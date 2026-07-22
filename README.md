@@ -4,7 +4,7 @@ Host-side foundations for translating a Steam Controller into a conventional USB
 
 ## Status
 
-The first eight pre-hardware phases are implemented: a generic gamepad model, stable framed protocol, output backends, simulation, recording/replay, macOS HID capture, Steam Controller 2 decoding, conventional mapping, live visualization, and serial transport with negotiation and health checks. The integrated bridge and firmware remain later phases.
+The first nine pre-hardware phases are implemented: a generic gamepad model, stable framed protocol, output backends, simulation, recording/replay, macOS HID capture, Steam Controller 2 decoding, conventional mapping, live visualization, serial transport, and the integrated host bridge. Firmware remains hardware-dependent.
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
@@ -95,11 +95,26 @@ output.
 
 See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [serial transport](docs/SERIAL_TRANSPORT.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [recording format](docs/RECORDING_FORMAT.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
 
+## Integrated bridge
+
+```bash
+cargo run -p sc-bridge -- --controller auto --output dump
+cargo run -p sc-bridge -- --index 0 --output serial \
+  --port /dev/cu.usbmodemXXXX --record session.jsonl
+cargo run -p sc-bridge -- --input replay --file session.jsonl \
+  --deterministic --output mock
+```
+
+Live mode uses bounded input buffering, changed-state output, timeout and
+decode-failure neutralization, reconnect tracking, Ctrl-C shutdown, and periodic
+structured diagnostics. See [the bridge guide](docs/BRIDGE.md).
+
 ## Known limitations
 
 - Steam Controller 2 input/status decoding is implemented from OpenPuck's protocol specification, but still needs regression captures from the user's controller and transports.
 - Controller initialization and feature-report transmission are not implemented; probing remains read-only.
 - No serial transport or handshake driver yet; the protocol messages are defined.
 - Native serial behavior is implemented and mock-tested, but cannot be validated against the XIAO until firmware and hardware are available.
+- Controller feature initialization is deliberately disabled until a safe SC2 command sequence is confirmed on the user's exact transport and firmware.
 - No XIAO firmware is included before hardware validation.
 - The keyboard simulator is line-oriented, not a production input UI.

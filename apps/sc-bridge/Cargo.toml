@@ -1,0 +1,17 @@
+[package]
+name = "sc-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bridge-core = { path = "../../crates/bridge-core" }
+bridge-output = { path = "../../crates/bridge-output" }
+controller-mapper = { path = "../../crates/controller-mapper" }
+ctrlc.workspace = true
+recording = { path = "../../crates/recording" }
+serde_json.workspace = true
+steam-controller-device = { path = "../../crates/steam-controller-device" }
+
+[lints]
+workspace = true

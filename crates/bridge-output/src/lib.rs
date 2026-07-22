@@ -65,6 +65,18 @@ pub trait GamepadOutput {
     fn send_neutral(&mut self) -> Result<(), OutputError> {
         self.send_state(&GamepadState::neutral())
     }
+
+    #[must_use]
+    fn diagnostics(&self) -> OutputDiagnostics {
+        OutputDiagnostics::default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OutputDiagnostics {
+    pub serial_reconnects: u64,
+    pub framing_failures: u64,
+    pub checksum_failures: u64,
 }
 
 #[derive(Debug, Default)]

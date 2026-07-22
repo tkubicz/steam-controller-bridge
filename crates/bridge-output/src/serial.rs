@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use bridge_protocol::{Frame, Message, StreamDecoder, WireGamepadState, PROTOCOL_VERSION};
 use gamepad_state::GamepadState;
 
-use crate::{GamepadOutput, OutputError};
+use crate::{GamepadOutput, OutputDiagnostics, OutputError};
 
 pub trait ByteTransport {
     /// Writes one complete protocol frame.
@@ -54,6 +54,7 @@ pub struct SerialMetrics {
     pub packets_sent: u64,
     pub packets_received: u64,
     pub framing_failures: u64,
+    pub checksum_failures: u64,
     pub states_dropped: u64,
     pub reconnects: u64,
 }
@@ -193,7 +194,15 @@ impl<T: ByteTransport> SerialConnection<T> {
                             self.metrics.packets_received += 1;
                             self.handle_message(&frame.message)?;
                         }
-                        Err(_) => self.metrics.framing_failures += 1,
+                        Err(error) => {
+                            self.metrics.framing_failures += 1;
+                            if matches!(
+                                error,
+                                bridge_protocol::ProtocolError::ChecksumMismatch { .. }
+                            ) {
+                                self.metrics.checksum_failures += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -368,6 +377,7 @@ impl SerialOutput {
             packets_sent: self.completed.packets_sent + active.packets_sent,
             packets_received: self.completed.packets_received + active.packets_received,
             framing_failures: self.completed.framing_failures + active.framing_failures,
+            checksum_failures: self.completed.checksum_failures + active.checksum_failures,
             states_dropped: self.completed.states_dropped + active.states_dropped,
             reconnects: self.completed.reconnects,
         }
@@ -398,6 +408,7 @@ impl SerialOutput {
             self.completed.packets_sent += metrics.packets_sent;
             self.completed.packets_received += metrics.packets_received;
             self.completed.framing_failures += metrics.framing_failures;
+            self.completed.checksum_failures += metrics.checksum_failures;
             self.completed.states_dropped += metrics.states_dropped;
         }
     }
@@ -437,6 +448,15 @@ impl GamepadOutput for SerialOutput {
             .ok_or_else(|| OutputError::Transport(SerialError::NotReady.to_string()))?
             .send_neutral_now()
             .map_err(|error| OutputError::Transport(error.to_string()))
+    }
+
+    fn diagnostics(&self) -> OutputDiagnostics {
+        let metrics = self.metrics();
+        OutputDiagnostics {
+            serial_reconnects: metrics.reconnects,
+            framing_failures: metrics.framing_failures,
+            checksum_failures: metrics.checksum_failures,
+        }
     }
 }
 
@@ -585,6 +605,7 @@ mod tests {
         connection.poll(Duration::ZERO).unwrap();
         connection.poll(Duration::ZERO).unwrap();
         assert_eq!(connection.metrics().framing_failures, 1);
+        assert_eq!(connection.metrics().checksum_failures, 1);
         assert!(messages(&connection.into_inner().writes).contains(&Message::Pong { nonce: 42 }));
     }
 }

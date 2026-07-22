@@ -41,6 +41,18 @@ bounded overflow, ping/pong timeout, firmware-originated ping response, and
 corrupted-frame accounting. Physical-port enumeration and XIAO interoperability
 remain hardware validation steps.
 
+Bridge-core tests cover changed-state suppression, timeout neutralization,
+disconnect/reset/shutdown neutralization, repeated decode failures, and HID
+reconnect accounting. An end-to-end hardware-independent bridge replay smoke
+test can reuse a simulator recording:
+
+```bash
+cargo run -p gamepad-simulator -- automated --interval-ms 0 \
+  --output recording --file /tmp/bridge-input.jsonl
+cargo run -p sc-bridge -- --input replay --file /tmp/bridge-input.jsonl \
+  --deterministic --output file --output-file /tmp/bridge-output.frames
+```
+
 An end-to-end pre-hardware smoke test is:
 
 ```bash
