@@ -66,6 +66,15 @@ pub trait GamepadOutput {
         self.send_state(&GamepadState::neutral())
     }
 
+    /// Services backend I/O and time-based work while no state is changing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutputError`] when backend health or I/O servicing fails.
+    fn service(&mut self) -> Result<(), OutputError> {
+        Ok(())
+    }
+
     #[must_use]
     fn diagnostics(&self) -> OutputDiagnostics {
         OutputDiagnostics::default()
@@ -213,6 +222,21 @@ impl<O: GamepadOutput> GamepadOutput for ChangedOnly<O> {
         self.inner.send_state(state)?;
         self.previous = Some(*state);
         Ok(())
+    }
+
+    fn send_neutral(&mut self) -> Result<(), OutputError> {
+        if self.previous == Some(GamepadState::neutral()) {
+            return Ok(());
+        }
+        self.inner.send_neutral()?;
+        self.previous = Some(GamepadState::neutral());
+        Ok(())
+    }
+    fn service(&mut self) -> Result<(), OutputError> {
+        self.inner.service()
+    }
+    fn diagnostics(&self) -> OutputDiagnostics {
+        self.inner.diagnostics()
     }
 }
 

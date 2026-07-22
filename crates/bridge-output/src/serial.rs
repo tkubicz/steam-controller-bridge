@@ -26,6 +26,7 @@ pub struct SerialConfig {
     pub handshake_timeout: Duration,
     pub ping_interval: Duration,
     pub pong_timeout: Duration,
+    pub state_refresh_interval: Duration,
     pub packet_logging: bool,
 }
 
@@ -36,6 +37,7 @@ impl Default for SerialConfig {
             handshake_timeout: Duration::from_secs(1),
             ping_interval: Duration::from_secs(1),
             pong_timeout: Duration::from_secs(2),
+            state_refresh_interval: Duration::from_millis(50),
             packet_logging: false,
         }
     }
@@ -57,6 +59,7 @@ pub struct SerialMetrics {
     pub checksum_failures: u64,
     pub states_dropped: u64,
     pub reconnects: u64,
+    pub state_refreshes: u64,
 }
 
 #[derive(Debug)]
@@ -116,6 +119,8 @@ pub struct SerialConnection<T> {
     started: Duration,
     last_ping: Duration,
     pending_ping: Option<(u32, Duration)>,
+    last_state: Option<GamepadState>,
+    last_state_sent: Option<Duration>,
     metrics: SerialMetrics,
 }
 
@@ -131,6 +136,9 @@ impl<T: ByteTransport> SerialConnection<T> {
         if config.handshake_timeout.is_zero() {
             return Err(SerialError::InvalidConfig("handshake_timeout"));
         }
+        if config.state_refresh_interval.is_zero() {
+            return Err(SerialError::InvalidConfig("state_refresh_interval"));
+        }
         let mut connection = Self {
             transport,
             config,
@@ -141,6 +149,8 @@ impl<T: ByteTransport> SerialConnection<T> {
             started: now,
             last_ping: now,
             pending_ping: None,
+            last_state: None,
+            last_state_sent: None,
             metrics: SerialMetrics::default(),
         };
         connection.write_message(Message::Hello {
@@ -237,7 +247,20 @@ impl<T: ByteTransport> SerialConnection<T> {
             self.pending_ping = Some((nonce, now));
             self.last_ping = now;
         }
-        self.flush_states()
+        self.flush_states(now)?;
+        if self.status == SerialStatus::Ready
+            && self.queued.is_empty()
+            && self
+                .last_state_sent
+                .is_some_and(|sent| now.saturating_sub(sent) >= self.config.state_refresh_interval)
+        {
+            if let Some(state) = self.last_state {
+                self.write_message(Message::GamepadState(WireGamepadState::try_from(state)?))?;
+                self.last_state_sent = Some(now);
+                self.metrics.state_refreshes += 1;
+            }
+        }
+        Ok(())
     }
 
     /// Immediately sends the dedicated neutral message on a ready connection.
@@ -248,6 +271,9 @@ impl<T: ByteTransport> SerialConnection<T> {
         if self.status != SerialStatus::Ready {
             return Err(SerialError::NotReady);
         }
+        self.queued.clear();
+        self.last_state = None;
+        self.last_state_sent = None;
         self.write_message(Message::Neutral)
     }
 
@@ -275,12 +301,19 @@ impl<T: ByteTransport> SerialConnection<T> {
         Ok(())
     }
 
-    fn flush_states(&mut self) -> Result<(), SerialError> {
+    fn flush_states(&mut self, now: Duration) -> Result<(), SerialError> {
         if self.status != SerialStatus::Ready {
             return Ok(());
         }
         while let Some(state) = self.queued.pop_front() {
             self.write_message(Message::GamepadState(WireGamepadState::try_from(state)?))?;
+            if state == GamepadState::neutral() {
+                self.last_state = None;
+                self.last_state_sent = None;
+            } else {
+                self.last_state = Some(state);
+                self.last_state_sent = Some(now);
+            }
         }
         Ok(())
     }
@@ -323,6 +356,7 @@ pub struct SerialOutput {
     clock: Instant,
     completed: SerialMetrics,
     connected_once: bool,
+    desired_state: Option<GamepadState>,
 }
 
 impl SerialOutput {
@@ -339,6 +373,7 @@ impl SerialOutput {
             clock: Instant::now(),
             completed: SerialMetrics::default(),
             connected_once: false,
+            desired_state: None,
         };
         output.connect()?;
         Ok(output)
@@ -380,6 +415,7 @@ impl SerialOutput {
             checksum_failures: self.completed.checksum_failures + active.checksum_failures,
             states_dropped: self.completed.states_dropped + active.states_dropped,
             reconnects: self.completed.reconnects,
+            state_refreshes: self.completed.state_refreshes + active.state_refreshes,
         }
     }
 
@@ -393,6 +429,9 @@ impl SerialOutput {
             SerialConnection::new(NativeTransport(port), self.config, Duration::ZERO)?;
         while connection.status() == SerialStatus::Handshaking {
             connection.poll(self.clock.elapsed())?;
+        }
+        if let Some(state) = self.desired_state {
+            connection.queue_state(state)?;
         }
         if self.connected_once {
             self.completed.reconnects += 1;
@@ -410,6 +449,7 @@ impl SerialOutput {
             self.completed.framing_failures += metrics.framing_failures;
             self.completed.checksum_failures += metrics.checksum_failures;
             self.completed.states_dropped += metrics.states_dropped;
+            self.completed.state_refreshes += metrics.state_refreshes;
         }
     }
 }
@@ -417,7 +457,9 @@ impl SerialOutput {
 impl GamepadOutput for SerialOutput {
     fn send_state(&mut self, state: &GamepadState) -> Result<(), OutputError> {
         state.validate()?;
+        self.desired_state = Some(*state);
         for attempt in 0..2 {
+            let mut connected_here = false;
             if self.connection.is_none() {
                 if let Err(error) = self.connect() {
                     if attempt == 1 {
@@ -425,13 +467,16 @@ impl GamepadOutput for SerialOutput {
                     }
                     continue;
                 }
+                connected_here = true;
             }
             let Some(connection) = self.connection.as_mut() else {
                 return Err(OutputError::Transport(SerialError::NotReady.to_string()));
             };
-            connection
-                .queue_state(*state)
-                .map_err(|error| OutputError::Transport(error.to_string()))?;
+            if !connected_here {
+                connection
+                    .queue_state(*state)
+                    .map_err(|error| OutputError::Transport(error.to_string()))?;
+            }
             match self.poll() {
                 Ok(()) => return Ok(()),
                 Err(error) if attempt == 1 => {
@@ -443,11 +488,24 @@ impl GamepadOutput for SerialOutput {
         unreachable!("two reconnect attempts always return")
     }
     fn send_neutral(&mut self) -> Result<(), OutputError> {
+        self.desired_state = None;
         self.connection
             .as_mut()
             .ok_or_else(|| OutputError::Transport(SerialError::NotReady.to_string()))?
             .send_neutral_now()
             .map_err(|error| OutputError::Transport(error.to_string()))
+    }
+    fn service(&mut self) -> Result<(), OutputError> {
+        for attempt in 0..2 {
+            match self.poll() {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt == 1 => {
+                    return Err(OutputError::Transport(error.to_string()));
+                }
+                Err(_) => {}
+            }
+        }
+        unreachable!("two service attempts always return")
     }
 
     fn diagnostics(&self) -> OutputDiagnostics {
@@ -607,5 +665,49 @@ mod tests {
         assert_eq!(connection.metrics().framing_failures, 1);
         assert_eq!(connection.metrics().checksum_failures, 1);
         assert!(messages(&connection.into_inner().writes).contains(&Message::Pong { nonce: 42 }));
+    }
+
+    #[test]
+    fn refreshes_unchanged_active_state_and_neutral_clears_refresh() {
+        let transport = MockTransport {
+            reads: VecDeque::from([response(Message::HelloResponse {
+                selected_version: 1,
+            })]),
+            writes: Vec::new(),
+        };
+        let mut connection =
+            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+        let mut active = GamepadState::neutral();
+        active.left_x = 0.5;
+        connection.queue_state(active).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        connection.poll(Duration::from_millis(49)).unwrap();
+        assert_eq!(connection.metrics().state_refreshes, 0);
+        connection.poll(Duration::from_millis(50)).unwrap();
+        assert_eq!(connection.metrics().state_refreshes, 1);
+        connection.send_neutral_now().unwrap();
+        connection.poll(Duration::from_millis(500)).unwrap();
+        assert_eq!(connection.metrics().state_refreshes, 1);
+
+        let sent = messages(&connection.into_inner().writes);
+        assert_eq!(
+            sent.iter()
+                .filter(|message| matches!(message, Message::GamepadState(_)))
+                .count(),
+            2
+        );
+        assert!(matches!(sent.last(), Some(Message::Neutral)));
+    }
+
+    #[test]
+    fn rejects_zero_refresh_interval() {
+        let config = SerialConfig {
+            state_refresh_interval: Duration::ZERO,
+            ..SerialConfig::default()
+        };
+        assert!(matches!(
+            SerialConnection::new(MockTransport::default(), config, Duration::ZERO),
+            Err(SerialError::InvalidConfig("state_refresh_interval"))
+        ));
     }
 }

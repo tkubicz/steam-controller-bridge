@@ -238,6 +238,7 @@ impl BridgeEngine {
         now: Duration,
         output: &mut O,
     ) -> Result<ProcessOutcome, BridgeError> {
+        output.service()?;
         if !self.neutralized
             && self
                 .last_input

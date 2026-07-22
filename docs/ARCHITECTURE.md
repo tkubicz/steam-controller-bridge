@@ -41,6 +41,6 @@ All crates forbid unsafe code. Only the recording layer uses third-party seriali
 
 ## Lifecycle and safety
 
-Simulator modes send a neutral state before normal exit. Outputs reject non-finite and out-of-range values instead of silently emitting invalid packets. A future integrated bridge must additionally send neutral on input timeout, controller disconnect, repeated decode failure, profile invalidation, and output reconnect.
+Simulator modes send a neutral state before normal exit. Outputs reject non-finite and out-of-range values instead of silently emitting invalid packets. The integrated bridge additionally sends neutral on input timeout, controller disconnect, repeated decode failure, reset, and shutdown. Serial output refreshes unchanged active states while its firmware watchdog is armed.
 
-The HID session currently polls synchronously with a bounded 1,024-byte report buffer and 100 ms CLI timeout. A read failure immediately emits a lifecycle disconnect and clears the handle; later polls refresh enumeration every 500 ms and match the selected path or physical/collection metadata. The future integrated bridge will place this session behind a bounded channel with latest-state semantics while preserving lifecycle events. No concurrency runtime is introduced before the integrated transport requires it.
+The HID session uses a bounded 1,024-byte report buffer. A read failure immediately emits a lifecycle disconnect and clears the handle; later polls refresh enumeration every 500 ms and match the selected path or physical/collection metadata. The integrated bridge runs this session behind a bounded standard-library channel with latest-state semantics for reports while preserving lifecycle events.

@@ -1,6 +1,8 @@
-# XIAO nRF52840 Firmware Plan
+# XIAO nRF52840 Firmware
 
-Firmware is deliberately not implemented before the board is available.
+Firmware is implemented in `firmware/xiao-nrf52840` for the non-Sense board.
+Its native protocol/session tests run without hardware; flashing, enumeration,
+browser compatibility, watchdog timing, and soak testing remain hardware gates.
 
 The XIAO firmware will expose a USB composite device with a CDC interface for bridge frames and a standards-compatible HID gamepad interface for browsers and streaming clients. Its parser will implement protocol v1 exactly as documented in `GAMEPAD_PROTOCOL.md`, beginning with the static vectors already covered by host tests.
 
@@ -18,3 +20,10 @@ Required behavior:
 
 Hardware validation must cover CDC reconnect, HID enumeration, browser Gamepad API behavior, sequence wrap, malformed input recovery, host process termination, cable removal, and watchdog-to-neutral timing.
 
+The host services serial output during idle waits and refreshes unchanged active
+states every 50 ms. Ping does not refresh the firmware data watchdog. See the
+firmware README for the pinned toolchain, flashing, LED states, and smoke test.
+
+OpenPuck is an architectural reference for nRF52840/TinyUSB scheduling and
+watchdog practices only. Its direct radio, selectable USB modes, configuration,
+and AGPL-licensed implementation are not part of this firmware.

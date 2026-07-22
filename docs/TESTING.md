@@ -1,5 +1,25 @@
 # Testing
 
+## Firmware
+
+Run the portable parser/session tests without hardware:
+
+```bash
+make -C firmware/xiao-nrf52840 test
+```
+
+With Arduino CLI and the pinned Seeed core installed, compile the actual sketch:
+
+```bash
+make -C firmware/xiao-nrf52840 build
+```
+
+Physical acceptance additionally covers CDC/HID enumeration, every report
+field, a 30-second unchanged hold, host termination neutralization within 125
+ms, malformed recovery, reconnect/sequence wrap, Chrome and Safari Gamepad API
+behavior, one streaming service, and a one-hour soak. Detailed steps are in the
+firmware README; these results must not be inferred from native or CI builds.
+
 The workspace has no hardware-dependent tests. Run the same gates as CI:
 
 ```bash
@@ -62,4 +82,4 @@ cargo run -p sc-replay -- /tmp/sc-session.jsonl --deterministic \
   --output file --output-file /tmp/sc-session.frames
 ```
 
-The resulting `.frames` file contains fixed-size, CRC-protected protocol frames suitable for inspection or future firmware parser tests.
+The resulting `.frames` file contains fixed-size, CRC-protected protocol frames suitable for inspection and firmware parser testing.

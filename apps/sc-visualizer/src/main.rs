@@ -439,6 +439,15 @@ impl Visualizer {
 impl eframe::App for Visualizer {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.process_events();
+        if let Some(serial) = &mut self.serial {
+            if let Err(error) = serial.service() {
+                self.status = format!("Serial service failed: {error}");
+            } else {
+                let metrics = serial.metrics();
+                self.packets_sent = metrics.packets_sent;
+                self.framing_failures = metrics.framing_failures;
+            }
+        }
         ui.ctx().request_repaint_after(Duration::from_millis(16));
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {

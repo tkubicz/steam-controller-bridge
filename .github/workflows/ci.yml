@@ -20,3 +20,19 @@ jobs:
       - run: cargo test --workspace --all-features
       - run: cargo build --workspace --all-targets
 
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+      - name: Install pinned Seeed nRF52 core
+        run: make -C firmware/xiao-nrf52840 setup
+      - name: Run native firmware tests
+        run: make -C firmware/xiao-nrf52840 test
+      - name: Build UF2 and DFU artifacts
+        run: make -C firmware/xiao-nrf52840 artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiao-nrf52840-firmware
+          path: firmware/xiao-nrf52840/build/artifacts/

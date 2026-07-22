@@ -1,16 +1,16 @@
 # Steam Controller Bridge
 
-Host-side foundations for translating a Steam Controller into a conventional USB gamepad through a future Seeed Studio XIAO nRF52840 bridge.
+Translate a Steam Controller into a conventional USB gamepad through a Seeed Studio XIAO nRF52840 bridge.
 
 ## Status
 
-The first nine pre-hardware phases are implemented: a generic gamepad model, stable framed protocol, output backends, simulation, recording/replay, macOS HID capture, Steam Controller 2 decoding, conventional mapping, live visualization, serial transport, and the integrated host bridge. Firmware remains hardware-dependent.
+The host pipeline and XIAO nRF52840 CDC-to-HID firmware are implemented. Native firmware tests run without a board; flashing, HID/browser behavior, watchdog timing, and soak validation remain hardware-dependent.
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
 ```
 
-The eventual path will replace the simulator with Steam Controller HID input and send the same frames over USB CDC to firmware that exposes a physical USB HID gamepad. This avoids depending on Apple's restricted virtual-HID entitlements.
+The bridge sends framed states over USB CDC to firmware that exposes a physical USB HID gamepad. This avoids depending on Apple's restricted virtual-HID entitlements.
 
 ## Build and test
 
@@ -54,7 +54,7 @@ cargo run -p gamepad-simulator -- automated --interval-ms 0 \
 cargo run -p sc-replay -- session.jsonl --deterministic --output dump
 ```
 
-`sc-replay` also supports `--speed`, `--seek-us`, `--step`, `--loop`, and all currently implemented output backends. Serial replay is intentionally deferred until the serial transport phase.
+`sc-replay` also supports `--speed`, `--seek-us`, `--step`, `--loop`, and all currently implemented output backends, including negotiated serial output.
 
 ## HID probing on macOS
 
@@ -95,6 +95,10 @@ output.
 
 See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [serial transport](docs/SERIAL_TRANSPORT.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [recording format](docs/RECORDING_FORMAT.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
 
+Firmware setup, native tests, UF2/DFU builds, flashing, recovery, LED states,
+and hardware validation are documented in
+[`firmware/xiao-nrf52840/README.md`](firmware/xiao-nrf52840/README.md).
+
 ## Integrated bridge
 
 ```bash
@@ -113,8 +117,7 @@ structured diagnostics. See [the bridge guide](docs/BRIDGE.md).
 
 - Steam Controller 2 input/status decoding is implemented from OpenPuck's protocol specification, but still needs regression captures from the user's controller and transports.
 - Controller initialization and feature-report transmission are not implemented; probing remains read-only.
-- No serial transport or handshake driver yet; the protocol messages are defined.
-- Native serial behavior is implemented and mock-tested, but cannot be validated against the XIAO until firmware and hardware are available.
+- Native serial behavior is implemented and mock-tested, but cannot be validated end to end until a flashed XIAO is connected.
 - Controller feature initialization is deliberately disabled until a safe SC2 command sequence is confirmed on the user's exact transport and firmware.
-- No XIAO firmware is included before hardware validation.
+- XIAO firmware is included but has not yet completed physical-board validation.
 - The keyboard simulator is line-oriented, not a production input UI.

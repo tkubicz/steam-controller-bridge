@@ -67,4 +67,4 @@ CRC check only:
 ASCII "123456789" -> CRC value 29b1 (wire bytes b1 29)
 ```
 
-The neutral vector is asserted in unit tests and is intended to be copied unchanged into future firmware tests.
+The neutral vector is asserted by both Rust and native firmware tests.

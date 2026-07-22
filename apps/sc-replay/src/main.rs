@@ -1,6 +1,9 @@
 use std::env;
 use std::fs::File;
 use std::io::{self, BufReader, Write};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use bridge_output::{
     DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput, SerialConfig, SerialOutput,
@@ -68,8 +71,6 @@ fn play_step(
     output: &mut dyn GamepadOutput,
     seek_timestamp_us: u64,
 ) -> Result<(), String> {
-    let stdin = io::stdin();
-    let mut line = String::new();
     for event in &session.events()[session.seek_index(seek_timestamp_us)..] {
         if event.kind != KIND_MAPPED_GAMEPAD_STATE {
             continue;
@@ -79,10 +80,7 @@ fn play_step(
             event.timestamp_us
         );
         io::stderr().flush().map_err(|error| error.to_string())?;
-        line.clear();
-        stdin
-            .read_line(&mut line)
-            .map_err(|error| error.to_string())?;
+        let line = read_line_with_service(output)?;
         if line.trim().eq_ignore_ascii_case("q") {
             break;
         }
@@ -95,6 +93,26 @@ fn play_step(
             .map_err(|error| error.to_string())?;
     }
     output.send_neutral().map_err(|error| error.to_string())
+}
+
+fn read_line_with_service(output: &mut dyn GamepadOutput) -> Result<String, String> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let mut line = String::new();
+        let result = io::stdin().read_line(&mut line).map(|_| line);
+        let _ = sender.send(result);
+    });
+    loop {
+        match receiver.recv_timeout(Duration::from_millis(25)) {
+            Ok(result) => return result.map_err(|error| error.to_string()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                output.service().map_err(|error| error.to_string())?;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("stdin reader stopped".to_owned());
+            }
+        }
+    }
 }
 
 fn make_output(name: &str, args: &[String]) -> Result<Box<dyn GamepadOutput>, String> {

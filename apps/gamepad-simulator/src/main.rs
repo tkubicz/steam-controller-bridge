@@ -1,8 +1,9 @@
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead};
+use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bridge_output::{
     DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput, SerialConfig, SerialOutput,
@@ -37,7 +38,7 @@ fn run() -> Result<(), String> {
                         .send_state(&state)
                         .map_err(|error| error.to_string())?;
                     if interval_ms > 0 {
-                        thread::sleep(Duration::from_millis(interval_ms));
+                        service_delay(&mut *output, Duration::from_millis(interval_ms))?;
                     }
                 }
             }
@@ -56,8 +57,23 @@ fn run() -> Result<(), String> {
 fn keyboard_mode(output: &mut dyn GamepadOutput) -> Result<(), String> {
     eprintln!("Enter a control name (w/a/s/d, up/left/down/right, q/e, i/j/k/l, space, 1-9, r, exit). Each line is one state.");
     let mut state = GamepadState::neutral();
-    for line in io::stdin().lock().lines() {
-        let line = line.map_err(|error| error.to_string())?;
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        for line in io::stdin().lock().lines() {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    loop {
+        let line = match receiver.recv_timeout(Duration::from_millis(25)) {
+            Ok(line) => line.map_err(|error| error.to_string())?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                output.service().map_err(|error| error.to_string())?;
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         match apply_keyboard_command(&mut state, &line) {
             Ok(true) => output
                 .send_state(&state)
@@ -67,6 +83,18 @@ fn keyboard_mode(output: &mut dyn GamepadOutput) -> Result<(), String> {
         }
     }
     output.send_neutral().map_err(|error| error.to_string())
+}
+
+fn service_delay(output: &mut dyn GamepadOutput, duration: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + duration;
+    loop {
+        output.service().map_err(|error| error.to_string())?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        thread::sleep(remaining.min(Duration::from_millis(25)));
+    }
 }
 
 fn make_output(name: &str, args: &[String]) -> Result<Box<dyn GamepadOutput>, String> {

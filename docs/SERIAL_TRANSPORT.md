@@ -16,11 +16,18 @@ port. No serial-specific framing is added. The default native settings are
    output retries by reopening the configured port and repeating negotiation.
 6. Normal shutdown sends the dedicated `Neutral` frame when the connection is
    still writable.
+7. While a non-neutral state remains current, the serial backend retransmits the
+   complete state every 50 ms. All application wait loops service output at
+   least every 25 ms. `Neutral` clears the cached active state immediately.
 
 Sequence numbers cover every host-originated frame, including hello, state,
 neutral, ping, and pong, and wrap as `u16`. Incoming bytes use the shared
 recovering `StreamDecoder`; checksum and framing errors are counted without
 creating a second parser.
+
+The refresh interval is independent of the one-second Ping health check. Pings
+prove the bidirectional session is responsive but deliberately do not keep the
+firmware's 100 ms controller-data watchdog alive.
 
 ## Queue behavior
 

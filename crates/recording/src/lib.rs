@@ -430,7 +430,7 @@ impl ReplaySession {
                     Duration::from_micros(delta_us).as_secs_f64() / options.speed,
                 );
                 if !scaled.is_zero() {
-                    thread::sleep(scaled);
+                    service_sleep(output, scaled)?;
                 }
             }
             previous_timestamp = Some(event.timestamp_us);
@@ -443,6 +443,22 @@ impl ReplaySession {
             }
         }
         Ok(stats)
+    }
+}
+
+fn service_sleep<O: GamepadOutput + ?Sized>(
+    output: &mut O,
+    duration: Duration,
+) -> Result<(), RecordingError> {
+    const SERVICE_INTERVAL: Duration = Duration::from_millis(25);
+    let deadline = Instant::now() + duration;
+    loop {
+        output.service()?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        thread::sleep(remaining.min(SERVICE_INTERVAL));
     }
 }
 
