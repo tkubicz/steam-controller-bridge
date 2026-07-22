@@ -35,6 +35,12 @@ On macOS, use `cargo run -p sc-visualizer -- --index N` after `sc-probe list`
 to verify live report rate, decoded controls, mapped output, recording controls,
 and disconnect-to-neutral behavior with hardware.
 
+Serial tests use an in-memory `ByteTransport` and cover hello success, queued
+state flush and sequence ownership, version rejection, handshake timeout,
+bounded overflow, ping/pong timeout, firmware-originated ping response, and
+corrupted-frame accounting. Physical-port enumeration and XIAO interoperability
+remain hardware validation steps.
+
 An end-to-end pre-hardware smoke test is:
 
 ```bash

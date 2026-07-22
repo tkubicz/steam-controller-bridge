@@ -4,7 +4,7 @@ Host-side foundations for translating a Steam Controller into a conventional USB
 
 ## Status
 
-The first seven pre-hardware phases are implemented: a generic gamepad model, a stable framed protocol, mock/dump/file output backends, keyboard/automated simulation, versioned recording/replay, macOS HID probing/capture, Steam Controller 2 report decoding, conventional gamepad mapping with reusable filters, and a live visualizer. Serial transport and firmware are later phases.
+The first eight pre-hardware phases are implemented: a generic gamepad model, stable framed protocol, output backends, simulation, recording/replay, macOS HID capture, Steam Controller 2 decoding, conventional mapping, live visualization, and serial transport with negotiation and health checks. The integrated bridge and firmware remain later phases.
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
@@ -90,17 +90,16 @@ cargo run -p sc-visualizer -- --index 0
 
 The visualizer shows raw, decoded, and mapped state; reports connection/rate and
 error diagnostics; edits the mapping filters; and records raw, decoded, mapped,
-lifecycle, and marker events to JSONL. Its mock output counts changed outgoing
-states. Serial status remains explicitly unavailable until the serial transport
-phase.
+lifecycle, and marker events to JSONL. It supports mock and negotiated serial
+output.
 
-See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [recording format](docs/RECORDING_FORMAT.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
+See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [serial transport](docs/SERIAL_TRANSPORT.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [recording format](docs/RECORDING_FORMAT.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
 
 ## Known limitations
 
 - Steam Controller 2 input/status decoding is implemented from OpenPuck's protocol specification, but still needs regression captures from the user's controller and transports.
 - Controller initialization and feature-report transmission are not implemented; probing remains read-only.
 - No serial transport or handshake driver yet; the protocol messages are defined.
-- The visualizer currently supports disabled and mock outputs; serial output is deferred to the next phase.
+- Native serial behavior is implemented and mock-tested, but cannot be validated against the XIAO until firmware and hardware are available.
 - No XIAO firmware is included before hardware validation.
 - The keyboard simulator is line-oriented, not a production input UI.

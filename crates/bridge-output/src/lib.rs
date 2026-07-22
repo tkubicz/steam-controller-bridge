@@ -7,11 +7,18 @@ use std::path::Path;
 use bridge_protocol::{Frame, Message, WireGamepadState};
 use gamepad_state::GamepadState;
 
+mod serial;
+pub use serial::{
+    available_serial_ports, ByteTransport, SerialConfig, SerialConnection, SerialError,
+    SerialMetrics, SerialOutput, SerialStatus,
+};
+
 #[derive(Debug)]
 pub enum OutputError {
     Io(io::Error),
     InvalidState(gamepad_state::InvalidState),
     Protocol(bridge_protocol::ProtocolError),
+    Transport(String),
 }
 
 impl std::fmt::Display for OutputError {
@@ -20,6 +27,7 @@ impl std::fmt::Display for OutputError {
             Self::Io(error) => write!(f, "output I/O failed: {error}"),
             Self::InvalidState(error) => write!(f, "invalid gamepad state: {error}"),
             Self::Protocol(error) => write!(f, "protocol encoding failed: {error}"),
+            Self::Transport(error) => write!(f, "output transport failed: {error}"),
         }
     }
 }

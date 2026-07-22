@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 controller-mapper = { path = "../../crates/controller-mapper" }
+bridge-output = { path = "../../crates/bridge-output" }
 eframe.workspace = true
 gamepad-state = { path = "../../crates/gamepad-state" }
 recording = { path = "../../crates/recording" }

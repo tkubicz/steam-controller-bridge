@@ -2,7 +2,9 @@ use std::env;
 use std::fs::File;
 use std::io::{self, BufReader, Write};
 
-use bridge_output::{DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput};
+use bridge_output::{
+    DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput, SerialConfig, SerialOutput,
+};
 use recording::{ReplayOptions, ReplaySession, ReplayTiming, KIND_MAPPED_GAMEPAD_STATE};
 
 fn main() {
@@ -25,7 +27,7 @@ fn run() -> Result<(), String> {
     ))
     .map_err(|error| error.to_string())?;
     let output_name = value_after(&args, "--output").unwrap_or("dump");
-    let mut output = make_output(output_name, value_after(&args, "--output-file"))?;
+    let mut output = make_output(output_name, &args)?;
     let speed = parse_value(&args, "--speed", 1.0_f64)?;
     let seek_timestamp_us = parse_value(&args, "--seek-us", 0_u64)?;
     let deterministic = args.iter().any(|arg| arg == "--deterministic");
@@ -95,7 +97,8 @@ fn play_step(
     output.send_neutral().map_err(|error| error.to_string())
 }
 
-fn make_output(name: &str, file: Option<&str>) -> Result<Box<dyn GamepadOutput>, String> {
+fn make_output(name: &str, args: &[String]) -> Result<Box<dyn GamepadOutput>, String> {
+    let file = value_after(args, "--output-file");
     match name {
         "dump" | "compact" => Ok(Box::new(DumpOutput::new(io::stdout(), DumpFormat::Compact))),
         "pretty" => Ok(Box::new(DumpOutput::new(io::stdout(), DumpFormat::Pretty))),
@@ -106,7 +109,17 @@ fn make_output(name: &str, file: Option<&str>) -> Result<Box<dyn GamepadOutput>,
                 .map_err(|error| error.to_string())?,
         )),
         "mock" => Ok(Box::new(MockOutput::default())),
-        "serial" => Err("serial output belongs to the next transport phase".to_owned()),
+        "serial" => Ok(Box::new(
+            SerialOutput::open(
+                value_after(args, "--port").ok_or("--output serial requires --port PATH")?,
+                parse_value(args, "--baud", 115_200_u32)?,
+                SerialConfig {
+                    packet_logging: args.iter().any(|arg| arg == "--serial-log"),
+                    ..SerialConfig::default()
+                },
+            )
+            .map_err(|error| error.to_string())?,
+        )),
         other => Err(format!("unknown output '{other}'")),
     }
 }
@@ -128,6 +141,6 @@ fn parse_value<T: std::str::FromStr>(args: &[String], flag: &str, default: T) ->
 
 fn print_help() {
     println!(
-        "sc-replay RECORDING [options]\n\nOptions:\n  --speed N                Playback speed (default: 1.0)\n  --deterministic          Ignore recorded timing\n  --step                   Advance mapped states with Enter\n  --loop                   Replay repeatedly\n  --seek-us N              Start at or after timestamp N\n  --output <dump|pretty|json|raw|file|mock>\n  --output-file PATH       Required by file output\n  -h, --help"
+        "sc-replay RECORDING [options]\n\nOptions:\n  --speed N                Playback speed (default: 1.0)\n  --deterministic          Ignore recorded timing\n  --step                   Advance mapped states with Enter\n  --loop                   Replay repeatedly\n  --seek-us N              Start at or after timestamp N\n  --output <dump|pretty|json|raw|file|mock|serial>\n  --output-file PATH       Required by file output\n  --port PATH              Required by serial output\n  --baud N                 Serial baud rate (default: 115200)\n  --serial-log             Log serial frame bytes\n  -h, --help"
     );
 }

@@ -3,6 +3,7 @@ use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use bridge_output::{GamepadOutput, SerialConfig, SerialOutput};
 use controller_mapper::{ControllerMapper, MapperConfig, RightAxisSource};
 use eframe::egui::{self, Color32, RichText, Sense, Stroke, Vec2};
 use gamepad_state::{Button, GamepadState};
@@ -73,6 +74,13 @@ fn input_worker(index: usize) -> Receiver<Result<DeviceEvent, String>> {
 enum OutputChoice {
     Disabled,
     Mock,
+    Serial,
+}
+
+struct SerialUiConfig {
+    path: String,
+    baud: String,
+    packet_logging: bool,
 }
 
 struct Visualizer {
@@ -96,6 +104,8 @@ struct Visualizer {
     packets_sent: u64,
     last_output: Option<GamepadState>,
     output: OutputChoice,
+    serial: Option<SerialOutput>,
+    serial_config: SerialUiConfig,
     recording: Option<RecordingWriter<File>>,
     recording_started: Instant,
     recording_path: String,
@@ -128,6 +138,12 @@ impl Visualizer {
             packets_sent: 0,
             last_output: None,
             output: OutputChoice::Disabled,
+            serial: None,
+            serial_config: SerialUiConfig {
+                path: "/dev/cu.usbmodem".to_owned(),
+                baud: "115200".to_owned(),
+                packet_logging: false,
+            },
             recording: None,
             recording_started: Instant::now(),
             recording_path: "sc-visualizer.jsonl".to_owned(),
@@ -215,6 +231,18 @@ impl Visualizer {
                             {
                                 self.packets_sent += 1;
                                 self.last_output = Some(self.mapped);
+                            }
+                            if self.output == OutputChoice::Serial {
+                                if let Some(serial) = &mut self.serial {
+                                    match serial.send_state(&self.mapped) {
+                                        Ok(()) => {
+                                            let metrics = serial.metrics();
+                                            self.packets_sent = metrics.packets_sent;
+                                            self.framing_failures = metrics.framing_failures;
+                                        }
+                                        Err(error) => self.status = error.to_string(),
+                                    }
+                                }
                             }
                         }
                         Ok(_) => {}
@@ -357,8 +385,54 @@ impl Visualizer {
                     OutputChoice::Mock,
                     "Mock (changed states)",
                 );
+                ui.selectable_value(&mut self.output, OutputChoice::Serial, "Serial");
             });
-        ui.label("Serial: unavailable until Phase 8");
+        if self.output == OutputChoice::Serial {
+            ui.text_edit_singleline(&mut self.serial_config.path);
+            ui.text_edit_singleline(&mut self.serial_config.baud);
+            ui.checkbox(
+                &mut self.serial_config.packet_logging,
+                "Log serial frame bytes",
+            );
+            if self.serial.is_none() {
+                if ui.button("Connect serial").clicked() {
+                    match self
+                        .serial_config
+                        .baud
+                        .parse()
+                        .map_err(|_| "invalid baud rate".to_owned())
+                        .and_then(|baud| {
+                            SerialOutput::open(
+                                &self.serial_config.path,
+                                baud,
+                                SerialConfig {
+                                    packet_logging: self.serial_config.packet_logging,
+                                    ..SerialConfig::default()
+                                },
+                            )
+                            .map_err(|error| error.to_string())
+                        }) {
+                        Ok(serial) => {
+                            self.serial = Some(serial);
+                            "Serial connected".clone_into(&mut self.status);
+                        }
+                        Err(error) => self.status = error,
+                    }
+                }
+            } else if ui.button("Disconnect serial").clicked() {
+                self.serial = None;
+                "Serial disconnected".clone_into(&mut self.status);
+            }
+            ui.label(format!(
+                "Serial: {}",
+                self.serial
+                    .as_ref()
+                    .map_or("disconnected".to_owned(), |serial| format!(
+                        "{:?}",
+                        serial.status()
+                    ))
+            ));
+        }
     }
 }
 

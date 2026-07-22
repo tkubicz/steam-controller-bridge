@@ -25,6 +25,7 @@ keyboard/automated simulator                  v
 - `gamepad-state` owns platform-neutral state, stable button indices, validation, and sanitization.
 - `bridge-protocol` owns integer wire representation, messages, framing, CRC, and stream recovery. It never copies Rust object memory into packets.
 - `bridge-output` owns the `GamepadOutput` boundary and hardware-independent backends. `ChangedOnly` is an optional policy wrapper; file output preserves every state by default.
+- Its serial submodule separates the `ByteTransport` session state machine from the native port adapter. It owns hello negotiation, bounded latest-state queuing, sequence numbers, ping/pong health, reconnect attempts, neutral shutdown, and transport metrics while reusing `bridge-protocol` framing.
 - `recording` owns the versioned JSONL envelope, ordered writer, typed raw/final-state payloads, unknown-event preservation, and deterministic or real-time replay.
 - `steam-controller-device` owns HID collection metadata, raw reports, lifecycle events, stable enumeration ordering, and reconnecting sessions. Only its private `platform` module depends on `hidapi`; non-macOS builds expose an explicit unsupported-platform stub.
 - `steam-controller-protocol` owns the Steam Controller 2 host-facing `0x45`/`0x42` state layouts, status reports, button masks, motion fields, and structured decode errors. It has no HID or transport dependency and preserves each complete validated report.

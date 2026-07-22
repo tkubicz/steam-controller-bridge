@@ -1,0 +1,590 @@
+use std::collections::VecDeque;
+use std::io::{self, Read, Write};
+use std::time::{Duration, Instant};
+
+use bridge_protocol::{Frame, Message, StreamDecoder, WireGamepadState, PROTOCOL_VERSION};
+use gamepad_state::GamepadState;
+
+use crate::{GamepadOutput, OutputError};
+
+pub trait ByteTransport {
+    /// Writes one complete protocol frame.
+    ///
+    /// # Errors
+    /// Returns an I/O error when the transport cannot accept all bytes.
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()>;
+    /// Reads currently available stream bytes.
+    ///
+    /// # Errors
+    /// Returns an I/O error or a non-fatal timeout/would-block condition.
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SerialConfig {
+    pub queue_capacity: usize,
+    pub handshake_timeout: Duration,
+    pub ping_interval: Duration,
+    pub pong_timeout: Duration,
+    pub packet_logging: bool,
+}
+
+impl Default for SerialConfig {
+    fn default() -> Self {
+        Self {
+            queue_capacity: 8,
+            handshake_timeout: Duration::from_secs(1),
+            ping_interval: Duration::from_secs(1),
+            pong_timeout: Duration::from_secs(2),
+            packet_logging: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SerialStatus {
+    Handshaking,
+    Ready,
+    Unhealthy,
+    Disconnected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SerialMetrics {
+    pub packets_sent: u64,
+    pub packets_received: u64,
+    pub framing_failures: u64,
+    pub states_dropped: u64,
+    pub reconnects: u64,
+}
+
+#[derive(Debug)]
+pub enum SerialError {
+    Io(io::Error),
+    Protocol(bridge_protocol::ProtocolError),
+    InvalidState(gamepad_state::InvalidState),
+    InvalidConfig(&'static str),
+    HandshakeTimeout,
+    VersionRejected(u8),
+    PongTimeout,
+    NotReady,
+}
+
+impl std::fmt::Display for SerialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "serial I/O failed: {error}"),
+            Self::Protocol(error) => write!(f, "serial protocol failed: {error}"),
+            Self::InvalidState(error) => write!(f, "invalid gamepad state: {error}"),
+            Self::InvalidConfig(field) => write!(f, "invalid serial configuration field {field}"),
+            Self::HandshakeTimeout => write!(f, "serial hello handshake timed out"),
+            Self::VersionRejected(version) => write!(
+                f,
+                "firmware selected unsupported protocol version {version}"
+            ),
+            Self::PongTimeout => write!(f, "serial pong timed out"),
+            Self::NotReady => write!(f, "serial session is not ready"),
+        }
+    }
+}
+
+impl std::error::Error for SerialError {}
+impl From<io::Error> for SerialError {
+    fn from(value: io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+impl From<bridge_protocol::ProtocolError> for SerialError {
+    fn from(value: bridge_protocol::ProtocolError) -> Self {
+        Self::Protocol(value)
+    }
+}
+impl From<gamepad_state::InvalidState> for SerialError {
+    fn from(value: gamepad_state::InvalidState) -> Self {
+        Self::InvalidState(value)
+    }
+}
+
+pub struct SerialConnection<T> {
+    transport: T,
+    config: SerialConfig,
+    status: SerialStatus,
+    decoder: StreamDecoder,
+    sequence: u16,
+    queued: VecDeque<GamepadState>,
+    started: Duration,
+    last_ping: Duration,
+    pending_ping: Option<(u32, Duration)>,
+    metrics: SerialMetrics,
+}
+
+impl<T: ByteTransport> SerialConnection<T> {
+    /// Starts a session and immediately transmits the version-negotiation hello.
+    ///
+    /// # Errors
+    /// Returns an error for invalid configuration, framing, or transport writes.
+    pub fn new(transport: T, config: SerialConfig, now: Duration) -> Result<Self, SerialError> {
+        if config.queue_capacity == 0 {
+            return Err(SerialError::InvalidConfig("queue_capacity"));
+        }
+        if config.handshake_timeout.is_zero() {
+            return Err(SerialError::InvalidConfig("handshake_timeout"));
+        }
+        let mut connection = Self {
+            transport,
+            config,
+            status: SerialStatus::Handshaking,
+            decoder: StreamDecoder::new(),
+            sequence: 0,
+            queued: VecDeque::new(),
+            started: now,
+            last_ping: now,
+            pending_ping: None,
+            metrics: SerialMetrics::default(),
+        };
+        connection.write_message(Message::Hello {
+            minimum_version: PROTOCOL_VERSION,
+            maximum_version: PROTOCOL_VERSION,
+        })?;
+        Ok(connection)
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> SerialStatus {
+        self.status
+    }
+    #[must_use]
+    pub const fn metrics(&self) -> SerialMetrics {
+        self.metrics
+    }
+    pub fn into_inner(self) -> T {
+        self.transport
+    }
+
+    /// Queues a validated state, dropping the oldest at the capacity limit.
+    ///
+    /// # Errors
+    /// Returns an error when the state cannot be represented on the wire.
+    pub fn queue_state(&mut self, state: GamepadState) -> Result<(), SerialError> {
+        state.validate()?;
+        if self.queued.len() == self.config.queue_capacity {
+            self.queued.pop_front();
+            self.metrics.states_dropped += 1;
+        }
+        self.queued.push_back(state);
+        Ok(())
+    }
+
+    /// Processes input, deadlines, health checks, and queued states.
+    ///
+    /// # Errors
+    /// Returns protocol, transport, handshake, or health-check failures.
+    pub fn poll(&mut self, now: Duration) -> Result<(), SerialError> {
+        let mut bytes = [0_u8; 512];
+        match self.transport.read(&mut bytes) {
+            Ok(0) => {}
+            Ok(count) => {
+                if self.config.packet_logging {
+                    eprintln!("serial rx: {}", hex_bytes(&bytes[..count]));
+                }
+                for decoded in self.decoder.push(&bytes[..count]) {
+                    match decoded {
+                        Ok(frame) => {
+                            self.metrics.packets_received += 1;
+                            self.handle_message(&frame.message)?;
+                        }
+                        Err(_) => self.metrics.framing_failures += 1,
+                    }
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(error) => {
+                self.status = SerialStatus::Disconnected;
+                return Err(error.into());
+            }
+        }
+        if self.status == SerialStatus::Handshaking
+            && now.saturating_sub(self.started) >= self.config.handshake_timeout
+        {
+            self.status = SerialStatus::Disconnected;
+            return Err(SerialError::HandshakeTimeout);
+        }
+        if let Some((_, sent)) = self.pending_ping {
+            if now.saturating_sub(sent) >= self.config.pong_timeout {
+                self.status = SerialStatus::Unhealthy;
+                return Err(SerialError::PongTimeout);
+            }
+        }
+        if self.status == SerialStatus::Ready
+            && self.pending_ping.is_none()
+            && now.saturating_sub(self.last_ping) >= self.config.ping_interval
+        {
+            let nonce = u32::from(self.sequence) | (u32::from(self.sequence) << 16);
+            self.write_message(Message::Ping { nonce })?;
+            self.pending_ping = Some((nonce, now));
+            self.last_ping = now;
+        }
+        self.flush_states()
+    }
+
+    /// Immediately sends the dedicated neutral message on a ready connection.
+    ///
+    /// # Errors
+    /// Returns [`SerialError::NotReady`] or a protocol/transport failure.
+    pub fn send_neutral_now(&mut self) -> Result<(), SerialError> {
+        if self.status != SerialStatus::Ready {
+            return Err(SerialError::NotReady);
+        }
+        self.write_message(Message::Neutral)
+    }
+
+    fn handle_message(&mut self, message: &Message) -> Result<(), SerialError> {
+        match message {
+            Message::HelloResponse { selected_version }
+                if *selected_version == PROTOCOL_VERSION =>
+            {
+                self.status = SerialStatus::Ready;
+            }
+            Message::HelloResponse { selected_version } => {
+                self.status = SerialStatus::Disconnected;
+                return Err(SerialError::VersionRejected(*selected_version));
+            }
+            Message::Ping { nonce } => self.write_message(Message::Pong { nonce: *nonce })?,
+            Message::Pong { nonce }
+                if self
+                    .pending_ping
+                    .is_some_and(|(expected, _)| expected == *nonce) =>
+            {
+                self.pending_ping = None;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn flush_states(&mut self) -> Result<(), SerialError> {
+        if self.status != SerialStatus::Ready {
+            return Ok(());
+        }
+        while let Some(state) = self.queued.pop_front() {
+            self.write_message(Message::GamepadState(WireGamepadState::try_from(state)?))?;
+        }
+        Ok(())
+    }
+
+    fn write_message(&mut self, message: Message) -> Result<(), SerialError> {
+        let bytes = Frame::new(self.sequence, message).encode()?;
+        if self.config.packet_logging {
+            eprintln!("serial tx: {}", hex_bytes(&bytes));
+        }
+        self.transport.write_all(&bytes)?;
+        self.sequence = self.sequence.wrapping_add(1);
+        self.metrics.packets_sent += 1;
+        Ok(())
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+struct NativeTransport(Box<dyn serialport::SerialPort>);
+impl ByteTransport for NativeTransport {
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        Write::write_all(&mut self.0, bytes)
+    }
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        Read::read(&mut self.0, buffer)
+    }
+}
+
+pub struct SerialOutput {
+    path: String,
+    baud_rate: u32,
+    config: SerialConfig,
+    connection: Option<SerialConnection<NativeTransport>>,
+    clock: Instant,
+    completed: SerialMetrics,
+    connected_once: bool,
+}
+
+impl SerialOutput {
+    /// Opens a native serial port and completes the protocol hello handshake.
+    ///
+    /// # Errors
+    /// Returns an error when opening, negotiation, framing, or I/O fails.
+    pub fn open(path: &str, baud_rate: u32, config: SerialConfig) -> Result<Self, SerialError> {
+        let mut output = Self {
+            path: path.to_owned(),
+            baud_rate,
+            config,
+            connection: None,
+            clock: Instant::now(),
+            completed: SerialMetrics::default(),
+            connected_once: false,
+        };
+        output.connect()?;
+        Ok(output)
+    }
+
+    /// Advances input parsing and connection health checks.
+    ///
+    /// # Errors
+    /// Returns protocol, transport, handshake, or health-check failures.
+    pub fn poll(&mut self) -> Result<(), SerialError> {
+        if self.connection.is_none() {
+            self.connect()?;
+        }
+        let Some(connection) = self.connection.as_mut() else {
+            return Err(SerialError::NotReady);
+        };
+        let result = connection.poll(self.clock.elapsed());
+        if result.is_err() {
+            self.disconnect();
+        }
+        result
+    }
+    #[must_use]
+    pub fn status(&self) -> SerialStatus {
+        self.connection
+            .as_ref()
+            .map_or(SerialStatus::Disconnected, SerialConnection::status)
+    }
+    #[must_use]
+    pub fn metrics(&self) -> SerialMetrics {
+        let active = self
+            .connection
+            .as_ref()
+            .map_or(SerialMetrics::default(), SerialConnection::metrics);
+        SerialMetrics {
+            packets_sent: self.completed.packets_sent + active.packets_sent,
+            packets_received: self.completed.packets_received + active.packets_received,
+            framing_failures: self.completed.framing_failures + active.framing_failures,
+            states_dropped: self.completed.states_dropped + active.states_dropped,
+            reconnects: self.completed.reconnects,
+        }
+    }
+
+    fn connect(&mut self) -> Result<(), SerialError> {
+        let port = serialport::new(&self.path, self.baud_rate)
+            .timeout(Duration::from_millis(10))
+            .open()
+            .map_err(|error| SerialError::Io(io::Error::other(error.to_string())))?;
+        self.clock = Instant::now();
+        let mut connection =
+            SerialConnection::new(NativeTransport(port), self.config, Duration::ZERO)?;
+        while connection.status() == SerialStatus::Handshaking {
+            connection.poll(self.clock.elapsed())?;
+        }
+        if self.connected_once {
+            self.completed.reconnects += 1;
+        }
+        self.connected_once = true;
+        self.connection = Some(connection);
+        Ok(())
+    }
+
+    fn disconnect(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            let metrics = connection.metrics();
+            self.completed.packets_sent += metrics.packets_sent;
+            self.completed.packets_received += metrics.packets_received;
+            self.completed.framing_failures += metrics.framing_failures;
+            self.completed.states_dropped += metrics.states_dropped;
+        }
+    }
+}
+
+impl GamepadOutput for SerialOutput {
+    fn send_state(&mut self, state: &GamepadState) -> Result<(), OutputError> {
+        state.validate()?;
+        for attempt in 0..2 {
+            if self.connection.is_none() {
+                if let Err(error) = self.connect() {
+                    if attempt == 1 {
+                        return Err(OutputError::Transport(error.to_string()));
+                    }
+                    continue;
+                }
+            }
+            let Some(connection) = self.connection.as_mut() else {
+                return Err(OutputError::Transport(SerialError::NotReady.to_string()));
+            };
+            connection
+                .queue_state(*state)
+                .map_err(|error| OutputError::Transport(error.to_string()))?;
+            match self.poll() {
+                Ok(()) => return Ok(()),
+                Err(error) if attempt == 1 => {
+                    return Err(OutputError::Transport(error.to_string()));
+                }
+                Err(_) => {}
+            }
+        }
+        unreachable!("two reconnect attempts always return")
+    }
+    fn send_neutral(&mut self) -> Result<(), OutputError> {
+        self.connection
+            .as_mut()
+            .ok_or_else(|| OutputError::Transport(SerialError::NotReady.to_string()))?
+            .send_neutral_now()
+            .map_err(|error| OutputError::Transport(error.to_string()))
+    }
+}
+
+impl Drop for SerialOutput {
+    fn drop(&mut self) {
+        if let Some(connection) = &mut self.connection {
+            let _ = connection.send_neutral_now();
+        }
+    }
+}
+
+/// Enumerates native serial port names.
+///
+/// # Errors
+/// Returns an error when the native backend cannot enumerate ports.
+pub fn available_serial_ports() -> Result<Vec<String>, SerialError> {
+    serialport::available_ports()
+        .map(|ports| ports.into_iter().map(|port| port.port_name).collect())
+        .map_err(|error| SerialError::Io(io::Error::other(error.to_string())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct MockTransport {
+        reads: VecDeque<Vec<u8>>,
+        writes: Vec<u8>,
+    }
+    impl ByteTransport for MockTransport {
+        fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+            self.writes.extend_from_slice(bytes);
+            Ok(())
+        }
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let Some(bytes) = self.reads.pop_front() else {
+                return Err(io::ErrorKind::WouldBlock.into());
+            };
+            buffer[..bytes.len()].copy_from_slice(&bytes);
+            Ok(bytes.len())
+        }
+    }
+    fn response(message: Message) -> Vec<u8> {
+        Frame::new(90, message).encode().unwrap()
+    }
+    fn messages(bytes: &[u8]) -> Vec<Message> {
+        StreamDecoder::new()
+            .push(bytes)
+            .into_iter()
+            .map(Result::unwrap)
+            .map(|frame| frame.message)
+            .collect()
+    }
+
+    #[test]
+    fn handshake_queues_then_flushes_state_with_sequences() {
+        let transport = MockTransport {
+            reads: VecDeque::from([response(Message::HelloResponse {
+                selected_version: 1,
+            })]),
+            writes: Vec::new(),
+        };
+        let mut connection =
+            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+        connection.queue_state(GamepadState::neutral()).unwrap();
+        connection.poll(Duration::from_millis(1)).unwrap();
+        assert_eq!(connection.status(), SerialStatus::Ready);
+        assert_eq!(
+            messages(&connection.into_inner().writes),
+            vec![
+                Message::Hello {
+                    minimum_version: 1,
+                    maximum_version: 1
+                },
+                Message::GamepadState(WireGamepadState::try_from(GamepadState::neutral()).unwrap())
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_version_and_handshake_timeout() {
+        let transport = MockTransport {
+            reads: VecDeque::from([response(Message::HelloResponse {
+                selected_version: 2,
+            })]),
+            writes: Vec::new(),
+        };
+        let mut connection =
+            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+        assert!(matches!(
+            connection.poll(Duration::ZERO),
+            Err(SerialError::VersionRejected(2))
+        ));
+        let mut connection = SerialConnection::new(
+            MockTransport::default(),
+            SerialConfig::default(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(matches!(
+            connection.poll(Duration::from_secs(1)),
+            Err(SerialError::HandshakeTimeout)
+        ));
+    }
+
+    #[test]
+    fn bounded_queue_drops_oldest_and_health_check_requires_matching_pong() {
+        let config = SerialConfig {
+            queue_capacity: 1,
+            ping_interval: Duration::from_millis(10),
+            pong_timeout: Duration::from_millis(20),
+            ..SerialConfig::default()
+        };
+        let transport = MockTransport {
+            reads: VecDeque::from([response(Message::HelloResponse {
+                selected_version: 1,
+            })]),
+            writes: Vec::new(),
+        };
+        let mut connection = SerialConnection::new(transport, config, Duration::ZERO).unwrap();
+        connection.queue_state(GamepadState::neutral()).unwrap();
+        let mut active = GamepadState::neutral();
+        active.left_x = 1.0;
+        connection.queue_state(active).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        connection.poll(Duration::from_millis(10)).unwrap();
+        assert_eq!(connection.metrics().states_dropped, 1);
+        assert!(matches!(
+            connection.poll(Duration::from_millis(30)),
+            Err(SerialError::PongTimeout)
+        ));
+    }
+
+    #[test]
+    fn responds_to_firmware_ping_and_counts_corrupt_frames() {
+        let mut bad = response(Message::Neutral);
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        let transport = MockTransport {
+            reads: VecDeque::from([response(Message::Ping { nonce: 42 }), bad]),
+            writes: Vec::new(),
+        };
+        let mut connection =
+            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        assert_eq!(connection.metrics().framing_failures, 1);
+        assert!(messages(&connection.into_inner().writes).contains(&Message::Pong { nonce: 42 }));
+    }
+}
