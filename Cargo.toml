@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/gamepad-state",
+    "crates/bridge-protocol",
+    "crates/bridge-output",
+    "apps/gamepad-simulator",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/lynxware/steam-controller-bridge"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
+

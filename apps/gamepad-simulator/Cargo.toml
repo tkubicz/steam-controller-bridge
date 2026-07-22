@@ -1,0 +1,13 @@
+[package]
+name = "gamepad-simulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bridge-output = { path = "../../crates/bridge-output" }
+gamepad-state = { path = "../../crates/gamepad-state" }
+
+[lints]
+workspace = true
+

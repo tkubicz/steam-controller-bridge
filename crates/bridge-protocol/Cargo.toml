@@ -1,0 +1,12 @@
+[package]
+name = "bridge-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gamepad-state = { path = "../gamepad-state" }
+
+[lints]
+workspace = true
+

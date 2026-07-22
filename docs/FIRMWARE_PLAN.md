@@ -1,0 +1,20 @@
+# XIAO nRF52840 Firmware Plan
+
+Firmware is deliberately not implemented before the board is available.
+
+The XIAO firmware will expose a USB composite device with a CDC interface for bridge frames and a standards-compatible HID gamepad interface for browsers and streaming clients. Its parser will implement protocol v1 exactly as documented in `GAMEPAD_PROTOCOL.md`, beginning with the static vectors already covered by host tests.
+
+Required behavior:
+
+- Search and resynchronize on `SC` magic bytes.
+- Reject payloads over 256 bytes, unsupported versions, invalid message lengths, invalid hats, reserved axis values, and bad CRCs.
+- Complete `Hello` / `HelloResponse` negotiation before applying states.
+- Convert `GamepadState` and `Neutral` messages into USB HID reports.
+- Track sequence gaps for diagnostics without allowing a gap to leave stale controls active.
+- Respond to `Ping` with the same nonce in `Pong`.
+- Reset the HID report to neutral after a host-data watchdog timeout (initial target: 100 ms).
+- Reset immediately on CDC disconnect, protocol uncertainty, or parser failure threshold.
+- Use an LED for disconnected, negotiating, active, and fault states without affecting timing.
+
+Hardware validation must cover CDC reconnect, HID enumeration, browser Gamepad API behavior, sequence wrap, malformed input recovery, host process termination, cable removal, and watchdog-to-neutral timing.
+
