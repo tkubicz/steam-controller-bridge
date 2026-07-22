@@ -32,6 +32,7 @@ keyboard/automated simulator                  v
 - `gamepad-simulator` owns deterministic and keyboard-driven sources. It depends on output interfaces but not protocol internals.
 - `sc-replay` is a thin CLI over `recording` and the existing output backends. It contains no format parser of its own.
 - `sc-probe` lists and inspects all HID collections, monitors one explicitly selected collection, and records raw lifecycle/report events plus optional decoded states. It does not contain hard-coded device identifiers or feature-report bytes.
+- `sc-visualizer` owns the optional `eframe` GUI. A dedicated HID polling thread feeds a bounded 64-event channel; the UI drains it into decoder, mapper, recording, and mock-output diagnostics without introducing GUI dependencies into any library or CLI.
 
 All crates forbid unsafe code. Only the recording layer uses third-party serialization and base64 libraries. The GUI, HID, mapping, and serial layers remain separate components.
 

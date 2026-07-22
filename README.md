@@ -4,7 +4,7 @@ Host-side foundations for translating a Steam Controller into a conventional USB
 
 ## Status
 
-The first six pre-hardware phases are implemented: a generic gamepad model, a stable framed protocol, mock/dump/file output backends, keyboard/automated simulation, versioned recording/replay, macOS HID probing/capture, Steam Controller 2 report decoding, and conventional gamepad mapping with reusable filters. Serial transport, visualization, and firmware are later phases.
+The first seven pre-hardware phases are implemented: a generic gamepad model, a stable framed protocol, mock/dump/file output backends, keyboard/automated simulation, versioned recording/replay, macOS HID probing/capture, Steam Controller 2 report decoding, conventional gamepad mapping with reusable filters, and a live visualizer. Serial transport and firmware are later phases.
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
@@ -79,6 +79,21 @@ The session reports disconnects and automatically attempts to reopen the same co
 
 macOS may reject protected keyboard/gamepad collections with an IOKit `not permitted` error until the terminal or Codex host has Input Monitoring permission. Listing and metadata inspection do not require opening the collection.
 
+## Visualizer
+
+After identifying the desired HID collection with `sc-probe`, open the live
+visualizer with the same snapshot index:
+
+```bash
+cargo run -p sc-visualizer -- --index 0
+```
+
+The visualizer shows raw, decoded, and mapped state; reports connection/rate and
+error diagnostics; edits the mapping filters; and records raw, decoded, mapped,
+lifecycle, and marker events to JSONL. Its mock output counts changed outgoing
+states. Serial status remains explicitly unavailable until the serial transport
+phase.
+
 See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [recording format](docs/RECORDING_FORMAT.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
 
 ## Known limitations
@@ -86,6 +101,6 @@ See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [Steam Controller protocol](d
 - Steam Controller 2 input/status decoding is implemented from OpenPuck's protocol specification, but still needs regression captures from the user's controller and transports.
 - Controller initialization and feature-report transmission are not implemented; probing remains read-only.
 - No serial transport or handshake driver yet; the protocol messages are defined.
-- No live HID recorder or graphical visualizer yet; recording currently accepts generic simulator states and typed raw events through the library API.
+- The visualizer currently supports disabled and mock outputs; serial output is deferred to the next phase.
 - No XIAO firmware is included before hardware validation.
 - The keyboard simulator is line-oriented, not a production input UI.

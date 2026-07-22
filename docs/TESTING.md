@@ -30,6 +30,11 @@ cargo run -p sc-probe -- inspect --index 0
 
 Linux CI compiles the hardware-independent API and explicit unsupported-platform implementation; it does not require `hidapi` system libraries or physical hardware.
 
+The optional GUI remains part of the workspace build and strict Clippy gates.
+On macOS, use `cargo run -p sc-visualizer -- --index N` after `sc-probe list`
+to verify live report rate, decoded controls, mapped output, recording controls,
+and disconnect-to-neutral behavior with hardware.
+
 An end-to-end pre-hardware smoke test is:
 
 ```bash
