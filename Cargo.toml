@@ -5,8 +5,10 @@ members = [
     "crates/bridge-protocol",
     "crates/bridge-output",
     "crates/recording",
+    "crates/steam-controller-device",
     "apps/gamepad-simulator",
     "apps/sc-replay",
+    "apps/sc-probe",
 ]
 
 [workspace.package]
@@ -19,6 +21,7 @@ repository = "https://github.com/lynxware/steam-controller-bridge"
 base64 = "0.22.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+hidapi = { version = "2.6.6", default-features = false, features = ["macos-shared-device"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -46,12 +46,31 @@ impl RecordingEvent {
     ///
     /// Returns [`RecordingError`] if the typed payload cannot be represented as JSON.
     pub fn raw_hid(timestamp_us: u64, report_id: u8, bytes: &[u8]) -> Result<Self, RecordingError> {
+        Self::raw_hid_with_metadata(timestamp_us, report_id, bytes, None, None, 0)
+    }
+
+    /// Constructs a raw HID event including source and loss diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecordingError`] if the typed payload cannot be represented as JSON.
+    pub fn raw_hid_with_metadata(
+        timestamp_us: u64,
+        report_id: u8,
+        bytes: &[u8],
+        source_device_id: Option<&str>,
+        transport: Option<&str>,
+        dropped_reports: u64,
+    ) -> Result<Self, RecordingError> {
         Self::from_payload(
             timestamp_us,
             KIND_RAW_HID,
             &RawHidPayload {
                 report_id,
                 bytes: BASE64.encode(bytes),
+                source_device_id: source_device_id.map(str::to_owned),
+                transport: transport.map(str::to_owned),
+                dropped_reports,
             },
         )
     }
@@ -124,6 +143,17 @@ impl RecordingEvent {
 struct RawHidPayload {
     report_id: u8,
     bytes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transport: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    dropped_reports: u64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde skip predicates receive references.
+const fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -464,6 +494,21 @@ mod tests {
     fn event_round_trip_preserves_raw_and_gamepad_payloads() {
         let raw = RecordingEvent::raw_hid(7, 66, &[0, 1, 254, 255]).unwrap();
         assert_eq!(raw.decode_raw_hid().unwrap(), (66, vec![0, 1, 254, 255]));
+        let raw_with_metadata = RecordingEvent::raw_hid_with_metadata(
+            7,
+            66,
+            &[1, 2],
+            Some("collection-1"),
+            Some("USB"),
+            3,
+        )
+        .unwrap();
+        assert_eq!(
+            raw_with_metadata.payload["source_device_id"],
+            "collection-1"
+        );
+        assert_eq!(raw_with_metadata.payload["transport"], "USB");
+        assert_eq!(raw_with_metadata.payload["dropped_reports"], 3);
         let mut state = GamepadState {
             left_x: -1.0,
             right_trigger: 1.0,

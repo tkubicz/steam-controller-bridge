@@ -4,7 +4,7 @@ Host-side foundations for translating a Steam Controller into a conventional USB
 
 ## Status
 
-The first three pre-hardware phases are implemented: a generic gamepad model, a stable framed protocol, mock/dump/file output backends, keyboard/automated simulation, and versioned recording/replay. HID access, Steam Controller decoding, mapping, serial transport, visualization, and firmware are later phases.
+The first four pre-hardware phases are implemented: a generic gamepad model, a stable framed protocol, mock/dump/file output backends, keyboard/automated simulation, versioned recording/replay, and macOS HID probing/capture. Steam Controller decoding, mapping, serial transport, visualization, and firmware are later phases.
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
@@ -56,11 +56,34 @@ cargo run -p sc-replay -- session.jsonl --deterministic --output dump
 
 `sc-replay` also supports `--speed`, `--seek-us`, `--step`, `--loop`, and all currently implemented output backends. Serial replay is intentionally deferred until the serial transport phase.
 
+## HID probing on macOS
+
+Enumeration never assumes a Steam Controller VID/PID. Start by inspecting the HID collections macOS currently exposes:
+
+```bash
+cargo run -p sc-probe -- list
+cargo run -p sc-probe -- inspect --index 0
+```
+
+Indices use a stable path-sorted snapshot. Connecting or removing hardware can still change the snapshot, so run `list` again immediately before selecting a collection.
+
+Monitor or capture the explicitly selected collection:
+
+```bash
+cargo run -p sc-probe -- monitor --index 0 --raw
+cargo run -p sc-probe -- capture --index 0 --output reports.jsonl \
+  --duration-secs 30
+```
+
+The session reports disconnects and automatically attempts to reopen the same collection identity every 500 ms. Capture files include connection metadata, transport, source collection identity, report ID, base64 bytes, and the available dropped-report count.
+
+macOS may reject protected keyboard/gamepad collections with an IOKit `not permitted` error until the terminal or Codex host has Input Monitoring permission. Listing and metadata inspection do not require opening the collection.
+
 See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [recording format](docs/RECORDING_FORMAT.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
 
 ## Known limitations
 
-- No Steam Controller HID discovery or report decoding yet.
+- macOS HID discovery and raw capture are implemented, but Steam Controller-specific report decoding and initialization are not.
 - No serial transport or handshake driver yet; the protocol messages are defined.
 - No live HID recorder or graphical visualizer yet; recording currently accepts generic simulator states and typed raw events through the library API.
 - No XIAO firmware is included before hardware validation.

@@ -13,6 +13,15 @@ The protocol tests cover every message type, fixed axis endpoints, the static CR
 
 Recording tests cover typed raw and gamepad round trips, timestamp ordering, unknown events, seeking, deterministic replay, malformed/truncated input, version rejection, and identical simulator-state replay.
 
+The HID device crate unit-tests platform-neutral collection grouping. On macOS, a read-only live diagnostic can verify the native backend without controller-specific assumptions:
+
+```bash
+cargo run -p sc-probe -- list
+cargo run -p sc-probe -- inspect --index 0
+```
+
+Linux CI compiles the hardware-independent API and explicit unsupported-platform implementation; it does not require `hidapi` system libraries or physical hardware.
+
 An end-to-end pre-hardware smoke test is:
 
 ```bash

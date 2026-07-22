@@ -32,7 +32,7 @@ Known kinds are:
 
 Unknown kinds are valid v1 events. Readers preserve their JSON payloads and replay ignores them. This permits additive event kinds without increasing the envelope version.
 
-`raw_hid` contains `report_id` as an unsigned byte and `bytes` as standard padded base64. Device identity and transport metadata belong in the corresponding `device_connected` event rather than being repeated for every report.
+`raw_hid` contains `report_id` as an unsigned byte and `bytes` as standard padded base64. Live captures also include `source_device_id`, `transport`, and `dropped_reports`; older or synthetic v1 events may omit these additive fields. Full collection metadata is stored in each corresponding `device_connected` event.
 
 `decoded_steam_state` is reserved for the typed Steam Controller state introduced with the HID decoder phase. Its payload remains opaque JSON to the core recording reader until that model exists.
 
@@ -58,4 +58,3 @@ Gamepad values must satisfy the same finite-value and range rules as `gamepad-st
 Readers reject unknown envelope versions, decreasing timestamps, malformed JSON, invalid typed payloads, and truncated JSON lines with a structured error. A final valid JSON object is accepted even if the file lacks a trailing newline. This distinguishes harmless interrupted flushing after a complete event from a genuinely truncated object.
 
 Real-time replay uses deltas between recorded timestamps and divides them by the requested positive finite speed. Deterministic replay ignores timing entirely. Seeking selects the first event whose timestamp is greater than or equal to the requested timestamp.
-
