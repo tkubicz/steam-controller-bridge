@@ -4,7 +4,9 @@ members = [
     "crates/gamepad-state",
     "crates/bridge-protocol",
     "crates/bridge-output",
+    "crates/recording",
     "apps/gamepad-simulator",
+    "apps/sc-replay",
 ]
 
 [workspace.package]
@@ -13,10 +15,14 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/lynxware/steam-controller-bridge"
 
+[workspace.dependencies]
+base64 = "0.22.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = "warn"
 pedantic = "warn"
-

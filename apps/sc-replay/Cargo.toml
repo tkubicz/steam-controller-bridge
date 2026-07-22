@@ -1,13 +1,13 @@
 [package]
-name = "gamepad-simulator"
+name = "sc-replay"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 bridge-output = { path = "../../crates/bridge-output" }
-gamepad-state = { path = "../../crates/gamepad-state" }
 recording = { path = "../../crates/recording" }
 
 [lints]
 workspace = true
+

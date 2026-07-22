@@ -1,4 +1,5 @@
 use std::env;
+use std::fs::File;
 use std::io::{self, BufRead};
 use std::thread;
 use std::time::Duration;
@@ -6,6 +7,7 @@ use std::time::Duration;
 use bridge_output::{DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput};
 use gamepad_simulator::{apply_keyboard_command, automated_sequence};
 use gamepad_state::GamepadState;
+use recording::RecordingOutput;
 
 fn main() {
     if let Err(error) = run() {
@@ -75,6 +77,10 @@ fn make_output(name: &str, file: Option<&str>) -> Result<Box<dyn GamepadOutput>,
             FileOutput::create(file.ok_or("--output file requires --file PATH")?)
                 .map_err(|error| error.to_string())?,
         )),
+        "recording" => Ok(Box::new(RecordingOutput::new(
+            File::create(file.ok_or("--output recording requires --file PATH")?)
+                .map_err(|error| error.to_string())?,
+        ))),
         "mock" => Ok(Box::new(MockOutput::default())),
         other => Err(format!("unknown output '{other}'")),
     }
@@ -96,5 +102,5 @@ fn parse_value<T: std::str::FromStr>(args: &[String], flag: &str, default: T) ->
 }
 
 fn print_help() {
-    println!("gamepad-simulator <keyboard|automated> [options]\n\nOptions:\n  --output <dump|pretty|json|raw|file|mock>\n  --file PATH              Required by file output\n  --cycles N               Automated cycles (default: 1)\n  --interval-ms N          Delay between states (default: 50)\n  -h, --help");
+    println!("gamepad-simulator <keyboard|automated> [options]\n\nOptions:\n  --output <dump|pretty|json|raw|file|recording|mock>\n  --file PATH              Required by file/recording output\n  --cycles N               Automated cycles (default: 1)\n  --interval-ms N          Delay between states (default: 50)\n  -h, --help");
 }
