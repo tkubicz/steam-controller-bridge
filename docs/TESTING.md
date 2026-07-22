@@ -15,6 +15,12 @@ Recording tests cover typed raw and gamepad round trips, timestamp ordering, unk
 
 Steam Controller protocol tests cover all 30 OpenPuck button bits, every trigger/stick/pad/pressure/motion field, both `0x45` and extended `0x42`, connection/battery/signal reports, typed recording round trips, incorrect sizes, mismatched IDs, unknown IDs, and arbitrary truncated lengths.
 
+Mapper tests cover every documented button and hat mapping, neutral state,
+stick/pad/trigger normalization, pad release, alternate physical-stick input,
+independent and radial dead zones, inversion, sensitivity, saturation, finite
+clamping, smoothing convergence and reset, and immediate discrete controls while
+smoothing is active.
+
 The HID device crate unit-tests platform-neutral collection grouping. On macOS, a read-only live diagnostic can verify the native backend without controller-specific assumptions:
 
 ```bash

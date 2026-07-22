@@ -4,6 +4,7 @@ members = [
     "crates/gamepad-state",
     "crates/bridge-protocol",
     "crates/bridge-output",
+    "crates/controller-mapper",
     "crates/recording",
     "crates/steam-controller-device",
     "crates/steam-controller-protocol",

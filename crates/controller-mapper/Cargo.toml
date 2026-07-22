@@ -1,0 +1,13 @@
+[package]
+name = "controller-mapper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gamepad-state = { path = "../gamepad-state" }
+steam-controller-protocol = { path = "../steam-controller-protocol" }
+
+[lints]
+workspace = true
+

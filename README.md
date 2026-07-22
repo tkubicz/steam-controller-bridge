@@ -4,7 +4,7 @@ Host-side foundations for translating a Steam Controller into a conventional USB
 
 ## Status
 
-The first five pre-hardware phases are implemented: a generic gamepad model, a stable framed protocol, mock/dump/file output backends, keyboard/automated simulation, versioned recording/replay, macOS HID probing/capture, and Steam Controller 2 report decoding. Mapping, serial transport, visualization, and firmware are later phases.
+The first six pre-hardware phases are implemented: a generic gamepad model, a stable framed protocol, mock/dump/file output backends, keyboard/automated simulation, versioned recording/replay, macOS HID probing/capture, Steam Controller 2 report decoding, and conventional gamepad mapping with reusable filters. Serial transport, visualization, and firmware are later phases.
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
@@ -79,7 +79,7 @@ The session reports disconnects and automatically attempts to reopen the same co
 
 macOS may reject protected keyboard/gamepad collections with an IOKit `not permitted` error until the terminal or Codex host has Input Monitoring permission. Listing and metadata inspection do not require opening the collection.
 
-See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [recording format](docs/RECORDING_FORMAT.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
+See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [recording format](docs/RECORDING_FORMAT.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
 
 ## Known limitations
 
