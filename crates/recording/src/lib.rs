@@ -10,6 +10,7 @@ use bridge_output::{GamepadOutput, OutputError};
 use gamepad_state::{GamepadButtons, GamepadState, HatState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use steam_controller_protocol::SteamControllerState;
 
 pub const FORMAT_VERSION: u32 = 1;
 pub const KIND_DEVICE_CONNECTED: &str = "device_connected";
@@ -92,6 +93,18 @@ impl RecordingEvent {
         )
     }
 
+    /// Constructs a decoded Steam Controller 2 state event.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecordingError`] if serialization fails.
+    pub fn decoded_steam_state(
+        timestamp_us: u64,
+        state: &SteamControllerState,
+    ) -> Result<Self, RecordingError> {
+        Self::from_payload(timestamp_us, KIND_DECODED_STEAM_STATE, state)
+    }
+
     /// Constructs an event from any serializable typed payload.
     ///
     /// # Errors
@@ -136,6 +149,18 @@ impl RecordingEvent {
         }
         let payload: GamepadPayload = serde_json::from_value(self.payload.clone())?;
         payload.try_into()
+    }
+
+    /// Decodes this event as a Steam Controller 2 state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecordingError`] when the event kind or fields are invalid.
+    pub fn decode_steam_state(&self) -> Result<SteamControllerState, RecordingError> {
+        if self.kind != KIND_DECODED_STEAM_STATE {
+            return Err(RecordingError::UnexpectedKind(self.kind.clone()));
+        }
+        Ok(serde_json::from_value(self.payload.clone())?)
     }
 }
 
@@ -489,6 +514,9 @@ mod tests {
     use gamepad_state::Button;
     use serde_json::json;
     use std::io::Cursor;
+    use steam_controller_protocol::{
+        DecodedReport, SteamControllerDecoder, INPUT_REPORT_ID, INPUT_REPORT_SIZE,
+    };
 
     #[test]
     fn event_round_trip_preserves_raw_and_gamepad_payloads() {
@@ -636,5 +664,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(output.states, states);
+    }
+
+    #[test]
+    fn decoded_steam_state_round_trips_as_typed_payload() {
+        let mut report = vec![0_u8; INPUT_REPORT_SIZE];
+        report[0] = INPUT_REPORT_ID;
+        let DecodedReport::ControllerState(state) = SteamControllerDecoder::new()
+            .decode(INPUT_REPORT_ID, &report)
+            .unwrap()
+        else {
+            panic!("controller state expected");
+        };
+        let event = RecordingEvent::decoded_steam_state(12, &state).unwrap();
+        assert_eq!(event.decode_steam_state().unwrap(), state);
     }
 }

@@ -6,6 +6,7 @@ members = [
     "crates/bridge-output",
     "crates/recording",
     "crates/steam-controller-device",
+    "crates/steam-controller-protocol",
     "apps/gamepad-simulator",
     "apps/sc-replay",
     "apps/sc-probe",

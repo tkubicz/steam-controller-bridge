@@ -4,7 +4,7 @@ Host-side foundations for translating a Steam Controller into a conventional USB
 
 ## Status
 
-The first four pre-hardware phases are implemented: a generic gamepad model, a stable framed protocol, mock/dump/file output backends, keyboard/automated simulation, versioned recording/replay, and macOS HID probing/capture. Steam Controller decoding, mapping, serial transport, visualization, and firmware are later phases.
+The first five pre-hardware phases are implemented: a generic gamepad model, a stable framed protocol, mock/dump/file output backends, keyboard/automated simulation, versioned recording/replay, macOS HID probing/capture, and Steam Controller 2 report decoding. Mapping, serial transport, visualization, and firmware are later phases.
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
@@ -72,10 +72,10 @@ Monitor or capture the explicitly selected collection:
 ```bash
 cargo run -p sc-probe -- monitor --index 0 --raw
 cargo run -p sc-probe -- capture --index 0 --output reports.jsonl \
-  --duration-secs 30
+  --duration-secs 30 --decoded
 ```
 
-The session reports disconnects and automatically attempts to reopen the same collection identity every 500 ms. Capture files include connection metadata, transport, source collection identity, report ID, base64 bytes, and the available dropped-report count.
+The session reports disconnects and automatically attempts to reopen the same collection identity every 500 ms. Capture files include connection metadata, transport, source collection identity, report ID, base64 bytes, and the available dropped-report count. `--decoded` additionally records typed Steam Controller 2 state reports.
 
 macOS may reject protected keyboard/gamepad collections with an IOKit `not permitted` error until the terminal or Codex host has Input Monitoring permission. Listing and metadata inspection do not require opening the collection.
 
@@ -83,7 +83,8 @@ See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [recording format](docs/RECOR
 
 ## Known limitations
 
-- macOS HID discovery and raw capture are implemented, but Steam Controller-specific report decoding and initialization are not.
+- Steam Controller 2 input/status decoding is implemented from OpenPuck's protocol specification, but still needs regression captures from the user's controller and transports.
+- Controller initialization and feature-report transmission are not implemented; probing remains read-only.
 - No serial transport or handshake driver yet; the protocol messages are defined.
 - No live HID recorder or graphical visualizer yet; recording currently accepts generic simulator states and typed raw events through the library API.
 - No XIAO firmware is included before hardware validation.

@@ -122,6 +122,7 @@ dependencies = [
  "gamepad-state",
  "serde",
  "serde_json",
+ "steam-controller-protocol",
 ]
 
 [[package]]
@@ -131,6 +132,7 @@ dependencies = [
  "recording",
  "serde_json",
  "steam-controller-device",
+ "steam-controller-protocol",
 ]
 
 [[package]]
@@ -195,6 +197,13 @@ name = "steam-controller-device"
 version = "0.1.0"
 dependencies = [
  "hidapi",
+]
+
+[[package]]
+name = "steam-controller-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

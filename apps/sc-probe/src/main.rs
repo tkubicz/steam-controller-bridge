@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use recording::{RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
 use serde_json::json;
 use steam_controller_device::{enumerate, DeviceEvent, HidDeviceInfo, HidSession};
+use steam_controller_protocol::{DecodedReport, SteamControllerDecoder, SteamControllerState};
 
 fn main() {
     if let Err(error) = run() {
@@ -102,6 +103,8 @@ fn monitor(args: &[String]) -> Result<(), String> {
     let raw = args.iter().any(|arg| arg == "--raw");
     let duration = duration_limit(args)?;
     let mut session = HidSession::open_index(index).map_err(|error| error.to_string())?;
+    let mut decoder = SteamControllerDecoder::new();
+    let mut previous_state: Option<SteamControllerState> = None;
     eprintln!("Monitoring collection {index}; press Ctrl+C to stop.");
     let started = Instant::now();
     let mut window_started = Instant::now();
@@ -121,7 +124,10 @@ fn monitor(args: &[String]) -> Result<(), String> {
                     info.transport
                 );
             }
-            Some(DeviceEvent::Disconnected) => eprintln!("disconnected; waiting for reconnect"),
+            Some(DeviceEvent::Disconnected) => {
+                previous_state = None;
+                eprintln!("disconnected; waiting for reconnect");
+            }
             Some(DeviceEvent::Report(report)) => {
                 window_reports += 1;
                 if raw {
@@ -132,6 +138,31 @@ fn monitor(args: &[String]) -> Result<(), String> {
                         report.data.len(),
                         hex_bytes(&report.data)
                     );
+                } else {
+                    match decoder.decode(report.report_id, &report.data) {
+                        Ok(DecodedReport::ControllerState(state)) => {
+                            if previous_state.as_ref() != Some(&state) {
+                                println!(
+                                    "seq={} buttons={:#010x} ls=({:6},{:6}) rs=({:6},{:6}) pads=({:6},{:6})/({:6},{:6}) triggers=({:5},{:5})",
+                                    state.sequence,
+                                    state.buttons.0,
+                                    state.left_stick_x,
+                                    state.left_stick_y,
+                                    state.right_stick_x,
+                                    state.right_stick_y,
+                                    state.left_pad_x,
+                                    state.left_pad_y,
+                                    state.right_pad_x,
+                                    state.right_pad_y,
+                                    state.left_trigger,
+                                    state.right_trigger
+                                );
+                                previous_state = Some(state);
+                            }
+                        }
+                        Ok(other) => println!("{other:?}"),
+                        Err(error) => eprintln!("decode error: {error}"),
+                    }
                 }
             }
             None => {}
@@ -149,7 +180,9 @@ fn capture(args: &[String]) -> Result<(), String> {
     let index = required_index(args)?;
     let output_path = value_after(args, "--output").ok_or("capture requires --output PATH")?;
     let duration = duration_limit(args)?;
+    let include_decoded_states = args.iter().any(|arg| arg == "--decoded");
     let mut session = HidSession::open_index(index).map_err(|error| error.to_string())?;
+    let mut decoder = SteamControllerDecoder::new();
     let mut recording = RecordingWriter::new(
         File::create(output_path)
             .map_err(|error| format!("cannot create capture '{output_path}': {error}"))?,
@@ -189,8 +222,9 @@ fn capture(args: &[String]) -> Result<(), String> {
                 eprintln!("disconnected; waiting for reconnect");
             }
             Some(DeviceEvent::Report(report)) => {
+                let timestamp_us = elapsed_us(started);
                 let event = RecordingEvent::raw_hid_with_metadata(
-                    elapsed_us(started),
+                    timestamp_us,
                     report.report_id,
                     &report.data,
                     Some(&report.source_device_id),
@@ -201,6 +235,17 @@ fn capture(args: &[String]) -> Result<(), String> {
                 recording
                     .write_event(&event)
                     .map_err(|error| error.to_string())?;
+                if include_decoded_states {
+                    if let Ok(DecodedReport::ControllerState(state)) =
+                        decoder.decode(report.report_id, &report.data)
+                    {
+                        let event = RecordingEvent::decoded_steam_state(timestamp_us, &state)
+                            .map_err(|error| error.to_string())?;
+                        recording
+                            .write_event(&event)
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
                 reports += 1;
             }
             None => {}
@@ -280,6 +325,6 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 fn print_help() {
     println!(
-        "sc-probe <command> [options]\n\nCommands:\n  list                              List every HID collection\n  inspect [--index N]               Show complete metadata and sibling count\n  monitor --index N [--raw]         Monitor reports and reconnects\n  capture --index N --output PATH   Capture raw reports as JSONL\n\nOptions:\n  --duration-secs N                 Stop monitor/capture after N seconds\n  -h, --help"
+        "sc-probe <command> [options]\n\nCommands:\n  list                                      List every HID collection\n  inspect [--index N]                       Show complete metadata and sibling count\n  monitor --index N [--raw]                 Decode or print raw live reports\n  capture --index N --output PATH [--decoded]\n                                            Capture raw and optional decoded JSONL\n\nOptions:\n  --duration-secs N                         Stop monitor/capture after N seconds\n  -h, --help"
     );
 }

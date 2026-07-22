@@ -13,6 +13,8 @@ The protocol tests cover every message type, fixed axis endpoints, the static CR
 
 Recording tests cover typed raw and gamepad round trips, timestamp ordering, unknown events, seeking, deterministic replay, malformed/truncated input, version rejection, and identical simulator-state replay.
 
+Steam Controller protocol tests cover all 30 OpenPuck button bits, every trigger/stick/pad/pressure/motion field, both `0x45` and extended `0x42`, connection/battery/signal reports, typed recording round trips, incorrect sizes, mismatched IDs, unknown IDs, and arbitrary truncated lengths.
+
 The HID device crate unit-tests platform-neutral collection grouping. On macOS, a read-only live diagnostic can verify the native backend without controller-specific assumptions:
 
 ```bash

@@ -34,7 +34,7 @@ Unknown kinds are valid v1 events. Readers preserve their JSON payloads and repl
 
 `raw_hid` contains `report_id` as an unsigned byte and `bytes` as standard padded base64. Live captures also include `source_device_id`, `transport`, and `dropped_reports`; older or synthetic v1 events may omit these additive fields. Full collection metadata is stored in each corresponding `device_connected` event.
 
-`decoded_steam_state` is reserved for the typed Steam Controller state introduced with the HID decoder phase. Its payload remains opaque JSON to the core recording reader until that model exists.
+`decoded_steam_state` contains the typed Steam Controller 2 state produced from a validated `0x45` or `0x42` report. It includes buttons, triggers, both sticks, both pads and pressures, IMU timestamp, acceleration, gyro, and the complete original report bytes. The recording library can decode it back into `SteamControllerState` without depending on HID access.
 
 `mapped_gamepad_state` contains:
 

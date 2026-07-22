@@ -10,7 +10,7 @@ bridge-output = { path = "../bridge-output" }
 gamepad-state = { path = "../gamepad-state" }
 serde.workspace = true
 serde_json.workspace = true
+steam-controller-protocol = { path = "../steam-controller-protocol" }
 
 [lints]
 workspace = true
-
