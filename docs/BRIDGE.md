@@ -1,5 +1,9 @@
 # Integrated Host Bridge
 
+This bridge targets Steam Controller 2 (2026) only. See the
+[end-user guide](USER_GUIDE.md) for hardware setup, pairing, permissions,
+firmware flashing, source collection selection, and troubleshooting.
+
 `sc-bridge` combines HID lifecycle events, Steam Controller 2 decoding,
 normalization and filtering, changed-state output, optional full-pipeline
 recording, replay, and periodic metrics.

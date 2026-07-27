@@ -6,12 +6,16 @@ use serde::{Deserialize, Serialize};
 
 pub const INPUT_REPORT_ID: u8 = 0x45;
 pub const EXTENDED_INPUT_REPORT_ID: u8 = 0x42;
+pub const LIZARD_MOUSE_REPORT_ID: u8 = 0x40;
+pub const LIZARD_KEYBOARD_REPORT_ID: u8 = 0x41;
 pub const BATTERY_REPORT_ID: u8 = 0x43;
 pub const AUX_STATUS_REPORT_ID: u8 = 0x44;
 pub const CONNECTION_REPORT_ID: u8 = 0x79;
 pub const PERIODIC_STATUS_REPORT_ID: u8 = 0x7b;
 pub const INPUT_REPORT_SIZE: usize = 46;
 pub const EXTENDED_INPUT_REPORT_SIZE: usize = 54;
+pub const LIZARD_MOUSE_REPORT_SIZE: usize = 6;
+pub const LIZARD_KEYBOARD_REPORT_SIZE: usize = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
@@ -119,6 +123,12 @@ pub struct BatteryStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecodedReport {
     ControllerState(SteamControllerState),
+    LizardMouse {
+        raw_report: Vec<u8>,
+    },
+    LizardKeyboard {
+        raw_report: Vec<u8>,
+    },
     Connection(ConnectionState),
     Battery {
         status: BatteryStatus,
@@ -156,6 +166,18 @@ impl SteamControllerDecoder {
             });
         }
         match report_id {
+            LIZARD_MOUSE_REPORT_ID => {
+                exact_size(report_id, data, LIZARD_MOUSE_REPORT_SIZE)?;
+                Ok(DecodedReport::LizardMouse {
+                    raw_report: data.to_vec(),
+                })
+            }
+            LIZARD_KEYBOARD_REPORT_ID => {
+                exact_size(report_id, data, LIZARD_KEYBOARD_REPORT_SIZE)?;
+                Ok(DecodedReport::LizardKeyboard {
+                    raw_report: data.to_vec(),
+                })
+            }
             INPUT_REPORT_ID => {
                 exact_size(report_id, data, INPUT_REPORT_SIZE)?;
                 Ok(DecodedReport::ControllerState(decode_state(data)))
@@ -487,6 +509,34 @@ mod tests {
     }
 
     #[test]
+    fn decodes_lizard_mouse_and_keyboard_reports() {
+        let mouse = [LIZARD_MOUSE_REPORT_ID, 1, 2, 3, 4, 5];
+        assert_eq!(
+            SteamControllerDecoder::new().decode(LIZARD_MOUSE_REPORT_ID, &mouse),
+            Ok(DecodedReport::LizardMouse {
+                raw_report: mouse.to_vec()
+            })
+        );
+
+        let keyboard = [LIZARD_KEYBOARD_REPORT_ID, 1, 0, 4, 5, 6, 7, 8, 9];
+        assert_eq!(
+            SteamControllerDecoder::new().decode(LIZARD_KEYBOARD_REPORT_ID, &keyboard),
+            Ok(DecodedReport::LizardKeyboard {
+                raw_report: keyboard.to_vec()
+            })
+        );
+
+        assert!(matches!(
+            SteamControllerDecoder::new().decode(LIZARD_MOUSE_REPORT_ID, &mouse[..5]),
+            Err(DecodeError::InvalidReportSize { .. })
+        ));
+        assert!(matches!(
+            SteamControllerDecoder::new().decode(LIZARD_KEYBOARD_REPORT_ID, &keyboard[..8]),
+            Err(DecodeError::InvalidReportSize { .. })
+        ));
+    }
+
+    #[test]
     fn malformed_reports_return_errors_and_never_panic() {
         let mut decoder = SteamControllerDecoder::new();
         assert_eq!(
@@ -518,6 +568,8 @@ mod tests {
         let mut decoder = SteamControllerDecoder::new();
         let mut value = 0x1234_5678_u32;
         for report_id in [
+            LIZARD_MOUSE_REPORT_ID,
+            LIZARD_KEYBOARD_REPORT_ID,
             EXTENDED_INPUT_REPORT_ID,
             BATTERY_REPORT_ID,
             AUX_STATUS_REPORT_ID,

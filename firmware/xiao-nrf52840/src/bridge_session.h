@@ -5,10 +5,9 @@
 namespace scbridge {
 
 constexpr uint32_t kDataWatchdogMs = 100;
-constexpr uint8_t kHidReportId = 1;
 
 #pragma pack(push, 1)
-struct HidGamepadReport {
+struct CanonicalGamepadReport {
   uint16_t buttons;
   uint8_t hat;
   int16_t left_x;
@@ -20,8 +19,8 @@ struct HidGamepadReport {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(HidGamepadReport) == 15,
-              "HID gamepad report must be exactly 15 bytes");
+static_assert(sizeof(CanonicalGamepadReport) == 15,
+              "canonical gamepad report must be exactly 15 bytes");
 
 struct SessionDiagnostics {
   uint32_t decode_errors;
@@ -52,7 +51,9 @@ class BridgeSession {
   const SessionDiagnostics& diagnostics() const { return diagnostics_; }
 
   bool hid_report_pending() const { return hid_pending_; }
-  const HidGamepadReport& pending_hid_report() const { return pending_hid_; }
+  const CanonicalGamepadReport& pending_hid_report() const {
+    return pending_hid_;
+  }
   void mark_hid_report_sent();
 
  private:
@@ -60,11 +61,11 @@ class BridgeSession {
   void check_sequence(uint16_t sequence);
   void apply_gamepad(const Frame& frame, uint32_t now_ms);
   void force_neutral(bool safety);
-  void queue_hid(const HidGamepadReport& report, bool safety);
+  void queue_hid(const CanonicalGamepadReport& report, bool safety);
   void send_message(MessageType type, const uint8_t* payload,
                     uint16_t payload_length);
-  static HidGamepadReport neutral_report();
-  static bool report_is_neutral(const HidGamepadReport& report);
+  static CanonicalGamepadReport neutral_report();
+  static bool report_is_neutral(const CanonicalGamepadReport& report);
 
   SessionSink& sink_;
   bool cdc_connected_;
@@ -79,8 +80,8 @@ class BridgeSession {
   uint16_t expected_sequence_;
   uint16_t transmit_sequence_;
   uint32_t last_data_ms_;
-  HidGamepadReport pending_hid_;
-  HidGamepadReport deferred_active_;
+  CanonicalGamepadReport pending_hid_;
+  CanonicalGamepadReport deferred_active_;
   SessionDiagnostics diagnostics_;
 };
 

@@ -1,5 +1,6 @@
 #include "bridge_protocol.h"
 #include "bridge_session.h"
+#include "xinput_gamepad.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -10,7 +11,8 @@
 using scbridge::BridgeSession;
 using scbridge::DecodeError;
 using scbridge::Frame;
-using scbridge::HidGamepadReport;
+using scbridge::CanonicalGamepadReport;
+using scbridge::XInputGamepadReport;
 using scbridge::MessageType;
 using scbridge::SessionSink;
 using scbridge::StreamDecoder;
@@ -92,6 +94,90 @@ void test_crc_and_neutral_vector() {
                               0x00, 0x00, 0x00, 0xe7, 0xfb};
   assert(neutral.size() == sizeof(expected));
   assert(memcmp(neutral.data(), expected, sizeof(expected)) == 0);
+}
+
+void test_xinput_report_conversion() {
+  CanonicalGamepadReport neutral{};
+  neutral.hat = 8;
+  const XInputGamepadReport neutral_report =
+      scbridge::make_xinput_report(neutral);
+  assert(neutral_report.message_type == 0);
+  assert(neutral_report.message_size == 20);
+  assert(neutral_report.buttons == 0);
+  assert(neutral_report.left_x == 0);
+  assert(neutral_report.left_y == 0);
+  assert(neutral_report.right_x == 0);
+  assert(neutral_report.right_y == 0);
+  assert(neutral_report.left_trigger == 0);
+  assert(neutral_report.right_trigger == 0);
+
+  CanonicalGamepadReport extremes{};
+  extremes.buttons = 0xffff;
+  extremes.hat = 7;
+  extremes.left_x = -32767;
+  extremes.left_y = 32767;
+  extremes.right_x = 0;
+  extremes.right_y = -1;
+  extremes.left_trigger = 0x7fff;
+  extremes.right_trigger = 0x8000;
+  const XInputGamepadReport report =
+      scbridge::make_xinput_report(extremes);
+  assert(report.buttons == 0xf7f5);
+  assert(report.left_x == -32767);
+  assert(report.left_y == 32767);
+  assert(report.right_x == 0);
+  assert(report.right_y == -1);
+  assert(report.left_trigger == 127);
+  assert(report.right_trigger == 127);
+
+  struct ButtonCase {
+    uint8_t source_index;
+    uint16_t xinput_mask;
+  };
+  const ButtonCase button_cases[] = {
+      {0, 0x1000},  // A / south
+      {1, 0x2000},  // B / east
+      {2, 0x4000},  // X / west
+      {3, 0x8000},  // Y / north
+      {4, 0x0100},  // left shoulder
+      {5, 0x0200},  // right shoulder
+      {6, 0x0040},  // left stick
+      {7, 0x0080},  // right stick
+      {8, 0x0020},  // Back
+      {9, 0x0010},  // Start
+      {10, 0x0400}, // Guide
+  };
+  for (const ButtonCase& button_case : button_cases) {
+    CanonicalGamepadReport source{};
+    source.hat = 8;
+    source.buttons =
+        static_cast<uint16_t>(1U << button_case.source_index);
+    assert(scbridge::make_xinput_report(source).buttons ==
+           button_case.xinput_mask);
+  }
+
+  const uint16_t dpad_cases[] = {
+      0x0001,          // north
+      0x0001 | 0x0008, // north-east
+      0x0008,          // east
+      0x0002 | 0x0008, // south-east
+      0x0002,          // south
+      0x0002 | 0x0004, // south-west
+      0x0004,          // west
+      0x0001 | 0x0004, // north-west
+      0x0000,          // centered
+  };
+  for (uint8_t hat = 0; hat <= 8; ++hat) {
+    CanonicalGamepadReport source{};
+    source.hat = hat;
+    assert(scbridge::make_xinput_report(source).buttons ==
+           dpad_cases[hat]);
+  }
+
+  CanonicalGamepadReport unsupported{};
+  unsupported.hat = 8;
+  unsupported.buttons = 0xf800;
+  assert(scbridge::make_xinput_report(unsupported).buttons == 0);
 }
 
 void test_stream_recovery_and_splits() {
@@ -261,6 +347,7 @@ void test_fault_and_disconnect_neutralize() {
 
 int main() {
   test_crc_and_neutral_vector();
+  test_xinput_report_conversion();
   test_stream_recovery_and_splits();
   test_decoder_validation_and_unknown_messages();
   test_decoder_rejects_header_and_payload_errors_then_recovers();

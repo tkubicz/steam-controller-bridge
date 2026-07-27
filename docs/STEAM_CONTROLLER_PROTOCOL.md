@@ -1,6 +1,6 @@
 # Steam Controller 2 Host Protocol
 
-This implementation follows [OpenPuck](https://github.com/safijari/openpuck), as designated for this project. It targets the host-facing HID reports exposed by a Steam Controller 2 puck-compatible collection. It does not apply the original 2015 Steam Controller layout.
+This implementation follows [OpenPuck](https://github.com/safijari/openpuck), as designated for this project. It targets the host-facing HID reports exposed by a Steam Controller 2 (2026) puck-compatible collection. The original 2015 Steam Controller and receiver are explicitly unsupported because they use a different protocol and report layout.
 
 ## Confirmed from OpenPuck
 

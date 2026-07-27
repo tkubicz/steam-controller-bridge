@@ -307,7 +307,9 @@ impl Default for BridgeEngine {
 mod tests {
     use super::*;
     use bridge_output::MockOutput;
-    use steam_controller_protocol::{INPUT_REPORT_ID, INPUT_REPORT_SIZE};
+    use steam_controller_protocol::{
+        INPUT_REPORT_ID, INPUT_REPORT_SIZE, LIZARD_MOUSE_REPORT_ID, LIZARD_MOUSE_REPORT_SIZE,
+    };
 
     fn report(sequence: u8, x: i16) -> Vec<u8> {
         let mut bytes = vec![0; INPUT_REPORT_SIZE];
@@ -403,5 +405,68 @@ mod tests {
         ));
         assert_eq!(engine.metrics().hid_reconnects, 1);
         assert_eq!(engine.metrics().decode_failures, 3);
+    }
+
+    #[test]
+    fn valid_lizard_reports_are_status_and_do_not_refresh_input_timeout() {
+        let mut engine = BridgeEngine::default();
+        let mut output = MockOutput::default();
+        engine.connected();
+        engine
+            .process_report(
+                INPUT_REPORT_ID,
+                &report(1, 20_000),
+                Duration::ZERO,
+                &mut output,
+            )
+            .unwrap();
+
+        let mut mouse = [0_u8; LIZARD_MOUSE_REPORT_SIZE];
+        mouse[0] = LIZARD_MOUSE_REPORT_ID;
+        assert!(matches!(
+            engine
+                .process_report(
+                    LIZARD_MOUSE_REPORT_ID,
+                    &mouse,
+                    Duration::from_millis(199),
+                    &mut output
+                )
+                .unwrap(),
+            ProcessOutcome::Status(DecodedReport::LizardMouse { .. })
+        ));
+        assert_eq!(engine.metrics().decode_failures, 0);
+        assert!(matches!(
+            engine
+                .tick(Duration::from_millis(200), &mut output)
+                .unwrap(),
+            ProcessOutcome::Neutralized(NeutralReason::InputTimeout)
+        ));
+    }
+
+    #[test]
+    fn valid_lizard_reports_clear_the_decode_error_streak() {
+        let mut engine = BridgeEngine::default();
+        let mut output = MockOutput::default();
+        for _ in 0..2 {
+            assert!(matches!(
+                engine.process_report(0xff, &[0xff], Duration::ZERO, &mut output),
+                Err(BridgeError::Decode(_))
+            ));
+        }
+
+        let mut mouse = [0_u8; LIZARD_MOUSE_REPORT_SIZE];
+        mouse[0] = LIZARD_MOUSE_REPORT_ID;
+        assert!(engine
+            .process_report(LIZARD_MOUSE_REPORT_ID, &mouse, Duration::ZERO, &mut output)
+            .is_ok());
+
+        for _ in 0..2 {
+            assert!(matches!(
+                engine.process_report(0xff, &[0xff], Duration::ZERO, &mut output),
+                Err(BridgeError::Decode(_))
+            ));
+        }
+        assert!(output.states.is_empty());
+        assert_eq!(engine.metrics().decode_failures, 4);
     }
 }

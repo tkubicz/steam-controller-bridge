@@ -2,7 +2,7 @@
 
 The host sends the existing versioned bridge frames over a byte-stream serial
 port. No serial-specific framing is added. The default native settings are
-115200 baud and a 10 ms read timeout; callers can select another baud rate.
+115200 baud and a 1 ms read timeout; callers can select another baud rate.
 
 ## Session lifecycle
 
@@ -17,7 +17,7 @@ port. No serial-specific framing is added. The default native settings are
 6. Normal shutdown sends the dedicated `Neutral` frame when the connection is
    still writable.
 7. While a non-neutral state remains current, the serial backend retransmits the
-   complete state every 50 ms. All application wait loops service output at
+   complete state every 25 ms. All application wait loops service output at
    least every 25 ms. `Neutral` clears the cached active state immediately.
 
 Sequence numbers cover every host-originated frame, including hello, state,
@@ -47,5 +47,6 @@ cargo run -p sc-replay -- session.jsonl --output serial \
 ```
 
 The visualizer exposes the same path and baud controls when `Serial` is selected
-as its output backend. Raw transmit/receive frame logging is opt-in. Actual firmware interoperability remains hardware-bound;
-the host state machine is covered with an in-memory `ByteTransport`.
+as its output backend. Raw transmit/receive frame logging is opt-in. Native
+firmware interoperability has been exercised on a flashed XIAO; the host state
+machine remains covered independently with an in-memory `ByteTransport`.

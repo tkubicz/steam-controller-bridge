@@ -87,13 +87,16 @@ fn keyboard_mode(output: &mut dyn GamepadOutput) -> Result<(), String> {
 
 fn service_delay(output: &mut dyn GamepadOutput, duration: Duration) -> Result<(), String> {
     let deadline = Instant::now() + duration;
+    let mut next_service = Instant::now();
     loop {
         output.service().map_err(|error| error.to_string())?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Ok(());
         }
-        thread::sleep(remaining.min(Duration::from_millis(25)));
+        next_service += Duration::from_millis(25);
+        let until_service = next_service.saturating_duration_since(Instant::now());
+        thread::sleep(remaining.min(until_service));
     }
 }
 

@@ -106,6 +106,7 @@ fn run_live(args: &[String], output: &mut dyn GamepadOutput) -> Result<(), Strin
         .map(|_| parse_value(args, "--duration-secs", 0_u64).map(Duration::from_secs))
         .transpose()?;
     let mut metrics_at = Instant::now();
+    let mut previous_input_reports = 0_u64;
     eprintln!(
         "level=info event=bridge_started controller_index={index} profile=default protocol=1"
     );
@@ -194,13 +195,27 @@ fn run_live(args: &[String], output: &mut dyn GamepadOutput) -> Result<(), Strin
             eprintln!("level=warn event=neutralized reason={reason:?}");
         }
         if metrics_at.elapsed() >= Duration::from_secs(1) {
-            print_metrics(engine.metrics(), output.diagnostics(), metrics_at.elapsed());
+            let metrics = engine.metrics();
+            let interval_reports = metrics.input_reports.saturating_sub(previous_input_reports);
+            print_metrics(
+                metrics,
+                output.diagnostics(),
+                metrics_at.elapsed(),
+                interval_reports,
+            );
+            previous_input_reports = metrics.input_reports;
             metrics_at = Instant::now();
         }
     }
     worker.shutdown()?;
     engine.shutdown(output).map_err(|error| error.to_string())?;
-    print_metrics(engine.metrics(), output.diagnostics(), started.elapsed());
+    let metrics = engine.metrics();
+    print_metrics(
+        metrics,
+        output.diagnostics(),
+        started.elapsed(),
+        metrics.input_reports,
+    );
     eprintln!("level=info event=bridge_stopped reason=shutdown action=neutral");
     Ok(())
 }
@@ -302,10 +317,26 @@ fn select_controller(args: &[String]) -> Result<usize, String> {
             .map_err(|_| format!("invalid --index value '{index}'"));
     }
     let devices = enumerate().map_err(|error| error.to_string())?;
-    devices.iter().position(|device| {
-        device.manufacturer.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("valve"))
-            || device.product.as_deref().is_some_and(|name| name.to_ascii_lowercase().contains("steam"))
-    }).ok_or_else(|| "--controller auto found no enumerated Valve/Steam HID collection; use sc-probe list and --index N".to_owned())
+    devices
+        .iter()
+        .position(is_controller_candidate)
+        .ok_or_else(|| "--controller auto found no enumerated Valve/Steam HID collection; use sc-probe list and --index N".to_owned())
+}
+
+fn is_controller_candidate(device: &HidDeviceInfo) -> bool {
+    let product = device
+        .product
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if product.contains("steam controller bridge") {
+        return false;
+    }
+    device
+        .manufacturer
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case("valve"))
+        || product.contains("steam")
 }
 
 fn make_output(args: &[String]) -> Result<Box<dyn GamepadOutput>, String> {
@@ -355,13 +386,14 @@ fn print_metrics(
     metrics: bridge_core::BridgeMetrics,
     output: OutputDiagnostics,
     elapsed: Duration,
+    reports_in_interval: u64,
 ) {
     let hz = if elapsed.is_zero() {
         0.0
     } else {
-        metrics.input_reports as f64 / elapsed.as_secs_f64()
+        reports_in_interval as f64 / elapsed.as_secs_f64()
     };
-    eprintln!("level=info event=metrics input_reports={} report_hz={hz:.1} dropped={} decode_failures={} state_changes={} output_packets={} skipped={} hid_reconnects={} serial_reconnects={} framing_failures={} checksum_failures={} avg_decode_us={:.2} avg_mapping_us={:.2} avg_processing_us={:.2}", metrics.input_reports, metrics.dropped_input_reports, metrics.decode_failures, metrics.state_changes, metrics.output_packets, metrics.outputs_skipped_unchanged, metrics.hid_reconnects, output.serial_reconnects, output.framing_failures, output.checksum_failures, metrics.average_decode_us(), metrics.average_mapping_us(), metrics.average_processing_us());
+    eprintln!("level=info event=metrics input_reports={} report_hz={hz:.1} dropped={} decode_failures={} state_changes={} output_packets={} skipped={} hid_reconnects={} serial_reconnects={} framing_failures={} checksum_failures={} state_refreshes={} avg_decode_us={:.2} avg_mapping_us={:.2} avg_processing_us={:.2}", metrics.input_reports, metrics.dropped_input_reports, metrics.decode_failures, metrics.state_changes, metrics.output_packets, metrics.outputs_skipped_unchanged, metrics.hid_reconnects, output.serial_reconnects, output.framing_failures, output.checksum_failures, output.state_refreshes, metrics.average_decode_us(), metrics.average_mapping_us(), metrics.average_processing_us());
 }
 
 fn device_json(info: &HidDeviceInfo) -> serde_json::Value {
@@ -386,4 +418,45 @@ fn parse_value<T: std::str::FromStr>(args: &[String], flag: &str, default: T) ->
 
 fn print_help() {
     println!("sc-bridge [options]\n\n  --input <live|replay>       Input mode (default: live)\n  --controller auto          Auto-select an enumerated Valve/Steam collection\n  --index N                  Select collection from sc-probe list\n  --file PATH                Replay recording input\n  --output <dump|pretty|json|raw|file|mock|serial>\n  --output-file PATH         Binary frame output\n  --port PATH --baud N       Serial output (default baud: 115200)\n  --serial-log               Log serial frame bytes\n  --record PATH              Record full live pipeline as JSONL\n  --input-timeout-ms N       Neutral timeout (default: 200)\n  --decode-failure-limit N   Failures before neutral (default: 3)\n  --duration-secs N          Stop live mode after N seconds\n  --deterministic --speed N --seek-us N   Replay controls\n  -h, --help");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn device(manufacturer: Option<&str>, product: Option<&str>) -> HidDeviceInfo {
+        HidDeviceInfo {
+            id: "test".to_owned(),
+            path: "test".to_owned(),
+            vendor_id: 0,
+            product_id: 0,
+            usage_page: 1,
+            usage: 5,
+            interface_number: 0,
+            serial_number: None,
+            manufacturer: manufacturer.map(str::to_owned),
+            product: product.map(str::to_owned),
+            transport: "USB".to_owned(),
+        }
+    }
+
+    #[test]
+    fn auto_selection_excludes_bridge_output() {
+        assert!(!is_controller_candidate(&device(
+            Some("Seeed Studio"),
+            Some("Steam Controller Bridge")
+        )));
+        assert!(is_controller_candidate(&device(
+            Some("Valve"),
+            Some("Steam Controller Puck")
+        )));
+        assert!(is_controller_candidate(&device(
+            None,
+            Some("Steam Ctrl (BT) FXA123")
+        )));
+        assert!(!is_controller_candidate(&device(
+            Some("Example"),
+            Some("Generic Gamepad")
+        )));
+    }
 }

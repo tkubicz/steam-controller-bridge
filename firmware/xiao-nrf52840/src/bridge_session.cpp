@@ -151,7 +151,7 @@ void BridgeSession::check_sequence(uint16_t sequence) {
 }
 
 void BridgeSession::apply_gamepad(const Frame& frame, uint32_t now_ms) {
-  HidGamepadReport report{};
+  CanonicalGamepadReport report{};
   report.buttons = static_cast<uint16_t>(read_u16(frame.payload) & 0xffffU);
   report.hat = frame.payload[4];
   report.left_x = read_i16(frame.payload + 6);
@@ -170,7 +170,8 @@ void BridgeSession::force_neutral(bool safety) {
   queue_hid(neutral_report(), safety);
 }
 
-void BridgeSession::queue_hid(const HidGamepadReport& report, bool safety) {
+void BridgeSession::queue_hid(const CanonicalGamepadReport& report,
+                              bool safety) {
   if (pending_is_safety_neutral_ && !safety) {
     deferred_active_ = report;
     deferred_active_pending_ = true;
@@ -195,14 +196,15 @@ void BridgeSession::send_message(MessageType type, const uint8_t* payload,
   }
 }
 
-HidGamepadReport BridgeSession::neutral_report() {
-  HidGamepadReport report{};
+CanonicalGamepadReport BridgeSession::neutral_report() {
+  CanonicalGamepadReport report{};
   report.hat = 8;
   return report;
 }
 
-bool BridgeSession::report_is_neutral(const HidGamepadReport& report) {
-  const HidGamepadReport neutral = neutral_report();
+bool BridgeSession::report_is_neutral(
+    const CanonicalGamepadReport& report) {
+  const CanonicalGamepadReport neutral = neutral_report();
   return memcmp(&report, &neutral, sizeof(report)) == 0;
 }
 

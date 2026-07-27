@@ -86,6 +86,7 @@ pub struct OutputDiagnostics {
     pub serial_reconnects: u64,
     pub framing_failures: u64,
     pub checksum_failures: u64,
+    pub state_refreshes: u64,
 }
 
 #[derive(Debug, Default)]

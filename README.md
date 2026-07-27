@@ -2,15 +2,30 @@
 
 Translate a Steam Controller into a conventional USB gamepad through a Seeed Studio XIAO nRF52840 bridge.
 
+> Compatibility: this project targets **Steam Controller 2 (2026)** only. The
+> original 2015 Steam Controller and receiver use a different protocol and are
+> not supported.
+
+For hardware requirements, firmware flashing, Steam Controller 2 pairing,
+macOS permissions, daily startup, verification, and troubleshooting, start with
+the [user guide](docs/USER_GUIDE.md).
+
 ## Status
 
-The host pipeline and XIAO nRF52840 CDC-to-HID firmware are implemented. Native firmware tests run without a board; flashing, HID/browser behavior, watchdog timing, and soak validation remain hardware-dependent.
+The Steam Controller 2 Puck input path, host bridge, and XIAO nRF52840
+CDC-to-gamepad firmware are implemented. On macOS, the connected prototype has
+been flashed successfully, receives live `0x42` Puck reports, and enumerates in
+Safari's Gamepad API with `mapping: standard` through an Xbox/ABXY-compatible
+USB personality. Full control-by-control mapping, GeForce NOW/Boosteroid,
+disconnect timing, and one-hour soak tests remain release gates.
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
 ```
 
-The bridge sends framed states over USB CDC to firmware that exposes a physical USB HID gamepad. This avoids depending on Apple's restricted virtual-HID entitlements.
+The bridge sends framed states over USB CDC to firmware that exposes a physical
+Xbox-layout USB gamepad. This avoids depending on Apple's restricted
+virtual-HID entitlements.
 
 ## Build and test
 
@@ -115,9 +130,15 @@ structured diagnostics. See [the bridge guide](docs/BRIDGE.md).
 
 ## Known limitations
 
-- Steam Controller 2 input/status decoding is implemented from OpenPuck's protocol specification, but still needs regression captures from the user's controller and transports.
+- Steam Controller 2 Puck input is live-tested with extended `0x42` reports.
+  Direct USB and Bluetooth still need transport-specific regression captures.
 - Controller initialization and feature-report transmission are not implemented; probing remains read-only.
-- Native serial behavior is implemented and mock-tested, but cannot be validated end to end until a flashed XIAO is connected.
 - Controller feature initialization is deliberately disabled until a safe SC2 command sequence is confirmed on the user's exact transport and firmware.
-- XIAO firmware is included but has not yet completed physical-board validation.
+- The macOS-compatible output currently uses the Xbox 360 compatibility
+  VID/PID (`045e:028e`) so Apple's built-in driver will publish it to
+  GameController and browser clients. This is suitable for development
+  hardware, but a distributable product needs an owned/licensed USB identity
+  and a verified macOS recognition strategy.
+- GeForce NOW, Boosteroid, full mapping, failure timing, and soak acceptance
+  are not yet complete.
 - The keyboard simulator is line-oriented, not a production input UI.

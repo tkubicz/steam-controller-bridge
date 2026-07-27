@@ -37,7 +37,7 @@ impl Default for SerialConfig {
             handshake_timeout: Duration::from_secs(1),
             ping_interval: Duration::from_secs(1),
             pong_timeout: Duration::from_secs(2),
-            state_refresh_interval: Duration::from_millis(50),
+            state_refresh_interval: Duration::from_millis(25),
             packet_logging: false,
         }
     }
@@ -421,7 +421,11 @@ impl SerialOutput {
 
     fn connect(&mut self) -> Result<(), SerialError> {
         let port = serialport::new(&self.path, self.baud_rate)
-            .timeout(Duration::from_millis(10))
+            // Idle reads must not consume a large part of the 25 ms service
+            // cadence; otherwise a nominal 50 ms refresh can become 70+ ms
+            // before USB/CDC scheduling and trip the firmware's 100 ms
+            // controller-data watchdog.
+            .timeout(Duration::from_millis(1))
             .open()
             .map_err(|error| SerialError::Io(io::Error::other(error.to_string())))?;
         self.clock = Instant::now();
@@ -514,6 +518,7 @@ impl GamepadOutput for SerialOutput {
             serial_reconnects: metrics.reconnects,
             framing_failures: metrics.framing_failures,
             checksum_failures: metrics.checksum_failures,
+            state_refreshes: metrics.state_refreshes,
         }
     }
 }
@@ -681,9 +686,9 @@ mod tests {
         active.left_x = 0.5;
         connection.queue_state(active).unwrap();
         connection.poll(Duration::ZERO).unwrap();
-        connection.poll(Duration::from_millis(49)).unwrap();
+        connection.poll(Duration::from_millis(24)).unwrap();
         assert_eq!(connection.metrics().state_refreshes, 0);
-        connection.poll(Duration::from_millis(50)).unwrap();
+        connection.poll(Duration::from_millis(25)).unwrap();
         assert_eq!(connection.metrics().state_refreshes, 1);
         connection.send_neutral_now().unwrap();
         connection.poll(Duration::from_millis(500)).unwrap();

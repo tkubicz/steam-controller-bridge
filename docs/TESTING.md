@@ -14,7 +14,7 @@ With Arduino CLI and the pinned Seeed core installed, compile the actual sketch:
 make -C firmware/xiao-nrf52840 build
 ```
 
-Physical acceptance additionally covers CDC/HID enumeration, every report
+Physical acceptance additionally covers CDC/gamepad enumeration, every report
 field, a 30-second unchanged hold, host termination neutralization within 125
 ms, malformed recovery, reconnect/sequence wrap, Chrome and Safari Gamepad API
 behavior, one streaming service, and a one-hour soak. Detailed steps are in the
@@ -58,8 +58,20 @@ and disconnect-to-neutral behavior with hardware.
 Serial tests use an in-memory `ByteTransport` and cover hello success, queued
 state flush and sequence ownership, version rejection, handshake timeout,
 bounded overflow, ping/pong timeout, firmware-originated ping response, and
-corrupted-frame accounting. Physical-port enumeration and XIAO interoperability
-remain hardware validation steps.
+corrupted-frame accounting. Physical-port negotiation and refreshed state
+delivery have been exercised with a flashed XIAO.
+
+The 2026-07-27 development-hardware smoke test additionally confirmed:
+
+- the active Puck slot produced valid extended `0x42` reports at about 250 Hz;
+- the XIAO enumerated CDC plus an Xbox-layout gamepad and bound to macOS's
+  `Xbox360Gamepad` DriverKit class;
+- Safari reported a connected standard-mapped gamepad;
+- an unchanged active state refreshed for more than 30 seconds without an
+  unintended firmware neutral.
+
+This does not replace the remaining full mapping, target streaming service,
+fault timing, reconnect, and soak gates.
 
 Bridge-core tests cover changed-state suppression, timeout neutralization,
 disconnect/reset/shutdown neutralization, repeated decode failures, and HID
