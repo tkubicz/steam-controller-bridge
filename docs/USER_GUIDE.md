@@ -17,19 +17,21 @@ The following paths have been verified on development hardware:
   an Xbox-layout gamepad;
 - macOS binds the gamepad to its built-in `Xbox360Gamepad` driver;
 - Safari's Gamepad API sees a connected controller with `mapping: standard`;
+- Boosteroid detects the connected XIAO as a valid gamepad;
 - an unchanged active simulator state remains held for more than 30 seconds
-  without an unintended watchdog neutral.
+  without an unintended watchdog neutral;
+- the live bridge sent the initial lizard-off command plus ten three-second
+  refreshes over a 30-second Puck-to-XIAO run with no HID, decode, suppression,
+  or serial failure.
 
-Every physical Steam Controller 2 control, explicit watchdog/disconnect timing,
-GeForce NOW, Boosteroid, reconnect stress, and the one-hour soak still require
-acceptance testing. Do not treat the development smoke test as a release
-qualification.
+Every physical Steam Controller 2 control, explicit watchdog/disconnect and
+manual Space/pointer suppression, lizard restoration timing, GeForce NOW,
+reconnect stress, and the one-hour soak still require acceptance testing. Do
+not treat the development smoke test as a release qualification.
 
-The bridge deliberately does not send Steam Controller feature or
-initialization reports yet. If a connection mode enumerates but produces no
-`0x42` or `0x45` state reports, capture that behavior rather than experimenting
-with feature writes: the safe initialization sequence still needs to be
-confirmed on the exact transport and firmware.
+The bridge sends exactly one whitelisted controller setting on the official
+Puck: SDL's lizard-mode-off command. It does not expose arbitrary feature
+writes, initialization, mapping clears, settings, or haptics.
 
 ## What you need
 
@@ -144,10 +146,21 @@ project's report decoder is designed around.
    Puck.
 4. With the controller off, hold `A + R1 + Steam` for the right Puck slot or
    `A + L1 + Steam` for the left slot. A solid white LED means connected.
+5. After pairing succeeds, choose **Steam → Quit Steam**. Do not merely close
+   its window. Steam must remain quit while probing or running the bridge.
+6. Steam's `ipcserver` is a persistent `launchd` job and can survive after the
+   application exits. Stop it for the current login session:
 
-OpenPuck-compatible Pucks can expose several controller-slot collections. Do
-not assume the first HID index is the active slot; use the probe procedure in
-the next section.
+   ```bash
+   launchctl bootout user/$(id -u)/com.valvesoftware.steam.ipctool
+   ```
+
+   Killing `ipcserver` is insufficient because its `KeepAlive` setting makes
+   `launchd` restart it. Launching Steam later normally registers it again.
+
+The official Puck exposes several controller-slot collections. Do not assume
+the first HID index is the active slot; use the probe procedure in the next
+section.
 
 ### Experimental: direct USB-C
 
@@ -185,6 +198,13 @@ List every HID collection:
 target/release/sc-probe list
 ```
 
+Fully quit Steam, `sc-visualizer`, other `sc-probe` processes, and other
+controller tools before opening a collection. Project tools take a per-slot
+ownership lock, which rejects another project process. Native macOS HID access
+remains shared because this Puck rejects an exclusive seize request. Steam and
+other non-project tools do not honor the project lock, so the `ipcserver`
+bootout above is mandatory.
+
 The XIAO output is named `Steam Controller Bridge`; **do not select it as the
 input**. Look for a Valve/Steam Controller 2 or Puck collection, then inspect
 candidate indices:
@@ -207,6 +227,18 @@ target/release/sc-probe monitor --index N --duration-secs 10
 
 If no candidate produces state reports, see Troubleshooting; the bridge cannot
 operate from metadata alone.
+
+Test lizard suppression on the verified index:
+
+```bash
+target/release/sc-probe suppress-lizard --index N --duration-secs 15
+```
+
+While it runs, focus a text field and press controller `A`, then move both
+touchpads. No Space key or pointer motion should occur. Stop the command and
+wait up to about 10 seconds; the controller watchdog should restore its normal
+desktop keyboard/mouse behavior. Do not run the monitor or visualizer at the
+same time as this command.
 
 ## 6. Verify the XIAO output independently
 
@@ -252,23 +284,34 @@ target/release/sc-bridge --index N --output serial \
   --port /dev/cu.usbmodemXXXX --record session.jsonl
 ```
 
-Explicit `--index` is recommended. `--controller auto` excludes the XIAO bridge
-output, but a multi-slot Puck can still expose several Valve collections and
-the first one may not be the active controller slot.
+Explicit `--index` is recommended. `--controller auto` considers only official
+Puck `ff00:0001` controller slots, but a multi-slot Puck can still expose
+several candidates and the first one may not be active.
 
 Keep the terminal and XIAO connected while playing. Press `Ctrl-C` for orderly
-shutdown; the bridge sends a final neutral state. The XIAO also neutralizes if
-CDC disconnects or active-state refreshes stop for 100 ms.
+shutdown; the bridge sends a final neutral state before releasing the Puck.
+The controller's desktop lizard mode returns automatically after its watchdog
+expires. The XIAO also neutralizes if CDC disconnects or active-state refreshes
+stop for 100 ms.
+
+Successful startup logs `lizard_suppressed=true`. Periodic metrics should show
+`lizard_suppressed=true`, increasing `lizard_refreshes`, zero
+`lizard_failures`, and a `lizard_refresh_age_ms` below 3000. The diagnostic
+option `--lizard-mode leave` retains the old native keyboard/mouse behavior and
+is not suitable for gameplay.
 
 For a first end-to-end test:
 
 1. Confirm the XIAO LED is solid green.
-2. Confirm `sc-bridge` logs input reports and no continuing decode errors.
+2. Confirm `sc-bridge` logs `lizard_suppressed=true`, input reports, and no
+   continuing decode or lizard failures.
 3. Open the browser or streaming client only after the bridge is running.
 4. Exercise every button, both sticks, both triggers, and the D-pad.
-5. Hold a stick for at least 30 seconds to verify refresh behavior.
-6. Stop `sc-bridge` and verify the physical USB gamepad becomes neutral within
-   125 ms.
+5. Keep a text field focused while pressing `A` and using touchpads; verify no
+   Space key or pointer movement occurs.
+6. Hold a stick for at least 30 seconds to verify refresh behavior.
+7. Stop `sc-bridge` and verify the physical USB gamepad becomes neutral within
+   125 ms and desktop lizard mode returns within about 10 seconds.
 
 ## Daily startup
 
@@ -277,10 +320,14 @@ After initial setup and pairing:
 1. Connect the flashed XIAO.
 2. Connect the official Puck.
 3. Power on Steam Controller 2 in Puck mode and confirm a solid white LED.
-4. If device ordering may have changed, rerun `sc-probe list` and monitor the
+4. Fully quit Steam and boot out `com.valvesoftware.steam.ipctool`.
+5. Close all controller probes/visualizers.
+6. If device ordering may have changed, rerun `sc-probe list` and monitor the
    candidate index briefly.
-5. Start `sc-bridge` with the input index and XIAO serial port.
-6. Start the browser or streaming service.
+7. Close the monitor, then start `sc-bridge` with the input index and XIAO
+   serial port.
+8. Confirm `lizard_suppressed=true`, then start the browser or streaming
+   service.
 
 HID indices and `/dev/cu.usbmodem…` names can change after reconnecting devices,
 so do not permanently assume old values.
@@ -297,7 +344,8 @@ iTerm, or the application launching the command—then quit and reopen it.
 - Confirm this is Steam Controller 2 (2026), not the 2015 controller.
 - Confirm the controller LED is solid white for Puck, green for USB, or blue for
   Bluetooth.
-- For Puck mode, keep Steam running during pairing and initial diagnosis.
+- For Puck mode, use Steam only for pairing, then fully quit it before opening a
+  collection.
 - Probe every Puck slot collection.
 - Capture evidence for implementation work:
 
@@ -306,8 +354,38 @@ iTerm, or the application launching the command—then quit and reopen it.
     --duration-secs 30 --decoded
   ```
 
-Do not send guessed feature reports. Initialization is intentionally disabled
-until the safe command sequence is confirmed.
+Do not send guessed feature reports. Only the fixed lizard-off setting used by
+`sc-probe suppress-lizard` and `sc-bridge` is permitted.
+
+### Ownership or HID open fails
+
+Fully quit Steam rather than closing its window. Stop `sc-visualizer`, every
+other `sc-probe monitor`/`capture`/`suppress-lizard` process, and any other
+controller translator. An `already owned by another
+steam-controller-bridge tool` error comes from the per-slot project lock; a
+native HID-open error may instead indicate missing Input Monitoring permission.
+Confirm Steam's persistent helper is absent:
+
+```bash
+pgrep -ifl ipcserver
+launchctl print user/$(id -u)/com.valvesoftware.steam.ipctool
+```
+
+If it is present, use the `launchctl bootout` command above. Then run
+`sc-probe list` again because indices may have changed.
+
+### `A` still types Space or a touchpad moves the pointer
+
+- Confirm the bridge startup log says `lizard_suppressed=true`.
+- Confirm periodic metrics show increasing `lizard_refreshes`, zero
+  `lizard_failures`, and refresh age below 3000 ms.
+- Verify the selected collection is `28de:1304`, usage `ff00:0001`, interface
+  2–5, and is the slot producing the active `0x42`/`0x45` stream.
+- Fully quit Steam and close other controller tools.
+- Confirm only one Steam Controller 2 is active.
+
+If a refresh fails, the bridge intentionally neutralizes the XIAO and exits
+rather than continuing with duplicate keyboard/gamepad input.
 
 ### No XIAO serial port appears
 
@@ -343,10 +421,11 @@ and press a face button.
 
 ### Controls appear twice or the wrong gamepad is used
 
-Use the official Puck path first. Direct USB/Bluetooth may expose another
-standard gamepad in addition to the XIAO output, allowing a browser or Steam to
-see both. Close other controller translators and verify the `Steam Controller
-Bridge` HID device independently with the simulator.
+Use the official Puck path and default lizard suppression. Direct USB/Bluetooth
+may expose another standard gamepad in addition to the XIAO output. Fully quit
+Steam, close other controller translators, confirm the lizard diagnostics, and
+verify the `Steam Controller Bridge` HID device independently with the
+simulator.
 
 ### Mapping is wrong
 
@@ -368,8 +447,7 @@ but a broadly distributable product should additionally provide:
 
 - verified captures for the official Puck and a documented decision on direct
   USB/Bluetooth support;
-- safe controller initialization if the official Puck requires it without
-  Steam;
+- hardware qualification of the narrow lizard-mode suppression lifecycle;
 - automated hardware acceptance and long-duration testing;
 - signed/notarized macOS binaries and downloadable firmware artifacts;
 - an owned or licensed USB VID/PID plus a macOS recognition path that does not

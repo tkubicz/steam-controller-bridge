@@ -16,7 +16,10 @@ The Steam Controller 2 Puck input path, host bridge, and XIAO nRF52840
 CDC-to-gamepad firmware are implemented. On macOS, the connected prototype has
 been flashed successfully, receives live `0x42` Puck reports, and enumerates in
 Safari's Gamepad API with `mapping: standard` through an Xbox/ABXY-compatible
-USB personality. Full control-by-control mapping, GeForce NOW/Boosteroid,
+USB personality. Boosteroid also detects the XIAO as a valid gamepad. The
+lizard-off feature transfer and repeated three-second refreshes have also been
+verified on the connected Puck. Manual confirmation that Space/pointer input is
+absent, restoration timing, full control-by-control mapping, GeForce NOW,
 disconnect timing, and one-hour soak tests remain release gates.
 
 ```text
@@ -90,6 +93,22 @@ cargo run -p sc-probe -- capture --index 0 --output reports.jsonl \
   --duration-secs 30 --decoded
 ```
 
+The Puck is opened with macOS shared HID access because the tested composite
+rejects `kIOHIDOptionsTypeSeizeDevice` with `not permitted`. Project tools take
+a per-slot ownership lock, preventing two bridge/probe/visualizer processes
+from sharing a slot. Steam and other non-project consumers do not honor that
+lock and must be stopped separately.
+After identifying the active `28de:1304` `ff00:0001` interface 2–5 slot, test
+the safe SDL-compatible lizard-mode heartbeat:
+
+```bash
+cargo run -p sc-probe -- suppress-lizard --index 0 --duration-secs 15
+```
+
+While the command runs, controller buttons and touchpads should no longer
+produce native keyboard/mouse input. The controller watchdog restores desktop
+mode after the command exits.
+
 The session reports disconnects and automatically attempts to reopen the same collection identity every 500 ms. Capture files include connection metadata, transport, source collection identity, report ID, base64 bytes, and the available dropped-report count. `--decoded` additionally records typed Steam Controller 2 state reports.
 
 macOS may reject protected keyboard/gamepad collections with an IOKit `not permitted` error until the terminal or Codex host has Input Monitoring permission. Listing and metadata inspection do not require opening the collection.
@@ -126,19 +145,32 @@ cargo run -p sc-bridge -- --input replay --file session.jsonl \
 
 Live mode uses bounded input buffering, changed-state output, timeout and
 decode-failure neutralization, reconnect tracking, Ctrl-C shutdown, and periodic
-structured diagnostics. See [the bridge guide](docs/BRIDGE.md).
+structured diagnostics. It claims the selected Puck slot from other project
+tools and, by default, refreshes the narrow lizard-off setting every three
+seconds. Steam must still be fully quit. A failed write neutralizes the XIAO
+and stops the bridge. See
+[the bridge guide](docs/BRIDGE.md).
 
 ## Known limitations
 
 - Steam Controller 2 Puck input is live-tested with extended `0x42` reports.
   Direct USB and Bluetooth still need transport-specific regression captures.
-- Controller initialization and feature-report transmission are not implemented; probing remains read-only.
-- Controller feature initialization is deliberately disabled until a safe SC2 command sequence is confirmed on the user's exact transport and firmware.
+- Only the official Proteus Puck `28de:1304` active slot is permitted to receive
+  the SDL-compatible lizard-off feature report. Arbitrary controller
+  initialization, settings, mappings, haptics, and feature writes remain
+  intentionally unavailable.
+- Steam coexistence, multiple simultaneous SC2 controllers, and running another
+  HID consumer against the selected slot are unsupported.
+- macOS access is intentionally shared at the native HID layer. The project
+  lock excludes other project tools only; Steam's persistent
+  `com.valvesoftware.steam.ipctool` LaunchAgent must be booted out before play.
 - The macOS-compatible output currently uses the Xbox 360 compatibility
   VID/PID (`045e:028e`) so Apple's built-in driver will publish it to
   GameController and browser clients. This is suitable for development
   hardware, but a distributable product needs an owned/licensed USB identity
   and a verified macOS recognition strategy.
-- GeForce NOW, Boosteroid, full mapping, failure timing, and soak acceptance
-  are not yet complete.
+- GeForce NOW, full mapping, manual keyboard/pointer suppression, automatic
+  restoration timing, lizard-suppression failure timing, and soak acceptance
+  are not yet complete. Boosteroid gamepad detection and repeated lizard-off
+  writes have been confirmed, but complete input acceptance remains pending.
 - The keyboard simulator is line-oriented, not a production input UI.

@@ -90,15 +90,49 @@ OpenPuck's published table labels bits 28 and 29 as grip-touch signals, while cu
 - Unknown IDs and malformed sizes return structured errors.
 - No decoding path indexes bytes until the corresponding fixed length is validated.
 - Full reports are retained for future discoveries and capture comparison.
-- No feature or output reports are sent by the decoder or probe tools.
+- The decoder never sends feature or output reports.
+
+## Lizard-mode suppression
+
+The official Proteus Puck is USB `28de:1304`. Its controller slots use vendor
+usage `ff00:0001` on interfaces 2–5. macOS also receives the controller's native
+`0x40` mouse and `0x41` keyboard reports through sibling HID collections, so
+discarding those reports in the decoder cannot prevent Space keys or pointer
+movement.
+
+For an exact supported Puck slot, the device layer permits one 64-byte feature
+report:
+
+```text
+01 87 03 09 00 00 00 ... 00
+```
+
+- `0x01`: HID feature report ID.
+- `0x87`: `SET_SETTINGS_VALUES`.
+- `0x03`: one three-byte controller setting.
+- `0x09`: `SETTING_LIZARD_MODE`.
+- `0x0000`: little-endian `LIZARD_MODE_OFF`.
+
+The vector follows
+[SDL's Steam Controller 2/Triton command](https://github.com/libsdl-org/SDL/blob/f4337eded2250abfd6b580116d883717b079f37c/src/joystick/hidapi/SDL_hidapi_steam_triton.c#L127-L144).
+Its three-second cadence and automatic controller-watchdog restoration follow
+[SDL's refresh lifecycle](https://github.com/libsdl-org/SDL/blob/f4337eded2250abfd6b580116d883717b079f37c/src/joystick/hidapi/SDL_hidapi_steam_triton.c#L485-L499).
+No explicit lizard-on command is sent.
+
+The project does not expose an arbitrary feature-report API. Unsupported
+devices and collections are rejected before a write. Digital-mapping clears,
+arbitrary settings, haptics, actuator commands, and explicit lizard-on writes
+remain unavailable.
 
 ## Still requiring local captures
 
-- Actual collection paths and VID/PID values for the user's official puck, direct USB, and Bluetooth modes.
+- Actual collection paths for reconnect scenarios and VID/PID values for direct
+  USB and Bluetooth modes.
 - Whether direct USB and Bluetooth expose the same host-facing reports as the puck.
 - Real trigger maxima, neutral jitter, pad pressure ranges, IMU scaling, and axis orientation.
 - Semantics of report `0x44` and unresolved bytes in `0x43`, `0x7b`, and extended `0x42`.
-- Initialization behavior when Steam is absent.
+- Long-duration lizard-suppression, sleep/wake, reconnect, and failure behavior
+  when Steam is absent.
 
 ## Sources
 
@@ -106,3 +140,4 @@ OpenPuck's published table labels bits 28 and 29 as grip-touch signals, while cu
 - [OpenPuck host HID implementation](https://github.com/safijari/openpuck/blob/main/OpenPuck/puck_hid.cpp)
 - [OpenPuck report decoding helpers](https://github.com/safijari/openpuck/blob/main/OpenPuck/triton.h)
 - [OpenPuck RF report extraction](https://github.com/safijari/openpuck/blob/main/OpenPuck/rf_link.cpp)
+- [SDL Steam Controller 2/Triton HID driver](https://github.com/libsdl-org/SDL/blob/f4337eded2250abfd6b580116d883717b079f37c/src/joystick/hidapi/SDL_hidapi_steam_triton.c)

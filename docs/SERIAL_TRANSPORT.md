@@ -32,9 +32,11 @@ firmware's 100 ms controller-data watchdog alive.
 ## Queue behavior
 
 The transport-independent session has a bounded state queue with capacity 8 by
-default. When full, it drops the oldest state and retains the newest input. This
-prevents stale controller motion from accumulating while a handshake is in
-progress. Lifecycle and protocol-control messages are not stored in that queue.
+default. When the connection becomes ready, it sends only the newest pending
+snapshot and discards every older state; when full, it also drops the oldest
+state first. This prevents stale controller motion from replaying after a
+handshake or temporary output stall. Lifecycle and protocol-control messages
+are not stored in that queue.
 
 ## Commands
 

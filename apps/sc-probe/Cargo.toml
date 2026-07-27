@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ctrlc.workspace = true
 recording = { path = "../../crates/recording" }
 serde_json.workspace = true
 steam-controller-device = { path = "../../crates/steam-controller-device" }

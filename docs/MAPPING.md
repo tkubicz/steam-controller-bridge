@@ -1,29 +1,35 @@
 # Controller Mapping
 
 `controller-mapper` converts a decoded `SteamControllerState` into the
-platform-neutral `GamepadState`. The default profile is deliberately simple:
-the right trackpad is an absolute right stick and no trackball inertia or action
-layers are applied.
+platform-neutral `GamepadState`. The default profile maps the two physical
+sticks directly and leaves the right trackpad out of the generic gamepad axes.
 
 ## Default controls
 
 | Steam Controller 2 input | Generic output |
 | --- | --- |
 | Left stick | Left stick |
-| Touched right trackpad | Right stick |
+| Right stick | Right stick |
 | A / B / X / Y | South / East / West / North |
 | D-pad | Eight-way hat |
 | Left / right trigger | Left / right trigger |
 | Left / right bumper | Left / right shoulder |
-| View / Menu / Steam | Back / Start / Guide |
+| Physical View (left) / Menu (right) / Steam | Back / Start / Guide |
 | Left stick press | Left stick button |
-| Right stick press or right pad click | Right stick button |
+| Right stick press | Right stick button |
 | L4 / R4 | Left grip / Right grip |
 | L5 / R5 / Quick Access | Extra 1 / Extra 2 / Extra 3 |
 
-Releasing the right trackpad immediately centers the generic right stick. A
-profile can select the physical right stick instead with
-`RightAxisSource::RightStick`.
+An alternate diagnostic profile can map a touched right trackpad to the generic
+right stick with `RightAxisSource::RightPad`; in that profile, releasing the pad
+centers the axis and a pad click acts as the right-stick button. This is not the
+gameplay default.
+
+The physical buttons follow Xbox conventions: the left View button is Back and
+the right Menu button is Start. The Triton source-bit names are counterintuitive
+and reversed at this boundary: source `VIEW` is the physical Menu/Start button,
+while source `MENU` is the physical View/Back button. The implementation follows
+SDL's SC2 driver and OpenPuck's XInput mapping.
 
 ## Axis and trigger rules
 

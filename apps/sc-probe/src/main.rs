@@ -1,11 +1,15 @@
 use std::env;
 use std::fmt::Write as _;
 use std::fs::File;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use recording::{RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
 use serde_json::json;
-use steam_controller_device::{enumerate, DeviceEvent, HidDeviceInfo, HidSession};
+use steam_controller_device::{
+    enumerate, DeviceEvent, HidDeviceInfo, HidSession, LizardModeHeartbeat,
+};
 use steam_controller_protocol::{DecodedReport, SteamControllerDecoder, SteamControllerState};
 
 fn main() {
@@ -26,6 +30,7 @@ fn run() -> Result<(), String> {
         "inspect" => inspect_devices(optional_index(&args)?),
         "monitor" => monitor(&args),
         "capture" => capture(&args),
+        "suppress-lizard" => suppress_lizard(&args),
         command => Err(format!("unknown command '{command}'")),
     }
 }
@@ -255,6 +260,76 @@ fn capture(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn suppress_lizard(args: &[String]) -> Result<(), String> {
+    let index = required_index(args)?;
+    let duration = duration_limit(args)?;
+    let mut session = HidSession::open_index(index).map_err(|error| error.to_string())?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let signal_stop = Arc::clone(&stop);
+    ctrlc::set_handler(move || signal_stop.store(true, Ordering::Release))
+        .map_err(|error| format!("cannot install Ctrl-C handler: {error}"))?;
+
+    let started = Instant::now();
+    let mut heartbeat = LizardModeHeartbeat::new();
+    let mut refreshes = 0_u64;
+    eprintln!(
+        "Testing lizard-mode suppression on collection {index}; \
+         press Ctrl+C to stop."
+    );
+    while !stop.load(Ordering::Acquire) && duration.is_none_or(|limit| started.elapsed() < limit) {
+        if heartbeat.refresh_due(started.elapsed()) {
+            send_lizard_refresh(&session, &mut heartbeat, started.elapsed(), &mut refreshes)?;
+        }
+        match session
+            .poll(Duration::from_millis(100))
+            .map_err(|error| error.to_string())?
+        {
+            Some(DeviceEvent::Connected(info)) => {
+                heartbeat.connected();
+                send_lizard_refresh(&session, &mut heartbeat, started.elapsed(), &mut refreshes)?;
+                eprintln!(
+                    "connected: {} ({}) lizard_suppressed=true",
+                    display_optional(info.product.as_deref()),
+                    info.transport
+                );
+            }
+            Some(DeviceEvent::Disconnected) => {
+                heartbeat.disconnected();
+                eprintln!("disconnected; lizard heartbeat stopped, waiting for reconnect");
+            }
+            Some(DeviceEvent::Report(_)) | None => {}
+        }
+    }
+    eprintln!(
+        "lizard suppression stopped after {refreshes} successful writes; \
+         the controller watchdog should restore desktop mode within about 10 seconds"
+    );
+    Ok(())
+}
+
+fn send_lizard_refresh(
+    session: &HidSession,
+    heartbeat: &mut LizardModeHeartbeat,
+    now: Duration,
+    refreshes: &mut u64,
+) -> Result<(), String> {
+    session.suppress_lizard_mode().map_err(|error| {
+        format!(
+            "lizard-mode suppression failed; stop other controller tools and \
+             verify the selected Puck slot: {error}"
+        )
+    })?;
+    heartbeat.refreshed(now);
+    *refreshes += 1;
+    eprintln!(
+        "lizard suppression refresh={} elapsed_ms={}",
+        *refreshes,
+        now.as_millis()
+    );
+    Ok(())
+}
+
 fn device_json(info: &HidDeviceInfo) -> serde_json::Value {
     json!({
         "id": info.id,
@@ -325,6 +400,6 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 fn print_help() {
     println!(
-        "sc-probe <command> [options]\n\nCommands:\n  list                                      List every HID collection\n  inspect [--index N]                       Show complete metadata and sibling count\n  monitor --index N [--raw]                 Decode or print raw live reports\n  capture --index N --output PATH [--decoded]\n                                            Capture raw and optional decoded JSONL\n\nOptions:\n  --duration-secs N                         Stop monitor/capture after N seconds\n  -h, --help"
+        "sc-probe <command> [options]\n\nCommands:\n  list                                      List every HID collection\n  inspect [--index N]                       Show complete metadata and sibling count\n  monitor --index N [--raw]                 Decode or print raw live reports\n  capture --index N --output PATH [--decoded]\n                                            Capture raw and optional decoded JSONL\n  suppress-lizard --index N                 Safely test SC2 lizard-mode suppression\n\nOptions:\n  --duration-secs N                         Stop monitor/capture/suppression after N seconds\n  -h, --help"
     );
 }

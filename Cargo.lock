@@ -2178,6 +2178,7 @@ dependencies = [
 name = "sc-probe"
 version = "0.1.0"
 dependencies = [
+ "ctrlc",
  "recording",
  "serde_json",
  "steam-controller-device",
@@ -2439,6 +2440,8 @@ name = "steam-controller-device"
 version = "0.1.0"
 dependencies = [
  "hidapi",
+ "rustix 1.1.4",
+ "steam-controller-protocol",
 ]
 
 [[package]]

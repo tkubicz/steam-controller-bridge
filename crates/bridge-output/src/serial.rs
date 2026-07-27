@@ -305,15 +305,18 @@ impl<T: ByteTransport> SerialConnection<T> {
         if self.status != SerialStatus::Ready {
             return Ok(());
         }
-        while let Some(state) = self.queued.pop_front() {
-            self.write_message(Message::GamepadState(WireGamepadState::try_from(state)?))?;
-            if state == GamepadState::neutral() {
-                self.last_state = None;
-                self.last_state_sent = None;
-            } else {
-                self.last_state = Some(state);
-                self.last_state_sent = Some(now);
-            }
+        let Some(state) = self.queued.pop_back() else {
+            return Ok(());
+        };
+        self.metrics.states_dropped += self.queued.len() as u64;
+        self.queued.clear();
+        self.write_message(Message::GamepadState(WireGamepadState::try_from(state)?))?;
+        if state == GamepadState::neutral() {
+            self.last_state = None;
+            self.last_state_sent = None;
+        } else {
+            self.last_state = Some(state);
+            self.last_state_sent = Some(now);
         }
         Ok(())
     }
@@ -576,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn handshake_queues_then_flushes_state_with_sequences() {
+    fn handshake_flushes_only_the_latest_queued_snapshot() {
         let transport = MockTransport {
             reads: VecDeque::from([response(Message::HelloResponse {
                 selected_version: 1,
@@ -586,8 +589,15 @@ mod tests {
         let mut connection =
             SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
         connection.queue_state(GamepadState::neutral()).unwrap();
+        let mut stale = GamepadState::neutral();
+        stale.left_y = -1.0;
+        connection.queue_state(stale).unwrap();
+        let mut latest = GamepadState::neutral();
+        latest.left_y = 1.0;
+        connection.queue_state(latest).unwrap();
         connection.poll(Duration::from_millis(1)).unwrap();
         assert_eq!(connection.status(), SerialStatus::Ready);
+        assert_eq!(connection.metrics().states_dropped, 2);
         assert_eq!(
             messages(&connection.into_inner().writes),
             vec![
@@ -595,7 +605,7 @@ mod tests {
                     minimum_version: 1,
                     maximum_version: 1
                 },
-                Message::GamepadState(WireGamepadState::try_from(GamepadState::neutral()).unwrap())
+                Message::GamepadState(WireGamepadState::try_from(latest).unwrap())
             ]
         );
     }

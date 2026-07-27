@@ -35,18 +35,46 @@ Recording tests cover typed raw and gamepad round trips, timestamp ordering, unk
 
 Steam Controller protocol tests cover all 30 OpenPuck button bits, every trigger/stick/pad/pressure/motion field, both `0x45` and extended `0x42`, connection/battery/signal reports, typed recording round trips, incorrect sizes, mismatched IDs, unknown IDs, and arbitrary truncated lengths.
 
-Mapper tests cover every documented button and hat mapping, neutral state,
-stick/pad/trigger normalization, pad release, alternate physical-stick input,
-independent and radial dead zones, inversion, sensitivity, saturation, finite
-clamping, smoothing convergence and reset, and immediate discrete controls while
-smoothing is active.
+The same crate commits the complete 64-byte SDL-compatible lizard-off golden
+vector. Device tests cover the exact `28de:1304`/`ff00:0001`/interface 2–5
+allowlist plus immediate, three-second, disconnect, and reconnect heartbeat
+scheduling. Bridge tests cover safe-default option parsing, initial
+suppression, periodic refresh, leave mode, and fail-closed write behavior. The
+macOS device tests also verify that a second project process cannot acquire the
+same per-slot ownership lock and that ownership is released when the first
+session ends.
 
-The HID device crate unit-tests platform-neutral collection grouping. On macOS, a read-only live diagnostic can verify the native backend without controller-specific assumptions:
+The tested Puck cannot be opened with HIDAPI's macOS exclusive seize option:
+it returns `0xE00002E2 not permitted`, including after Steam's persistent IPC
+LaunchAgent is removed. Hardware validation therefore uses shared native HID
+access plus the project-level per-slot lock. Contention with Steam or another
+non-project HID consumer remains a manual unsupported-use check.
+
+Mapper tests cover every documented button and hat mapping, neutral state,
+stick/pad/trigger normalization, pad release, the default physical-right-stick
+mapping and explicit alternate right-pad profile, independent and radial dead
+zones, inversion, sensitivity, saturation, finite clamping, smoothing
+convergence and reset, and immediate discrete controls while smoothing is
+active.
+
+The HID device crate unit-tests platform-neutral collection grouping. On macOS,
+enumeration and metadata inspection remain read-only:
 
 ```bash
 cargo run -p sc-probe -- list
 cargo run -p sc-probe -- inspect --index 0
 ```
+
+After identifying the active official Puck slot and fully quitting Steam, the
+whitelisted hardware test is:
+
+```bash
+cargo run -p sc-probe -- suppress-lizard --index N --duration-secs 15
+```
+
+While it runs, controller `A` must not emit Space and touchpads must not move the
+pointer. After it stops, desktop behavior must return within about 10 seconds.
+Never run this alongside the visualizer, monitor, Steam, or another bridge.
 
 Linux CI compiles the hardware-independent API and explicit unsupported-platform implementation; it does not require `hidapi` system libraries or physical hardware.
 
@@ -55,11 +83,13 @@ On macOS, use `cargo run -p sc-visualizer -- --index N` after `sc-probe list`
 to verify live report rate, decoded controls, mapped output, recording controls,
 and disconnect-to-neutral behavior with hardware.
 
-Serial tests use an in-memory `ByteTransport` and cover hello success, queued
-state flush and sequence ownership, version rejection, handshake timeout,
-bounded overflow, ping/pong timeout, firmware-originated ping response, and
-corrupted-frame accounting. Physical-port negotiation and refreshed state
-delivery have been exercised with a flashed XIAO.
+Serial tests use an in-memory `ByteTransport` and cover hello success,
+latest-only queued state flush and sequence ownership, version rejection,
+handshake timeout, bounded overflow, ping/pong timeout, firmware-originated
+ping response, and corrupted-frame accounting. Bridge tests additionally cover
+replacement of a stale raw HID report before decoding and deferral of the input
+timeout while newer HID input is waiting. Physical-port negotiation and
+refreshed state delivery have been exercised with a flashed XIAO.
 
 The 2026-07-27 development-hardware smoke test additionally confirmed:
 
@@ -67,11 +97,17 @@ The 2026-07-27 development-hardware smoke test additionally confirmed:
 - the XIAO enumerated CDC plus an Xbox-layout gamepad and bound to macOS's
   `Xbox360Gamepad` DriverKit class;
 - Safari reported a connected standard-mapped gamepad;
+- Boosteroid detected the XIAO as a valid gamepad;
 - an unchanged active state refreshed for more than 30 seconds without an
-  unintended firmware neutral.
+  unintended firmware neutral;
+- the Puck accepted the fixed lizard-off feature report, and a 30-second
+  end-to-end serial run completed ten suppression refreshes with zero
+  lizard-write, decode, dropped-report, or serial failures.
 
-This does not replace the remaining full mapping, target streaming service,
-fault timing, reconnect, and soak gates.
+The hardware observation that `A` emits no Space, touchpads do not move the
+pointer, and desktop mode returns within about 10 seconds is still pending.
+Refresh failure handling, full mapping, GeForce NOW, fault timing, reconnect,
+and soak gates also remain unproven.
 
 Bridge-core tests cover changed-state suppression, timeout neutralization,
 disconnect/reset/shutdown neutralization, repeated decode failures, and HID

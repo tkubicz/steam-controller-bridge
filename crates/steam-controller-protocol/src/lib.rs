@@ -16,6 +16,30 @@ pub const INPUT_REPORT_SIZE: usize = 46;
 pub const EXTENDED_INPUT_REPORT_SIZE: usize = 54;
 pub const LIZARD_MOUSE_REPORT_SIZE: usize = 6;
 pub const LIZARD_KEYBOARD_REPORT_SIZE: usize = 9;
+pub const FEATURE_REPORT_SIZE: usize = 64;
+
+const FEATURE_REPORT_ID: u8 = 0x01;
+const SET_SETTINGS_VALUES: u8 = 0x87;
+const CONTROLLER_SETTING_SIZE: u8 = 3;
+const SETTING_LIZARD_MODE: u8 = 9;
+const LIZARD_MODE_OFF: u16 = 0;
+
+/// Builds the sole controller feature report this project permits.
+///
+/// This matches SDL's Steam Controller 2/Triton lizard-mode suppression
+/// command. The report ID is included in the returned 64-byte buffer.
+#[must_use]
+pub const fn lizard_mode_off_feature_report() -> [u8; FEATURE_REPORT_SIZE] {
+    let mut report = [0_u8; FEATURE_REPORT_SIZE];
+    report[0] = FEATURE_REPORT_ID;
+    report[1] = SET_SETTINGS_VALUES;
+    report[2] = CONTROLLER_SETTING_SIZE;
+    report[3] = SETTING_LIZARD_MODE;
+    let value = LIZARD_MODE_OFF.to_le_bytes();
+    report[4] = value[0];
+    report[5] = value[1];
+    report
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
@@ -335,6 +359,14 @@ impl std::error::Error for DecodeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lizard_mode_off_feature_report_matches_sdl_golden_vector() {
+        let report = lizard_mode_off_feature_report();
+        assert_eq!(report.len(), FEATURE_REPORT_SIZE);
+        assert_eq!(&report[..6], &[0x01, 0x87, 0x03, 0x09, 0x00, 0x00]);
+        assert!(report[6..].iter().all(|byte| *byte == 0));
+    }
 
     fn input_report(report_id: u8) -> Vec<u8> {
         let size = if report_id == INPUT_REPORT_ID {

@@ -11,8 +11,8 @@ pub trait StateFilter {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RightAxisSource {
-    #[default]
     RightPad,
+    #[default]
     RightStick,
 }
 
@@ -43,7 +43,7 @@ impl Default for MapperConfig {
             axis_inversion: AxisInversionFilter::NONE,
             smoothing_time_constant: None,
             trigger_full_scale: 0x8000,
-            right_axis_source: RightAxisSource::RightPad,
+            right_axis_source: RightAxisSource::RightStick,
         }
     }
 }
@@ -185,10 +185,13 @@ impl ControllerMapper {
         state.buttons.set(
             Button::RightStick,
             input.buttons.contains(SteamButton::RightStickPress)
-                || input.buttons.contains(SteamButton::RightPadClick),
+                || (self.config.right_axis_source == RightAxisSource::RightPad
+                    && input.buttons.contains(SteamButton::RightPadClick)),
         );
-        map_button(input, SteamButton::View, &mut state, Button::Back);
-        map_button(input, SteamButton::Menu, &mut state, Button::Start);
+        // Triton's button names are counterintuitive at the generic/Xbox
+        // boundary: SDL and OpenPuck both map VIEW to Start and MENU to Back.
+        map_button(input, SteamButton::View, &mut state, Button::Start);
+        map_button(input, SteamButton::Menu, &mut state, Button::Back);
         map_button(input, SteamButton::Steam, &mut state, Button::Guide);
         map_button(input, SteamButton::LeftGrip4, &mut state, Button::LeftGrip);
         map_button(
@@ -523,9 +526,8 @@ mod tests {
             (SteamButton::RightShoulder, Button::RightShoulder),
             (SteamButton::LeftStickPress, Button::LeftStick),
             (SteamButton::RightStickPress, Button::RightStick),
-            (SteamButton::RightPadClick, Button::RightStick),
-            (SteamButton::View, Button::Back),
-            (SteamButton::Menu, Button::Start),
+            (SteamButton::View, Button::Start),
+            (SteamButton::Menu, Button::Back),
             (SteamButton::Steam, Button::Guide),
             (SteamButton::LeftGrip4, Button::LeftGrip),
             (SteamButton::RightGrip4, Button::RightGrip),
@@ -539,6 +541,21 @@ mod tests {
             let output = ControllerMapper::default().map(&input, 0.004);
             assert!(output.buttons.contains(target), "{source:?} -> {target:?}");
         }
+    }
+
+    #[test]
+    fn view_and_menu_follow_sdl_xbox_button_semantics() {
+        let mut view = source_state();
+        set_button(&mut view, SteamButton::View);
+        let view_output = ControllerMapper::default().map(&view, 0.004);
+        assert!(view_output.buttons.contains(Button::Start));
+        assert!(!view_output.buttons.contains(Button::Back));
+
+        let mut menu = source_state();
+        set_button(&mut menu, SteamButton::Menu);
+        let menu_output = ControllerMapper::default().map(&menu, 0.004);
+        assert!(menu_output.buttons.contains(Button::Back));
+        assert!(!menu_output.buttons.contains(Button::Start));
     }
 
     #[test]
@@ -582,13 +599,12 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_sticks_pad_and_observed_trigger_scale() {
+    fn normalizes_sticks_and_observed_trigger_scale() {
         let mut input = source_state();
         input.left_stick_x = -32767;
         input.left_stick_y = 32767;
-        input.right_pad_touched = true;
-        input.right_pad_x = 32767;
-        input.right_pad_y = -32767;
+        input.right_stick_x = 32767;
+        input.right_stick_y = -32767;
         input.left_trigger = 0;
         input.right_trigger = 0x8000;
         let config = MapperConfig {
@@ -612,31 +628,32 @@ mod tests {
     }
 
     #[test]
-    fn released_right_pad_returns_to_center_and_stick_source_is_optional() {
+    fn physical_right_stick_is_default_and_right_pad_is_optional() {
         let mut input = source_state();
-        input.right_pad_x = 20000;
-        input.right_pad_y = -20000;
-        let mut mapper = ControllerMapper::default();
-        assert_eq!(
-            (
-                mapper.map(&input, 0.004).right_x,
-                mapper.map(&input, 0.004).right_y
-            ),
-            (0.0, 0.0)
-        );
         input.right_stick_x = 32767;
+        input.right_pad_touched = true;
+        input.right_pad_x = -32767;
+        input.right_pad_y = 0;
+        set_button(&mut input, SteamButton::RightPadClick);
+        let mut mapper = ControllerMapper::default();
+        let default_output = mapper.map(&input, 0.004);
+        assert_close(default_output.right_x, 1.0);
+        assert!(!default_output.buttons.contains(Button::RightStick));
+
+        set_button(&mut input, SteamButton::RightStickPress);
+        assert!(mapper
+            .map(&input, 0.004)
+            .buttons
+            .contains(Button::RightStick));
+
         let config = MapperConfig {
-            right_axis_source: RightAxisSource::RightStick,
+            right_axis_source: RightAxisSource::RightPad,
             right_axis_dead_zone: 0.0,
             ..MapperConfig::default()
         };
-        assert_close(
-            ControllerMapper::new(config)
-                .unwrap()
-                .map(&input, 0.004)
-                .right_x,
-            1.0,
-        );
+        let pad_output = ControllerMapper::new(config).unwrap().map(&input, 0.004);
+        assert_close(pad_output.right_x, -1.0);
+        assert!(pad_output.buttons.contains(Button::RightStick));
     }
 
     #[test]
@@ -687,8 +704,7 @@ mod tests {
     fn mapper_applies_profile_axis_inversion() {
         let mut input = source_state();
         input.left_stick_x = 32767;
-        input.right_pad_touched = true;
-        input.right_pad_y = -32767;
+        input.right_stick_y = -32767;
         let config = MapperConfig {
             left_stick_dead_zone: 0.0,
             right_axis_dead_zone: 0.0,
