@@ -136,11 +136,10 @@ Hardware evidence on 2026-07-27:
   `mapping: standard`;
 - an unchanged active simulator report remained submitted for more than 30
   seconds without firmware watchdog neutralization.
-- on 2026-07-28, the rumble-enabled build flashed successfully to MCU serial
-  `5E6EF905E5468F85`, completed a fresh Hello handshake, reached Running with
-  live Puck input, and shut down cleanly.
+- on 2026-07-28, the rumble-enabled build flashed successfully, completed a
+  fresh Hello handshake, reached Running with live Puck input, and shut down
+  cleanly;
+- Boosteroid, GeForce NOW, every physical control, and end-to-end dual rumble
+  with correct strong/weak actuator sides are confirmed on hardware.
 
-GeForce NOW, Boosteroid, every physical control, explicit fault timing, and the
-one-hour soak remain manual release gates. End-to-end rumble has not yet been
-qualified; a successful flash and handshake are not evidence that Safari or a
-streaming client delivered Xbox OUT traffic.
+Explicit fault timing and the one-hour soak remain manual release gates.

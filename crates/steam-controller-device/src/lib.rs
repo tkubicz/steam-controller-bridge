@@ -209,6 +209,11 @@ mod platform;
 #[cfg(target_os = "macos")]
 pub use platform::{enumerate, HidSession};
 
+/// Returns an unsupported-platform error on non-macOS hosts.
+///
+/// # Errors
+///
+/// Always returns [`DeviceError::UnsupportedPlatform`].
 #[cfg(not(target_os = "macos"))]
 pub fn enumerate() -> Result<Vec<HidDeviceInfo>, DeviceError> {
     Err(DeviceError::UnsupportedPlatform)

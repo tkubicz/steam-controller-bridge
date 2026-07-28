@@ -143,16 +143,16 @@ The 2026-07-27 development-hardware smoke test additionally confirmed:
   enabled suppression, and surfaced a valid 94% battery report.
 - on 2026-07-28, active Puck index 43 accepted separate left-only and right-only
   50% diagnostics, each with seven 40 ms writes and a successful final zero.
-  The updated firmware then flashed successfully to XIAO serial
-  `5E6EF905E5468F85`; a bounded live bridge re-negotiated, stayed Running, and
-  shut down cleanly. The Codex in-app browser did not enumerate the local
-  gamepad, so physical actuator orientation and Safari/streaming-client OUT
-  delivery remain manual checks.
+  The updated firmware then flashed successfully; a bounded live bridge
+  re-negotiated, stayed Running, and shut down cleanly.
 
-The hardware observation that `A` emits no Space, touchpads do not move the
-pointer, and desktop mode returns within about 10 seconds is still pending.
-Refresh failure handling, full mapping, GeForce NOW, fault timing, reconnect,
-and soak gates also remain unproven.
+Subsequent hardware acceptance confirmed full control-by-control mapping,
+Boosteroid and GeForce NOW as a standard gamepad, end-to-end dual rumble with
+correct strong/weak actuator orientation, and that `A` emits no Space while
+touchpads do not move the pointer, with desktop mode returning after exit.
+
+Refresh failure handling, fault timing, reconnect, and soak gates remain
+unproven.
 
 Bridge-core tests cover changed-state suppression, timeout neutralization,
 disconnect/reset/shutdown neutralization, repeated decode failures, and HID

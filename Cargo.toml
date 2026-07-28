@@ -22,7 +22,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/lynxware/steam-controller-bridge"
+repository = "https://github.com/tkubicz/steam-controller-bridge"
 
 [workspace.dependencies]
 base64 = "0.22.1"
