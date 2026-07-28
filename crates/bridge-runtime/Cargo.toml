@@ -1,0 +1,18 @@
+[package]
+name = "bridge-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bridge-core = { path = "../bridge-core" }
+bridge-output = { path = "../bridge-output" }
+controller-mapper = { path = "../controller-mapper" }
+recording = { path = "../recording" }
+serde_json.workspace = true
+steam-controller-device = { path = "../steam-controller-device" }
+steam-controller-protocol = { path = "../steam-controller-protocol" }
+
+[lints]
+workspace = true

@@ -27,6 +27,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo build --workspace --all-targets
+./tools/build-macos-app.sh
 ```
 
 The protocol tests cover every message type, fixed axis endpoints, the static CRC vector, partial and combined reads, garbage, truncation, invalid versions, oversized lengths, corruption, and recovery. A deterministic pseudo-random byte-stream test checks that framing never panics.
@@ -91,6 +92,18 @@ replacement of a stale raw HID report before decoding and deferral of the input
 timeout while newer HID input is waiting. Physical-port negotiation and
 refreshed state delivery have been exercised with a flashed XIAO.
 
+Runtime and CLI tests cover zero-argument defaults, explicit controller/port
+overrides, exact XIAO metadata filtering, callout-versus-tty filtering,
+battery-range handling, latest-report replacement, and replay's unchanged dump
+default. Menu-model tests cover status strings, battery unknown/percentage,
+error visibility, and Start/Stop enablement. macOS tests build the tray
+frontend, diagnostics renderer, and template icon.
+
+The `macos-app` CI job builds the current-architecture release binary, creates
+an `LSUIElement` `.app`, ad-hoc signs and verifies it, archives it, and uploads
+the bundle artifact. This proves source packaging, not Developer ID trust or
+notarization.
+
 The 2026-07-27 development-hardware smoke test additionally confirmed:
 
 - the active Puck slot produced valid extended `0x42` reports at about 250 Hz;
@@ -103,6 +116,9 @@ The 2026-07-27 development-hardware smoke test additionally confirmed:
 - the Puck accepted the fixed lizard-off feature report, and a 30-second
   end-to-end serial run completed ten suppression refreshes with zero
   lizard-write, decode, dropped-report, or serial failures.
+- zero-argument discovery selected active Puck interface 2 and the
+  `/dev/cu.usbmodem11201` XIAO by exact metadata plus Hello, reached `Running`,
+  enabled suppression, and surfaced a valid 94% battery report.
 
 The hardware observation that `A` emits no Space, touchpads do not move the
 pointer, and desktop mode returns within about 10 seconds is still pending.

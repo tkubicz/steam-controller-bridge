@@ -4,6 +4,12 @@ The host sends the existing versioned bridge frames over a byte-stream serial
 port. No serial-specific framing is added. The default native settings are
 115200 baud and a 1 ms read timeout; callers can select another baud rate.
 
+Zero-configuration live mode enumerates `SerialPortInfo`, keeps only macOS
+callout ports with exact XIAO metadata (`Lynxware / Steam Controller Bridge`,
+`045e:028e`), and then performs the Hello exchange below before selection. It
+never chooses a port merely because its filename contains `usbmodem`, which
+prevents confusing the Puck's own CDC interface with the XIAO.
+
 ## Session lifecycle
 
 1. The host opens the configured port and sends `Hello { min: 1, max: 1 }`.
@@ -28,6 +34,11 @@ creating a second parser.
 The refresh interval is independent of the one-second Ping health check. Pings
 prove the bidirectional session is responsive but deliberately do not keep the
 firmware's 100 ms controller-data watchdog alive.
+
+The live runtime remembers the selected XIAO's MCU-derived USB serial number.
+After reconnect it prefers that identity even when macOS assigns a different
+`/dev/cu.usbmodem…` path. On an initial run, two Hello-valid XIAOs are an
+ambiguity and require `--port PATH`.
 
 ## Queue behavior
 

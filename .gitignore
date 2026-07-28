@@ -1,3 +1,4 @@
 /target/
+/dist/
 /firmware/xiao-nrf52840/build/
 *.frames

@@ -158,9 +158,9 @@ project's report decoder is designed around.
    Killing `ipcserver` is insufficient because its `KeepAlive` setting makes
    `launchd` restart it. Launching Steam later normally registers it again.
 
-The official Puck exposes several controller-slot collections. Do not assume
-the first HID index is the active slot; use the probe procedure in the next
-section.
+The official Puck exposes several controller-slot collections. Normal bridge
+startup discovers which slot is active from complete state reports. The probe
+procedure below is optional diagnostics rather than a daily setup step.
 
 ### Experimental: direct USB-C
 
@@ -190,7 +190,7 @@ On Apple-silicon laptops, macOS may also ask whether to allow a newly connected
 USB accessory. Approve both the Puck/controller and the XIAO while the Mac is
 unlocked.
 
-## 5. Identify and verify the controller input
+## 5. Optionally verify the controller input
 
 List every HID collection:
 
@@ -277,16 +277,35 @@ observer after Apple's Xbox driver owns the interface.
 
 ## 7. Run the complete bridge
 
-Use the verified source index and XIAO CDC port:
+From the project root, use the normal zero-configuration command:
 
 ```bash
-target/release/sc-bridge --index N --output serial \
-  --port /dev/cu.usbmodemXXXX --record session.jsonl
+./sc-bridge
 ```
 
-Explicit `--index` is recommended. `--controller auto` considers only official
-Puck `ff00:0001` controller slots, but a multi-slot Puck can still expose
-several candidates and the first one may not be active.
+The launcher uses Cargo's release profile so source changes are rebuilt when
+needed. Live mode automatically:
+
+- filters Puck candidates to `28de:1304`, usage `ff00:0001`, interfaces 2–5;
+- observes candidates without feature writes until exactly one emits a complete
+  valid `0x42` or `0x45` controller-state report;
+- filters macOS callout ports by the XIAO's `Lynxware / Steam Controller
+  Bridge`, `045e:028e` USB metadata, rejecting the Puck's own CDC port;
+- completes the protocol-v1 Hello handshake before selecting the XIAO;
+- remembers the XIAO MCU serial number across a changed `/dev/cu.usbmodem…`
+  path; and
+- waits and rescans every 500 ms when hardware is absent.
+
+If more than one Puck slot produces controller states, the bridge refuses the
+ambiguity and asks for `--index N`. If more than one XIAO completes Hello, use
+`--port PATH`. Explicit forms are:
+
+```bash
+./sc-bridge --controller auto --port auto
+./sc-bridge --index N
+./sc-bridge --port /dev/cu.usbmodemXXXX
+./sc-bridge --index N --port /dev/cu.usbmodemXXXX --record session.jsonl
+```
 
 Keep the terminal and XIAO connected while playing. Press `Ctrl-C` for orderly
 shutdown; the bridge sends a final neutral state before releasing the Puck.
@@ -294,17 +313,17 @@ The controller's desktop lizard mode returns automatically after its watchdog
 expires. The XIAO also neutralizes if CDC disconnects or active-state refreshes
 stop for 100 ms.
 
-Successful startup logs `lizard_suppressed=true`. Periodic metrics should show
-`lizard_suppressed=true`, increasing `lizard_refreshes`, zero
-`lizard_failures`, and a `lizard_refresh_age_ms` below 3000. The diagnostic
-option `--lizard-mode leave` retains the old native keyboard/mouse behavior and
-is not suitable for gameplay.
+Normal logs progress through `Discovering`, `Waiting`, `Starting`, and
+`Running`. Running status must show the selected XIAO path, a connected
+controller, and `lizard_suppressed=true`. The diagnostic option
+`--lizard-mode leave` retains the old native keyboard/mouse behavior and is not
+suitable for gameplay.
 
 For a first end-to-end test:
 
 1. Confirm the XIAO LED is solid green.
-2. Confirm `sc-bridge` logs `lizard_suppressed=true`, input reports, and no
-   continuing decode or lizard failures.
+2. Confirm `sc-bridge` reaches `Running`, reports `lizard_suppressed=true`, and
+   shows no continuing decode or suppression failures.
 3. Open the browser or streaming client only after the bridge is running.
 4. Exercise every button, both sticks, both triggers, and the D-pad.
 5. Keep a text field focused while pressing `A` and using touchpads; verify no
@@ -322,15 +341,53 @@ After initial setup and pairing:
 3. Power on Steam Controller 2 in Puck mode and confirm a solid white LED.
 4. Fully quit Steam and boot out `com.valvesoftware.steam.ipctool`.
 5. Close all controller probes/visualizers.
-6. If device ordering may have changed, rerun `sc-probe list` and monitor the
-   candidate index briefly.
-7. Close the monitor, then start `sc-bridge` with the input index and XIAO
-   serial port.
-8. Confirm `lizard_suppressed=true`, then start the browser or streaming
+6. Run `./sc-bridge`.
+7. Wait for `Running` with `lizard_suppressed=true`, then start the streaming
    service.
 
-HID indices and `/dev/cu.usbmodem…` names can change after reconnecting devices,
-so do not permanently assume old values.
+The command can be started before either device is connected. It remains in a
+waiting state, accepts hardware in either order, and rediscovers changed HID
+indices and serial paths after reconnects.
+
+## Menu-bar application
+
+Build the current-architecture local application:
+
+```bash
+./tools/build-macos-app.sh
+```
+
+Move `dist/Steam Controller Bridge.app` to `/Applications` if desired, then
+open it from Finder or:
+
+```bash
+open "dist/Steam Controller Bridge.app"
+```
+
+It has no ordinary window or Dock icon. The controller icon in the macOS menu
+bar opens status and actions:
+
+- current bridge, Puck, controller, and XIAO/port state;
+- battery percentage, or `Unknown` until a valid `0x43` report arrives;
+- the latest actionable error;
+- `Start Bridge` and `Stop Bridge`;
+- `Copy Diagnostics`;
+- `Open Input Monitoring Settings`;
+- `Open Log Folder`; and
+- `Quit`.
+
+The bridge starts automatically when the app launches. Stop and Quit
+neutralize the XIAO before releasing the Puck and ending lizard suppression.
+Logs rotate at a bounded size under:
+
+```text
+~/Library/Logs/Steam Controller Bridge/
+```
+
+Grant Input Monitoring to **Steam Controller Bridge** itself when using the
+app. Permission granted to Terminal does not automatically cover the app.
+Because this is an ad-hoc-signed source build, it is not notarized; use System
+Settings to approve it if macOS prompts.
 
 ## Troubleshooting
 
@@ -374,11 +431,29 @@ launchctl print user/$(id -u)/com.valvesoftware.steam.ipctool
 If it is present, use the `launchctl bootout` command above. Then run
 `sc-probe list` again because indices may have changed.
 
+### Automatic discovery reports multiple active Pucks or XIAOs
+
+The bridge intentionally does not pick the first device. For Puck ambiguity,
+quit the bridge, run `target/release/sc-probe list`, identify the intended
+active `ff00:0001` slot, and restart with `./sc-bridge --index N`. For XIAO
+ambiguity, disconnect the unused board or restart with
+`./sc-bridge --port /dev/cu.usbmodem…`.
+
+### The bridge stays in `Waiting`
+
+Read the status detail. `Waiting for the official ... Puck` means no matching
+Puck is enumerated. `waiting for an awake Steam Controller 2` means candidate
+slots opened but no complete state stream was observed; wake the controller
+and verify its white Puck-mode LED. `Waiting for XIAO ... CDC` means no exact
+XIAO metadata match. A Hello-handshake message means the port exists but
+firmware negotiation failed; close other serial tools and reflash current
+firmware if needed.
+
 ### `A` still types Space or a touchpad moves the pointer
 
-- Confirm the bridge startup log says `lizard_suppressed=true`.
-- Confirm periodic metrics show increasing `lizard_refreshes`, zero
-  `lizard_failures`, and refresh age below 3000 ms.
+- Confirm Running status says `lizard_suppressed=true`.
+- In the menu app, use `Copy Diagnostics` or `Open Log Folder` and confirm
+  increasing `lizard_refreshes`, zero failures, and a recent refresh age.
 - Verify the selected collection is `28de:1304`, usage `ff00:0001`, interface
   2–5, and is the slot producing the active `0x42`/`0x45` stream.
 - Fully quit Steam and close other controller tools.

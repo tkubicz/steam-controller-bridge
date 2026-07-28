@@ -9,8 +9,9 @@ use gamepad_state::GamepadState;
 
 mod serial;
 pub use serial::{
-    available_serial_ports, ByteTransport, SerialConfig, SerialConnection, SerialError,
-    SerialMetrics, SerialOutput, SerialStatus,
+    available_serial_devices, available_serial_ports, ByteTransport, SerialConfig,
+    SerialConnection, SerialDeviceInfo, SerialError, SerialMetrics, SerialOutput, SerialStatus,
+    XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
 };
 
 #[derive(Debug)]

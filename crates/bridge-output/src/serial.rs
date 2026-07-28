@@ -7,6 +7,33 @@ use gamepad_state::GamepadState;
 
 use crate::{GamepadOutput, OutputDiagnostics, OutputError};
 
+pub const XIAO_USB_VENDOR_ID: u16 = 0x045e;
+pub const XIAO_USB_PRODUCT_ID: u16 = 0x028e;
+pub const XIAO_USB_MANUFACTURER: &str = "Lynxware";
+pub const XIAO_USB_PRODUCT: &str = "Steam Controller Bridge";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SerialDeviceInfo {
+    pub path: String,
+    pub vendor_id: Option<u16>,
+    pub product_id: Option<u16>,
+    pub serial_number: Option<String>,
+    pub manufacturer: Option<String>,
+    pub product: Option<String>,
+}
+
+impl SerialDeviceInfo {
+    #[must_use]
+    pub fn is_xiao_bridge(&self) -> bool {
+        let is_callout = !cfg!(target_os = "macos") || self.path.starts_with("/dev/cu.");
+        is_callout
+            && self.vendor_id == Some(XIAO_USB_VENDOR_ID)
+            && self.product_id == Some(XIAO_USB_PRODUCT_ID)
+            && self.manufacturer.as_deref() == Some(XIAO_USB_MANUFACTURER)
+            && self.product.as_deref() == Some(XIAO_USB_PRODUCT)
+    }
+}
+
 pub trait ByteTransport {
     /// Writes one complete protocol frame.
     ///
@@ -539,9 +566,41 @@ impl Drop for SerialOutput {
 /// # Errors
 /// Returns an error when the native backend cannot enumerate ports.
 pub fn available_serial_ports() -> Result<Vec<String>, SerialError> {
-    serialport::available_ports()
-        .map(|ports| ports.into_iter().map(|port| port.port_name).collect())
-        .map_err(|error| SerialError::Io(io::Error::other(error.to_string())))
+    available_serial_devices().map(|ports| ports.into_iter().map(|port| port.path).collect())
+}
+
+/// Enumerates native serial ports with USB identity metadata.
+///
+/// # Errors
+/// Returns an error when the native backend cannot enumerate ports.
+pub fn available_serial_devices() -> Result<Vec<SerialDeviceInfo>, SerialError> {
+    let mut devices = serialport::available_ports()
+        .map_err(|error| SerialError::Io(io::Error::other(error.to_string())))?
+        .into_iter()
+        .map(|port| {
+            let (vendor_id, product_id, serial_number, manufacturer, product) = match port.port_type
+            {
+                serialport::SerialPortType::UsbPort(usb) => (
+                    Some(usb.vid),
+                    Some(usb.pid),
+                    usb.serial_number,
+                    usb.manufacturer,
+                    usb.product,
+                ),
+                _ => (None, None, None, None, None),
+            };
+            SerialDeviceInfo {
+                path: port.port_name,
+                vendor_id,
+                product_id,
+                serial_number,
+                manufacturer,
+                product,
+            }
+        })
+        .collect::<Vec<_>>();
+    devices.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(devices)
 }
 
 #[cfg(test)]
@@ -568,6 +627,39 @@ mod tests {
     }
     fn response(message: Message) -> Vec<u8> {
         Frame::new(90, message).encode().unwrap()
+    }
+
+    #[test]
+    fn xiao_filter_uses_complete_usb_identity_and_rejects_the_puck() {
+        let xiao = SerialDeviceInfo {
+            path: if cfg!(target_os = "macos") {
+                "/dev/cu.usbmodem11201".to_owned()
+            } else {
+                "/dev/ttyACM0".to_owned()
+            },
+            vendor_id: Some(XIAO_USB_VENDOR_ID),
+            product_id: Some(XIAO_USB_PRODUCT_ID),
+            serial_number: Some("5E6EF905E5468F85".to_owned()),
+            manufacturer: Some(XIAO_USB_MANUFACTURER.to_owned()),
+            product: Some(XIAO_USB_PRODUCT.to_owned()),
+        };
+        assert!(xiao.is_xiao_bridge());
+
+        let mut puck = xiao.clone();
+        puck.path = if cfg!(target_os = "macos") {
+            "/dev/cu.usbmodemFXB9961501D831".to_owned()
+        } else {
+            "/dev/ttyACM1".to_owned()
+        };
+        puck.vendor_id = Some(0x28de);
+        puck.product_id = Some(0x1304);
+        puck.manufacturer = Some("Valve Software".to_owned());
+        puck.product = Some("Steam Controller Puck".to_owned());
+        assert!(!puck.is_xiao_bridge());
+
+        let mut dialin = xiao;
+        dialin.path = "/dev/tty.usbmodem11201".to_owned();
+        assert_eq!(dialin.is_xiao_bridge(), !cfg!(target_os = "macos"));
     }
     fn messages(bytes: &[u8]) -> Vec<Message> {
         StreamDecoder::new()

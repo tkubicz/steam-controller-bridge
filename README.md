@@ -18,9 +18,11 @@ been flashed successfully, receives live `0x42` Puck reports, and enumerates in
 Safari's Gamepad API with `mapping: standard` through an Xbox/ABXY-compatible
 USB personality. Boosteroid also detects the XIAO as a valid gamepad. The
 lizard-off feature transfer and repeated three-second refreshes have also been
-verified on the connected Puck. Manual confirmation that Space/pointer input is
-absent, restoration timing, full control-by-control mapping, GeForce NOW,
-disconnect timing, and one-hour soak tests remain release gates.
+verified on the connected Puck. Zero-argument discovery has selected the active
+Puck interface and the metadata/Hello-verified XIAO port end to end, including a
+live 94% battery report. Manual confirmation that Space/pointer input is absent,
+restoration timing, full control-by-control mapping, GeForce NOW, disconnect
+timing, and one-hour soak tests remain release gates.
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
@@ -39,6 +41,26 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 No physical hardware is required. The recording crate uses the established `serde`, `serde_json`, and `base64` crates; the timing, protocol, output, and simulator paths otherwise use the standard library.
+
+## Daily use
+
+After flashing the XIAO, pairing the Steam Controller 2 with its official
+Puck, granting Input Monitoring permission, and fully stopping Steam and its
+IPC helper, start the complete bridge from the repository root:
+
+```bash
+./sc-bridge
+```
+
+No HID index or serial path is normally needed. The bridge waits if either
+device is absent, identifies the one Puck interface producing complete
+`0x42`/`0x45` controller states, verifies the XIAO with a protocol-v1 Hello
+handshake, and resumes after either device is reconnected. It refuses to guess
+when more than one active controller or valid XIAO is present.
+
+Use `./sc-bridge --index N` or `./sc-bridge --port /dev/cu.usbmodem…` only to
+resolve an ambiguity or diagnose a specific endpoint. See the
+[user guide](docs/USER_GUIDE.md) for the one-time setup.
 
 ## Simulator
 
@@ -136,20 +158,34 @@ and hardware validation are documented in
 ## Integrated bridge
 
 ```bash
-cargo run -p sc-bridge -- --controller auto --output dump
-cargo run -p sc-bridge -- --index 0 --output serial \
-  --port /dev/cu.usbmodemXXXX --record session.jsonl
-cargo run -p sc-bridge -- --input replay --file session.jsonl \
+./sc-bridge
+./sc-bridge --index 43 --port /dev/cu.usbmodem11201
+./sc-bridge --input replay --file session.jsonl \
   --deterministic --output mock
 ```
 
-Live mode uses bounded input buffering, changed-state output, timeout and
-decode-failure neutralization, reconnect tracking, Ctrl-C shutdown, and periodic
-structured diagnostics. It claims the selected Puck slot from other project
-tools and, by default, refreshes the narrow lizard-off setting every three
-seconds. Steam must still be fully quit. A failed write neutralizes the XIAO
-and stops the bridge. See
+Live mode defaults to automatic active-slot and XIAO discovery plus serial
+output. It uses bounded latest-state input, timeout and decode-failure
+neutralization, reconnect recovery, Ctrl-C shutdown, and structured status. It
+claims the selected Puck slot from other project tools and refreshes the narrow
+lizard-off setting every three seconds. Steam must still be fully quit. A
+failed suppression write neutralizes the XIAO and stops the bridge. See
 [the bridge guide](docs/BRIDGE.md).
+
+## macOS menu-bar app
+
+Build an ad-hoc-signed, dockless local application:
+
+```bash
+./tools/build-macos-app.sh
+open "dist/Steam Controller Bridge.app"
+```
+
+The menu app embeds the same runtime, starts it automatically, and shows bridge,
+Puck, controller, XIAO, battery, suppression, and error status. Its menu
+provides Start/Stop, Copy Diagnostics, Input Monitoring settings, the rotated
+log folder, and Quit. This source-built application is not notarized; release
+signing, a DMG, and Launch at Login remain future work.
 
 ## Known limitations
 
@@ -161,6 +197,10 @@ and stops the bridge. See
   intentionally unavailable.
 - Steam coexistence, multiple simultaneous SC2 controllers, and running another
   HID consumer against the selected slot are unsupported.
+- Automatic discovery deliberately reports an ambiguity instead of choosing
+  when multiple Puck slots produce controller states or multiple XIAOs complete
+  the firmware handshake. Use an explicit override after identifying the
+  intended endpoint.
 - macOS access is intentionally shared at the native HID layer. The project
   lock excludes other project tools only; Steam's persistent
   `com.valvesoftware.steam.ipctool` LaunchAgent must be booted out before play.

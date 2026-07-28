@@ -36,3 +36,17 @@ jobs:
         with:
           name: xiao-nrf52840-firmware
           path: firmware/xiao-nrf52840/build/artifacts/
+
+  macos-app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and ad-hoc sign menu-bar application
+        run: ./tools/build-macos-app.sh
+      - name: Archive application bundle
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/Steam Controller Bridge.app" steam-controller-bridge-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: steam-controller-bridge-macos
+          path: steam-controller-bridge-macos.zip

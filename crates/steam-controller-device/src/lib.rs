@@ -206,6 +206,15 @@ impl HidSession {
     /// # Errors
     ///
     /// Always returns [`DeviceError::UnsupportedPlatform`].
+    pub fn open_info(_info: &HidDeviceInfo) -> Result<Self, DeviceError> {
+        Err(DeviceError::UnsupportedPlatform)
+    }
+
+    /// Returns an unsupported-platform error on non-macOS hosts.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`DeviceError::UnsupportedPlatform`].
     pub fn poll(&mut self, _timeout: Duration) -> Result<Option<DeviceEvent>, DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }

@@ -49,7 +49,27 @@ impl HidSession {
             .get(index)
             .cloned()
             .ok_or(DeviceError::InvalidIndex(index))?;
-        let selected = convert_info(&native);
+        Self::open_native(api, &native)
+    }
+
+    /// Opens a previously enumerated collection by stable identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError`] when the collection disappeared, is already
+    /// owned, or macOS refuses access.
+    pub fn open_info(info: &HidDeviceInfo) -> Result<Self, DeviceError> {
+        let api = HidApi::new().map_err(|error| backend_error(&error))?;
+        let native = api
+            .device_list()
+            .find(|candidate| matches_selected(candidate, info))
+            .cloned()
+            .ok_or(DeviceError::NotConnected)?;
+        Self::open_native(api, &native)
+    }
+
+    fn open_native(api: HidApi, native: &DeviceInfo) -> Result<Self, DeviceError> {
+        let selected = convert_info(native);
         let ownership_lock = acquire_ownership_lock(&selected)?;
         let device = native.open_device(&api).map_err(|error| {
             DeviceError::Backend(format!(
@@ -221,11 +241,14 @@ fn ownership_lock_path(selected: &HidDeviceInfo) -> PathBuf {
 
 fn matches_selected(candidate: &DeviceInfo, selected: &HidDeviceInfo) -> bool {
     let info = convert_info(candidate);
-    info.path == selected.path
-        || (info.same_physical_device(selected)
-            && info.usage_page == selected.usage_page
-            && info.usage == selected.usage
-            && info.interface_number == selected.interface_number)
+    same_collection(&info, selected)
+}
+
+fn same_collection(info: &HidDeviceInfo, selected: &HidDeviceInfo) -> bool {
+    (info.path == selected.path || info.same_physical_device(selected))
+        && info.usage_page == selected.usage_page
+        && info.usage == selected.usage
+        && info.interface_number == selected.interface_number
 }
 
 fn convert_info(info: &DeviceInfo) -> HidDeviceInfo {
@@ -295,5 +318,18 @@ mod tests {
         let second = acquire_ownership_lock(&target).expect("lock after release");
         drop(second);
         std::fs::remove_file(ownership_lock_path(&target)).expect("remove test lock");
+    }
+
+    #[test]
+    fn shared_hid_paths_do_not_collapse_sibling_collections() {
+        let selected = lock_target("shared-path");
+        let mut sibling = selected.clone();
+        sibling.usage_page = 0x0001;
+        sibling.usage = 0x0002;
+        assert!(!same_collection(&sibling, &selected));
+
+        let mut same = selected.clone();
+        same.id = "different-enumeration-id".to_owned();
+        assert!(same_collection(&same, &selected));
     }
 }
