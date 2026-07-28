@@ -42,11 +42,11 @@ firmware's 100 ms controller-data watchdog alive.
 Updated firmware returns `Rumble { low_frequency, high_frequency }` frames
 after validating an exact Xbox 360 output report. The serial backend retains
 only the newest feedback command, so rapid effects cannot create an unbounded
-queue. The runtime applies changes to the Puck immediately and treats every
-nonzero frame as a 100 ms lease. Firmware refreshes nonzero values every 25 ms;
-the runtime refreshes the selected SC2 actuator report every 40 ms. If feedback
-frames stop, the runtime sends zero and stops refreshing. Ping and controller
-input do not renew this lease.
+queue. The runtime applies changes to the selected Puck or Bluetooth controller
+immediately and treats every nonzero frame as a 100 ms lease. Firmware
+refreshes nonzero values every 25 ms; the runtime refreshes the selected SC2
+actuator report every 40 ms. If feedback frames stop, the runtime sends zero
+and stops refreshing. Ping and controller input do not renew this lease.
 
 Old firmware remains input-compatible but never produces rumble feedback. Old
 hosts ignore message type 8 through the protocol's unknown-message rule.

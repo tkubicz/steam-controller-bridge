@@ -5,10 +5,27 @@ use std::time::Duration;
 pub const LIZARD_MODE_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 pub const PROTEUS_VENDOR_ID: u16 = 0x28de;
 pub const PROTEUS_PRODUCT_ID: u16 = 0x1304;
+pub const STEAM_CONTROLLER_BLUETOOTH_PRODUCT_ID: u16 = 0x1303;
 pub const STEAM_USAGE_PAGE: u16 = 0xff00;
 pub const STEAM_CONTROLLER_USAGE: u16 = 0x0001;
 pub const FIRST_PROTEUS_SLOT_INTERFACE: i32 = 2;
 pub const LAST_PROTEUS_SLOT_INTERFACE: i32 = 5;
+pub const BLUETOOTH_CONTROLLER_INTERFACE: i32 = -1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerTransport {
+    Puck,
+    Bluetooth,
+}
+
+impl std::fmt::Display for ControllerTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Puck => f.write_str("Puck"),
+            Self::Bluetooth => f.write_str("Bluetooth"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HidDeviceInfo {
@@ -50,23 +67,48 @@ impl HidDeviceInfo {
         }
     }
 
-    /// Returns whether this collection is a supported Steam Controller 2 Puck
-    /// slot on which the narrow lizard-mode command may be sent.
+    /// Classifies an exact supported Steam Controller 2 input collection.
     #[must_use]
-    pub const fn supports_lizard_mode_suppression(&self) -> bool {
-        self.vendor_id == PROTEUS_VENDOR_ID
-            && self.product_id == PROTEUS_PRODUCT_ID
-            && self.usage_page == STEAM_USAGE_PAGE
-            && self.usage == STEAM_CONTROLLER_USAGE
+    pub fn controller_transport(&self) -> Option<ControllerTransport> {
+        if self.vendor_id != PROTEUS_VENDOR_ID
+            || self.usage_page != STEAM_USAGE_PAGE
+            || self.usage != STEAM_CONTROLLER_USAGE
+        {
+            return None;
+        }
+        if self.product_id == PROTEUS_PRODUCT_ID
+            && self.transport == "USB"
             && self.interface_number >= FIRST_PROTEUS_SLOT_INTERFACE
             && self.interface_number <= LAST_PROTEUS_SLOT_INTERFACE
+        {
+            return Some(ControllerTransport::Puck);
+        }
+        if self.product_id == STEAM_CONTROLLER_BLUETOOTH_PRODUCT_ID
+            && self.transport == "Bluetooth"
+            && self.interface_number == BLUETOOTH_CONTROLLER_INTERFACE
+        {
+            return Some(ControllerTransport::Bluetooth);
+        }
+        None
     }
 
-    /// Returns whether this collection is a supported Steam Controller 2 Puck
-    /// slot on which the narrow dual-rumble output may be sent.
+    /// Returns whether this collection is an exact supported Steam Controller
+    /// 2 Puck slot or direct Bluetooth vendor collection.
     #[must_use]
-    pub const fn supports_rumble(&self) -> bool {
-        self.supports_lizard_mode_suppression()
+    pub fn is_supported_controller_source(&self) -> bool {
+        self.controller_transport().is_some()
+    }
+
+    /// Returns whether the narrow lizard-mode command may be sent.
+    #[must_use]
+    pub fn supports_lizard_mode_suppression(&self) -> bool {
+        self.is_supported_controller_source()
+    }
+
+    /// Returns whether the narrow dual-rumble output may be sent.
+    #[must_use]
+    pub fn supports_rumble(&self) -> bool {
+        self.is_supported_controller_source()
     }
 }
 
@@ -179,7 +221,9 @@ impl std::fmt::Display for DeviceError {
                 "refusing lizard-mode write to unsupported collection \
                  {vendor_id:04x}:{product_id:04x} usage \
                  {usage_page:04x}:{usage:04x} interface {interface_number}; \
-                 select the active 28de:1304 ff00:0001 interface 2-5 Puck slot"
+                 select either an active 28de:1304 ff00:0001 USB Puck slot on \
+                 interface 2-5 or the 28de:1303 ff00:0001 Bluetooth collection \
+                 on interface -1"
             ),
             Self::UnsupportedRumbleTarget {
                 vendor_id,
@@ -192,7 +236,9 @@ impl std::fmt::Display for DeviceError {
                 "refusing rumble write to unsupported collection \
                  {vendor_id:04x}:{product_id:04x} usage \
                  {usage_page:04x}:{usage:04x} interface {interface_number}; \
-                 select the active 28de:1304 ff00:0001 interface 2-5 Puck slot"
+                 select either an active 28de:1304 ff00:0001 USB Puck slot on \
+                 interface 2-5 or the 28de:1303 ff00:0001 Bluetooth collection \
+                 on interface -1"
             ),
             Self::UnsupportedPlatform => {
                 write!(f, "live HID access is currently implemented only on macOS")
@@ -301,7 +347,7 @@ mod tests {
         assert!(!info(None, 1).same_physical_device(&different_product));
     }
 
-    fn suppression_target() -> HidDeviceInfo {
+    fn puck_target() -> HidDeviceInfo {
         HidDeviceInfo {
             id: "slot".to_owned(),
             path: "slot".to_owned(),
@@ -318,8 +364,13 @@ mod tests {
     }
 
     #[test]
-    fn suppression_target_is_exact_and_interface_bounded() {
-        let target = suppression_target();
+    fn puck_target_is_exact_and_interface_bounded() {
+        let target = puck_target();
+        assert_eq!(
+            target.controller_transport(),
+            Some(ControllerTransport::Puck)
+        );
+        assert!(target.is_supported_controller_source());
         assert!(target.supports_lizard_mode_suppression());
         assert!(target.supports_rumble());
 
@@ -330,12 +381,50 @@ mod tests {
             |info: &mut HidDeviceInfo| info.usage = 0,
             |info: &mut HidDeviceInfo| info.interface_number = 1,
             |info: &mut HidDeviceInfo| info.interface_number = 6,
+            |info: &mut HidDeviceInfo| info.transport = "Bluetooth".to_owned(),
         ] {
             let mut other = target.clone();
             mutate(&mut other);
+            assert_eq!(other.controller_transport(), None);
+            assert!(!other.is_supported_controller_source());
             assert!(!other.supports_lizard_mode_suppression());
             assert!(!other.supports_rumble());
         }
+    }
+
+    #[test]
+    fn bluetooth_target_is_exact_and_ignores_names() {
+        let mut target = HidDeviceInfo {
+            id: "bluetooth-controller".to_owned(),
+            path: "bluetooth-controller".to_owned(),
+            vendor_id: PROTEUS_VENDOR_ID,
+            product_id: STEAM_CONTROLLER_BLUETOOTH_PRODUCT_ID,
+            usage_page: STEAM_USAGE_PAGE,
+            usage: STEAM_CONTROLLER_USAGE,
+            interface_number: BLUETOOTH_CONTROLLER_INTERFACE,
+            serial_number: Some("redacted".to_owned()),
+            manufacturer: None,
+            product: None,
+            transport: "Bluetooth".to_owned(),
+        };
+        assert_eq!(
+            target.controller_transport(),
+            Some(ControllerTransport::Bluetooth)
+        );
+        assert!(target.supports_lizard_mode_suppression());
+        assert!(target.supports_rumble());
+
+        target.product_id = PROTEUS_PRODUCT_ID;
+        assert_eq!(target.controller_transport(), None);
+        target.product_id = STEAM_CONTROLLER_BLUETOOTH_PRODUCT_ID;
+        target.interface_number = 0;
+        assert_eq!(target.controller_transport(), None);
+        target.interface_number = BLUETOOTH_CONTROLLER_INTERFACE;
+        target.transport = "USB".to_owned();
+        assert_eq!(target.controller_transport(), None);
+        target.transport = "Bluetooth".to_owned();
+        target.usage = 2;
+        assert_eq!(target.controller_transport(), None);
     }
 
     #[test]

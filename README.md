@@ -12,8 +12,8 @@ the [user guide](docs/USER_GUIDE.md).
 
 ## Status
 
-Working end to end on macOS. The Steam Controller 2 Puck input path, host
-bridge, and XIAO nRF52840 CDC-to-gamepad firmware are implemented, and the
+Working end to end on macOS. Both the official Puck and direct Bluetooth input
+paths feed the host bridge and XIAO nRF52840 CDC-to-gamepad firmware. The
 following are verified on hardware:
 
 - the browser Gamepad API in Safari, reporting `mapping: standard`;
@@ -23,12 +23,15 @@ following are verified on hardware:
   correct strong and weak Steam Controller 2 actuators;
 - lizard-mode suppression, with no stray Space keypresses or pointer motion
   while running and normal desktop behavior restored after exit;
-- zero-argument discovery of the active Puck interface and the
-  metadata/Hello-verified XIAO port, including live battery reporting.
+- zero-argument discovery of the uniquely active Puck or Bluetooth collection
+  and the metadata/Hello-verified XIAO port, including live battery reporting;
+- direct Bluetooth `28de:1303` input using 46-byte `0x45` state reports at
+  approximately 67–68 Hz and compatible `0x43` battery reports.
 
-A one-hour soak test is the remaining hardware acceptance gate. Distributing
-this to end users additionally requires the USB identity and code-signing work
-described under [known limitations](#known-limitations).
+Bluetooth reconnect/sleep-wake stress, in-game control/rumble confirmation, and
+the one-hour soak remain hardware acceptance gates. Distributing this to end
+users additionally requires the USB identity and code-signing work described
+under [known limitations](#known-limitations).
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
@@ -50,19 +53,21 @@ No physical hardware is required. The recording crate uses the established `serd
 
 ## Daily use
 
-After flashing the XIAO, pairing the Steam Controller 2 with its official
-Puck, granting Input Monitoring permission, and fully stopping Steam and its
-IPC helper, start the complete bridge from the repository root:
+After flashing the XIAO, connecting the Steam Controller 2 through its official
+Puck or macOS Bluetooth, granting Input Monitoring permission, and fully
+stopping Steam and its IPC helper, start the complete bridge from the
+repository root:
 
 ```bash
 ./sc-bridge
 ```
 
 No HID index or serial path is normally needed. The bridge waits if either
-device is absent, identifies the one Puck interface producing complete
-`0x42`/`0x45` controller states, verifies the XIAO with a protocol-v1 Hello
-handshake, and resumes after either device is reconnected. It refuses to guess
-when more than one active controller or valid XIAO is present.
+endpoint is absent, identifies the one supported Puck or Bluetooth collection
+producing complete `0x42`/`0x45` controller states, verifies the XIAO with a
+protocol-v1 Hello handshake, and resumes after either endpoint is reconnected.
+It refuses to guess when more than one active controller source or valid XIAO
+is present.
 
 Use `./sc-bridge --index N` or `./sc-bridge --port /dev/cu.usbmodem…` only to
 resolve an ambiguity or diagnose a specific endpoint. See the
@@ -121,13 +126,14 @@ cargo run -p sc-probe -- capture --index 0 --output reports.jsonl \
   --duration-secs 30 --decoded
 ```
 
-The Puck is opened with macOS shared HID access because the tested composite
-rejects `kIOHIDOptionsTypeSeizeDevice` with `not permitted`. Project tools take
-a per-slot ownership lock, preventing two bridge/probe/visualizer processes
-from sharing a slot. Steam and other non-project consumers do not honor that
-lock and must be stopped separately.
-After identifying the active `28de:1304` `ff00:0001` interface 2–5 slot, test
-the safe SDL-compatible lizard-mode heartbeat:
+Supported controller collections are opened with macOS shared HID access
+because the tested Puck rejects `kIOHIDOptionsTypeSeizeDevice` with `not
+permitted`. Project tools take a per-input ownership lock, preventing two
+bridge/probe/visualizer processes from sharing one source. Steam and other
+non-project consumers do not honor that lock and must be stopped separately.
+After identifying either the active `28de:1304` USB `ff00:0001` interface 2–5
+slot or `28de:1303` Bluetooth `ff00:0001` interface -1 collection, test the safe
+SDL-compatible lizard-mode heartbeat:
 
 ```bash
 cargo run -p sc-probe -- suppress-lizard --index 0 --duration-secs 15
@@ -180,13 +186,13 @@ and hardware validation are documented in
   --deterministic --output mock
 ```
 
-Live mode defaults to automatic active-slot and XIAO discovery plus serial
+Live mode defaults to automatic active-source and XIAO discovery plus serial
 output. It uses bounded latest-state input, timeout and decode-failure
 neutralization, reconnect recovery, Ctrl-C shutdown, and structured status. It
-claims the selected Puck slot from other project tools and refreshes the narrow
-lizard-off setting every three seconds. Steam must still be fully quit. A
-failed suppression write neutralizes the XIAO and stops the bridge. See
-[the bridge guide](docs/BRIDGE.md).
+claims the selected Puck or Bluetooth collection from other project tools and
+refreshes the narrow lizard-off setting every three seconds. Steam must still
+be fully quit. A failed suppression write neutralizes the XIAO and stops the
+bridge. See [the bridge guide](docs/BRIDGE.md).
 
 ## macOS menu-bar app
 
@@ -198,25 +204,27 @@ open "dist/Steam Controller Bridge.app"
 ```
 
 The menu app embeds the same runtime, starts it automatically, and shows bridge,
-Puck, controller, XIAO, battery, suppression, haptics, and error status. Its menu
-provides Start/Stop, Copy Diagnostics, Input Monitoring settings, the rotated
-log folder, and Quit. This source-built application is not notarized; release
-signing, a DMG, and Launch at Login remain future work.
+input transport, controller, XIAO, battery, suppression, haptics, and error
+status. Its menu provides Start/Stop, Copy Diagnostics, Input Monitoring
+settings, the rotated log folder, and Quit. This source-built application is
+not notarized; release signing, a DMG, and Launch at Login remain future work.
 
 ## Known limitations
 
-- Steam Controller 2 Puck input is live-tested with extended `0x42` reports.
-  Direct USB and Bluetooth still need transport-specific regression captures.
-- Only the official Proteus Puck `28de:1304` active slot is permitted to receive
-  the SDL-compatible lizard-off feature report and exact standard dual-rumble
+- Steam Controller 2 Puck input is live-tested with extended `0x42` reports;
+  Bluetooth is live-tested with primary `0x45` and battery `0x43` reports.
+  Direct USB-C input remains unsupported.
+- Only the exact official Proteus Puck `28de:1304` active slots and the direct
+  Bluetooth `28de:1303` vendor collection are permitted to receive the
+  SDL-compatible lizard-off feature report and exact standard dual-rumble
   output. Arbitrary controller initialization, settings, mappings, custom
   haptics, and feature/output writes remain intentionally unavailable.
 - Steam coexistence, multiple simultaneous SC2 controllers, and running another
   HID consumer against the selected slot are unsupported.
 - Automatic discovery deliberately reports an ambiguity instead of choosing
-  when multiple Puck slots produce controller states or multiple XIAOs complete
-  the firmware handshake. Use an explicit override after identifying the
-  intended endpoint.
+  when multiple Puck/Bluetooth sources produce controller states or multiple
+  XIAOs complete the firmware handshake. Use an explicit override after
+  identifying the intended endpoint.
 - macOS access is intentionally shared at the native HID layer. The project
   lock excludes other project tools only; Steam's persistent
   `com.valvesoftware.steam.ipctool` LaunchAgent must be booted out before play.

@@ -57,14 +57,16 @@ fn run_live(args: &[String]) -> Result<(), String> {
     let result = loop {
         let status = handle.status();
         let summary = format!(
-            "{:?}|{}|{}|{}|{:?}|{:?}|{}|{:?}|{}|{}|{:?}",
+            "{:?}|{}|{:?}|{}|{:?}|{:?}|{}|{}|{}|{:?}|{}|{}|{:?}",
             status.state,
             status.detail,
-            status.puck.connected,
+            status.source,
             status.controller.connected,
             status.xiao.path,
             status.battery_percent,
             status.lizard.suppressed,
+            status.lizard.refreshes,
+            status.lizard.failures,
             status.haptics.state,
             status.haptics.refreshes / 25,
             status.haptics.failures,
@@ -72,15 +74,32 @@ fn run_live(args: &[String]) -> Result<(), String> {
         );
         if last_summary.as_ref() != Some(&summary) {
             eprintln!(
-                "level=info event=status state={:?} detail={:?} puck_connected={} \
-                 controller_connected={} xiao_path={:?} battery={:?} lizard_suppressed={}",
+                "level=info event=status state={:?} detail={:?} input_connected={} \
+                 input_active={} input_transport={:?} input_product={:?} input_serial={:?} \
+                 controller_connected={} xiao_path={:?} battery={:?} lizard_suppressed={} \
+                 lizard_refreshes={} lizard_failures={} lizard_refresh_age_ms={:?}",
                 status.state,
                 status.detail,
-                status.puck.connected,
+                status.source.connected,
+                status.source.active,
+                status.source.transport,
+                status
+                    .source
+                    .identity
+                    .as_ref()
+                    .and_then(|info| info.product.as_deref()),
+                status
+                    .source
+                    .identity
+                    .as_ref()
+                    .and_then(|info| info.serial_number.as_deref()),
                 status.controller.connected,
                 status.xiao.path,
                 status.battery_percent,
-                status.lizard.suppressed
+                status.lizard.suppressed,
+                status.lizard.refreshes,
+                status.lizard.failures,
+                status.lizard.last_refresh_age.map(|age| age.as_millis())
             );
             eprintln!(
                 "level=info event=haptics state={:?} commands={} writes={} refreshes={} \
@@ -251,10 +270,11 @@ fn parse_value<T: std::str::FromStr>(args: &[String], flag: &str, default: T) ->
 fn print_help() {
     println!(
         "sc-bridge [options]\n\n\
-         With no arguments, waits for the active official Puck slot and the XIAO,\n\
-         then starts the serial bridge and recovers after reconnects.\n\n\
+         With no arguments, waits for one active Steam Controller 2 input source\n\
+         (Puck or Bluetooth) and the XIAO, then starts the serial bridge and recovers\n\
+         after reconnects.\n\n\
          --input <live|replay>       Input mode (default: live)\n\
-         --controller auto          Explicit automatic active-slot discovery\n\
+         --controller auto          Explicit automatic active-source discovery\n\
          --index N                  Select collection from sc-probe list\n\
          --port <auto|PATH>         Automatic XIAO discovery or fixed CDC port\n\
          --lizard-mode <suppress|leave>\n\

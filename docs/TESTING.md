@@ -40,15 +40,21 @@ expiry, 500 ms degraded retry, reconnect clearing, and safety-zero priority.
 
 Recording tests cover typed raw and gamepad round trips, timestamp ordering, unknown events, seeking, deterministic replay, malformed/truncated input, version rejection, and identical simulator-state replay.
 
-Steam Controller protocol tests cover all 30 OpenPuck button bits, every trigger/stick/pad/pressure/motion field, both `0x45` and extended `0x42`, connection/battery/signal reports, typed recording round trips, incorrect sizes, mismatched IDs, unknown IDs, and arbitrary truncated lengths.
+Steam Controller protocol tests cover all 30 OpenPuck button bits, every
+trigger/stick/pad/pressure/motion field, both `0x45` and extended `0x42`,
+connection/battery/signal reports, anonymized observed Bluetooth `0x45`/`0x43`
+goldens, typed recording round trips, incorrect sizes, mismatched IDs, unknown
+IDs, and arbitrary truncated lengths.
 
 The same crate commits the complete 64-byte SDL-compatible lizard-off golden
-vector. Device tests cover the exact `28de:1304`/`ff00:0001`/interface 2–5
-allowlist plus immediate, three-second, disconnect, and reconnect heartbeat
-scheduling. Bridge tests cover safe-default option parsing, initial
+vector. Device tests cover exact classification and rejection boundaries for
+the `28de:1304` USB/`ff00:0001`/interface 2–5 Puck and `28de:1303`
+Bluetooth/`ff00:0001`/interface -1 collection, plus immediate, three-second,
+disconnect, and reconnect heartbeat scheduling. Bridge tests cover
+safe-default option parsing, unique active-source selection, initial
 suppression, periodic refresh, leave mode, and fail-closed write behavior. The
 macOS device tests also verify that a second project process cannot acquire the
-same per-slot ownership lock and that ownership is released when the first
+same per-input ownership lock and that ownership is released when the first
 session ends.
 
 The tested Puck cannot be opened with HIDAPI's macOS exclusive seize option:
@@ -72,8 +78,8 @@ cargo run -p sc-probe -- list
 cargo run -p sc-probe -- inspect --index 0
 ```
 
-After identifying the active official Puck slot and fully quitting Steam, the
-whitelisted hardware test is:
+After identifying an active exact supported Puck or Bluetooth collection and
+fully quitting Steam, the whitelisted hardware test is:
 
 ```bash
 cargo run -p sc-probe -- suppress-lizard --index N --duration-secs 15
@@ -83,7 +89,7 @@ While it runs, controller `A` must not emit Space and touchpads must not move th
 pointer. After it stops, desktop behavior must return within about 10 seconds.
 Never run this alongside the visualizer, monitor, Steam, or another bridge.
 
-Test the Puck actuators without the XIAO:
+Test the controller actuators without the XIAO:
 
 ```bash
 cargo run -p sc-probe -- rumble --index N --low 32768 --high 0
@@ -96,7 +102,7 @@ Then flash the updated firmware, start `./sc-bridge`, and verify GamepadTester's
 one-second and infinite vibration actions. Hardware acceptance covers unequal
 strong/weak magnitudes, Boosteroid, GeForce NOW, rapid and continuous effects,
 and zero within 100 ms after effect stop, browser exit, bridge termination, or
-Puck/XIAO disconnect. These physical results must not be inferred from unit
+controller/XIAO disconnect. These physical results must not be inferred from unit
 tests or a successful firmware build.
 
 Linux CI compiles the hardware-independent API and explicit unsupported-platform implementation; it does not require `hidapi` system libraries or physical hardware.
@@ -117,9 +123,9 @@ refreshed state delivery have been exercised with a flashed XIAO.
 Runtime and CLI tests cover zero-argument defaults, explicit controller/port
 overrides, exact XIAO metadata filtering, callout-versus-tty filtering,
 battery-range handling, latest-report replacement, and replay's unchanged dump
-default. Menu-model tests cover status strings, battery unknown/percentage,
-haptics state, error visibility, and Start/Stop enablement. macOS tests build the tray
-frontend, diagnostics renderer, and template icon.
+default. Menu-model tests cover Puck/Bluetooth source rendering, battery
+unknown/percentage, haptics state, error visibility, and Start/Stop enablement.
+macOS tests build the tray frontend, diagnostics renderer, and template icon.
 
 The `macos-app` CI job builds the current-architecture release binary, creates
 an `LSUIElement` `.app`, ad-hoc signs and verifies it, archives it, and uploads
@@ -151,8 +157,21 @@ Boosteroid and GeForce NOW as a standard gamepad, end-to-end dual rumble with
 correct strong/weak actuator orientation, and that `A` emits no Space while
 touchpads do not move the pointer, with desktop mode returning after exit.
 
-Refresh failure handling, fault timing, reconnect, and soak gates remain
-unproven.
+On 2026-07-28, direct Bluetooth was additionally observed as `28de:1303`,
+transport Bluetooth, usage `ff00:0001`, interface `-1`. Its vendor collection
+produced complete 46-byte `0x45` states at approximately 67–68 Hz, including
+normal sequence wrap, and compatible `0x43` battery reports reporting 97%.
+With the idle four-slot Puck still attached, the rebuilt zero-argument bridge
+selected only the active Bluetooth source, completed Hello with the XIAO at
+`/dev/cu.usbmodem11201`, reached `Running`, surfaced the battery, and shut down
+cleanly. A separate seven-second diagnostic completed the initial Bluetooth
+lizard-off write and two three-second refreshes with no failures. Independent
+left-only and right-only 50% rumble diagnostics each completed seven output
+writes and an explicit final zero without a HID error.
+
+Bluetooth full-control mapping, lizard suppression, rumble, reconnect,
+sleep/wake, refresh failure handling, fault timing, and soak gates remain
+hardware acceptance work until explicitly recorded here.
 
 Bridge-core tests cover changed-state suppression, timeout neutralization,
 disconnect/reset/shutdown neutralization, repeated decode failures, and HID

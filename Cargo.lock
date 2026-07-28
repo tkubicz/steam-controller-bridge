@@ -2754,6 +2754,7 @@ name = "sc-bridge-menu"
 version = "0.1.0"
 dependencies = [
  "bridge-runtime",
+ "steam-controller-device",
  "tray-icon",
  "winit",
 ]

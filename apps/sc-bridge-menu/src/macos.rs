@@ -34,7 +34,7 @@ pub fn run() -> Result<(), String> {
 
 struct MenuItems {
     bridge: MenuItem,
-    puck: MenuItem,
+    input: MenuItem,
     controller: MenuItem,
     xiao: MenuItem,
     battery: MenuItem,
@@ -71,7 +71,7 @@ impl MenuApp {
 
     fn create_tray(&mut self) -> Result<(), String> {
         let bridge = MenuItem::new("Bridge: Starting", false, None);
-        let puck = MenuItem::new("Puck: Discovering", false, None);
+        let input = MenuItem::new("Input: Discovering", false, None);
         let controller = MenuItem::new("Controller: Not connected", false, None);
         let xiao = MenuItem::new("XIAO: Discovering", false, None);
         let battery = MenuItem::new("Battery: Unknown", false, None);
@@ -88,7 +88,7 @@ impl MenuApp {
         let separator3 = PredefinedMenuItem::separator();
         let menu = Menu::with_items(&[
             &bridge,
-            &puck,
+            &input,
             &controller,
             &xiao,
             &battery,
@@ -114,7 +114,7 @@ impl MenuApp {
             .map_err(|error| error.to_string())?;
         self.items = Some(MenuItems {
             bridge,
-            puck,
+            input,
             controller,
             xiao,
             battery,
@@ -137,7 +137,7 @@ impl MenuApp {
         if self.last_model.as_ref() != Some(&model) {
             if let Some(items) = &self.items {
                 items.bridge.set_text(&model.bridge);
-                items.puck.set_text(&model.puck);
+                items.input.set_text(&model.input);
                 items.controller.set_text(&model.controller);
                 items.xiao.set_text(&model.xiao);
                 items.battery.set_text(&model.battery);
@@ -322,7 +322,8 @@ impl StatusLogger {
         writeln!(
             log,
             "timestamp={timestamp} revision={} state={:?} detail={:?} \
-             puck_connected={} controller_connected={} xiao_path={:?} \
+             input_connected={} input_active={} input_transport={:?} \
+             input_product={:?} input_serial={:?} controller_connected={} xiao_path={:?} \
              xiao_serial={:?} battery={:?} lizard_suppressed={} \
              lizard_refreshes={} lizard_failures={} lizard_refresh_age_ms={:?} last_error={:?} \
              haptics_state={:?} rumble_commands={} rumble_writes={} rumble_refreshes={} \
@@ -331,7 +332,19 @@ impl StatusLogger {
             status.revision,
             status.state,
             status.detail,
-            status.puck.connected,
+            status.source.connected,
+            status.source.active,
+            status.source.transport,
+            status
+                .source
+                .identity
+                .as_ref()
+                .and_then(|info| info.product.as_deref()),
+            status
+                .source
+                .identity
+                .as_ref()
+                .and_then(|info| info.serial_number.as_deref()),
             status.controller.connected,
             status.xiao.path,
             status.xiao.usb_serial,
@@ -376,7 +389,7 @@ fn diagnostics_text(status: &BridgeStatus) -> String {
     let _ = writeln!(text, "Steam Controller Bridge diagnostics");
     let _ = writeln!(text, "state: {:?}", status.state);
     let _ = writeln!(text, "detail: {}", status.detail);
-    let _ = writeln!(text, "puck: {:?}", status.puck);
+    let _ = writeln!(text, "input_source: {:?}", status.source);
     let _ = writeln!(text, "controller: {:?}", status.controller);
     let _ = writeln!(text, "xiao: {:?}", status.xiao);
     let _ = writeln!(text, "battery_percent: {:?}", status.battery_percent);
@@ -426,7 +439,7 @@ mod tests {
     #[test]
     fn diagnostics_include_hardware_and_safety_state() {
         let text = diagnostics_text(&BridgeStatus::default());
-        assert!(text.contains("puck:"));
+        assert!(text.contains("input_source:"));
         assert!(text.contains("xiao:"));
         assert!(text.contains("lizard:"));
         assert!(text.contains("haptics:"));

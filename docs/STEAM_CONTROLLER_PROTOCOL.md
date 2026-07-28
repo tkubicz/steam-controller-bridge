@@ -1,6 +1,11 @@
 # Steam Controller 2 Host Protocol
 
-This implementation follows [OpenPuck](https://github.com/safijari/openpuck), as designated for this project. It targets the host-facing HID reports exposed by a Steam Controller 2 (2026) puck-compatible collection. The original 2015 Steam Controller and receiver are explicitly unsupported because they use a different protocol and report layout.
+This implementation follows
+[OpenPuck](https://github.com/safijari/openpuck) for the Puck report layout and
+SDL's Triton driver for safe controller writes. It targets Steam Controller 2
+(2026) through the official Puck or the exact direct Bluetooth vendor
+collection. The original 2015 Steam Controller and receiver are explicitly
+unsupported because they use a different protocol and report layout.
 
 ## Confirmed from OpenPuck
 
@@ -14,6 +19,14 @@ OpenPuck exposes four puck HID slot interfaces and forwards controller input rep
 - `0x7b`: periodic 13-byte status; byte 9 is signed signal strength in dBm.
 
 Every multi-byte field is little-endian. HIDAPI returns the report ID as the first byte, and the decoder also receives it as metadata; mismatches are rejected.
+
+Direct Bluetooth was observed on macOS as `28de:1303`, transport `Bluetooth`,
+usage `ff00:0001`, interface `-1`. It emits the same 46-byte `0x45` state layout
+at approximately 67–68 Hz and compatible 15-byte `0x43` battery reports. The
+anonymized captured state and battery packets are committed as decoder golden
+vectors. The official Puck remains `28de:1304`, transport `USB`, usage
+`ff00:0001`, interfaces 2–5, and has been observed using extended `0x42` at
+approximately 250 Hz.
 
 ## State report layout
 
@@ -94,14 +107,15 @@ OpenPuck's published table labels bits 28 and 29 as grip-touch signals, while cu
 
 ## Lizard-mode suppression
 
-The official Proteus Puck is USB `28de:1304`. Its controller slots use vendor
-usage `ff00:0001` on interfaces 2–5. macOS also receives the controller's native
-`0x40` mouse and `0x41` keyboard reports through sibling HID collections, so
-discarding those reports in the decoder cannot prevent Space keys or pointer
-movement.
+The exact write allowlist contains the official Proteus Puck (`28de:1304`, USB,
+vendor usage `ff00:0001`, interfaces 2–5) and direct Bluetooth (`28de:1303`,
+Bluetooth, vendor usage `ff00:0001`, interface `-1`). macOS also receives the
+controller's native `0x40` mouse and `0x41` keyboard reports through sibling
+HID collections, so discarding those reports in the decoder cannot prevent
+Space keys or pointer movement.
 
-For an exact supported Puck slot, the device layer permits one 64-byte feature
-report:
+For either exact supported collection, the device layer permits one 64-byte
+feature report:
 
 ```text
 01 87 03 09 00 00 00 ... 00
@@ -126,7 +140,7 @@ remain unavailable.
 
 ## Standard dual rumble
 
-The same exact official Puck-slot allowlist permits one ordinary HID output
+The same exact Puck-or-Bluetooth allowlist permits one ordinary HID output
 packet for standard dual rumble:
 
 ```text
@@ -150,13 +164,12 @@ copied.
 
 ## Still requiring local captures
 
-- Actual collection paths for reconnect scenarios and VID/PID values for direct
-  USB and Bluetooth modes.
-- Whether direct USB and Bluetooth expose the same host-facing reports as the puck.
+- Direct USB-C collection identity and report compatibility; it remains
+  unsupported.
 - Real trigger maxima, neutral jitter, pad pressure ranges, IMU scaling, and axis orientation.
 - Semantics of report `0x44` and unresolved bytes in `0x43`, `0x7b`, and extended `0x42`.
-- Long-duration lizard-suppression, sleep/wake, reconnect, and failure behavior
-  when Steam is absent.
+- Long-duration Bluetooth lizard-suppression, sleep/wake, reconnect, rumble,
+  and failure behavior when Steam is absent.
 
 ## Sources
 

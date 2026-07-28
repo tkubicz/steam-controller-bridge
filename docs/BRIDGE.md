@@ -1,8 +1,9 @@
 # Integrated Host Bridge
 
-This bridge targets Steam Controller 2 (2026) through the official Proteus
-Puck. See the [end-user guide](USER_GUIDE.md) for pairing, firmware, macOS
-permissions, and troubleshooting.
+This bridge targets Steam Controller 2 (2026) through either the official
+Proteus Puck or direct macOS Bluetooth. See the
+[end-user guide](USER_GUIDE.md) for pairing, firmware, macOS permissions, and
+troubleshooting.
 
 ## Zero-configuration live mode
 
@@ -12,16 +13,19 @@ The normal workflow is:
 ./sc-bridge
 ```
 
-Live mode defaults to automatic active-Puck discovery, automatic XIAO
+Live mode defaults to automatic active-source discovery, automatic XIAO
 discovery, negotiated serial output, and lizard-mode suppression. The process
 may start before either endpoint is present. It scans at 500 ms intervals and
 reports state transitions only when they change.
 
-Puck discovery considers only official `28de:1304`, usage `ff00:0001`,
-interface 2–5 collections. It opens candidates by stable HID identity and
-observes them without sending feature reports. A slot becomes active only
-after a complete valid `0x42` or `0x45` state report. Zero active slots waits;
-multiple active slots fail safely and require `--index N`.
+Controller discovery considers only official `28de:1304` USB, usage
+`ff00:0001`, interface 2–5 Puck collections and the `28de:1303` Bluetooth,
+usage `ff00:0001`, interface -1 collection. It opens candidates by stable HID
+identity and observes them without sending feature reports. A source becomes
+active only after a complete valid `0x42` or `0x45` state report. An idle Puck
+therefore does not block an active Bluetooth controller. Zero active sources
+waits; multiple active sources fail safely, list their global `sc-probe`
+indices and identities, and require `--index N`.
 
 XIAO discovery enumerates serial metadata rather than matching filenames. An
 automatic candidate must be a macOS `/dev/cu.*` callout port with exact
@@ -55,12 +59,13 @@ idempotent Start, Stop, and Shutdown commands plus a thread-safe latest
 `BridgeStatus`.
 
 Status distinguishes `Stopped`, `Discovering`, `Waiting`, `Starting`,
-`Running`, `Stopping`, and `Error`. It includes selected Puck identity,
-controller-state connectivity, XIAO path/serial/Hello state, lizard refresh
-state, haptics idle/active/degraded state and counters, a best-effort battery
-percentage from `0x43`, bridge/output metrics, and the latest actionable error.
-Battery values above 100 are ignored and battery state is cleared when the
-controller disconnects or the slot changes.
+`Running`, `Stopping`, and `Error`. It includes selected input identity and
+`ControllerTransport::{Puck, Bluetooth}`, controller-state connectivity, XIAO
+path/serial/Hello state, lizard refresh state, haptics idle/active/degraded
+state and counters, a best-effort battery percentage from `0x43`,
+bridge/output metrics, and the latest actionable error. Battery values above
+100 are ignored and battery state is cleared when the controller disconnects
+or the source changes.
 
 The macOS `sc-bridge-menu` binary embeds this same runtime. It does not launch a
 CLI subprocess.
@@ -72,10 +77,10 @@ stale motion if output temporarily stalls; lifecycle events remain ordered.
 The bridge sends neutral after 200 ms without a valid controller state or after
 three consecutive decode failures.
 
-If the selected slot stops producing valid states for one second, the XIAO has
+If the selected source stops producing valid states for one second, the XIAO has
 already been neutralized by the 200 ms deadline. The runtime then stops the
-lizard heartbeat, releases the Puck, and returns to active-slot discovery. If
-the XIAO disappears, firmware CDC/data watchdogs neutralize it, host input
+lizard heartbeat, releases the input, and returns to active-source discovery.
+If the XIAO disappears, firmware CDC/data watchdogs neutralize it, host input
 acceptance and lizard refreshes stop, and both endpoints are rediscovered.
 
 Every owned transition follows this ordering:
@@ -85,7 +90,7 @@ Every owned transition follows this ordering:
 3. stop the lizard heartbeat;
 4. release output and HID devices.
 
-Live mode sends the fixed SDL-compatible lizard-off report only after one slot
+Live mode sends the fixed SDL-compatible lizard-off report only after one source
 is selected and refreshes it every three seconds. An initial or refresh write
 failure is fail-closed: input stops, neutralization is attempted, the HID
 worker ends, and status becomes an actionable error. No lizard-on command is
@@ -100,7 +105,8 @@ haptics `Degraded`, leaves input running, and retries no more often than every
 post-reconnect lease.
 
 Native HID access remains shared because the tested Puck rejects macOS seize
-access. A project-level ownership lock excludes another bridge/probe/visualizer,
+access. A project-level ownership lock keyed by stable device identity excludes
+another bridge/probe/visualizer from the selected Puck or Bluetooth collection,
 but Steam and its persistent IPC helper must be stopped manually:
 
 ```bash
