@@ -12,23 +12,23 @@ the [user guide](docs/USER_GUIDE.md).
 
 ## Status
 
-The Steam Controller 2 Puck input path, host bridge, and XIAO nRF52840
-CDC-to-gamepad firmware are implemented. On macOS, the connected prototype has
-been flashed successfully, receives live `0x42` Puck reports, and enumerates in
-Safari's Gamepad API with `mapping: standard` through an Xbox/ABXY-compatible
-USB personality. Boosteroid also detects the XIAO as a valid gamepad. The
-lizard-off feature transfer and repeated three-second refreshes have also been
-verified on the connected Puck. Zero-argument discovery has selected the active
-Puck interface and the metadata/Hello-verified XIAO port end to end, including a
-live 94% battery report. Manual confirmation that Space/pointer input is absent,
-restoration timing, full control-by-control mapping, GeForce NOW, disconnect
-timing, end-to-end dual rumble, and one-hour soak tests remain release gates.
-The software and updated firmware paths for standard Xbox strong/weak rumble
-are implemented. The Puck accepted bounded left-only and right-only refreshed
-diagnostics plus their final zero writes, and the connected development XIAO
-was flashed with the reverse path. End-to-end acceptance still requires a
-Safari/streaming-client vibration request and confirmation of the physical
-actuator sides.
+Working end to end on macOS. The Steam Controller 2 Puck input path, host
+bridge, and XIAO nRF52840 CDC-to-gamepad firmware are implemented, and the
+following are verified on hardware:
+
+- the browser Gamepad API in Safari, reporting `mapping: standard`;
+- Boosteroid and GeForce NOW, both driven as a standard Xbox-layout gamepad;
+- every physical control: buttons, both sticks, both triggers, and the D-pad;
+- end-to-end dual rumble, from a client vibration request through to the
+  correct strong and weak Steam Controller 2 actuators;
+- lizard-mode suppression, with no stray Space keypresses or pointer motion
+  while running and normal desktop behavior restored after exit;
+- zero-argument discovery of the active Puck interface and the
+  metadata/Hello-verified XIAO port, including live battery reporting.
+
+A one-hour soak test is the remaining hardware acceptance gate. Distributing
+this to end users additionally requires the USB identity and code-signing work
+described under [known limitations](#known-limitations).
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
@@ -225,9 +225,6 @@ signing, a DMG, and Launch at Login remain future work.
   GameController and browser clients. This is suitable for development
   hardware, but a distributable product needs an owned/licensed USB identity
   and a verified macOS recognition strategy.
-- GeForce NOW, full mapping, manual keyboard/pointer suppression, automatic
-  restoration timing, lizard-suppression failure timing, and soak acceptance
-  are not yet complete. Boosteroid gamepad detection and repeated lizard-off
-  writes have been confirmed, but complete input and rumble acceptance remains
-  pending.
+- A one-hour soak test, automatic lizard restoration timing, and
+  lizard-suppression failure timing have not been formally qualified.
 - The keyboard simulator is line-oriented, not a production input UI.

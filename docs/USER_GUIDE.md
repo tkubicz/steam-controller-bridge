@@ -17,18 +17,21 @@ The following paths have been verified on development hardware:
   an Xbox-layout gamepad;
 - macOS binds the gamepad to its built-in `Xbox360Gamepad` driver;
 - Safari's Gamepad API sees a connected controller with `mapping: standard`;
-- Boosteroid detects the connected XIAO as a valid gamepad;
+- Boosteroid and GeForce NOW both drive the bridge as a standard gamepad;
+- every physical control is confirmed: buttons, both sticks, both triggers, and
+  the D-pad;
+- end-to-end dual rumble works from a client vibration request through to the
+  correct strong and weak actuators;
+- lizard suppression produces no Space keypresses or pointer motion while
+  running, and normal desktop behavior returns afterwards;
 - an unchanged active simulator state remains held for more than 30 seconds
   without an unintended watchdog neutral;
 - the live bridge sent the initial lizard-off command plus ten three-second
   refreshes over a 30-second Puck-to-XIAO run with no HID, decode, suppression,
   or serial failure.
 
-Every physical Steam Controller 2 control, explicit watchdog/disconnect and
-manual Space/pointer suppression, lizard restoration timing, GeForce NOW,
-end-to-end dual rumble, reconnect stress, and the one-hour soak still require
-acceptance testing. Do not treat the development smoke test as a release
-qualification.
+Explicit watchdog/disconnect timing, lizard restoration timing, reconnect
+stress, and the one-hour soak still require acceptance testing.
 
 The bridge sends exactly one whitelisted controller setting and one whitelisted
 output shape on the official Puck: SDL's lizard-mode-off command and standard
@@ -577,6 +580,6 @@ but a broadly distributable product should additionally provide:
 - signed/notarized macOS binaries and downloadable firmware artifacts;
 - an owned or licensed USB VID/PID plus a macOS recognition path that does not
   depend on another vendor's Xbox 360 compatibility identity;
-- hardware qualification of dual-rumble delivery, expiry, and disconnect
-  behavior in GamepadTester, Boosteroid, and GeForce NOW;
+- hardware qualification of dual-rumble expiry and disconnect timing, beyond
+  the confirmed delivery path;
 - versioned releases and a supported upgrade/recovery procedure.

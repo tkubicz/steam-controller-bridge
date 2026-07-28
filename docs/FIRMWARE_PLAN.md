@@ -3,9 +3,9 @@
 Firmware is implemented in `firmware/xiao-nrf52840` for the non-Sense board.
 Its native protocol/session tests run without hardware. Serial flashing,
 CDC/gamepad enumeration, macOS Xbox-driver binding, Safari Gamepad API
-visibility, and a 30-second unchanged-state refresh have also been exercised on
-hardware. Full mapping, failure timing, streaming clients, and soak testing
-remain release gates.
+visibility, a 30-second unchanged-state refresh, full control-by-control
+mapping, Boosteroid and GeForce NOW, and end-to-end dual rumble have also been
+exercised on hardware. Failure timing and soak testing remain release gates.
 
 The XIAO firmware exposes a USB composite device with a CDC interface for
 bridge frames and an Xbox 360-compatible vendor interface for browsers and

@@ -10,6 +10,15 @@ ARDUINO_DATA = $(shell $(ARDUINO_CLI) config get directories.data)
 UF2CONV = $(ARDUINO_DATA)/packages/Seeeduino/hardware/nrf52/$(CORE_VERSION)/tools/uf2conv/uf2conv.py
 PORT ?=
 
+# The core's bundled adafruit-nrfutil is a frozen Click application that aborts
+# unless the environment names a UTF-8 locale. Non-interactive shells and CI
+# runners routinely leave LANG and LC_ALL unset, so force a locale that both
+# macOS and glibc provide.
+LC_ALL ?= C.UTF-8
+LANG ?= C.UTF-8
+export LC_ALL
+export LANG
+
 .PHONY: setup test build flash artifacts clean
 
 setup:

@@ -7,11 +7,13 @@ on:
 jobs:
   test:
     strategy:
+      # Never let one platform's failure hide the other platform's result.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -20,19 +22,33 @@ jobs:
       - run: cargo test --workspace --all-features
       - run: cargo build --workspace --all-targets
 
-  firmware:
-    runs-on: ubuntu-latest
+  firmware-tests:
+    # Host-native parser/session tests. No Arduino toolchain required, so this
+    # stays cheap and covers both GCC and Clang under -Werror.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - name: Run native firmware tests
+        run: make -C firmware/xiao-nrf52840 test
+
+  firmware-artifacts:
+    # macOS only: the pinned Seeed nRF52 core bundles adafruit-nrfutil for
+    # macOS and Windows, but on Linux its recipe falls back to a bare PATH
+    # lookup that nothing satisfies, so the DFU/UF2 build cannot run there.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
       - name: Install Arduino CLI
         uses: arduino/setup-arduino-cli@v2
       - name: Install pinned Seeed nRF52 core
         run: make -C firmware/xiao-nrf52840 setup
-      - name: Run native firmware tests
-        run: make -C firmware/xiao-nrf52840 test
       - name: Build UF2 and DFU artifacts
         run: make -C firmware/xiao-nrf52840 artifacts
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: xiao-nrf52840-firmware
           path: firmware/xiao-nrf52840/build/artifacts/
@@ -40,13 +56,13 @@ jobs:
   macos-app:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Build and ad-hoc sign menu-bar application
         run: ./tools/build-macos-app.sh
       - name: Archive application bundle
         run: ditto -c -k --sequesterRsrc --keepParent "dist/Steam Controller Bridge.app" steam-controller-bridge-macos.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: steam-controller-bridge-macos
           path: steam-controller-bridge-macos.zip
