@@ -57,9 +57,10 @@ idempotent Start, Stop, and Shutdown commands plus a thread-safe latest
 Status distinguishes `Stopped`, `Discovering`, `Waiting`, `Starting`,
 `Running`, `Stopping`, and `Error`. It includes selected Puck identity,
 controller-state connectivity, XIAO path/serial/Hello state, lizard refresh
-state, a best-effort battery percentage from `0x43`, bridge/output metrics, and
-the latest actionable error. Battery values above 100 are ignored and battery
-state is cleared when the controller disconnects or the slot changes.
+state, haptics idle/active/degraded state and counters, a best-effort battery
+percentage from `0x43`, bridge/output metrics, and the latest actionable error.
+Battery values above 100 are ignored and battery state is cleared when the
+controller disconnects or the slot changes.
 
 The macOS `sc-bridge-menu` binary embeds this same runtime. It does not launch a
 CLI subprocess.
@@ -80,14 +81,23 @@ acceptance and lizard refreshes stop, and both endpoints are rediscovered.
 Every owned transition follows this ordering:
 
 1. send or attempt XIAO neutral;
-2. stop and join the Puck/lizard worker;
-3. release output and HID devices.
+2. send SC2 rumble zero;
+3. stop the lizard heartbeat;
+4. release output and HID devices.
 
 Live mode sends the fixed SDL-compatible lizard-off report only after one slot
 is selected and refreshes it every three seconds. An initial or refresh write
 failure is fail-closed: input stops, neutralization is attempted, the HID
 worker ends, and status becomes an actionable error. No lizard-on command is
 sent; the controller watchdog restores desktop mode after heartbeats stop.
+
+Rumble travels in the opposite direction. The XIAO validates the Xbox OUT
+packet and renews a CDC lease every 25 ms. The HID worker applies changed
+values immediately, refreshes nonzero actuator output at 40 ms, and expires the
+lease at 100 ms. Only the newest command is retained. A write failure marks
+haptics `Degraded`, leaves input running, and retries no more often than every
+500 ms while fresh lease frames continue. Reconnect requires a new
+post-reconnect lease.
 
 Native HID access remains shared because the tested Puck rejects macOS seize
 access. A project-level ownership lock excludes another bridge/probe/visualizer,

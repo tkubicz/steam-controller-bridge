@@ -8,6 +8,7 @@ pub const HEADER_SIZE: usize = 8;
 pub const CHECKSUM_SIZE: usize = 2;
 pub const MAX_PAYLOAD_SIZE: usize = 256;
 pub const GAMEPAD_PAYLOAD_SIZE: usize = 18;
+pub const RUMBLE_PAYLOAD_SIZE: usize = 4;
 pub const GAMEPAD_FRAME_SIZE: usize = HEADER_SIZE + GAMEPAD_PAYLOAD_SIZE + CHECKSUM_SIZE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,7 @@ pub enum MessageType {
     Ping = 5,
     Pong = 6,
     DeviceInfo = 7,
+    Rumble = 8,
     Error = 255,
 }
 
@@ -35,6 +37,7 @@ impl TryFrom<u8> for MessageType {
             5 => Ok(Self::Ping),
             6 => Ok(Self::Pong),
             7 => Ok(Self::DeviceInfo),
+            8 => Ok(Self::Rumble),
             255 => Ok(Self::Error),
             _ => Err(()),
         }
@@ -59,6 +62,10 @@ pub enum Message {
         nonce: u32,
     },
     DeviceInfo(Vec<u8>),
+    Rumble {
+        low_frequency: u16,
+        high_frequency: u16,
+    },
     Error {
         code: u16,
         detail: Vec<u8>,
@@ -201,6 +208,15 @@ fn encode_message(message: &Message) -> (u8, Vec<u8>) {
         Message::Ping { nonce } => (MessageType::Ping as u8, nonce.to_le_bytes().to_vec()),
         Message::Pong { nonce } => (MessageType::Pong as u8, nonce.to_le_bytes().to_vec()),
         Message::DeviceInfo(info) => (MessageType::DeviceInfo as u8, info.clone()),
+        Message::Rumble {
+            low_frequency,
+            high_frequency,
+        } => {
+            let mut payload = Vec::with_capacity(RUMBLE_PAYLOAD_SIZE);
+            payload.extend_from_slice(&low_frequency.to_le_bytes());
+            payload.extend_from_slice(&high_frequency.to_le_bytes());
+            (MessageType::Rumble as u8, payload)
+        }
         Message::Error { code, detail } => {
             let mut payload = code.to_le_bytes().to_vec();
             payload.extend_from_slice(detail);
@@ -263,6 +279,13 @@ fn parse_message(message_type: u8, payload: &[u8]) -> Result<Message, ProtocolEr
             })
         }
         Ok(MessageType::DeviceInfo) => Ok(Message::DeviceInfo(payload.to_vec())),
+        Ok(MessageType::Rumble) => {
+            exact_len(payload, RUMBLE_PAYLOAD_SIZE)?;
+            Ok(Message::Rumble {
+                low_frequency: u16::from_le_bytes([payload[0], payload[1]]),
+                high_frequency: u16::from_le_bytes([payload[2], payload[3]]),
+            })
+        }
         Ok(MessageType::Error) => {
             if payload.len() < 2 {
                 return Err(ProtocolError::InvalidPayloadLength {
@@ -440,6 +463,10 @@ mod tests {
             Message::Ping { nonce: 0x1234_5678 },
             Message::Pong { nonce: 9 },
             Message::DeviceInfo(b"xiao".to_vec()),
+            Message::Rumble {
+                low_frequency: 0x1234,
+                high_frequency: 0xabcd,
+            },
             Message::Error {
                 code: 42,
                 detail: b"bad".to_vec(),
@@ -462,6 +489,30 @@ mod tests {
                 .unwrap();
             assert_eq!(decoded, frame);
         }
+    }
+
+    #[test]
+    fn rumble_has_a_stable_little_endian_golden_vector() {
+        let frame = Frame::new(
+            0x5678,
+            Message::Rumble {
+                low_frequency: 0x1234,
+                high_frequency: 0xabcd,
+            },
+        )
+        .encode()
+        .unwrap();
+        assert_eq!(
+            &frame[..12],
+            &[b'S', b'C', 1, 8, 4, 0, 0x78, 0x56, 0x34, 0x12, 0xcd, 0xab]
+        );
+        assert!(matches!(
+            parse_message(MessageType::Rumble as u8, &[0, 0, 0]),
+            Err(ProtocolError::InvalidPayloadLength {
+                expected: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]

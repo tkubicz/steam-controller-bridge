@@ -20,10 +20,17 @@ constexpr uint8_t kOutEndpoint = 0x02;
 struct State {
   volatile bool opened;
   volatile bool out_needs_arm;
+  volatile bool output_pending;
+  volatile uint8_t output_length;
+  volatile uint8_t interface_number;
   volatile uint8_t in_endpoint;
   volatile uint8_t out_endpoint;
   uint8_t in_buffer[32] __attribute__((aligned(4)));
   uint8_t out_buffer[32] __attribute__((aligned(4)));
+  uint8_t pending_output[scbridge::kXInputRumbleReportSize]
+      __attribute__((aligned(4)));
+  uint8_t control_output[scbridge::kXInputRumbleReportSize]
+      __attribute__((aligned(4)));
 };
 
 State state{};
@@ -31,6 +38,9 @@ State state{};
 void driver_init() {
   state.opened = false;
   state.out_needs_arm = false;
+  state.output_pending = false;
+  state.output_length = 0;
+  state.interface_number = 0xff;
   state.in_endpoint = 0;
   state.out_endpoint = 0;
 }
@@ -58,6 +68,7 @@ uint16_t driver_open(uint8_t rhport, tusb_desc_interface_t const* interface,
     return 0;
   }
 
+  state.interface_number = interface->bInterfaceNumber;
   state.in_endpoint = endpoint_in->bEndpointAddress;
   state.out_endpoint = endpoint_out->bEndpointAddress;
   state.out_needs_arm = true;
@@ -65,12 +76,44 @@ uint16_t driver_open(uint8_t rhport, tusb_desc_interface_t const* interface,
   return kDescriptorLength;
 }
 
-bool driver_control(uint8_t, uint8_t, tusb_control_request_t const*) {
-  return false;
+void stage_output(const uint8_t* data, uint32_t length) {
+  const uint8_t copy_length =
+      length <= sizeof(state.pending_output)
+          ? static_cast<uint8_t>(length)
+          : static_cast<uint8_t>(sizeof(state.pending_output));
+  memcpy(state.pending_output, data, copy_length);
+  state.output_length =
+      length <= UINT8_MAX ? static_cast<uint8_t>(length) : UINT8_MAX;
+  state.output_pending = true;
 }
 
-bool driver_transfer(uint8_t, uint8_t endpoint, xfer_result_t, uint32_t) {
+bool driver_control(uint8_t rhport, uint8_t stage,
+                    tusb_control_request_t const* request) {
+  if (request == nullptr ||
+      !scbridge::is_xinput_output_set_report(
+          request->bmRequestType_bit.direction == TUSB_DIR_OUT,
+          request->bmRequestType_bit.type == TUSB_REQ_TYPE_CLASS,
+          request->bmRequestType_bit.recipient == TUSB_REQ_RCPT_INTERFACE,
+          request->bRequest, request->wValue, request->wIndex,
+          request->wLength, state.interface_number)) {
+    return false;
+  }
+  if (stage == CONTROL_STAGE_SETUP) {
+    return tud_control_xfer(rhport, request, state.control_output,
+                            sizeof(state.control_output));
+  }
+  if (stage == CONTROL_STAGE_ACK) {
+    stage_output(state.control_output, sizeof(state.control_output));
+  }
+  return true;
+}
+
+bool driver_transfer(uint8_t, uint8_t endpoint, xfer_result_t result,
+                     uint32_t transferred_bytes) {
   if (endpoint == state.out_endpoint) {
+    if (result == XFER_RESULT_SUCCESS) {
+      stage_output(state.out_buffer, transferred_bytes);
+    }
     state.out_needs_arm = true;
   }
   return true;
@@ -119,6 +162,28 @@ class Interface final : public Adafruit_USBD_Interface {
 };
 
 Interface interface;
+
+bool take_output_report(uint8_t* data, size_t capacity, size_t* length) {
+  if (!state.output_pending || data == nullptr || length == nullptr) {
+    return false;
+  }
+  const size_t staged_length = state.output_length;
+  if (staged_length > capacity) {
+    state.output_pending = false;
+    state.output_length = 0;
+    return false;
+  }
+  memcpy(data, state.pending_output, staged_length);
+  state.output_pending = false;
+  state.output_length = 0;
+  *length = staged_length;
+  return true;
+}
+
+void discard_pending_output() {
+  state.output_pending = false;
+  state.output_length = 0;
+}
 
 void service_out_endpoint() {
   const uint8_t endpoint = state.out_endpoint;
@@ -266,6 +331,7 @@ void service_connection(uint32_t now_ms) {
     session.on_cdc_disconnected();
     decoder.reset();
     cdc_tx.clear();
+    xinput_usb::discard_pending_output();
   }
   previous_usb_mounted = mounted;
 
@@ -273,11 +339,13 @@ void service_connection(uint32_t now_ms) {
   if (dtr && !previous_dtr) {
     decoder.reset();
     cdc_tx.clear();
+    xinput_usb::discard_pending_output();
     session.on_cdc_connected(now_ms);
   } else if (!dtr && previous_dtr) {
     session.on_cdc_disconnected();
     decoder.reset();
     cdc_tx.clear();
+    xinput_usb::discard_pending_output();
   }
   previous_dtr = dtr;
 }
@@ -299,7 +367,16 @@ void service_cdc() {
   cdc_tx.service();
 }
 
-void service_gamepad() {
+void service_gamepad(uint32_t now_ms) {
+  uint8_t output_report[scbridge::kXInputRumbleReportSize];
+  size_t output_length = 0;
+  if (xinput_usb::take_output_report(output_report, sizeof(output_report),
+                                     &output_length)) {
+    scbridge::RumbleFeedback rumble{};
+    if (scbridge::parse_xinput_rumble(output_report, output_length, &rumble)) {
+      session.on_xinput_rumble(rumble, now_ms);
+    }
+  }
   xinput_usb::service_out_endpoint();
   if (!session.hid_report_pending() || !TinyUSBDevice.mounted()) {
     return;
@@ -364,7 +441,7 @@ void loop() {
   service_cdc();
   const uint32_t after_cdc_ms = millis();
   session.tick(after_cdc_ms);
-  service_gamepad();
+  service_gamepad(after_cdc_ms);
   service_led(after_cdc_ms);
   feed_hardware_watchdog();
 }

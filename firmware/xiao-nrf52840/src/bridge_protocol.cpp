@@ -199,6 +199,8 @@ bool StreamDecoder::validate(const Frame& frame, DecodeError* error) const {
       return exact_length(frame, 4, error);
     case MessageType::DeviceInfo:
       return true;
+    case MessageType::Rumble:
+      return exact_length(frame, kRumblePayloadSize, error);
     case MessageType::Error:
       if (frame.payload_length >= 2U) {
         return true;

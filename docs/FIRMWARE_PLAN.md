@@ -22,6 +22,10 @@ Required behavior:
 - Convert `GamepadState` and `Neutral` messages into USB HID reports.
 - Track sequence gaps for diagnostics without allowing a gap to leave stale controls active.
 - Respond to `Ping` with the same nonce in `Pong`.
+- Accept only the exact eight-byte Xbox 360 dual-rumble OUT command, scale its
+  two 8-bit channels to `u16`, and return protocol message type 8 over CDC.
+- Refresh nonzero rumble feedback every 25 ms and prioritize a safety zero
+  across USB/CDC/session resets without feeding the input watchdog.
 - Reset the HID report to neutral after a host-data watchdog timeout (initial target: 100 ms).
 - Reset immediately on CDC disconnect, protocol uncertainty, or parser failure threshold.
 - Use an LED for disconnected, negotiating, active, and fault states without affecting timing.
@@ -31,6 +35,10 @@ Hardware validation must cover CDC reconnect, HID enumeration, browser Gamepad A
 The host services serial output during idle waits and refreshes unchanged active
 states every 25 ms. Ping does not refresh the firmware data watchdog. See the
 firmware README for the pinned toolchain, flashing, LED states, and smoke test.
+
+The Xbox OUT path is serviced from the cooperative loop. Interrupt and
+`SET_REPORT(Output)` callbacks only stage the completed eight bytes and rearm
+work; they never parse packets or write CDC frames directly.
 
 The development personality uses compatibility VID/PID `045e:028e` so Apple's
 built-in Xbox driver publishes the device. Shipping requires an owned/licensed

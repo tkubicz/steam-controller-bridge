@@ -27,6 +27,7 @@ The CRC is CRC-16/CCITT-FALSE with polynomial `0x1021`, initial value `0xffff`, 
 | 5 | Ping | nonce `u32` |
 | 6 | Pong | nonce `u32` |
 | 7 | DeviceInfo | implementation-defined bytes, at most 256 |
+| 8 | Rumble | low-frequency `u16`, high-frequency `u16` |
 | 255 | Error | code `u16`, followed by optional detail bytes |
 
 Unknown message type values are returned as opaque messages so newer messages can be ignored safely. Known messages with invalid lengths are rejected. Frames whose protocol version is not exactly 1 are rejected; version range selection happens through `Hello` before ordinary traffic.
@@ -50,6 +51,22 @@ Stick values map `-1.0`, `0.0`, and `1.0` to `-32767`, `0`, and `32767`. `-32768
 Button bits 0 through 15 are, in order: South, East, West, North, LeftShoulder, RightShoulder, LeftStick, RightStick, Back, Start, Guide, LeftGrip, RightGrip, Extra1, Extra2, Extra3. Bits 16 through 31 are reserved.
 
 `Neutral` is a semantic command to clear firmware state. A `GamepadState` containing all-neutral fields has the same controller outcome but remains useful as a fully explicit state sample.
+
+## Rumble feedback
+
+`Rumble` is the only protocol-v1 firmware-to-host feedback message. Its
+four-byte payload is:
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 2 | Xbox low-frequency/strong magnitude, `0..65535` |
+| 2 | 2 | Xbox high-frequency/weak magnitude, `0..65535` |
+
+Both values are little-endian. Firmware scales the Xbox driver's 8-bit values
+linearly with `value * 257`, sends changes immediately, and refreshes a nonzero
+request every 25 ms. A zero command ends that lease. Firmware transmit sequence
+numbers are independent wrapping `u16` values; an older host safely ignores
+message type 8 as an unknown message.
 
 ## Stream recovery
 

@@ -11,6 +11,7 @@ constexpr size_t kHeaderSize = 8;
 constexpr size_t kChecksumSize = 2;
 constexpr size_t kMaxFrameSize = kHeaderSize + kMaxPayloadSize + kChecksumSize;
 constexpr size_t kGamepadPayloadSize = 18;
+constexpr size_t kRumblePayloadSize = 4;
 
 enum class MessageType : uint8_t {
   Hello = 1,
@@ -20,6 +21,7 @@ enum class MessageType : uint8_t {
   Ping = 5,
   Pong = 6,
   DeviceInfo = 7,
+  Rumble = 8,
   Error = 255,
 };
 

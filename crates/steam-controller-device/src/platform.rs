@@ -126,6 +126,38 @@ impl HidSession {
             })
     }
 
+    /// Sends the sole Steam Controller 2 output report permitted by this
+    /// project: SDL-compatible standard dual rumble.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError`] for an unsupported collection, disconnected
+    /// session, or native HID output failure.
+    pub fn set_rumble(&self, low_frequency: u16, high_frequency: u16) -> Result<(), DeviceError> {
+        if !self.selected.supports_rumble() {
+            return Err(DeviceError::UnsupportedRumbleTarget {
+                vendor_id: self.selected.vendor_id,
+                product_id: self.selected.product_id,
+                usage_page: self.selected.usage_page,
+                usage: self.selected.usage,
+                interface_number: self.selected.interface_number,
+            });
+        }
+        let device = self.device.as_ref().ok_or(DeviceError::NotConnected)?;
+        device
+            .write(&steam_controller_protocol::rumble_output_report(
+                low_frequency,
+                high_frequency,
+            ))
+            .map(|_| ())
+            .map_err(|error| {
+                DeviceError::Backend(format!(
+                    "rumble output write failed; ensure Steam Controller 2 is \
+                     awake in Puck mode and the selected slot is active: {error}"
+                ))
+            })
+    }
+
     /// Waits for the next lifecycle event or input report.
     ///
     /// A read failure emits `Disconnected`; subsequent calls periodically

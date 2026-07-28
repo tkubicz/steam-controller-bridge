@@ -38,6 +38,7 @@ struct MenuItems {
     controller: MenuItem,
     xiao: MenuItem,
     battery: MenuItem,
+    haptics: MenuItem,
     error: MenuItem,
     start: MenuItem,
     stop: MenuItem,
@@ -74,6 +75,7 @@ impl MenuApp {
         let controller = MenuItem::new("Controller: Not connected", false, None);
         let xiao = MenuItem::new("XIAO: Discovering", false, None);
         let battery = MenuItem::new("Battery: Unknown", false, None);
+        let haptics = MenuItem::new("Haptics: Idle", false, None);
         let error = MenuItem::new("Last error: None", false, None);
         let start = MenuItem::with_id(START_ID, "Start Bridge", false, None);
         let stop = MenuItem::with_id(STOP_ID, "Stop Bridge", true, None);
@@ -90,6 +92,7 @@ impl MenuApp {
             &controller,
             &xiao,
             &battery,
+            &haptics,
             &error,
             &separator1,
             &start,
@@ -115,6 +118,7 @@ impl MenuApp {
             controller,
             xiao,
             battery,
+            haptics,
             error,
             start,
             stop,
@@ -137,6 +141,7 @@ impl MenuApp {
                 items.controller.set_text(&model.controller);
                 items.xiao.set_text(&model.xiao);
                 items.battery.set_text(&model.battery);
+                items.haptics.set_text(&model.haptics);
                 items.error.set_text(&model.error);
                 items.start.set_enabled(model.start_enabled);
                 items.stop.set_enabled(model.stop_enabled);
@@ -320,6 +325,8 @@ impl StatusLogger {
              puck_connected={} controller_connected={} xiao_path={:?} \
              xiao_serial={:?} battery={:?} lizard_suppressed={} \
              lizard_refreshes={} lizard_failures={} lizard_refresh_age_ms={:?} last_error={:?} \
+             haptics_state={:?} rumble_commands={} rumble_writes={} rumble_refreshes={} \
+             rumble_coalesced={} rumble_failures={} rumble_command_age_ms={:?} \
              input_reports={} dropped_reports={} output_packets={} state_refreshes={}",
             status.revision,
             status.state,
@@ -334,6 +341,13 @@ impl StatusLogger {
             status.lizard.failures,
             status.lizard.last_refresh_age.map(|age| age.as_millis()),
             status.last_error,
+            status.haptics.state,
+            status.haptics.commands_received,
+            status.haptics.writes,
+            status.haptics.refreshes,
+            status.haptics.coalesced_commands,
+            status.haptics.failures,
+            status.haptics.last_command_age.map(|age| age.as_millis()),
             status.bridge_metrics.input_reports,
             status.bridge_metrics.dropped_input_reports,
             status.bridge_metrics.output_packets,
@@ -367,6 +381,7 @@ fn diagnostics_text(status: &BridgeStatus) -> String {
     let _ = writeln!(text, "xiao: {:?}", status.xiao);
     let _ = writeln!(text, "battery_percent: {:?}", status.battery_percent);
     let _ = writeln!(text, "lizard: {:?}", status.lizard);
+    let _ = writeln!(text, "haptics: {:?}", status.haptics);
     let _ = writeln!(text, "bridge_metrics: {:?}", status.bridge_metrics);
     let _ = writeln!(text, "output_diagnostics: {:?}", status.output_diagnostics);
     let _ = writeln!(text, "last_error: {:?}", status.last_error);
@@ -414,6 +429,7 @@ mod tests {
         assert!(text.contains("puck:"));
         assert!(text.contains("xiao:"));
         assert!(text.contains("lizard:"));
+        assert!(text.contains("haptics:"));
         assert!(text.contains("output_diagnostics:"));
     }
 

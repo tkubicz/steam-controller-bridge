@@ -1,6 +1,6 @@
 # Architecture
 
-The implemented foundation follows a one-way pipeline:
+The input path and bounded reverse-feedback path are:
 
 ```text
 Steam Controller HID -> protocol decoder -> SteamControllerState
@@ -18,6 +18,11 @@ keyboard/automated simulator                  v
                          |
                          v
                  deterministic/timed replay
+
+game/browser -> Xbox OUT -> XIAO -> CDC Rumble -> bridge-runtime
+                                                  |
+                                                  v
+                                      SC2 dual actuator output
 ```
 
 ## Crates
@@ -31,7 +36,7 @@ keyboard/automated simulator                  v
 - `steam-controller-protocol` owns the Steam Controller 2 host-facing `0x45`/`0x42` state layouts, status reports, button masks, motion fields, and structured decode errors. It has no HID or transport dependency and preserves each complete validated report.
 - `controller-mapper` owns the validated default mapping profile and allocation-free filter pipeline. Its only inputs are decoded controller state, elapsed time, and explicit configuration; disconnect handling resets its optional smoothing history.
 - `bridge-core` owns the hardware-independent integrated state machine: decode/map timing, changed-state suppression, reconnect counters, repeated-failure and timeout safety, mapper reset, and neutral output.
-- `bridge-runtime` owns reusable live discovery and orchestration: stable active-Puck selection, metadata/Hello-verified XIAO selection, HID/serial ownership, lizard suppression, battery/status snapshots, reconnect recovery, and neutral-before-release cleanup.
+- `bridge-runtime` owns reusable live discovery and orchestration: stable active-Puck selection, metadata/Hello-verified XIAO selection, HID/serial ownership, lizard suppression, bounded rumble leasing, battery/status snapshots, reconnect recovery, and neutral/rumble-zero-before-release cleanup.
 - `gamepad-simulator` owns deterministic and keyboard-driven sources. It depends on output interfaces but not protocol internals.
 - `sc-replay` is a thin CLI over `recording` and the existing output backends. It contains no format parser of its own.
 - `sc-probe` lists and inspects all HID collections, monitors one explicitly selected collection, and records raw lifecycle/report events plus optional decoded states. It does not contain hard-coded device identifiers or feature-report bytes.
@@ -43,7 +48,7 @@ All crates forbid unsafe code. Only the recording layer uses third-party seriali
 
 ## Lifecycle and safety
 
-Simulator modes send a neutral state before normal exit. Outputs reject non-finite and out-of-range values instead of silently emitting invalid packets. The integrated bridge additionally sends neutral on input timeout, controller disconnect, repeated decode failure, reset, and shutdown. Serial output refreshes unchanged active states while its firmware watchdog is armed.
+Simulator modes send a neutral state before normal exit. Outputs reject non-finite and out-of-range values instead of silently emitting invalid packets. The integrated bridge additionally sends neutral on input timeout, controller disconnect, repeated decode failure, reset, and shutdown. Serial output refreshes unchanged active states while its firmware watchdog is armed. Reverse feedback is also latest-only: a 100 ms host lease and the controller's own actuator watchdog prevent stale rumble, while write failures degrade haptics without disabling input.
 
 The HID session uses a bounded 1,024-byte report buffer. Automatic discovery
 opens exact official Puck slot candidates by stable identity and selects only a

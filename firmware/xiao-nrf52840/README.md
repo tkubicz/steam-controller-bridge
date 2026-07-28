@@ -5,7 +5,8 @@ USB endpoint for the macOS bridge. It exposes one composite USB device:
 
 - CDC ACM carries protocol-v1 frames from the host.
 - An Xbox 360-compatible vendor interface exposes an ABXY gamepad through
-  macOS's built-in Xbox GameController driver.
+  macOS's built-in Xbox GameController driver and accepts standard dual-rumble
+  output.
 
 The Steam Controller radio and feature protocol remain on the host. OpenPuck
 informed the nonblocking TinyUSB and watchdog structure, but no OpenPuck source
@@ -60,6 +61,18 @@ signed 16-bit stick axes. The protocol's South/East/West/North buttons map to
 A/B/X/Y respectively. Protocol-only grip and extra buttons have no Xbox 360
 counterpart and are ignored by the USB report.
 
+The only accepted Xbox output is the exact eight-byte dual-rumble packet:
+
+```text
+00 08 00 LOW HIGH 00 00 00
+```
+
+It is accepted from both interrupt OUT and interface
+`SET_REPORT(Output)`. USB callbacks stage bytes only; the cooperative loop
+validates the full packet, scales each channel with `value * 257`, and sends
+protocol-v1 `Rumble` feedback over CDC. Other lengths, headers, reserved bytes,
+and Xbox output commands are ignored.
+
 ## Runtime and safety
 
 The device starts neutral and ignores state until CDC DTR is asserted and a
@@ -68,6 +81,12 @@ malformed frames, or 100 ms without an active-state refresh queues a neutral
 HID report. A separate two-second hardware watchdog resets the MCU if the main
 loop stalls. The host refreshes unchanged active states every 25 ms, leaving
 margin inside the firmware's 100 ms data watchdog.
+
+Nonzero rumble changes are returned immediately and refreshed every 25 ms as a
+host-side lease. HID mount, CDC DTR loss, USB unmount, a new Hello, parser/session
+reset, watchdog expiry, and reboot clear rumble and prioritize a zero feedback
+command after negotiation. Rumble never refreshes the 100 ms controller-input
+watchdog and does not compete with a pending neutral input report.
 
 The active-low RGB LED indicates:
 
@@ -96,6 +115,19 @@ target streaming service. Raw `sc-probe monitor` is not a reliable observer for
 the output once Apple's Xbox DriverKit extension owns the interface; use a
 Gamepad API tester or target client instead.
 
+For rumble acceptance, first flash this updated firmware, start `./sc-bridge`,
+and use GamepadTester's one-second and infinite vibration actions. Verify
+unequal strong/weak values and that stopping the effect, closing the browser,
+unplugging either endpoint, or stopping the bridge cannot leave an actuator
+running. Test the Puck path independently with:
+
+```bash
+cargo run -p sc-probe -- rumble --index N --low 32768 --high 0
+cargo run -p sc-probe -- rumble --index N --low 0 --high 32768
+cargo run -p sc-probe -- rumble --index N --low 65535 --high 65535 \
+  --duration-ms 1000
+```
+
 Hardware evidence on 2026-07-27:
 
 - serial flashing and CDC reconnect succeeded on a non-Sense XIAO;
@@ -104,6 +136,11 @@ Hardware evidence on 2026-07-27:
   `mapping: standard`;
 - an unchanged active simulator report remained submitted for more than 30
   seconds without firmware watchdog neutralization.
+- on 2026-07-28, the rumble-enabled build flashed successfully to MCU serial
+  `5E6EF905E5468F85`, completed a fresh Hello handshake, reached Running with
+  live Puck input, and shut down cleanly.
 
 GeForce NOW, Boosteroid, every physical control, explicit fault timing, and the
-one-hour soak remain manual release gates.
+one-hour soak remain manual release gates. End-to-end rumble has not yet been
+qualified; a successful flash and handshake are not evidence that Safari or a
+streaming client delivered Xbox OUT traffic.

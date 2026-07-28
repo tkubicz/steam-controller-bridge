@@ -9,13 +9,14 @@
 #include <vector>
 
 using scbridge::BridgeSession;
+using scbridge::CanonicalGamepadReport;
 using scbridge::DecodeError;
 using scbridge::Frame;
-using scbridge::CanonicalGamepadReport;
-using scbridge::XInputGamepadReport;
 using scbridge::MessageType;
+using scbridge::RumbleFeedback;
 using scbridge::SessionSink;
 using scbridge::StreamDecoder;
+using scbridge::XInputGamepadReport;
 
 namespace {
 
@@ -55,12 +56,26 @@ std::vector<uint8_t> gamepad_payload(uint16_t buttons = 1, int16_t x = 1234) {
 class CapturingSink final : public SessionSink {
  public:
   bool queue_cdc(const uint8_t* data, size_t length) override {
+    if (reject_next_write) {
+      reject_next_write = false;
+      return false;
+    }
     writes.emplace_back(data, data + length);
     return true;
   }
 
+  bool reject_next_write = false;
   std::vector<std::vector<uint8_t>> writes;
 };
+
+Frame decode_single(const std::vector<uint8_t>& bytes) {
+  DecoderEvents events;
+  StreamDecoder decoder(collect_frame, collect_error, &events);
+  decoder.push(bytes.data(), bytes.size());
+  assert(events.errors.empty());
+  assert(events.frames.size() == 1);
+  return events.frames[0];
+}
 
 void negotiate(BridgeSession& session, uint16_t sequence = 0) {
   Frame hello{};
@@ -180,6 +195,55 @@ void test_xinput_report_conversion() {
   assert(scbridge::make_xinput_report(unsupported).buttons == 0);
 }
 
+void test_xinput_rumble_parser() {
+  assert(scbridge::is_xinput_output_set_report(
+      true, true, true, 0x09, 0x0200, 2, 8, 2));
+  assert(!scbridge::is_xinput_output_set_report(
+      false, true, true, 0x09, 0x0200, 2, 8, 2));
+  assert(!scbridge::is_xinput_output_set_report(
+      true, false, true, 0x09, 0x0200, 2, 8, 2));
+  assert(!scbridge::is_xinput_output_set_report(
+      true, true, false, 0x09, 0x0200, 2, 8, 2));
+  assert(!scbridge::is_xinput_output_set_report(
+      true, true, true, 0x08, 0x0200, 2, 8, 2));
+  assert(!scbridge::is_xinput_output_set_report(
+      true, true, true, 0x09, 0x0100, 2, 8, 2));
+  assert(!scbridge::is_xinput_output_set_report(
+      true, true, true, 0x09, 0x0200, 3, 8, 2));
+  assert(!scbridge::is_xinput_output_set_report(
+      true, true, true, 0x09, 0x0200, 2, 9, 2));
+
+  RumbleFeedback rumble{};
+  const uint8_t both[] = {0x00, 0x08, 0x00, 0x01,
+                          0xff, 0x00, 0x00, 0x00};
+  assert(scbridge::parse_xinput_rumble(both, sizeof(both), &rumble));
+  assert(rumble.low_frequency == 257);
+  assert(rumble.high_frequency == 65535);
+
+  const uint8_t zero[] = {0x00, 0x08, 0x00, 0x00,
+                          0x00, 0x00, 0x00, 0x00};
+  assert(scbridge::parse_xinput_rumble(zero, sizeof(zero), &rumble));
+  assert(rumble.low_frequency == 0);
+  assert(rumble.high_frequency == 0);
+
+  uint8_t malformed[sizeof(both)];
+  memcpy(malformed, both, sizeof(both));
+  malformed[1] = 7;
+  assert(!scbridge::parse_xinput_rumble(malformed, sizeof(malformed),
+                                        &rumble));
+  memcpy(malformed, both, sizeof(both));
+  malformed[2] = 1;
+  assert(!scbridge::parse_xinput_rumble(malformed, sizeof(malformed),
+                                        &rumble));
+  memcpy(malformed, both, sizeof(both));
+  malformed[7] = 1;
+  assert(!scbridge::parse_xinput_rumble(malformed, sizeof(malformed),
+                                        &rumble));
+  assert(!scbridge::parse_xinput_rumble(both, sizeof(both) - 1, &rumble));
+  assert(!scbridge::parse_xinput_rumble(nullptr, sizeof(both), &rumble));
+  assert(!scbridge::parse_xinput_rumble(both, sizeof(both), nullptr));
+}
+
 void test_stream_recovery_and_splits() {
   const auto first = encode(1, MessageType::Neutral);
   const auto second = encode(2, MessageType::Ping, {1, 2, 3, 4});
@@ -244,6 +308,7 @@ void test_decoder_rejects_header_and_payload_errors_then_recovers() {
   wrong_version.back() = static_cast<uint8_t>(crc >> 8U);
 
   const auto bad_length = encode(10, MessageType::Hello, {1});
+  const auto bad_rumble_length = encode(12, MessageType::Rumble, {1, 2, 3});
   auto reserved_axis = encode(11, MessageType::GamepadState, gamepad_payload());
   reserved_axis[14] = 0;
   reserved_axis[15] = 0x80;
@@ -257,17 +322,20 @@ void test_decoder_rejects_header_and_payload_errors_then_recovers() {
                               oversized_header + sizeof(oversized_header));
   stream.insert(stream.end(), wrong_version.begin(), wrong_version.end());
   stream.insert(stream.end(), bad_length.begin(), bad_length.end());
+  stream.insert(stream.end(), bad_rumble_length.begin(),
+                bad_rumble_length.end());
   stream.insert(stream.end(), reserved_axis.begin(), reserved_axis.end());
   stream.insert(stream.end(), neutral.begin(), neutral.end());
 
   DecoderEvents events;
   StreamDecoder decoder(collect_frame, collect_error, &events);
   decoder.push(stream.data(), stream.size());
-  assert(events.errors.size() == 4);
+  assert(events.errors.size() == 5);
   assert(events.errors[0] == DecodeError::PayloadTooLarge);
   assert(events.errors[1] == DecodeError::UnsupportedVersion);
   assert(events.errors[2] == DecodeError::InvalidPayloadLength);
-  assert(events.errors[3] == DecodeError::ReservedAxisValue);
+  assert(events.errors[3] == DecodeError::InvalidPayloadLength);
+  assert(events.errors[4] == DecodeError::ReservedAxisValue);
   assert(events.frames.size() == 1);
   assert(events.frames[0].sequence == 9);
 }
@@ -311,15 +379,64 @@ void test_session_negotiation_sequence_and_watchdog() {
   ping.payload[2] = 0x34;
   ping.payload[3] = 0x12;
   session.on_frame(ping, 121);
-  assert(sink.writes.size() == 2);
-
-  DecoderEvents pong_events;
-  StreamDecoder pong_decoder(collect_frame, collect_error, &pong_events);
-  pong_decoder.push(sink.writes.back().data(), sink.writes.back().size());
-  assert(pong_events.frames.size() == 1);
-  assert(pong_events.frames[0].message_type ==
+  const Frame pong = decode_single(sink.writes.back());
+  assert(pong.message_type ==
          static_cast<uint8_t>(MessageType::Pong));
-  assert(memcmp(pong_events.frames[0].payload, ping.payload, 4) == 0);
+  assert(memcmp(pong.payload, ping.payload, 4) == 0);
+}
+
+void test_rumble_latest_refresh_and_safety_zero() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+
+  session.on_xinput_rumble(RumbleFeedback{0xffff, 0xffff}, 0);
+  session.tick(0);
+  assert(sink.writes.empty());
+
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session);
+  session.on_xinput_rumble(RumbleFeedback{0x1111, 0x2222}, 0);
+  session.on_xinput_rumble(RumbleFeedback{0x1234, 0xabcd}, 0);
+
+  session.tick(0);
+  Frame frame = decode_single(sink.writes.back());
+  assert(frame.message_type == static_cast<uint8_t>(MessageType::Rumble));
+  assert(frame.payload_length == 4);
+  assert(frame.payload[0] == 0 && frame.payload[1] == 0);
+  assert(frame.payload[2] == 0 && frame.payload[3] == 0);
+
+  session.tick(1);
+  frame = decode_single(sink.writes.back());
+  assert(frame.payload[0] == 0x34 && frame.payload[1] == 0x12);
+  assert(frame.payload[2] == 0xcd && frame.payload[3] == 0xab);
+  const size_t writes_after_change = sink.writes.size();
+  session.tick(25);
+  assert(sink.writes.size() == writes_after_change);
+  session.tick(26);
+  assert(sink.writes.size() == writes_after_change + 1);
+  assert(session.diagnostics().rumble_feedback_refreshes == 1);
+
+  session.on_xinput_rumble(RumbleFeedback{0, 0}, 27);
+  session.tick(27);
+  frame = decode_single(sink.writes.back());
+  assert(frame.payload[0] == 0 && frame.payload[1] == 0);
+  assert(frame.payload[2] == 0 && frame.payload[3] == 0);
+  const size_t writes_after_zero = sink.writes.size();
+  session.tick(100);
+  assert(sink.writes.size() == writes_after_zero);
+
+  session.on_xinput_rumble(RumbleFeedback{0xffff, 0x0101}, 101);
+  sink.reject_next_write = true;
+  session.tick(101);
+  const size_t writes_after_rejection = sink.writes.size();
+  session.tick(102);
+  assert(sink.writes.size() == writes_after_rejection + 1);
+
+  session.on_cdc_disconnected();
+  session.on_xinput_rumble(RumbleFeedback{0xffff, 0xffff}, 103);
+  session.tick(103);
+  assert(sink.writes.size() == writes_after_rejection + 1);
 }
 
 void test_fault_and_disconnect_neutralize() {
@@ -348,10 +465,12 @@ void test_fault_and_disconnect_neutralize() {
 int main() {
   test_crc_and_neutral_vector();
   test_xinput_report_conversion();
+  test_xinput_rumble_parser();
   test_stream_recovery_and_splits();
   test_decoder_validation_and_unknown_messages();
   test_decoder_rejects_header_and_payload_errors_then_recovers();
   test_session_negotiation_sequence_and_watchdog();
+  test_rumble_latest_refresh_and_safety_zero();
   test_fault_and_disconnect_neutralize();
   puts("firmware native tests passed");
   return 0;

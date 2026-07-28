@@ -26,12 +26,21 @@ BridgeSession::BridgeSession(SessionSink& sink)
       hid_pending_(true),
       pending_is_safety_neutral_(true),
       deferred_active_pending_(false),
+      rumble_pending_(true),
+      rumble_pending_is_safety_zero_(true),
+      rumble_pending_is_refresh_(false),
+      deferred_rumble_pending_(false),
+      rumble_refresh_armed_(false),
       consecutive_errors_(0),
       expected_sequence_(0),
       transmit_sequence_(0),
       last_data_ms_(0),
+      last_rumble_tx_ms_(0),
       pending_hid_(neutral_report()),
       deferred_active_(neutral_report()),
+      desired_rumble_(zero_rumble()),
+      pending_rumble_(zero_rumble()),
+      deferred_rumble_(zero_rumble()),
       diagnostics_{} {}
 
 void BridgeSession::on_cdc_connected(uint32_t now_ms) {
@@ -45,7 +54,10 @@ void BridgeSession::on_cdc_disconnected() {
   reset_session(false);
 }
 
-void BridgeSession::on_hid_mounted() { force_neutral(true); }
+void BridgeSession::on_hid_mounted() {
+  force_neutral(true);
+  force_rumble_zero();
+}
 
 void BridgeSession::on_frame(const Frame& frame, uint32_t now_ms) {
   consecutive_errors_ = 0;
@@ -53,14 +65,15 @@ void BridgeSession::on_frame(const Frame& frame, uint32_t now_ms) {
 
   if (frame.message_type == static_cast<uint8_t>(MessageType::Hello)) {
     force_neutral(true);
+    force_rumble_zero();
     negotiated_ = false;
     sequence_valid_ = true;
     expected_sequence_ = static_cast<uint16_t>(frame.sequence + 1U);
     if (frame.payload[0] <= kProtocolVersion &&
         frame.payload[1] >= kProtocolVersion) {
       const uint8_t selected = kProtocolVersion;
-      send_message(MessageType::HelloResponse, &selected, 1);
-      negotiated_ = true;
+      negotiated_ =
+          send_message(MessageType::HelloResponse, &selected, 1);
     }
     return;
   }
@@ -85,6 +98,7 @@ void BridgeSession::on_frame(const Frame& frame, uint32_t now_ms) {
     case MessageType::Pong:
     case MessageType::HelloResponse:
     case MessageType::DeviceInfo:
+    case MessageType::Rumble:
     case MessageType::Error:
     case MessageType::Hello:
       break;
@@ -103,7 +117,16 @@ void BridgeSession::on_decode_error(DecodeError) {
     negotiated_ = false;
     sequence_valid_ = false;
     force_neutral(true);
+    force_rumble_zero();
   }
+}
+
+void BridgeSession::on_xinput_rumble(const RumbleFeedback& rumble,
+                                     uint32_t) {
+  if (!negotiated_) {
+    return;
+  }
+  queue_rumble(rumble, false);
 }
 
 void BridgeSession::tick(uint32_t now_ms) {
@@ -113,7 +136,9 @@ void BridgeSession::tick(uint32_t now_ms) {
     faulted_ = true;
     ++diagnostics_.watchdog_neutrals;
     force_neutral(true);
+    force_rumble_zero();
   }
+  service_rumble(now_ms);
 }
 
 void BridgeSession::mark_hid_report_sent() {
@@ -135,6 +160,7 @@ void BridgeSession::reset_session(bool keep_connection) {
   faulted_ = false;
   data_watchdog_armed_ = false;
   deferred_active_pending_ = false;
+  force_rumble_zero();
   if (!keep_connection) {
     transmit_sequence_ = 0;
   }
@@ -145,6 +171,7 @@ void BridgeSession::check_sequence(uint16_t sequence) {
   if (sequence_valid_ && sequence != expected_sequence_) {
     ++diagnostics_.sequence_gaps;
     force_neutral(true);
+    force_rumble_zero();
   }
   sequence_valid_ = true;
   expected_sequence_ = static_cast<uint16_t>(sequence + 1U);
@@ -170,6 +197,11 @@ void BridgeSession::force_neutral(bool safety) {
   queue_hid(neutral_report(), safety);
 }
 
+void BridgeSession::force_rumble_zero() {
+  rumble_refresh_armed_ = false;
+  queue_rumble(zero_rumble(), true);
+}
+
 void BridgeSession::queue_hid(const CanonicalGamepadReport& report,
                               bool safety) {
   if (pending_is_safety_neutral_ && !safety) {
@@ -185,7 +217,68 @@ void BridgeSession::queue_hid(const CanonicalGamepadReport& report,
   pending_is_safety_neutral_ = safety;
 }
 
-void BridgeSession::send_message(MessageType type, const uint8_t* payload,
+void BridgeSession::queue_rumble(const RumbleFeedback& rumble, bool safety) {
+  desired_rumble_ = rumble;
+  rumble_refresh_armed_ = rumble_is_active(rumble);
+  if (rumble_pending_is_safety_zero_ && !safety &&
+      rumble_is_active(rumble)) {
+    deferred_rumble_ = rumble;
+    deferred_rumble_pending_ = true;
+    return;
+  }
+  if (safety) {
+    deferred_rumble_pending_ = false;
+  }
+  pending_rumble_ = rumble;
+  rumble_pending_ = true;
+  rumble_pending_is_safety_zero_ = safety;
+  rumble_pending_is_refresh_ = false;
+}
+
+void BridgeSession::service_rumble(uint32_t now_ms) {
+  if (!negotiated_) {
+    return;
+  }
+  if (!rumble_pending_ && rumble_refresh_armed_ &&
+      static_cast<uint32_t>(now_ms - last_rumble_tx_ms_) >=
+          kRumbleLeaseRefreshMs) {
+    pending_rumble_ = desired_rumble_;
+    rumble_pending_ = true;
+    rumble_pending_is_safety_zero_ = false;
+    rumble_pending_is_refresh_ = true;
+  }
+  if (!rumble_pending_) {
+    return;
+  }
+  uint8_t payload[kRumblePayloadSize];
+  payload[0] = static_cast<uint8_t>(pending_rumble_.low_frequency);
+  payload[1] =
+      static_cast<uint8_t>(pending_rumble_.low_frequency >> 8U);
+  payload[2] = static_cast<uint8_t>(pending_rumble_.high_frequency);
+  payload[3] =
+      static_cast<uint8_t>(pending_rumble_.high_frequency >> 8U);
+  if (!send_message(MessageType::Rumble, payload, sizeof(payload))) {
+    return;
+  }
+  last_rumble_tx_ms_ = now_ms;
+  ++diagnostics_.rumble_feedback_frames;
+  if (rumble_pending_is_refresh_) {
+    ++diagnostics_.rumble_feedback_refreshes;
+  }
+  if (rumble_pending_is_safety_zero_ && deferred_rumble_pending_) {
+    pending_rumble_ = deferred_rumble_;
+    rumble_pending_is_safety_zero_ = false;
+    rumble_pending_is_refresh_ = false;
+    deferred_rumble_pending_ = false;
+    rumble_pending_ = true;
+    return;
+  }
+  rumble_pending_ = false;
+  rumble_pending_is_safety_zero_ = false;
+  rumble_pending_is_refresh_ = false;
+}
+
+bool BridgeSession::send_message(MessageType type, const uint8_t* payload,
                                  uint16_t payload_length) {
   uint8_t frame[kMaxFrameSize];
   const size_t length =
@@ -193,7 +286,9 @@ void BridgeSession::send_message(MessageType type, const uint8_t* payload,
                    payload_length, frame, sizeof(frame));
   if (length != 0U && sink_.queue_cdc(frame, length)) {
     transmit_sequence_ = static_cast<uint16_t>(transmit_sequence_ + 1U);
+    return true;
   }
+  return false;
 }
 
 CanonicalGamepadReport BridgeSession::neutral_report() {
@@ -202,10 +297,18 @@ CanonicalGamepadReport BridgeSession::neutral_report() {
   return report;
 }
 
+RumbleFeedback BridgeSession::zero_rumble() {
+  return RumbleFeedback{0, 0};
+}
+
 bool BridgeSession::report_is_neutral(
     const CanonicalGamepadReport& report) {
   const CanonicalGamepadReport neutral = neutral_report();
   return memcmp(&report, &neutral, sizeof(report)) == 0;
+}
+
+bool BridgeSession::rumble_is_active(const RumbleFeedback& rumble) {
+  return rumble.low_frequency != 0U || rumble.high_frequency != 0U;
 }
 
 }  // namespace scbridge

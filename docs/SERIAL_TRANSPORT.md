@@ -27,13 +27,29 @@ prevents confusing the Puck's own CDC interface with the XIAO.
    least every 25 ms. `Neutral` clears the cached active state immediately.
 
 Sequence numbers cover every host-originated frame, including hello, state,
-neutral, ping, and pong, and wrap as `u16`. Incoming bytes use the shared
+neutral, ping, and pong, and wrap as `u16`. Firmware owns an independent
+wrapping transmit sequence for Hello responses, Pong, and rumble feedback.
+Incoming bytes use the shared
 recovering `StreamDecoder`; checksum and framing errors are counted without
 creating a second parser.
 
 The refresh interval is independent of the one-second Ping health check. Pings
 prove the bidirectional session is responsive but deliberately do not keep the
 firmware's 100 ms controller-data watchdog alive.
+
+## Reverse rumble lease
+
+Updated firmware returns `Rumble { low_frequency, high_frequency }` frames
+after validating an exact Xbox 360 output report. The serial backend retains
+only the newest feedback command, so rapid effects cannot create an unbounded
+queue. The runtime applies changes to the Puck immediately and treats every
+nonzero frame as a 100 ms lease. Firmware refreshes nonzero values every 25 ms;
+the runtime refreshes the selected SC2 actuator report every 40 ms. If feedback
+frames stop, the runtime sends zero and stops refreshing. Ping and controller
+input do not renew this lease.
+
+Old firmware remains input-compatible but never produces rumble feedback. Old
+hosts ignore message type 8 through the protocol's unknown-message rule.
 
 The live runtime remembers the selected XIAO's MCU-derived USB serial number.
 After reconnect it prefers that identity even when macOS assigns a different

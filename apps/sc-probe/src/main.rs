@@ -31,6 +31,7 @@ fn run() -> Result<(), String> {
         "monitor" => monitor(&args),
         "capture" => capture(&args),
         "suppress-lizard" => suppress_lizard(&args),
+        "rumble" => rumble(&args),
         command => Err(format!("unknown command '{command}'")),
     }
 }
@@ -330,6 +331,108 @@ fn send_lizard_refresh(
     Ok(())
 }
 
+fn rumble(args: &[String]) -> Result<(), String> {
+    let index = required_index(args)?;
+    let low_frequency = parse_value(args, "--low", 32_768_u16)?;
+    let high_frequency = parse_value(args, "--high", 32_768_u16)?;
+    let duration = Duration::from_millis(parse_value(args, "--duration-ms", 1_000_u64)?);
+    let mut session = HidSession::open_index(index).map_err(|error| error.to_string())?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let signal_stop = Arc::clone(&stop);
+    ctrlc::set_handler(move || signal_stop.store(true, Ordering::Release))
+        .map_err(|error| format!("cannot install Ctrl-C handler: {error}"))?;
+
+    eprintln!(
+        "Testing rumble on collection {index}: low={low_frequency} \
+         high={high_frequency} duration_ms={}; press Ctrl+C to stop.",
+        duration.as_millis()
+    );
+    let result = run_rumble_test(&mut session, &stop, low_frequency, high_frequency, duration);
+    let stop_result = session
+        .set_rumble(0, 0)
+        .map_err(|error| format!("final rumble-zero write failed: {error}"));
+    match (&result, &stop_result) {
+        (_, Ok(())) => eprintln!("rumble stopped with an explicit zero write"),
+        (Err(_), Err(stop_error)) => eprintln!("{stop_error}"),
+        (Ok(()), Err(_)) => {}
+    }
+    result.and(stop_result)
+}
+
+fn run_rumble_test(
+    session: &mut HidSession,
+    stop: &AtomicBool,
+    low_frequency: u16,
+    high_frequency: u16,
+    duration: Duration,
+) -> Result<(), String> {
+    const RUMBLE_REFRESH: Duration = Duration::from_millis(40);
+
+    let started = Instant::now();
+    let mut heartbeat = LizardModeHeartbeat::new();
+    heartbeat.connected();
+    let mut lizard_refreshes = 0_u64;
+    send_lizard_refresh(
+        session,
+        &mut heartbeat,
+        started.elapsed(),
+        &mut lizard_refreshes,
+    )?;
+    session
+        .set_rumble(low_frequency, high_frequency)
+        .map_err(|error| format!("initial rumble write failed: {error}"))?;
+    let mut rumble_writes = 1_u64;
+    let mut next_rumble_refresh = RUMBLE_REFRESH;
+    let mut connected = true;
+
+    while !stop.load(Ordering::Acquire) && started.elapsed() < duration {
+        let now = started.elapsed();
+        if connected && heartbeat.refresh_due(now) {
+            send_lizard_refresh(session, &mut heartbeat, now, &mut lizard_refreshes)?;
+        }
+        if connected && now >= next_rumble_refresh {
+            session
+                .set_rumble(low_frequency, high_frequency)
+                .map_err(|error| format!("rumble refresh failed: {error}"))?;
+            rumble_writes += 1;
+            next_rumble_refresh = now.saturating_add(RUMBLE_REFRESH);
+        }
+        match session
+            .poll(Duration::from_millis(10))
+            .map_err(|error| error.to_string())?
+        {
+            Some(DeviceEvent::Connected(info)) => {
+                connected = true;
+                heartbeat.connected();
+                let now = started.elapsed();
+                send_lizard_refresh(session, &mut heartbeat, now, &mut lizard_refreshes)?;
+                session
+                    .set_rumble(low_frequency, high_frequency)
+                    .map_err(|error| format!("rumble write after reconnect failed: {error}"))?;
+                rumble_writes += 1;
+                next_rumble_refresh = now.saturating_add(RUMBLE_REFRESH);
+                eprintln!(
+                    "connected: {} ({}) rumble_active=true",
+                    display_optional(info.product.as_deref()),
+                    info.transport
+                );
+            }
+            Some(DeviceEvent::Disconnected) => {
+                connected = false;
+                heartbeat.disconnected();
+                eprintln!("disconnected; rumble refresh stopped, waiting for reconnect");
+            }
+            Some(DeviceEvent::Report(_)) | None => {}
+        }
+    }
+    eprintln!(
+        "rumble test complete: writes={rumble_writes} \
+         lizard_refreshes={lizard_refreshes}"
+    );
+    Ok(())
+}
+
 fn device_json(info: &HidDeviceInfo) -> serde_json::Value {
     json!({
         "id": info.id,
@@ -383,6 +486,14 @@ fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
+fn parse_value<T: std::str::FromStr>(args: &[String], flag: &str, default: T) -> Result<T, String> {
+    value_after(args, flag).map_or(Ok(default), |value| {
+        value
+            .parse()
+            .map_err(|_| format!("invalid {flag} value '{value}'"))
+    })
+}
+
 fn display_optional(value: Option<&str>) -> &str {
     value.filter(|text| !text.is_empty()).unwrap_or("<unknown>")
 }
@@ -400,6 +511,29 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 fn print_help() {
     println!(
-        "sc-probe <command> [options]\n\nCommands:\n  list                                      List every HID collection\n  inspect [--index N]                       Show complete metadata and sibling count\n  monitor --index N [--raw]                 Decode or print raw live reports\n  capture --index N --output PATH [--decoded]\n                                            Capture raw and optional decoded JSONL\n  suppress-lizard --index N                 Safely test SC2 lizard-mode suppression\n\nOptions:\n  --duration-secs N                         Stop monitor/capture/suppression after N seconds\n  -h, --help"
+        "sc-probe <command> [options]\n\nCommands:\n  list                                      List every HID collection\n  inspect [--index N]                       Show complete metadata and sibling count\n  monitor --index N [--raw]                 Decode or print raw live reports\n  capture --index N --output PATH [--decoded]\n                                            Capture raw and optional decoded JSONL\n  suppress-lizard --index N                 Safely test SC2 lizard-mode suppression\n  rumble --index N [--low N] [--high N] [--duration-ms N]\n                                            Test dual SC2 rumble (defaults: 50%/50%, 1 second)\n\nOptions:\n  --duration-secs N                         Stop monitor/capture/suppression after N seconds\n  --low N --high N                          Rumble channel intensity, 0..65535\n  --duration-ms N                           Rumble duration in milliseconds\n  -h, --help"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn rumble_values_accept_full_u16_range_and_reject_overflow() {
+        assert_eq!(
+            parse_value(&args(&["--low", "0"]), "--low", 32_768_u16).unwrap(),
+            0
+        );
+        assert_eq!(
+            parse_value(&args(&["--high", "65535"]), "--high", 32_768_u16).unwrap(),
+            u16::MAX
+        );
+        assert!(parse_value(&args(&["--low", "65536"]), "--low", 32_768_u16).is_err());
+        assert_eq!(parse_value::<u16>(&[], "--low", 32_768).unwrap(), 32_768);
+    }
 }

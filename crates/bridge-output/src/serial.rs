@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use bridge_protocol::{Frame, Message, StreamDecoder, WireGamepadState, PROTOCOL_VERSION};
 use gamepad_state::GamepadState;
 
-use crate::{GamepadOutput, OutputDiagnostics, OutputError};
+use crate::{GamepadOutput, OutputDiagnostics, OutputError, OutputFeedback};
 
 pub const XIAO_USB_VENDOR_ID: u16 = 0x045e;
 pub const XIAO_USB_PRODUCT_ID: u16 = 0x028e;
@@ -87,6 +87,8 @@ pub struct SerialMetrics {
     pub states_dropped: u64,
     pub reconnects: u64,
     pub state_refreshes: u64,
+    pub rumble_commands_received: u64,
+    pub rumble_commands_coalesced: u64,
 }
 
 #[derive(Debug)]
@@ -148,6 +150,7 @@ pub struct SerialConnection<T> {
     pending_ping: Option<(u32, Duration)>,
     last_state: Option<GamepadState>,
     last_state_sent: Option<Duration>,
+    pending_feedback: Option<OutputFeedback>,
     metrics: SerialMetrics,
 }
 
@@ -178,6 +181,7 @@ impl<T: ByteTransport> SerialConnection<T> {
             pending_ping: None,
             last_state: None,
             last_state_sent: None,
+            pending_feedback: None,
             metrics: SerialMetrics::default(),
         };
         connection.write_message(Message::Hello {
@@ -197,6 +201,10 @@ impl<T: ByteTransport> SerialConnection<T> {
     }
     pub fn into_inner(self) -> T {
         self.transport
+    }
+
+    pub fn take_feedback(&mut self) -> Option<OutputFeedback> {
+        self.pending_feedback.take()
     }
 
     /// Queues a validated state, dropping the oldest at the capacity limit.
@@ -323,6 +331,22 @@ impl<T: ByteTransport> SerialConnection<T> {
             {
                 self.pending_ping = None;
             }
+            Message::Rumble {
+                low_frequency,
+                high_frequency,
+            } if self.status == SerialStatus::Ready => {
+                self.metrics.rumble_commands_received += 1;
+                if self
+                    .pending_feedback
+                    .replace(OutputFeedback::Rumble {
+                        low_frequency: *low_frequency,
+                        high_frequency: *high_frequency,
+                    })
+                    .is_some()
+                {
+                    self.metrics.rumble_commands_coalesced += 1;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -446,6 +470,10 @@ impl SerialOutput {
             states_dropped: self.completed.states_dropped + active.states_dropped,
             reconnects: self.completed.reconnects,
             state_refreshes: self.completed.state_refreshes + active.state_refreshes,
+            rumble_commands_received: self.completed.rumble_commands_received
+                + active.rumble_commands_received,
+            rumble_commands_coalesced: self.completed.rumble_commands_coalesced
+                + active.rumble_commands_coalesced,
         }
     }
 
@@ -484,6 +512,8 @@ impl SerialOutput {
             self.completed.checksum_failures += metrics.checksum_failures;
             self.completed.states_dropped += metrics.states_dropped;
             self.completed.state_refreshes += metrics.state_refreshes;
+            self.completed.rumble_commands_received += metrics.rumble_commands_received;
+            self.completed.rumble_commands_coalesced += metrics.rumble_commands_coalesced;
         }
     }
 }
@@ -542,6 +572,12 @@ impl GamepadOutput for SerialOutput {
         unreachable!("two service attempts always return")
     }
 
+    fn take_feedback(&mut self) -> Option<OutputFeedback> {
+        self.connection
+            .as_mut()
+            .and_then(SerialConnection::take_feedback)
+    }
+
     fn diagnostics(&self) -> OutputDiagnostics {
         let metrics = self.metrics();
         OutputDiagnostics {
@@ -549,6 +585,8 @@ impl GamepadOutput for SerialOutput {
             framing_failures: metrics.framing_failures,
             checksum_failures: metrics.checksum_failures,
             state_refreshes: metrics.state_refreshes,
+            rumble_commands_received: metrics.rumble_commands_received,
+            rumble_commands_coalesced: metrics.rumble_commands_coalesced,
         }
     }
 }
@@ -772,6 +810,46 @@ mod tests {
         assert_eq!(connection.metrics().framing_failures, 1);
         assert_eq!(connection.metrics().checksum_failures, 1);
         assert!(messages(&connection.into_inner().writes).contains(&Message::Pong { nonce: 42 }));
+    }
+
+    #[test]
+    fn stages_only_the_latest_ready_rumble_feedback() {
+        let transport = MockTransport {
+            reads: VecDeque::from([
+                response(Message::Rumble {
+                    low_frequency: 1,
+                    high_frequency: 2,
+                }),
+                response(Message::HelloResponse {
+                    selected_version: 1,
+                }),
+                response(Message::Rumble {
+                    low_frequency: 3,
+                    high_frequency: 4,
+                }),
+                response(Message::Rumble {
+                    low_frequency: 5,
+                    high_frequency: 6,
+                }),
+            ]),
+            writes: Vec::new(),
+        };
+        let mut connection =
+            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        assert_eq!(connection.take_feedback(), None);
+        connection.poll(Duration::ZERO).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        assert_eq!(
+            connection.take_feedback(),
+            Some(OutputFeedback::Rumble {
+                low_frequency: 5,
+                high_frequency: 6
+            })
+        );
+        assert_eq!(connection.metrics().rumble_commands_received, 2);
+        assert_eq!(connection.metrics().rumble_commands_coalesced, 1);
     }
 
     #[test]

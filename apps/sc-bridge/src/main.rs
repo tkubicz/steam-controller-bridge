@@ -57,7 +57,7 @@ fn run_live(args: &[String]) -> Result<(), String> {
     let result = loop {
         let status = handle.status();
         let summary = format!(
-            "{:?}|{}|{}|{}|{:?}|{:?}|{}|{:?}",
+            "{:?}|{}|{}|{}|{:?}|{:?}|{}|{:?}|{}|{}|{:?}",
             status.state,
             status.detail,
             status.puck.connected,
@@ -65,6 +65,9 @@ fn run_live(args: &[String]) -> Result<(), String> {
             status.xiao.path,
             status.battery_percent,
             status.lizard.suppressed,
+            status.haptics.state,
+            status.haptics.refreshes / 25,
+            status.haptics.failures,
             status.last_error
         );
         if last_summary.as_ref() != Some(&summary) {
@@ -78,6 +81,17 @@ fn run_live(args: &[String]) -> Result<(), String> {
                 status.xiao.path,
                 status.battery_percent,
                 status.lizard.suppressed
+            );
+            eprintln!(
+                "level=info event=haptics state={:?} commands={} writes={} refreshes={} \
+                 coalesced={} failures={} last_command_age_ms={:?}",
+                status.haptics.state,
+                status.haptics.commands_received,
+                status.haptics.writes,
+                status.haptics.refreshes,
+                status.haptics.coalesced_commands,
+                status.haptics.failures,
+                status.haptics.last_command_age.map(|age| age.as_millis())
             );
             if let Some(error) = &status.last_error {
                 eprintln!("level=warn event=status_error message={error:?}");

@@ -17,6 +17,8 @@ pub const EXTENDED_INPUT_REPORT_SIZE: usize = 54;
 pub const LIZARD_MOUSE_REPORT_SIZE: usize = 6;
 pub const LIZARD_KEYBOARD_REPORT_SIZE: usize = 9;
 pub const FEATURE_REPORT_SIZE: usize = 64;
+pub const RUMBLE_OUTPUT_REPORT_SIZE: usize = 10;
+pub const RUMBLE_OUTPUT_REPORT_ID: u8 = 0x80;
 
 const FEATURE_REPORT_ID: u8 = 0x01;
 const SET_SETTINGS_VALUES: u8 = 0x87;
@@ -38,6 +40,26 @@ pub const fn lizard_mode_off_feature_report() -> [u8; FEATURE_REPORT_SIZE] {
     let value = LIZARD_MODE_OFF.to_le_bytes();
     report[4] = value[0];
     report[5] = value[1];
+    report
+}
+
+/// Builds the SDL-compatible Steam Controller 2 dual-rumble output report.
+///
+/// The returned packet includes report ID `0x80`. Xbox low-frequency rumble
+/// drives the left actuator and high-frequency rumble drives the right.
+#[must_use]
+pub const fn rumble_output_report(
+    low_frequency: u16,
+    high_frequency: u16,
+) -> [u8; RUMBLE_OUTPUT_REPORT_SIZE] {
+    let mut report = [0_u8; RUMBLE_OUTPUT_REPORT_SIZE];
+    let low = low_frequency.to_le_bytes();
+    let high = high_frequency.to_le_bytes();
+    report[0] = RUMBLE_OUTPUT_REPORT_ID;
+    report[3] = low[0];
+    report[4] = low[1];
+    report[6] = high[0];
+    report[7] = high[1];
     report
 }
 
@@ -366,6 +388,22 @@ mod tests {
         assert_eq!(report.len(), FEATURE_REPORT_SIZE);
         assert_eq!(&report[..6], &[0x01, 0x87, 0x03, 0x09, 0x00, 0x00]);
         assert!(report[6..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn rumble_output_report_matches_sdl_golden_vectors() {
+        assert_eq!(
+            rumble_output_report(0x1234, 0xabcd),
+            [0x80, 0, 0, 0x34, 0x12, 0, 0xcd, 0xab, 0, 0]
+        );
+        assert_eq!(
+            rumble_output_report(0, 0),
+            [0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            rumble_output_report(u16::MAX, u16::MAX),
+            [0x80, 0, 0, 0xff, 0xff, 0, 0xff, 0xff, 0, 0]
+        );
     }
 
     fn input_report(report_id: u8) -> Vec<u8> {

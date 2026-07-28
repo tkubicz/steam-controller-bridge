@@ -7,6 +7,7 @@ pub struct MenuModel {
     pub controller: String,
     pub xiao: String,
     pub battery: String,
+    pub haptics: String,
     pub error: String,
     pub start_enabled: bool,
     pub stop_enabled: bool,
@@ -58,6 +59,7 @@ impl MenuModel {
                 || "Battery: Unknown".to_owned(),
                 |percent| format!("Battery: {percent}%"),
             ),
+            haptics: format!("Haptics: {:?}", status.haptics.state),
             error: status.last_error.as_ref().map_or_else(
                 || "Last error: None".to_owned(),
                 |error| format!("Last error: {error}"),
@@ -82,11 +84,16 @@ mod tests {
             state: RuntimeState::Running,
             detail: "Bridge running".to_owned(),
             battery_percent: Some(87),
+            haptics: bridge_runtime::HapticsStatus {
+                state: bridge_runtime::HapticsState::Active,
+                ..bridge_runtime::HapticsStatus::default()
+            },
             ..BridgeStatus::default()
         });
         assert!(!running.start_enabled);
         assert!(running.stop_enabled);
         assert_eq!(running.battery, "Battery: 87%");
+        assert_eq!(running.haptics, "Haptics: Active");
     }
 
     #[test]

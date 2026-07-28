@@ -76,10 +76,24 @@ pub trait GamepadOutput {
         Ok(())
     }
 
+    /// Takes the latest device-to-host feedback request, if the backend
+    /// supports bidirectional output.
+    fn take_feedback(&mut self) -> Option<OutputFeedback> {
+        None
+    }
+
     #[must_use]
     fn diagnostics(&self) -> OutputDiagnostics {
         OutputDiagnostics::default()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFeedback {
+    Rumble {
+        low_frequency: u16,
+        high_frequency: u16,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -88,6 +102,8 @@ pub struct OutputDiagnostics {
     pub framing_failures: u64,
     pub checksum_failures: u64,
     pub state_refreshes: u64,
+    pub rumble_commands_received: u64,
+    pub rumble_commands_coalesced: u64,
 }
 
 #[derive(Debug, Default)]
@@ -236,6 +252,9 @@ impl<O: GamepadOutput> GamepadOutput for ChangedOnly<O> {
     }
     fn service(&mut self) -> Result<(), OutputError> {
         self.inner.service()
+    }
+    fn take_feedback(&mut self) -> Option<OutputFeedback> {
+        self.inner.take_feedback()
     }
     fn diagnostics(&self) -> OutputDiagnostics {
         self.inner.diagnostics()

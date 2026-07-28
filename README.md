@@ -22,7 +22,13 @@ verified on the connected Puck. Zero-argument discovery has selected the active
 Puck interface and the metadata/Hello-verified XIAO port end to end, including a
 live 94% battery report. Manual confirmation that Space/pointer input is absent,
 restoration timing, full control-by-control mapping, GeForce NOW, disconnect
-timing, and one-hour soak tests remain release gates.
+timing, end-to-end dual rumble, and one-hour soak tests remain release gates.
+The software and updated firmware paths for standard Xbox strong/weak rumble
+are implemented. The Puck accepted bounded left-only and right-only refreshed
+diagnostics plus their final zero writes, and the connected development XIAO
+was flashed with the reverse path. End-to-end acceptance still requires a
+Safari/streaming-client vibration request and confirmation of the physical
+actuator sides.
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
@@ -131,6 +137,16 @@ While the command runs, controller buttons and touchpads should no longer
 produce native keyboard/mouse input. The controller watchdog restores desktop
 mode after the command exits.
 
+Independently of the XIAO, test the two SC2 actuators directly:
+
+```bash
+cargo run -p sc-probe -- rumble --index 0 --low 32768 --high 0
+cargo run -p sc-probe -- rumble --index 0 --low 0 --high 32768
+```
+
+The diagnostic suppresses lizard mode, refreshes rumble every 40 ms, and always
+attempts a zero write before it exits.
+
 The session reports disconnects and automatically attempts to reopen the same collection identity every 500 ms. Capture files include connection metadata, transport, source collection identity, report ID, base64 bytes, and the available dropped-report count. `--decoded` additionally records typed Steam Controller 2 state reports.
 
 macOS may reject protected keyboard/gamepad collections with an IOKit `not permitted` error until the terminal or Codex host has Input Monitoring permission. Listing and metadata inspection do not require opening the collection.
@@ -182,7 +198,7 @@ open "dist/Steam Controller Bridge.app"
 ```
 
 The menu app embeds the same runtime, starts it automatically, and shows bridge,
-Puck, controller, XIAO, battery, suppression, and error status. Its menu
+Puck, controller, XIAO, battery, suppression, haptics, and error status. Its menu
 provides Start/Stop, Copy Diagnostics, Input Monitoring settings, the rotated
 log folder, and Quit. This source-built application is not notarized; release
 signing, a DMG, and Launch at Login remain future work.
@@ -192,9 +208,9 @@ signing, a DMG, and Launch at Login remain future work.
 - Steam Controller 2 Puck input is live-tested with extended `0x42` reports.
   Direct USB and Bluetooth still need transport-specific regression captures.
 - Only the official Proteus Puck `28de:1304` active slot is permitted to receive
-  the SDL-compatible lizard-off feature report. Arbitrary controller
-  initialization, settings, mappings, haptics, and feature writes remain
-  intentionally unavailable.
+  the SDL-compatible lizard-off feature report and exact standard dual-rumble
+  output. Arbitrary controller initialization, settings, mappings, custom
+  haptics, and feature/output writes remain intentionally unavailable.
 - Steam coexistence, multiple simultaneous SC2 controllers, and running another
   HID consumer against the selected slot are unsupported.
 - Automatic discovery deliberately reports an ambiguity instead of choosing
@@ -212,5 +228,6 @@ signing, a DMG, and Launch at Login remain future work.
 - GeForce NOW, full mapping, manual keyboard/pointer suppression, automatic
   restoration timing, lizard-suppression failure timing, and soak acceptance
   are not yet complete. Boosteroid gamepad detection and repeated lizard-off
-  writes have been confirmed, but complete input acceptance remains pending.
+  writes have been confirmed, but complete input and rumble acceptance remains
+  pending.
 - The keyboard simulator is line-oriented, not a production input UI.

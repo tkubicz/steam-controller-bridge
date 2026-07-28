@@ -121,8 +121,32 @@ No explicit lizard-on command is sent.
 
 The project does not expose an arbitrary feature-report API. Unsupported
 devices and collections are rejected before a write. Digital-mapping clears,
-arbitrary settings, haptics, actuator commands, and explicit lizard-on writes
+arbitrary settings, custom actuator commands, and explicit lizard-on writes
 remain unavailable.
+
+## Standard dual rumble
+
+The same exact official Puck-slot allowlist permits one ordinary HID output
+packet for standard dual rumble:
+
+```text
+80 00 00 LOW_LO LOW_HI 00 HIGH_LO HIGH_HI 00 00
+```
+
+Report ID `0x80` is SDL's packed `MsgHapticRumble`. Xbox
+low-frequency/strong maps linearly to the SC2 left actuator, and Xbox
+high-frequency/weak maps to the right actuator. Changed values are written
+immediately; nonzero values are resent every 40 ms because the controller
+stops stale actuator output on its own short watchdog. Zero is written once on
+effect stop, lease expiry, disconnect, and shutdown.
+
+This narrow API does not expose trigger rumble, pulses, tones, scripts, or HD
+haptics. The byte layout and refresh timing follow
+[SDL's Steam Controller 2 rumble implementation](https://github.com/libsdl-org/SDL/blob/412a7c5db639399b1bbaa4516d56f390884ea28b/src/joystick/hidapi/SDL_hidapi_steam_triton.c#L595-L629)
+and its
+[40 ms cadence](https://github.com/libsdl-org/SDL/blob/412a7c5db639399b1bbaa4516d56f390884ea28b/src/joystick/hidapi/SDL_hidapi_steam_triton.c#L40-L44).
+OpenPuck remains an architectural and safety reference only; no AGPL source is
+copied.
 
 ## Still requiring local captures
 

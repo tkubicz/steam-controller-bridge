@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stddef.h>
+
 #include "bridge_session.h"
 
 namespace scbridge {
@@ -21,6 +23,32 @@ struct XInputGamepadReport {
 
 static_assert(sizeof(XInputGamepadReport) == 20,
               "XInput report must be exactly 20 bytes");
+
+constexpr size_t kXInputRumbleReportSize = 8;
+
+inline bool is_xinput_output_set_report(
+    bool direction_out, bool class_request, bool interface_recipient,
+    uint8_t request, uint16_t value, uint16_t index, uint16_t length,
+    uint8_t interface_number) {
+  return direction_out && class_request && interface_recipient &&
+         request == 0x09U && value == 0x0200U &&
+         index == interface_number && length == kXInputRumbleReportSize;
+}
+
+inline bool parse_xinput_rumble(const uint8_t* data, size_t length,
+                                RumbleFeedback* output) {
+  if (data == nullptr || output == nullptr ||
+      length != kXInputRumbleReportSize || data[0] != 0x00U ||
+      data[1] != kXInputRumbleReportSize || data[2] != 0x00U ||
+      data[5] != 0x00U || data[6] != 0x00U || data[7] != 0x00U) {
+    return false;
+  }
+  output->low_frequency =
+      static_cast<uint16_t>(static_cast<uint16_t>(data[3]) * 257U);
+  output->high_frequency =
+      static_cast<uint16_t>(static_cast<uint16_t>(data[4]) * 257U);
+  return true;
+}
 
 constexpr uint16_t source_button(uint8_t index) {
   return static_cast<uint16_t>(1U << index);

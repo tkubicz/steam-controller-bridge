@@ -26,12 +26,15 @@ The following paths have been verified on development hardware:
 
 Every physical Steam Controller 2 control, explicit watchdog/disconnect and
 manual Space/pointer suppression, lizard restoration timing, GeForce NOW,
-reconnect stress, and the one-hour soak still require acceptance testing. Do
-not treat the development smoke test as a release qualification.
+end-to-end dual rumble, reconnect stress, and the one-hour soak still require
+acceptance testing. Do not treat the development smoke test as a release
+qualification.
 
-The bridge sends exactly one whitelisted controller setting on the official
-Puck: SDL's lizard-mode-off command. It does not expose arbitrary feature
-writes, initialization, mapping clears, settings, or haptics.
+The bridge sends exactly one whitelisted controller setting and one whitelisted
+output shape on the official Puck: SDL's lizard-mode-off command and standard
+dual rumble. It does not expose arbitrary feature/output writes,
+initialization, mapping clears, settings, trigger rumble, tones, or scripted
+haptics.
 
 ## What you need
 
@@ -97,6 +100,10 @@ firmware/xiao-nrf52840/build/artifacts/
 ├── steam-controller-bridge-xiao-nrf52840.uf2
 └── steam-controller-bridge-xiao-nrf52840-dfu.zip
 ```
+
+Rumble requires firmware containing protocol-v1 message type 8. An older XIAO
+remains input-compatible but cannot return Xbox vibration requests to the host,
+so reflash the board after updating the project.
 
 Connect the XIAO with a data-capable USB-C cable and list its port:
 
@@ -240,6 +247,21 @@ wait up to about 10 seconds; the controller watchdog should restore its normal
 desktop keyboard/mouse behavior. Do not run the monitor or visualizer at the
 same time as this command.
 
+Test each SC2 actuator independently without the XIAO:
+
+```bash
+target/release/sc-probe rumble --index N --low 32768 --high 0
+target/release/sc-probe rumble --index N --low 0 --high 32768
+target/release/sc-probe rumble --index N --low 65535 --high 65535 \
+  --duration-ms 1000
+```
+
+`low` is the Xbox low-frequency/strong channel mapped to the SC2 left
+actuator; `high` is the high-frequency/weak channel mapped to the right
+actuator. Values are `0..65535`. The command suppresses lizard mode, refreshes
+rumble every 40 ms, and attempts an explicit zero on duration expiry, Ctrl-C,
+or error.
+
 ## 6. Verify the XIAO output independently
 
 Before involving the controller, test the host-to-XIAO path. Find the XIAO CDC
@@ -315,7 +337,10 @@ stop for 100 ms.
 
 Normal logs progress through `Discovering`, `Waiting`, `Starting`, and
 `Running`. Running status must show the selected XIAO path, a connected
-controller, and `lizard_suppressed=true`. The diagnostic option
+controller, `lizard_suppressed=true`, and haptics `Idle` until an effect is
+requested. `Active` means a fresh XIAO rumble lease is being refreshed;
+`Degraded` means actuator writes failed while controller input remains usable.
+The diagnostic option
 `--lizard-mode leave` retains the old native keyboard/mouse behavior and is not
 suitable for gameplay.
 
@@ -329,7 +354,9 @@ For a first end-to-end test:
 5. Keep a text field focused while pressing `A` and using touchpads; verify no
    Space key or pointer movement occurs.
 6. Hold a stick for at least 30 seconds to verify refresh behavior.
-7. Stop `sc-bridge` and verify the physical USB gamepad becomes neutral within
+7. Use GamepadTester's one-second vibration action, then its infinite action.
+   Verify both unequal channels and that Stop ends rumble promptly.
+8. Stop `sc-bridge` and verify the physical USB gamepad becomes neutral within
    125 ms and desktop lizard mode returns within about 10 seconds.
 
 ## Daily startup
@@ -369,6 +396,7 @@ bar opens status and actions:
 
 - current bridge, Puck, controller, and XIAO/port state;
 - battery percentage, or `Unknown` until a valid `0x43` report arrives;
+- haptics `Idle`, `Active`, or `Degraded`;
 - the latest actionable error;
 - `Start Bridge` and `Stop Bridge`;
 - `Copy Diagnostics`;
@@ -411,14 +439,15 @@ iTerm, or the application launching the command—then quit and reopen it.
     --duration-secs 30 --decoded
   ```
 
-Do not send guessed feature reports. Only the fixed lizard-off setting used by
-`sc-probe suppress-lizard` and `sc-bridge` is permitted.
+Do not send guessed feature/output reports. Only the fixed lizard-off setting
+and exact standard rumble output used by `sc-probe` and `sc-bridge` are
+permitted.
 
 ### Ownership or HID open fails
 
 Fully quit Steam rather than closing its window. Stop `sc-visualizer`, every
-other `sc-probe monitor`/`capture`/`suppress-lizard` process, and any other
-controller translator. An `already owned by another
+other `sc-probe monitor`/`capture`/`suppress-lizard`/`rumble` process, and any
+other controller translator. An `already owned by another
 steam-controller-bridge tool` error comes from the per-slot project lock; a
 native HID-open error may instead indicate missing Input Monitoring permission.
 Confirm Steam's persistent helper is absent:
@@ -502,6 +531,27 @@ Steam, close other controller translators, confirm the lizard diagnostics, and
 verify the `Steam Controller Bridge` HID device independently with the
 simulator.
 
+### GamepadTester or a game requests vibration, but the SC2 does not rumble
+
+- Rebuild and reflash the current XIAO firmware; old firmware has no reverse
+  feedback path.
+- First run the left-only and right-only `sc-probe rumble` commands above. If
+  they fail, verify the active `28de:1304 ff00:0001` interface and close Steam
+  and other controller tools.
+- Start `./sc-bridge`, request vibration again, and inspect the CLI or copied
+  diagnostics. `commands_received` must increase. If it does not, macOS did not
+  deliver an Xbox OUT packet to the XIAO or the CDC feedback frame did not
+  arrive.
+- `Degraded` with increasing failures means the Puck output write failed.
+  Controller input intentionally continues; the worker retries at most every
+  500 ms while the XIAO keeps the 100 ms lease fresh.
+- Confirm the browser tab is focused and has received a controller input. Test
+  one-second vibration before infinite vibration.
+
+Stopping the effect, closing the browser, disconnecting either endpoint, or
+stopping the bridge must stop rumble. Do not continue using a build that can
+leave an actuator latched.
+
 ### Mapping is wrong
 
 Record a session with `--record`, note the controller transport and firmware,
@@ -527,6 +577,6 @@ but a broadly distributable product should additionally provide:
 - signed/notarized macOS binaries and downloadable firmware artifacts;
 - an owned or licensed USB VID/PID plus a macOS recognition path that does not
   depend on another vendor's Xbox 360 compatibility identity;
-- stable source/slot and XIAO-port discovery instead of manual indices/paths;
-- a background service or packaged UI with startup, reconnect, and diagnostics;
+- hardware qualification of dual-rumble delivery, expiry, and disconnect
+  behavior in GamepadTester, Boosteroid, and GeForce NOW;
 - versioned releases and a supported upgrade/recovery procedure.

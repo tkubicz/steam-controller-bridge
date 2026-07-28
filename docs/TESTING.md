@@ -32,6 +32,12 @@ cargo build --workspace --all-targets
 
 The protocol tests cover every message type, fixed axis endpoints, the static CRC vector, partial and combined reads, garbage, truncation, invalid versions, oversized lengths, corruption, and recovery. A deterministic pseudo-random byte-stream test checks that framing never panics.
 
+Rumble coverage includes the protocol type-8 little-endian vector, exact
+eight-byte Xbox command validation and `u8 * 257` scaling, the complete
+ten-byte SC2 output vector, independent/zero/full-scale channels, latest-value
+coalescing, 25 ms firmware feedback, 40 ms actuator refresh, 100 ms lease
+expiry, 500 ms degraded retry, reconnect clearing, and safety-zero priority.
+
 Recording tests cover typed raw and gamepad round trips, timestamp ordering, unknown events, seeking, deterministic replay, malformed/truncated input, version rejection, and identical simulator-state replay.
 
 Steam Controller protocol tests cover all 30 OpenPuck button bits, every trigger/stick/pad/pressure/motion field, both `0x45` and extended `0x42`, connection/battery/signal reports, typed recording round trips, incorrect sizes, mismatched IDs, unknown IDs, and arbitrary truncated lengths.
@@ -77,6 +83,22 @@ While it runs, controller `A` must not emit Space and touchpads must not move th
 pointer. After it stops, desktop behavior must return within about 10 seconds.
 Never run this alongside the visualizer, monitor, Steam, or another bridge.
 
+Test the Puck actuators without the XIAO:
+
+```bash
+cargo run -p sc-probe -- rumble --index N --low 32768 --high 0
+cargo run -p sc-probe -- rumble --index N --low 0 --high 32768
+cargo run -p sc-probe -- rumble --index N --low 65535 --high 65535 \
+  --duration-ms 1000
+```
+
+Then flash the updated firmware, start `./sc-bridge`, and verify GamepadTester's
+one-second and infinite vibration actions. Hardware acceptance covers unequal
+strong/weak magnitudes, Boosteroid, GeForce NOW, rapid and continuous effects,
+and zero within 100 ms after effect stop, browser exit, bridge termination, or
+Puck/XIAO disconnect. These physical results must not be inferred from unit
+tests or a successful firmware build.
+
 Linux CI compiles the hardware-independent API and explicit unsupported-platform implementation; it does not require `hidapi` system libraries or physical hardware.
 
 The optional GUI remains part of the workspace build and strict Clippy gates.
@@ -96,7 +118,7 @@ Runtime and CLI tests cover zero-argument defaults, explicit controller/port
 overrides, exact XIAO metadata filtering, callout-versus-tty filtering,
 battery-range handling, latest-report replacement, and replay's unchanged dump
 default. Menu-model tests cover status strings, battery unknown/percentage,
-error visibility, and Start/Stop enablement. macOS tests build the tray
+haptics state, error visibility, and Start/Stop enablement. macOS tests build the tray
 frontend, diagnostics renderer, and template icon.
 
 The `macos-app` CI job builds the current-architecture release binary, creates
@@ -119,6 +141,13 @@ The 2026-07-27 development-hardware smoke test additionally confirmed:
 - zero-argument discovery selected active Puck interface 2 and the
   `/dev/cu.usbmodem11201` XIAO by exact metadata plus Hello, reached `Running`,
   enabled suppression, and surfaced a valid 94% battery report.
+- on 2026-07-28, active Puck index 43 accepted separate left-only and right-only
+  50% diagnostics, each with seven 40 ms writes and a successful final zero.
+  The updated firmware then flashed successfully to XIAO serial
+  `5E6EF905E5468F85`; a bounded live bridge re-negotiated, stayed Running, and
+  shut down cleanly. The Codex in-app browser did not enumerate the local
+  gamepad, so physical actuator orientation and Safari/streaming-client OUT
+  delivery remain manual checks.
 
 The hardware observation that `A` emits no Space, touchpads do not move the
 pointer, and desktop mode returns within about 10 seconds is still pending.

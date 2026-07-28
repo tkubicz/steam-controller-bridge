@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use bridge_core::{BridgeConfig, BridgeEngine, BridgeMetrics, ProcessOutcome};
 use bridge_output::{
     available_serial_devices, DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput,
-    OutputDiagnostics, SerialConfig, SerialDeviceInfo, SerialOutput,
+    OutputDiagnostics, OutputFeedback, SerialConfig, SerialDeviceInfo, SerialOutput,
 };
 use controller_mapper::MapperConfig;
 use recording::{RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
@@ -36,6 +36,9 @@ const ACTIVE_SLOT_TIMEOUT: Duration = Duration::from_secs(1);
 const STATUS_INTERVAL: Duration = Duration::from_millis(250);
 const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const RUMBLE_REFRESH_INTERVAL: Duration = Duration::from_millis(40);
+const RUMBLE_LEASE_TIMEOUT: Duration = Duration::from_millis(100);
+const RUMBLE_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerSelection {
@@ -131,6 +134,25 @@ pub struct LizardStatus {
     pub last_refresh_age: Option<Duration>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HapticsState {
+    #[default]
+    Idle,
+    Active,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HapticsStatus {
+    pub state: HapticsState,
+    pub commands_received: u64,
+    pub writes: u64,
+    pub refreshes: u64,
+    pub coalesced_commands: u64,
+    pub failures: u64,
+    pub last_command_age: Option<Duration>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BridgeStatus {
     pub revision: u64,
@@ -141,6 +163,7 @@ pub struct BridgeStatus {
     pub xiao: XiaoStatus,
     pub battery_percent: Option<u8>,
     pub lizard: LizardStatus,
+    pub haptics: HapticsStatus,
     pub bridge_metrics: BridgeMetrics,
     pub output_diagnostics: OutputDiagnostics,
     pub last_error: Option<String>,
@@ -157,6 +180,7 @@ impl Default for BridgeStatus {
             xiao: XiaoStatus::default(),
             battery_percent: None,
             lizard: LizardStatus::default(),
+            haptics: HapticsStatus::default(),
             bridge_metrics: BridgeMetrics::default(),
             output_diagnostics: OutputDiagnostics::default(),
             last_error: None,
@@ -703,7 +727,26 @@ impl Supervisor {
         let mut recording = self.open_recording()?;
         let started = Instant::now();
         let dropped = Arc::new(AtomicU64::new(0));
-        let mut worker = HidWorker::spawn(active, self.config.lizard_mode, Arc::clone(&dropped))?;
+        let mut worker =
+            match HidWorker::spawn(active, self.config.lizard_mode, Arc::clone(&dropped)) {
+                Ok(worker) => worker,
+                Err(error) => {
+                    let _ = engine.shutdown(&mut *output.output);
+                    return Err(error);
+                }
+            };
+        if let Err(error) = output.output.service() {
+            let _ = engine.shutdown(&mut *output.output);
+            worker.shutdown()?;
+            return Err(format!(
+                "XIAO service failed before input activation: {error}"
+            ));
+        }
+        while output.output.take_feedback().is_some() {
+            // Feedback received before the Puck worker exists is not a valid
+            // post-reconnect lease. A continuing effect will be refreshed by
+            // the XIAO within 25 ms.
+        }
         let mut last_controller_state = Instant::now();
         let mut controller_connected = initial_controller_seen;
         let mut last_status = Instant::now()
@@ -717,6 +760,7 @@ impl Supervisor {
             status.controller.connected = initial_controller_seen;
             status.controller.last_state_age = initial_controller_seen.then_some(Duration::ZERO);
             status.lizard = worker.lizard_diagnostics();
+            status.haptics = worker.haptics_diagnostics();
         });
         eprintln!(
             "level=info event=bridge_running puck_interface={} xiao_path={:?} lizard_mode={:?}",
@@ -797,11 +841,27 @@ impl Supervisor {
             if lost > 0 {
                 engine.note_dropped_reports(lost);
             }
-            if should_tick_input_timeout(lost, worker.has_pending_report()) {
-                if let Err(error) = engine.tick(started.elapsed(), &mut *output.output) {
-                    break ActiveExit::OutputLost(format!(
-                        "XIAO service failed; waiting for reconnect: {error}"
-                    ));
+            let service_result = if should_tick_input_timeout(lost, worker.has_pending_report()) {
+                engine
+                    .tick(started.elapsed(), &mut *output.output)
+                    .map(|_| ())
+            } else {
+                output
+                    .output
+                    .service()
+                    .map_err(bridge_core::BridgeError::Output)
+            };
+            if let Err(error) = service_result {
+                break ActiveExit::OutputLost(format!(
+                    "XIAO service failed; waiting for reconnect: {error}"
+                ));
+            }
+            while let Some(feedback) = output.output.take_feedback() {
+                match feedback {
+                    OutputFeedback::Rumble {
+                        low_frequency,
+                        high_frequency,
+                    } => worker.set_rumble(low_frequency, high_frequency),
                 }
             }
             if last_controller_state.elapsed() >= ACTIVE_SLOT_TIMEOUT {
@@ -814,6 +874,7 @@ impl Supervisor {
                     status.bridge_metrics = engine.metrics();
                     status.output_diagnostics = output.output.diagnostics();
                     status.lizard = worker.lizard_diagnostics();
+                    status.haptics = worker.haptics_diagnostics();
                     status.controller.connected =
                         controller_connected && controller_age < ACTIVE_SLOT_TIMEOUT;
                     status.controller.last_state_age =
@@ -830,6 +891,7 @@ impl Supervisor {
             status.bridge_metrics = engine.metrics();
             status.output_diagnostics = output.output.diagnostics();
             status.lizard = worker.lizard_diagnostics();
+            status.haptics = worker.haptics_diagnostics();
         });
         self.clear_controller_status();
         record_device_event(&mut recording, started, KIND_DEVICE_DISCONNECTED, None)?;
@@ -991,6 +1053,7 @@ impl Supervisor {
             || status.xiao != previous.xiao
             || status.battery_percent != previous.battery_percent
             || status.lizard != previous.lizard
+            || status.haptics != previous.haptics
             || status.bridge_metrics != previous.bridge_metrics
             || status.output_diagnostics != previous.output_diagnostics
             || status.last_error != previous.last_error;
@@ -1023,7 +1086,10 @@ struct OutputSession {
 
 fn service_waiting_output(output: Option<&mut OutputSession>) -> bool {
     output.is_some_and(|output| match output.output.service() {
-        Ok(()) => true,
+        Ok(()) => {
+            while output.output.take_feedback().is_some() {}
+            true
+        }
         Err(error) => {
             eprintln!("level=warn event=xiao_lost phase=waiting error={error:?} action=rediscover");
             false
@@ -1340,6 +1406,250 @@ impl LizardSupervisor {
     }
 }
 
+#[derive(Debug, Default)]
+struct SharedHapticsMetrics {
+    active: AtomicBool,
+    degraded: AtomicBool,
+    commands_received: AtomicU64,
+    writes: AtomicU64,
+    refreshes: AtomicU64,
+    coalesced_commands: AtomicU64,
+    failures: AtomicU64,
+    last_command_millis: AtomicU64,
+}
+
+impl SharedHapticsMetrics {
+    fn record_command(&self, now: Duration, coalesced: bool) {
+        self.commands_received.fetch_add(1, Ordering::Relaxed);
+        if coalesced {
+            self.coalesced_commands.fetch_add(1, Ordering::Relaxed);
+        }
+        let millis = u64::try_from(now.as_millis())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        self.last_command_millis.store(millis, Ordering::Release);
+    }
+
+    fn record_success(&self, active: bool, refresh: bool) {
+        self.active.store(active, Ordering::Release);
+        self.degraded.store(false, Ordering::Release);
+        self.writes.fetch_add(1, Ordering::Relaxed);
+        if refresh {
+            self.refreshes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_failure(&self) {
+        self.active.store(false, Ordering::Release);
+        self.degraded.store(true, Ordering::Release);
+        self.failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_disconnected(&self) {
+        self.active.store(false, Ordering::Release);
+        self.degraded.store(false, Ordering::Release);
+        self.last_command_millis.store(0, Ordering::Release);
+    }
+
+    fn snapshot(&self, now: Duration) -> HapticsStatus {
+        let last_command_millis = self.last_command_millis.load(Ordering::Acquire);
+        let state = if self.degraded.load(Ordering::Acquire) {
+            HapticsState::Degraded
+        } else if self.active.load(Ordering::Acquire) {
+            HapticsState::Active
+        } else {
+            HapticsState::Idle
+        };
+        HapticsStatus {
+            state,
+            commands_received: self.commands_received.load(Ordering::Relaxed),
+            writes: self.writes.load(Ordering::Relaxed),
+            refreshes: self.refreshes.load(Ordering::Relaxed),
+            coalesced_commands: self.coalesced_commands.load(Ordering::Relaxed),
+            failures: self.failures.load(Ordering::Relaxed),
+            last_command_age: (last_command_millis > 0)
+                .then(|| now.saturating_sub(Duration::from_millis(last_command_millis - 1))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct RumbleCommand {
+    low_frequency: u16,
+    high_frequency: u16,
+}
+
+impl RumbleCommand {
+    const fn is_active(self) -> bool {
+        self.low_frequency != 0 || self.high_frequency != 0
+    }
+}
+
+#[derive(Debug, Default)]
+struct LatestRumbleSlot {
+    command: Mutex<Option<RumbleCommand>>,
+}
+
+impl LatestRumbleSlot {
+    fn publish(&self, command: RumbleCommand) -> bool {
+        self.command
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace(command)
+            .is_some()
+    }
+
+    fn take(&self) -> Option<RumbleCommand> {
+        self.command
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    fn clear(&self) {
+        self.command
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+    }
+}
+
+trait RumbleWriter {
+    fn write_rumble(&self, low_frequency: u16, high_frequency: u16) -> Result<(), String>;
+}
+
+impl RumbleWriter for HidSession {
+    fn write_rumble(&self, low_frequency: u16, high_frequency: u16) -> Result<(), String> {
+        self.set_rumble(low_frequency, high_frequency)
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct HapticsSupervisor {
+    connected: bool,
+    desired: RumbleCommand,
+    lease_received: Option<Duration>,
+    last_write: Option<Duration>,
+    retry_after: Option<Duration>,
+    metrics: Arc<SharedHapticsMetrics>,
+}
+
+impl HapticsSupervisor {
+    fn new(metrics: Arc<SharedHapticsMetrics>) -> Self {
+        Self {
+            connected: false,
+            desired: RumbleCommand::default(),
+            lease_received: None,
+            last_write: None,
+            retry_after: None,
+            metrics,
+        }
+    }
+
+    fn connected(&mut self, now: Duration, session: &impl RumbleWriter) {
+        self.connected = true;
+        self.desired = RumbleCommand::default();
+        self.lease_received = None;
+        self.last_write = None;
+        self.retry_after = None;
+        self.write(now, session, self.desired, false);
+    }
+
+    fn command(&mut self, now: Duration, session: &impl RumbleWriter, command: RumbleCommand) {
+        let changed = command != self.desired;
+        self.desired = command;
+        if command.is_active() {
+            self.lease_received = Some(now);
+            if changed && self.retry_due(now) {
+                self.write(now, session, command, false);
+            }
+        } else {
+            self.lease_received = None;
+            if changed
+                || self.metrics.active.load(Ordering::Acquire)
+                || self.metrics.degraded.load(Ordering::Acquire)
+            {
+                self.write(now, session, command, false);
+            }
+        }
+    }
+
+    fn service(&mut self, now: Duration, session: &impl RumbleWriter) {
+        if self.desired.is_active()
+            && self
+                .lease_received
+                .is_some_and(|received| now.saturating_sub(received) >= RUMBLE_LEASE_TIMEOUT)
+        {
+            self.desired = RumbleCommand::default();
+            self.lease_received = None;
+            self.write(now, session, self.desired, false);
+            return;
+        }
+        if !self.desired.is_active() {
+            return;
+        }
+        if self.metrics.degraded.load(Ordering::Acquire) {
+            if self.retry_due(now) {
+                self.write(now, session, self.desired, false);
+            }
+            return;
+        }
+        if self
+            .last_write
+            .is_some_and(|written| now.saturating_sub(written) >= RUMBLE_REFRESH_INTERVAL)
+        {
+            self.write(now, session, self.desired, true);
+        }
+    }
+
+    fn shutdown(&mut self, now: Duration, session: &impl RumbleWriter) {
+        self.desired = RumbleCommand::default();
+        self.lease_received = None;
+        if self.connected {
+            self.write(now, session, self.desired, false);
+            self.connected = false;
+        }
+    }
+
+    fn disconnected(&mut self) {
+        self.connected = false;
+        self.desired = RumbleCommand::default();
+        self.lease_received = None;
+        self.last_write = None;
+        self.retry_after = None;
+        self.metrics.record_disconnected();
+    }
+
+    fn retry_due(&self, now: Duration) -> bool {
+        self.retry_after
+            .is_none_or(|retry_after| now >= retry_after)
+    }
+
+    fn write(
+        &mut self,
+        now: Duration,
+        session: &impl RumbleWriter,
+        command: RumbleCommand,
+        refresh: bool,
+    ) {
+        match session.write_rumble(command.low_frequency, command.high_frequency) {
+            Ok(()) => {
+                self.last_write = Some(now);
+                self.retry_after = None;
+                self.metrics.record_success(command.is_active(), refresh);
+            }
+            Err(error) => {
+                self.retry_after = Some(now.saturating_add(RUMBLE_RETRY_INTERVAL));
+                self.metrics.record_failure();
+                eprintln!(
+                    "level=warn event=rumble_write_failed error={error:?} retry_ms={}",
+                    RUMBLE_RETRY_INTERVAL.as_millis()
+                );
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 enum HidWorkerEvent {
     Connected(HidDeviceInfo),
@@ -1406,14 +1716,17 @@ struct HidWorker {
     receiver: Receiver<HidWorkerEvent>,
     failure_receiver: Receiver<String>,
     latest_report: Arc<LatestReportSlot>,
+    latest_rumble: Arc<LatestRumbleSlot>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     started: Instant,
     lizard_metrics: Arc<SharedLizardMetrics>,
+    haptics_metrics: Arc<SharedHapticsMetrics>,
     info: HidDeviceInfo,
 }
 
 impl HidWorker {
+    #[allow(clippy::too_many_lines)] // Keep HID, lizard, and rumble safety ordering linear.
     fn spawn(
         active: ActivePuck,
         lizard_mode: LizardMode,
@@ -1426,10 +1739,14 @@ impl HidWorker {
         let (failure_sender, failure_receiver) = mpsc::channel();
         let latest_report = Arc::new(LatestReportSlot::default());
         let worker_latest_report = Arc::clone(&latest_report);
+        let latest_rumble = Arc::new(LatestRumbleSlot::default());
+        let worker_latest_rumble = Arc::clone(&latest_rumble);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let lizard_metrics = Arc::new(SharedLizardMetrics::default());
         let worker_lizard_metrics = Arc::clone(&lizard_metrics);
+        let haptics_metrics = Arc::new(SharedHapticsMetrics::default());
+        let worker_haptics_metrics = Arc::clone(&haptics_metrics);
         let worker_started = Instant::now();
 
         let mut initial_lizard =
@@ -1446,6 +1763,8 @@ impl HidWorker {
         let worker_info = info.clone();
         let handle = thread::spawn(move || {
             let mut lizard = initial_lizard;
+            let mut haptics = HapticsSupervisor::new(worker_haptics_metrics);
+            haptics.connected(worker_started.elapsed(), &session);
             while !worker_stop.load(Ordering::Acquire) {
                 if let Err(error) = lizard.service(worker_started.elapsed(), &session) {
                     worker_latest_report.clear(&dropped);
@@ -1454,6 +1773,10 @@ impl HidWorker {
                     ));
                     break;
                 }
+                if let Some(command) = worker_latest_rumble.take() {
+                    haptics.command(worker_started.elapsed(), &session, command);
+                }
+                haptics.service(worker_started.elapsed(), &session);
                 match session.poll(RUNTIME_POLL_INTERVAL) {
                     Ok(Some(DeviceEvent::Connected(info))) => {
                         if let Err(error) = lizard.connected(worker_started.elapsed(), &session) {
@@ -1463,6 +1786,7 @@ impl HidWorker {
                             ));
                             break;
                         }
+                        haptics.connected(worker_started.elapsed(), &session);
                         if !send_worker_event(
                             &sender,
                             HidWorkerEvent::Connected(info),
@@ -1472,6 +1796,8 @@ impl HidWorker {
                         }
                     }
                     Ok(Some(DeviceEvent::Disconnected)) => {
+                        haptics.disconnected();
+                        worker_latest_rumble.clear();
                         lizard.disconnected();
                         worker_latest_report.clear(&dropped);
                         if !send_worker_event(&sender, HidWorkerEvent::Disconnected, &worker_stop) {
@@ -1494,6 +1820,8 @@ impl HidWorker {
                     }
                     Ok(None) => {}
                     Err(error) => {
+                        haptics.disconnected();
+                        worker_latest_rumble.clear();
                         lizard.disconnected();
                         worker_latest_report.clear(&dropped);
                         let _ = failure_sender.send(format!("HID worker failed: {error}"));
@@ -1501,17 +1829,24 @@ impl HidWorker {
                     }
                 }
             }
+            while !worker_stop.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(1));
+            }
             worker_latest_report.clear(&dropped);
+            worker_latest_rumble.clear();
+            haptics.shutdown(worker_started.elapsed(), &session);
             lizard.disconnected();
         });
         Ok(Self {
             receiver,
             failure_receiver,
             latest_report,
+            latest_rumble,
             stop,
             handle: Some(handle),
             started: worker_started,
             lizard_metrics,
+            haptics_metrics,
             info: worker_info,
         })
     }
@@ -1526,6 +1861,20 @@ impl HidWorker {
 
     fn lizard_diagnostics(&self) -> LizardStatus {
         self.lizard_metrics.snapshot(self.started.elapsed())
+    }
+
+    fn haptics_diagnostics(&self) -> HapticsStatus {
+        self.haptics_metrics.snapshot(self.started.elapsed())
+    }
+
+    fn set_rumble(&self, low_frequency: u16, high_frequency: u16) {
+        let command = RumbleCommand {
+            low_frequency,
+            high_frequency,
+        };
+        let coalesced = self.latest_rumble.publish(command);
+        self.haptics_metrics
+            .record_command(self.started.elapsed(), coalesced);
     }
 
     fn take_latest_report(&self) -> Option<RawHidReport> {
@@ -1592,6 +1941,25 @@ fn publish_report(
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct FakeRumbleWriter {
+        fail: AtomicBool,
+        writes: Mutex<Vec<(u16, u16)>>,
+    }
+
+    impl RumbleWriter for FakeRumbleWriter {
+        fn write_rumble(&self, low_frequency: u16, high_frequency: u16) -> Result<(), String> {
+            if self.fail.load(Ordering::Acquire) {
+                return Err("injected rumble failure".to_owned());
+            }
+            self.writes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((low_frequency, high_frequency));
+            Ok(())
+        }
+    }
+
     fn serial_info(path: &str, serial: &str) -> SerialDeviceInfo {
         SerialDeviceInfo {
             path: path.to_owned(),
@@ -1636,6 +2004,113 @@ mod tests {
         assert!(!slot.publish(report(2), &dropped));
         assert_eq!(slot.take().map(|value| value.report_id), Some(2));
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn latest_rumble_slot_coalesces_to_one_command() {
+        let slot = LatestRumbleSlot::default();
+        assert!(!slot.publish(RumbleCommand {
+            low_frequency: 1,
+            high_frequency: 2,
+        }));
+        assert!(slot.publish(RumbleCommand {
+            low_frequency: 3,
+            high_frequency: 4,
+        }));
+        assert_eq!(
+            slot.take(),
+            Some(RumbleCommand {
+                low_frequency: 3,
+                high_frequency: 4,
+            })
+        );
+        assert_eq!(slot.take(), None);
+    }
+
+    #[test]
+    fn haptics_refreshes_expires_and_recovers_after_backoff() {
+        let metrics = Arc::new(SharedHapticsMetrics::default());
+        let writer = FakeRumbleWriter::default();
+        let mut haptics = HapticsSupervisor::new(Arc::clone(&metrics));
+
+        haptics.connected(Duration::ZERO, &writer);
+        haptics.command(
+            Duration::from_millis(1),
+            &writer,
+            RumbleCommand {
+                low_frequency: 0x1234,
+                high_frequency: 0xabcd,
+            },
+        );
+        haptics.service(Duration::from_millis(40), &writer);
+        assert_eq!(metrics.snapshot(Duration::from_millis(40)).refreshes, 0);
+        haptics.service(Duration::from_millis(41), &writer);
+        assert_eq!(metrics.snapshot(Duration::from_millis(41)).refreshes, 1);
+
+        haptics.command(
+            Duration::from_millis(50),
+            &writer,
+            RumbleCommand {
+                low_frequency: 0x1234,
+                high_frequency: 0xabcd,
+            },
+        );
+        haptics.service(Duration::from_millis(150), &writer);
+        assert_eq!(
+            writer
+                .writes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .last()
+                .copied(),
+            Some((0, 0))
+        );
+        assert_eq!(
+            metrics.snapshot(Duration::from_millis(150)).state,
+            HapticsState::Idle
+        );
+
+        writer.fail.store(true, Ordering::Release);
+        haptics.command(
+            Duration::from_millis(200),
+            &writer,
+            RumbleCommand {
+                low_frequency: 1,
+                high_frequency: 2,
+            },
+        );
+        assert_eq!(
+            metrics.snapshot(Duration::from_millis(200)).state,
+            HapticsState::Degraded
+        );
+        writer.fail.store(false, Ordering::Release);
+        for now in [250, 340, 430, 520, 610, 699] {
+            haptics.command(
+                Duration::from_millis(now),
+                &writer,
+                RumbleCommand {
+                    low_frequency: 1,
+                    high_frequency: 2,
+                },
+            );
+            haptics.service(Duration::from_millis(now), &writer);
+        }
+        assert_eq!(
+            metrics.snapshot(Duration::from_millis(699)).state,
+            HapticsState::Degraded
+        );
+        haptics.command(
+            Duration::from_millis(700),
+            &writer,
+            RumbleCommand {
+                low_frequency: 1,
+                high_frequency: 2,
+            },
+        );
+        haptics.service(Duration::from_millis(700), &writer);
+        let recovered = metrics.snapshot(Duration::from_millis(700));
+        assert_eq!(recovered.state, HapticsState::Active);
+        assert_eq!(recovered.failures, 1);
     }
 
     #[test]

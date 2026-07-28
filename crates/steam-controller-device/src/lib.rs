@@ -61,6 +61,13 @@ impl HidDeviceInfo {
             && self.interface_number >= FIRST_PROTEUS_SLOT_INTERFACE
             && self.interface_number <= LAST_PROTEUS_SLOT_INTERFACE
     }
+
+    /// Returns whether this collection is a supported Steam Controller 2 Puck
+    /// slot on which the narrow dual-rumble output may be sent.
+    #[must_use]
+    pub const fn supports_rumble(&self) -> bool {
+        self.supports_lizard_mode_suppression()
+    }
 }
 
 /// Portable scheduling state for the SDL-compatible lizard-off heartbeat.
@@ -139,6 +146,13 @@ pub enum DeviceError {
         usage: u16,
         interface_number: i32,
     },
+    UnsupportedRumbleTarget {
+        vendor_id: u16,
+        product_id: u16,
+        usage_page: u16,
+        usage: u16,
+        interface_number: i32,
+    },
     UnsupportedPlatform,
 }
 
@@ -163,6 +177,19 @@ impl std::fmt::Display for DeviceError {
             } => write!(
                 f,
                 "refusing lizard-mode write to unsupported collection \
+                 {vendor_id:04x}:{product_id:04x} usage \
+                 {usage_page:04x}:{usage:04x} interface {interface_number}; \
+                 select the active 28de:1304 ff00:0001 interface 2-5 Puck slot"
+            ),
+            Self::UnsupportedRumbleTarget {
+                vendor_id,
+                product_id,
+                usage_page,
+                usage,
+                interface_number,
+            } => write!(
+                f,
+                "refusing rumble write to unsupported collection \
                  {vendor_id:04x}:{product_id:04x} usage \
                  {usage_page:04x}:{usage:04x} interface {interface_number}; \
                  select the active 28de:1304 ff00:0001 interface 2-5 Puck slot"
@@ -228,6 +255,16 @@ impl HidSession {
     pub fn suppress_lizard_mode(&self) -> Result<(), DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
+
+    /// Returns an unsupported-platform error without attempting an output
+    /// write.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`DeviceError::UnsupportedPlatform`].
+    pub fn set_rumble(&self, _low_frequency: u16, _high_frequency: u16) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedPlatform)
+    }
 }
 
 #[cfg(test)]
@@ -279,6 +316,7 @@ mod tests {
     fn suppression_target_is_exact_and_interface_bounded() {
         let target = suppression_target();
         assert!(target.supports_lizard_mode_suppression());
+        assert!(target.supports_rumble());
 
         for mutate in [
             |info: &mut HidDeviceInfo| info.vendor_id = 0,
@@ -291,6 +329,7 @@ mod tests {
             let mut other = target.clone();
             mutate(&mut other);
             assert!(!other.supports_lizard_mode_suppression());
+            assert!(!other.supports_rumble());
         }
     }
 
