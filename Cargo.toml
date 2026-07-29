@@ -32,6 +32,7 @@ hidapi = { version = "2.6.6", default-features = false, features = ["macos-share
 rustix = { version = "1.1.4", features = ["fs"] }
 eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 tray-icon = "=0.24.1"
+tiny-skia = { version = "=0.11.4", default-features = false, features = ["simd", "std"] }
 winit = "=0.30.13"
 serialport = { version = "4.9.0", default-features = false }
 ctrlc = "3.5.2"

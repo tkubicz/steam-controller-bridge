@@ -97,8 +97,9 @@ impl HidSession {
 
     /// Sends the single SDL-compatible Steam Controller 2 lizard-off setting.
     ///
-    /// The operation is rejected unless the selected collection is an official
-    /// Proteus Puck controller slot. No arbitrary feature-report API is exposed.
+    /// The operation is rejected unless the selected collection is one of the
+    /// exact supported Puck or direct Bluetooth collections. No arbitrary
+    /// feature-report API is exposed.
     ///
     /// # Errors
     ///
@@ -120,7 +121,7 @@ impl HidSession {
             .map_err(|error| {
                 DeviceError::Backend(format!(
                     "lizard-mode feature write failed; ensure Steam Controller 2 \
-                     is awake in Puck mode and the selected slot is producing \
+                     is awake on the selected transport and its vendor collection is producing \
                      0x42/0x45 reports: {error}"
                 ))
             })
@@ -153,7 +154,7 @@ impl HidSession {
             .map_err(|error| {
                 DeviceError::Backend(format!(
                     "rumble output write failed; ensure Steam Controller 2 is \
-                     awake in Puck mode and the selected slot is active: {error}"
+                     awake on the selected transport and its vendor collection is active: {error}"
                 ))
             })
     }
@@ -241,7 +242,7 @@ fn acquire_ownership_lock(selected: &HidDeviceInfo) -> Result<File, DeviceError>
         .open(&lock_path)
         .map_err(|error| {
             DeviceError::Backend(format!(
-                "cannot create Puck ownership lock {}: {error}",
+                "cannot create Steam Controller input ownership lock {}: {error}",
                 lock_path.display()
             ))
         })?;

@@ -1,8 +1,9 @@
 //! Reusable live Steam Controller 2 bridge orchestration.
 //!
 //! The runtime deliberately keeps discovery separate from ownership: candidate
-//! Puck slots are only read during discovery, and the lizard-mode feature
-//! command is sent only after exactly one active slot has been identified.
+//! Puck and Bluetooth collections are only read during discovery, and the
+//! lizard-mode feature command is sent only after exactly one active source has
+//! been identified.
 
 use std::fs::File;
 use std::io;
@@ -22,8 +23,8 @@ use controller_mapper::MapperConfig;
 use recording::{RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
 use serde_json::json;
 use steam_controller_device::{
-    enumerate, DeviceError, DeviceEvent, HidDeviceInfo, HidSession, LizardModeHeartbeat,
-    RawHidReport,
+    enumerate, ControllerTransport, DeviceError, DeviceEvent, HidDeviceInfo, HidSession,
+    LizardModeHeartbeat, RawHidReport,
 };
 use steam_controller_protocol::{
     ConnectionState, DecodedReport, SteamControllerDecoder, EXTENDED_INPUT_REPORT_ID,
@@ -107,10 +108,11 @@ pub enum RuntimeState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct PuckStatus {
+pub struct ControllerSourceStatus {
     pub identity: Option<HidDeviceInfo>,
+    pub transport: Option<ControllerTransport>,
     pub connected: bool,
-    pub active_slot: bool,
+    pub active: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -158,7 +160,7 @@ pub struct BridgeStatus {
     pub revision: u64,
     pub state: RuntimeState,
     pub detail: String,
-    pub puck: PuckStatus,
+    pub source: ControllerSourceStatus,
     pub controller: ControllerStatus,
     pub xiao: XiaoStatus,
     pub battery_percent: Option<u8>,
@@ -175,7 +177,7 @@ impl Default for BridgeStatus {
             revision: 0,
             state: RuntimeState::Stopped,
             detail: "Bridge stopped".to_owned(),
-            puck: PuckStatus::default(),
+            source: ControllerSourceStatus::default(),
             controller: ControllerStatus::default(),
             xiao: XiaoStatus::default(),
             battery_percent: None,
@@ -417,7 +419,7 @@ impl Supervisor {
                 }
             }
 
-            let active = match self.discover_puck() {
+            let active = match self.discover_controller_source() {
                 Discovery::Ready(active) => active,
                 Discovery::Wait { detail, error } => {
                     self.clear_controller_status();
@@ -445,11 +447,11 @@ impl Supervisor {
                 continue;
             };
             match self.run_active(active, output) {
-                Ok((ActiveExit::PuckLost, output)) => {
+                Ok((ActiveExit::SourceLost, output)) => {
                     retained_output = Some(output);
                     self.transition(
                         RuntimeState::Discovering,
-                        "Controller stopped reporting; rediscovering active Puck slot",
+                        "Controller stopped reporting; rediscovering active input source",
                         None,
                     );
                 }
@@ -583,28 +585,29 @@ impl Supervisor {
         })
     }
 
-    fn discover_puck(&mut self) -> Discovery<ActivePuck> {
+    fn discover_controller_source(&mut self) -> Discovery<ActiveControllerSource> {
         match self.config.controller {
             ControllerSelection::Index(index) => {
                 let devices = match enumerate() {
                     Ok(devices) => devices,
                     Err(error) => {
                         return Discovery::Wait {
-                            detail: "Cannot enumerate Puck HID collections".to_owned(),
+                            detail: "Cannot enumerate Steam Controller HID collections".to_owned(),
                             error: Some(error.to_string()),
                         };
                     }
                 };
                 let Some(info) = devices.get(index).cloned() else {
                     return Discovery::Wait {
-                        detail: format!("Waiting for Puck collection index {index}"),
+                        detail: format!("Waiting for Steam Controller collection index {index}"),
                         error: None,
                     };
                 };
-                if !info.supports_lizard_mode_suppression() {
+                if !info.is_supported_controller_source() {
                     return Discovery::Error(format!(
-                        "collection index {index} is not an official 28de:1304 ff00:0001 \
-                         Puck slot on interface 2-5"
+                        "collection index {index} is not a supported Steam Controller 2 input; \
+                         expected a 28de:1304 USB Puck ff00:0001 interface 2-5 or the \
+                         28de:1303 Bluetooth ff00:0001 interface -1 collection"
                     ));
                 }
                 match HidSession::open_info(&info) {
@@ -613,55 +616,61 @@ impl Supervisor {
                         // already performed its initial suppression before it
                         // forwards any lifecycle or input event.
                         let _ = session.poll(Duration::ZERO);
-                        self.update_puck_discovered(&info, false);
-                        Discovery::Ready(ActivePuck {
+                        self.update_source_discovered(&info, false);
+                        Discovery::Ready(ActiveControllerSource {
                             info,
                             session,
                             controller_seen: false,
                         })
                     }
                     Err(error) => Discovery::Wait {
-                        detail: format!("Waiting to open Puck collection index {index}"),
+                        detail: format!(
+                            "Waiting to open Steam Controller collection index {index}"
+                        ),
                         error: Some(ownership_guidance(&error)),
                     },
                 }
             }
-            ControllerSelection::AutoActive => self.discover_active_puck(),
+            ControllerSelection::AutoActive => self.discover_active_controller_source(),
         }
     }
 
-    fn discover_active_puck(&mut self) -> Discovery<ActivePuck> {
+    fn discover_active_controller_source(&mut self) -> Discovery<ActiveControllerSource> {
         let devices = match enumerate() {
             Ok(devices) => devices,
             Err(error) => {
                 return Discovery::Wait {
-                    detail: "Cannot enumerate Puck HID collections".to_owned(),
+                    detail: "Cannot enumerate Steam Controller HID collections".to_owned(),
                     error: Some(error.to_string()),
                 };
             }
         };
         let candidates: Vec<_> = devices
             .into_iter()
-            .filter(HidDeviceInfo::supports_lizard_mode_suppression)
+            .enumerate()
+            .filter(|(_, info)| info.is_supported_controller_source())
             .collect();
         if candidates.is_empty() {
             return Discovery::Wait {
-                detail: "Waiting for the official Steam Controller 2 Puck".to_owned(),
+                detail: "Waiting for a Steam Controller 2 Puck or Bluetooth connection".to_owned(),
                 error: None,
             };
         }
 
         let mut sessions = Vec::new();
         let mut open_failures = Vec::new();
-        for info in candidates {
+        for (enumeration_index, info) in candidates {
             match HidSession::open_info(&info) {
-                Ok(session) => sessions.push((info, session, false)),
-                Err(error) => open_failures.push(ownership_guidance(&error)),
+                Ok(session) => sessions.push((enumeration_index, info, session, false)),
+                Err(error) => open_failures.push(format!(
+                    "index {enumeration_index}: {}",
+                    ownership_guidance(&error)
+                )),
             }
         }
         if sessions.is_empty() {
             return Discovery::Wait {
-                detail: "Puck found, but no controller slot can be opened".to_owned(),
+                detail: "Steam Controller input found, but no collection can be opened".to_owned(),
                 error: Some(open_failures.join("; ")),
             };
         }
@@ -669,7 +678,7 @@ impl Supervisor {
         let started = Instant::now();
         let mut decoder = SteamControllerDecoder::new();
         while started.elapsed() < ACTIVE_PROBE_WINDOW {
-            for (_, session, active) in &mut sessions {
+            for (_, _, session, active) in &mut sessions {
                 match session.poll(Duration::from_millis(5)) {
                     Ok(Some(DeviceEvent::Report(report)))
                         if is_valid_controller_state(&mut decoder, &report) =>
@@ -684,32 +693,36 @@ impl Supervisor {
         let active_indices: Vec<_> = sessions
             .iter()
             .enumerate()
-            .filter(|(_, (_, _, active))| *active)
+            .filter(|(_, (_, _, _, active))| *active)
             .map(|(index, _)| index)
             .collect();
         match choose_unique_active(&active_indices) {
             Ok(None) => Discovery::Wait {
-                detail: "Puck found; waiting for an awake Steam Controller 2".to_owned(),
+                detail: "Steam Controller input found; waiting for valid controller state"
+                    .to_owned(),
                 error: (!open_failures.is_empty()).then(|| open_failures.join("; ")),
             },
             Ok(Some(selected)) => {
-                let (info, session, _) = sessions.swap_remove(selected);
-                self.update_puck_discovered(&info, true);
-                Discovery::Ready(ActivePuck {
+                let (_, info, session, _) = sessions.swap_remove(selected);
+                self.update_source_discovered(&info, true);
+                Discovery::Ready(ActiveControllerSource {
                     info,
                     session,
                     controller_seen: true,
                 })
             }
             Err(active_indices) => {
-                let interfaces = active_indices
+                let sources = active_indices
                     .iter()
-                    .map(|index| sessions[*index].0.interface_number.to_string())
+                    .map(|index| {
+                        let (enumeration_index, info, _, _) = &sessions[*index];
+                        controller_source_description(*enumeration_index, info)
+                    })
                     .collect::<Vec<_>>()
-                    .join(", ");
+                    .join("; ");
                 Discovery::Error(format!(
-                    "multiple active Steam Controller 2 Puck slots were detected on interfaces \
-                     {interfaces}; run sc-probe list and restart with --index N"
+                    "multiple active Steam Controller 2 input sources were detected: {sources}; \
+                     run sc-probe list and restart with --index N"
                 ))
             }
         }
@@ -718,7 +731,7 @@ impl Supervisor {
     #[allow(clippy::too_many_lines)] // Safety ordering is clearest in one linear ownership loop.
     fn run_active(
         &mut self,
-        active: ActivePuck,
+        active: ActiveControllerSource,
         mut output: OutputSession,
     ) -> Result<(ActiveExit, OutputSession), String> {
         let initial_controller_seen = active.controller_seen;
@@ -743,11 +756,12 @@ impl Supervisor {
             ));
         }
         while output.output.take_feedback().is_some() {
-            // Feedback received before the Puck worker exists is not a valid
+            // Feedback received before the input worker exists is not a valid
             // post-reconnect lease. A continuing effect will be refreshed by
             // the XIAO within 25 ms.
         }
         let mut last_controller_state = Instant::now();
+        let mut controller_state_seen = initial_controller_seen;
         let mut controller_connected = initial_controller_seen;
         let mut last_status = Instant::now()
             .checked_sub(STATUS_INTERVAL)
@@ -755,16 +769,20 @@ impl Supervisor {
         engine.connected();
         self.transition(RuntimeState::Running, "Bridge running", None);
         self.update_status(|status| {
-            status.puck.connected = true;
-            status.puck.active_slot = true;
+            status.source.connected = true;
+            status.source.active = initial_controller_seen;
             status.controller.connected = initial_controller_seen;
             status.controller.last_state_age = initial_controller_seen.then_some(Duration::ZERO);
             status.lizard = worker.lizard_diagnostics();
             status.haptics = worker.haptics_diagnostics();
         });
         eprintln!(
-            "level=info event=bridge_running puck_interface={} xiao_path={:?} lizard_mode={:?}",
+            "level=info event=bridge_running input_transport={:?} input_interface={} \
+             input_product={:?} input_serial={:?} xiao_path={:?} lizard_mode={:?}",
+            worker.device_info().controller_transport(),
             worker.device_info().interface_number,
+            worker.device_info().product,
+            worker.device_info().serial_number,
             output.xiao.as_ref().map(|info| info.path.as_str()),
             self.config.lizard_mode
         );
@@ -788,18 +806,18 @@ impl Supervisor {
             let mut direct_report = None;
             match worker.receiver.recv_timeout(RUNTIME_POLL_INTERVAL) {
                 Ok(HidWorkerEvent::Connected(info)) => {
-                    self.update_puck_discovered(&info, true);
+                    self.update_source_discovered(&info, false);
                 }
                 Ok(HidWorkerEvent::Disconnected) => {
                     let _ = engine.disconnected(&mut *output.output);
-                    break ActiveExit::PuckLost;
+                    break ActiveExit::SourceLost;
                 }
                 Ok(HidWorkerEvent::StatusReport(report)) => {
                     direct_report = Some(report);
                 }
                 Ok(HidWorkerEvent::ReportReady) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    break ActiveExit::PuckLost;
+                    break ActiveExit::SourceLost;
                 }
             }
             if let Some(report) = direct_report.or_else(|| worker.take_latest_report()) {
@@ -812,7 +830,13 @@ impl Supervisor {
                 ) {
                     Ok(ReportEffect::ControllerState) => {
                         last_controller_state = Instant::now();
+                        controller_state_seen = true;
                         controller_connected = true;
+                        self.update_status(|status| {
+                            status.source.active = true;
+                            status.controller.connected = true;
+                            status.controller.last_state_age = Some(Duration::ZERO);
+                        });
                     }
                     Ok(ReportEffect::Connected) => {
                         controller_connected = true;
@@ -824,7 +848,7 @@ impl Supervisor {
                     }
                     Ok(ReportEffect::Disconnected) => {
                         let _ = engine.disconnected(&mut *output.output);
-                        break ActiveExit::PuckLost;
+                        break ActiveExit::SourceLost;
                     }
                     Ok(ReportEffect::None) => {}
                     Err(error) if is_output_error(&error) => {
@@ -866,7 +890,7 @@ impl Supervisor {
             }
             if last_controller_state.elapsed() >= ACTIVE_SLOT_TIMEOUT {
                 let _ = engine.disconnected(&mut *output.output);
-                break ActiveExit::PuckLost;
+                break ActiveExit::SourceLost;
             }
             if last_status.elapsed() >= STATUS_INTERVAL {
                 let controller_age = last_controller_state.elapsed();
@@ -875,6 +899,8 @@ impl Supervisor {
                     status.output_diagnostics = output.output.diagnostics();
                     status.lizard = worker.lizard_diagnostics();
                     status.haptics = worker.haptics_diagnostics();
+                    status.source.active =
+                        controller_state_seen && controller_age < ACTIVE_SLOT_TIMEOUT;
                     status.controller.connected =
                         controller_connected && controller_age < ACTIVE_SLOT_TIMEOUT;
                     status.controller.last_state_age =
@@ -1010,19 +1036,20 @@ impl Supervisor {
             .state
     }
 
-    fn update_puck_discovered(&self, info: &HidDeviceInfo, active: bool) {
+    fn update_source_discovered(&self, info: &HidDeviceInfo, active: bool) {
         self.update_status(|status| {
-            status.puck = PuckStatus {
+            status.source = ControllerSourceStatus {
                 identity: Some(info.clone()),
+                transport: info.controller_transport(),
                 connected: true,
-                active_slot: active,
+                active,
             };
         });
     }
 
     fn clear_controller_status(&self) {
         self.update_status(|status| {
-            status.puck = PuckStatus::default();
+            status.source = ControllerSourceStatus::default();
             status.controller = ControllerStatus::default();
             status.battery_percent = None;
             status.lizard = LizardStatus::default();
@@ -1031,7 +1058,7 @@ impl Supervisor {
 
     fn clear_hardware_status(&self) {
         self.update_status(|status| {
-            status.puck = PuckStatus::default();
+            status.source = ControllerSourceStatus::default();
             status.controller = ControllerStatus::default();
             status.xiao = XiaoStatus::default();
             status.battery_percent = None;
@@ -1048,7 +1075,7 @@ impl Supervisor {
         update(&mut status);
         let changed = status.state != previous.state
             || status.detail != previous.detail
-            || status.puck != previous.puck
+            || status.source != previous.source
             || status.controller != previous.controller
             || status.xiao != previous.xiao
             || status.battery_percent != previous.battery_percent
@@ -1073,7 +1100,7 @@ enum Discovery<T> {
     Error(String),
 }
 
-struct ActivePuck {
+struct ActiveControllerSource {
     info: HidDeviceInfo,
     session: HidSession,
     controller_seen: bool,
@@ -1098,7 +1125,7 @@ fn service_waiting_output(output: Option<&mut OutputSession>) -> bool {
 }
 
 enum ActiveExit {
-    PuckLost,
+    SourceLost,
     OutputLost(String),
     Stopped,
     Shutdown,
@@ -1175,6 +1202,18 @@ fn choose_unique_active(active_indices: &[usize]) -> Result<Option<usize>, Vec<u
         [selected] => Ok(Some(*selected)),
         multiple => Err(multiple.to_vec()),
     }
+}
+
+fn controller_source_description(enumeration_index: usize, info: &HidDeviceInfo) -> String {
+    let transport = info
+        .controller_transport()
+        .map_or_else(|| "Unknown".to_owned(), |value| value.to_string());
+    format!(
+        "index {enumeration_index} {transport} product {:?} serial {:?} interface {}",
+        info.product.as_deref().unwrap_or("<unknown>"),
+        info.serial_number.as_deref().unwrap_or("<unknown>"),
+        info.interface_number
+    )
 }
 
 fn acknowledge_all(acks: &mut Vec<CommandAck>) {
@@ -1728,11 +1767,11 @@ struct HidWorker {
 impl HidWorker {
     #[allow(clippy::too_many_lines)] // Keep HID, lizard, and rumble safety ordering linear.
     fn spawn(
-        active: ActivePuck,
+        active: ActiveControllerSource,
         lizard_mode: LizardMode,
         dropped: Arc<AtomicU64>,
     ) -> Result<Self, String> {
-        let ActivePuck {
+        let ActiveControllerSource {
             info, mut session, ..
         } = active;
         let (sender, receiver) = mpsc::sync_channel(64);
@@ -1971,6 +2010,26 @@ mod tests {
         }
     }
 
+    fn controller_info(product_id: u16, interface_number: i32, transport: &str) -> HidDeviceInfo {
+        HidDeviceInfo {
+            id: format!("{transport}-{interface_number}"),
+            path: format!("{transport}-{interface_number}"),
+            vendor_id: steam_controller_device::PROTEUS_VENDOR_ID,
+            product_id,
+            usage_page: steam_controller_device::STEAM_USAGE_PAGE,
+            usage: steam_controller_device::STEAM_CONTROLLER_USAGE,
+            interface_number,
+            serial_number: Some("redacted".to_owned()),
+            manufacturer: Some("Valve Corporation".to_owned()),
+            product: Some(if transport == "Bluetooth" {
+                "Steam Ctrl (BT)".to_owned()
+            } else {
+                "Steam Controller Puck".to_owned()
+            }),
+            transport: transport.to_owned(),
+        }
+    }
+
     #[test]
     fn runtime_defaults_to_zero_configuration_serial_bridge() {
         let config = RuntimeConfig::default();
@@ -2114,11 +2173,30 @@ mod tests {
     }
 
     #[test]
-    fn active_slot_selection_is_order_independent_and_rejects_ambiguity() {
+    fn active_source_selection_is_order_independent_and_rejects_ambiguity() {
         assert_eq!(choose_unique_active(&[]), Ok(None));
         assert_eq!(choose_unique_active(&[3]), Ok(Some(3)));
         assert_eq!(choose_unique_active(&[0]), Ok(Some(0)));
         assert_eq!(choose_unique_active(&[1, 3]), Err(vec![1, 3]));
+    }
+
+    #[test]
+    fn ambiguity_descriptions_retain_global_indices_and_transports() {
+        let puck = controller_info(
+            steam_controller_device::PROTEUS_PRODUCT_ID,
+            steam_controller_device::FIRST_PROTEUS_SLOT_INTERFACE,
+            "USB",
+        );
+        let bluetooth = controller_info(
+            steam_controller_device::STEAM_CONTROLLER_BLUETOOTH_PRODUCT_ID,
+            steam_controller_device::BLUETOOTH_CONTROLLER_INTERFACE,
+            "Bluetooth",
+        );
+        let puck_description = controller_source_description(43, &puck);
+        let bluetooth_description = controller_source_description(58, &bluetooth);
+        assert!(puck_description.contains("index 43 Puck"));
+        assert!(bluetooth_description.contains("index 58 Bluetooth"));
+        assert!(bluetooth_description.contains("interface -1"));
     }
 
     #[test]

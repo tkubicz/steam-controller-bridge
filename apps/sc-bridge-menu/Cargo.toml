@@ -7,7 +7,11 @@ license.workspace = true
 [dependencies]
 bridge-runtime = { path = "../../crates/bridge-runtime" }
 
+[dev-dependencies]
+steam-controller-device = { path = "../../crates/steam-controller-device" }
+
 [target.'cfg(target_os = "macos")'.dependencies]
+tiny-skia.workspace = true
 tray-icon.workspace = true
 winit.workspace = true
 

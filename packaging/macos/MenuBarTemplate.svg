@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">
-  <path fill="#000" d="M6 3h6l3 3 1 5-3 2-2-3H7l-2 3-3-2 1-5 3-3Zm0 3v2H4v1h2v2h1V9h2V8H7V6H6Zm5 1v2h2V7h-2Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="18" viewBox="0 0 24 18">
+  <g fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round">
+    <path stroke-width="1.4" d="M5.5 2.4C3.7 2.4 2.3 3.6 1.9 5.3L.65 11.6c-.45 2.2.65 4.3 2.4 4.85 1.45.45 2.45-.65 3.2-2.1l1-1.85c.3-.6.7-.8 1.3-.8h.8c.6 0 1 .2 1.3.8l1 1.85c.75 1.45 1.75 2.55 3.2 2.1 1.75-.55 2.85-2.65 2.4-4.85L16 5.3c-.4-1.7-1.8-2.9-3.6-2.9Z"/>
+    <path stroke-width="1.3" d="M5.15 6.4v3.2M3.55 8h3.2"/>
+  </g>
+  <circle cx="12.2" cy="7.1" r=".72" fill="#000"/>
+  <circle cx="14.2" cy="8.7" r=".72" fill="#000"/>
 </svg>

@@ -2,7 +2,7 @@
 mod macos;
 // Only `macos` renders the model, so a non-macOS binary build would see it as
 // dead code. `test` keeps its unit tests running on every CI platform.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 mod model;
 
 #[cfg(target_os = "macos")]

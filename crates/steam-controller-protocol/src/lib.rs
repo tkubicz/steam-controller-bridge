@@ -579,6 +579,45 @@ mod tests {
     }
 
     #[test]
+    fn observed_bluetooth_vectors_use_the_existing_state_and_battery_layouts() {
+        // Anonymized packets captured from the supported 28de:1303,
+        // ff00:0001, interface -1 Bluetooth collection. They intentionally
+        // remain transport-agnostic decoder inputs.
+        let state = [
+            0x45, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xcd, 0x00, 0xb4, 0x01,
+            0x5a, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0xcf, 0x9e, 0x1c, 0x0f, 0x88, 0x00, 0x6c, 0xf4, 0x7d, 0x3f, 0x00, 0x00,
+            0x02, 0x00, 0x01, 0x00,
+        ];
+        let DecodedReport::ControllerState(decoded) = SteamControllerDecoder::new()
+            .decode(INPUT_REPORT_ID, &state)
+            .expect("Bluetooth 0x45 state")
+        else {
+            panic!("controller state expected");
+        };
+        assert_eq!(decoded.sequence, 0x78);
+        assert_eq!(decoded.buttons, SteamButtons(0));
+        assert_eq!((decoded.left_stick_x, decoded.left_stick_y), (205, 436));
+        assert_eq!((decoded.right_stick_x, decoded.right_stick_y), (90, 260));
+        assert_eq!(decoded.raw_report, state);
+
+        let battery = [
+            0x43, 0x01, 0x61, 0x21, 0x10, 0x40, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3d,
+            0x6c,
+        ];
+        assert!(matches!(
+            SteamControllerDecoder::new().decode(BATTERY_REPORT_ID, &battery),
+            Ok(DecodedReport::Battery {
+                status: BatteryStatus {
+                    charge_state: 1,
+                    percent: 97
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn decodes_lizard_mouse_and_keyboard_reports() {
         let mouse = [LIZARD_MOUSE_REPORT_ID, 1, 2, 3, 4, 5];
         assert_eq!(

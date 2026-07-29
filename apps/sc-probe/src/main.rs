@@ -264,7 +264,7 @@ fn capture(args: &[String]) -> Result<(), String> {
 fn suppress_lizard(args: &[String]) -> Result<(), String> {
     let index = required_index(args)?;
     let duration = duration_limit(args)?;
-    let mut session = HidSession::open_index(index).map_err(|error| error.to_string())?;
+    let (info, mut session) = open_supported_controller_input(index)?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let signal_stop = Arc::clone(&stop);
@@ -275,8 +275,11 @@ fn suppress_lizard(args: &[String]) -> Result<(), String> {
     let mut heartbeat = LizardModeHeartbeat::new();
     let mut refreshes = 0_u64;
     eprintln!(
-        "Testing lizard-mode suppression on collection {index}; \
-         press Ctrl+C to stop."
+        "Testing lizard-mode suppression on Steam Controller input collection {index} \
+         ({}, interface {}); press Ctrl+C to stop.",
+        info.controller_transport()
+            .map_or_else(|| "Unknown".to_owned(), |transport| transport.to_string()),
+        info.interface_number
     );
     while !stop.load(Ordering::Acquire) && duration.is_none_or(|limit| started.elapsed() < limit) {
         if heartbeat.refresh_due(started.elapsed()) {
@@ -318,7 +321,7 @@ fn send_lizard_refresh(
     session.suppress_lizard_mode().map_err(|error| {
         format!(
             "lizard-mode suppression failed; stop other controller tools and \
-             verify the selected Puck slot: {error}"
+             verify the selected Steam Controller input collection: {error}"
         )
     })?;
     heartbeat.refreshed(now);
@@ -336,7 +339,7 @@ fn rumble(args: &[String]) -> Result<(), String> {
     let low_frequency = parse_value(args, "--low", 32_768_u16)?;
     let high_frequency = parse_value(args, "--high", 32_768_u16)?;
     let duration = Duration::from_millis(parse_value(args, "--duration-ms", 1_000_u64)?);
-    let mut session = HidSession::open_index(index).map_err(|error| error.to_string())?;
+    let (info, mut session) = open_supported_controller_input(index)?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let signal_stop = Arc::clone(&stop);
@@ -344,8 +347,12 @@ fn rumble(args: &[String]) -> Result<(), String> {
         .map_err(|error| format!("cannot install Ctrl-C handler: {error}"))?;
 
     eprintln!(
-        "Testing rumble on collection {index}: low={low_frequency} \
-         high={high_frequency} duration_ms={}; press Ctrl+C to stop.",
+        "Testing rumble on Steam Controller input collection {index} \
+         ({}, interface {}): low={low_frequency} high={high_frequency} \
+         duration_ms={}; press Ctrl+C to stop.",
+        info.controller_transport()
+            .map_or_else(|| "Unknown".to_owned(), |transport| transport.to_string()),
+        info.interface_number,
         duration.as_millis()
     );
     let result = run_rumble_test(&mut session, &stop, low_frequency, high_frequency, duration);
@@ -358,6 +365,23 @@ fn rumble(args: &[String]) -> Result<(), String> {
         (Ok(()), Err(_)) => {}
     }
     result.and(stop_result)
+}
+
+fn open_supported_controller_input(index: usize) -> Result<(HidDeviceInfo, HidSession), String> {
+    let devices = enumerate().map_err(|error| error.to_string())?;
+    let info = devices
+        .get(index)
+        .cloned()
+        .ok_or_else(|| format!("HID device index {index} does not exist"))?;
+    if !info.is_supported_controller_source() {
+        return Err(format!(
+            "collection index {index} is not a supported Steam Controller 2 input; \
+             select a 28de:1304 USB Puck ff00:0001 interface 2-5 or the \
+             28de:1303 Bluetooth ff00:0001 interface -1 collection"
+        ));
+    }
+    let session = HidSession::open_info(&info).map_err(|error| error.to_string())?;
+    Ok((info, session))
 }
 
 fn run_rumble_test(
