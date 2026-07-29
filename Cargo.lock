@@ -2755,6 +2755,7 @@ version = "0.1.0"
 dependencies = [
  "bridge-runtime",
  "steam-controller-device",
+ "tiny-skia",
  "tray-icon",
  "winit",
 ]

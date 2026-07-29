@@ -126,8 +126,16 @@ open "dist/Steam Controller Bridge.app"
 
 The tray is created on the main thread after the `winit` event loop starts. It
 polls status at 250 ms and updates menu items only when the snapshot revision
-changes. The app starts the runtime automatically and exposes Start, Stop,
-Copy Diagnostics, Input Monitoring settings, log folder, and Quit.
+changes. The menu uses short grouped lines rather than exposing device
+identities, paths, or raw errors in its main status. A bounded friendly problem
+summary is paired with `Copy Full Error`; `Copy Diagnostics` and the log folder
+retain the complete context.
+
+The template icon reflects the whole usable path: an x badge means Off,
+ellipsis means On but waiting for hardware, a check means the controller
+source and XIAO are both ready, and an exclamation mark means Action required.
+The app starts the runtime automatically and exposes Start, Stop, Input
+Monitoring settings, log folder, and Quit.
 
 Structured status transitions are written with bounded rotation under
 `~/Library/Logs/Steam Controller Bridge/`. The bundle identifier is

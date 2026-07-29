@@ -203,11 +203,14 @@ Build an ad-hoc-signed, dockless local application:
 open "dist/Steam Controller Bridge.app"
 ```
 
-The menu app embeds the same runtime, starts it automatically, and shows bridge,
-input transport, controller, XIAO, battery, suppression, haptics, and error
-status. Its menu provides Start/Stop, Copy Diagnostics, Input Monitoring
-settings, the rotated log folder, and Quit. This source-built application is
-not notarized; release signing, a DMG, and Launch at Login remain future work.
+The menu app embeds the same runtime, starts it automatically, and presents
+short, grouped bridge, readiness, hardware, battery, haptics, and problem
+lines. The menu-bar icon distinguishes Off, On but waiting, Controller ready,
+and Action required states. Friendly problem summaries stay bounded; use
+`Copy Full Error`, `Copy Diagnostics`, or the rotated log folder for the
+complete technical detail. Start/Stop, Input Monitoring settings, and Quit are
+also available. This source-built application is not notarized; release
+signing, a DMG, and Launch at Login remain future work.
 
 ## Known limitations
 

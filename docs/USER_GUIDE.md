@@ -415,13 +415,25 @@ open it from Finder or:
 open "dist/Steam Controller Bridge.app"
 ```
 
-It has no ordinary window or Dock icon. The controller icon in the macOS menu
-bar opens status and actions:
+It has no ordinary window or Dock icon. The controller icon itself shows the
+current state:
 
-- current bridge, input transport/source, controller, and XIAO/port state;
+- controller with an x badge: bridge is Off;
+- controller with ellipsis: bridge is On and waiting for hardware;
+- controller with a check: the controller and XIAO are connected and ready;
+- controller with an exclamation mark: action is required.
+
+All four are macOS template icons and automatically follow the light or dark
+menu-bar appearance.
+
+The menu opens compact, grouped status and actions:
+
+- bridge power and readiness;
+- input transport, controller, and XIAO state;
 - battery percentage, or `Unknown` until a valid `0x43` report arrives;
 - haptics `Idle`, `Active`, or `Degraded`;
-- the latest actionable error;
+- a short, friendly problem summary;
+- `Copy Full Error` for the complete technical error;
 - `Start Bridge` and `Stop Bridge`;
 - `Copy Diagnostics`;
 - `Open Input Monitoring Settings`;
