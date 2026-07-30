@@ -5,7 +5,8 @@ Its native protocol/session tests run without hardware. Serial flashing,
 CDC/gamepad enumeration, macOS Xbox-driver binding, Safari Gamepad API
 visibility, a 30-second unchanged-state refresh, full control-by-control
 mapping, Boosteroid and GeForce NOW, and end-to-end dual rumble have also been
-exercised on hardware. Failure timing and soak testing remain release gates.
+exercised on hardware, along with more than an hour of continuous play. Failure
+timing remains a release gate.
 
 The XIAO firmware exposes a USB composite device with a CDC interface for
 bridge frames and an Xbox 360-compatible vendor interface for browsers and

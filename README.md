@@ -75,12 +75,13 @@ following are verified on hardware:
 - zero-argument discovery of the uniquely active Puck or Bluetooth collection
   and the metadata/Hello-verified XIAO port, including live battery reporting;
 - direct Bluetooth `28de:1303` input using 46-byte `0x45` state reports at
-  approximately 67–68 Hz and compatible `0x43` battery reports.
+  approximately 67–68 Hz and compatible `0x43` battery reports;
+- more than an hour of continuous gameplay without degradation.
 
-Bluetooth reconnect/sleep-wake stress, in-game control/rumble confirmation, and
-the one-hour soak remain hardware acceptance gates. Distributing this to end
-users additionally requires the USB identity and code-signing work described
-under [known limitations](#known-limitations).
+Bluetooth reconnect/sleep-wake stress and in-game control/rumble confirmation
+remain hardware acceptance gates. Distributing this to end users additionally
+requires the USB identity and code-signing work described under
+[known limitations](#known-limitations).
 
 ```text
 Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay

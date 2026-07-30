@@ -35,11 +35,11 @@ The following paths have been verified on development hardware:
 
 Unless a bullet explicitly identifies Bluetooth, the end-to-end gameplay
 validation above used the Puck path. Bluetooth input, battery, suppression
-heartbeats, and independent rumble writes are verified; full in-game mapping,
-reconnect/sleep-wake, and soak testing remain below.
+heartbeats, and independent rumble writes are verified; full in-game mapping and
+reconnect/sleep-wake remain below.
 
-Explicit watchdog/disconnect timing, lizard restoration timing, reconnect
-stress, and the one-hour soak still require acceptance testing.
+Explicit watchdog/disconnect timing, lizard restoration timing, and reconnect
+stress still require acceptance testing.
 
 The bridge sends exactly one whitelisted controller setting and one whitelisted
 output shape on either exact supported input collection: SDL's lizard-mode-off
@@ -640,8 +640,8 @@ personality.
 The bridge can be completed and hardware-qualified from this source workflow,
 but a broadly distributable product should additionally provide:
 
-- completed Bluetooth reconnect, sleep/wake, lizard restoration, and long-soak
-  acceptance; direct USB-C remains a separate future transport;
+- completed Bluetooth reconnect, sleep/wake, and lizard restoration acceptance;
+  direct USB-C remains a separate future transport;
 - hardware qualification of the narrow lizard-mode suppression lifecycle;
 - automated hardware acceptance and long-duration testing;
 - signed/notarized macOS binaries and downloadable firmware artifacts;
