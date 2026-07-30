@@ -447,8 +447,8 @@ impl StatusLogger {
             log,
             "timestamp={timestamp} revision={} state={:?} detail={:?} \
              input_connected={} input_active={} input_transport={:?} \
-             input_product={:?} input_serial={:?} controller_connected={} xiao_path={:?} \
-             xiao_serial={:?} battery={:?} lizard_suppressed={} \
+             input_product={:?} input_serial={} controller_connected={} xiao_path={:?} \
+             xiao_serial={} battery={:?} lizard_suppressed={} \
              lizard_refreshes={} lizard_failures={} lizard_refresh_age_ms={:?} last_error={:?} \
              haptics_state={:?} rumble_commands={} rumble_writes={} rumble_refreshes={} \
              rumble_coalesced={} rumble_failures={} rumble_command_age_ms={:?} \
@@ -464,14 +464,16 @@ impl StatusLogger {
                 .identity
                 .as_ref()
                 .and_then(|info| info.product.as_deref()),
-            status
-                .source
-                .identity
-                .as_ref()
-                .and_then(|info| info.serial_number.as_deref()),
+            bridge_runtime::mask_serial_for_display(
+                status
+                    .source
+                    .identity
+                    .as_ref()
+                    .and_then(|info| info.serial_number.as_deref()),
+            ),
             status.controller.connected,
             status.xiao.path,
-            status.xiao.usb_serial,
+            bridge_runtime::mask_serial_for_display(status.xiao.usb_serial.as_deref()),
             status.battery_percent,
             status.lizard.suppressed,
             status.lizard.refreshes,
@@ -572,6 +574,47 @@ mod tests {
         assert!(text.contains("lizard:"));
         assert!(text.contains("haptics:"));
         assert!(text.contains("output_diagnostics:"));
+    }
+
+    /// Copy Diagnostics is what the troubleshooting guide tells users to paste
+    /// into a public issue, so no whole serial may reach it. On Bluetooth that
+    /// value is the controller's MAC address.
+    #[test]
+    fn diagnostics_never_expose_a_whole_device_serial() {
+        let text = diagnostics_text(&BridgeStatus {
+            source: bridge_runtime::ControllerSourceStatus {
+                identity: Some(steam_controller_device::HidDeviceInfo {
+                    id: "controller-source".to_owned(),
+                    path: "controller-source".to_owned(),
+                    vendor_id: 0x28de,
+                    product_id: 0x1303,
+                    usage_page: 0xff00,
+                    usage: 1,
+                    interface_number: -1,
+                    serial_number: Some("a1b2c3d4e5f6".to_owned()),
+                    manufacturer: Some("Valve Corporation".to_owned()),
+                    product: Some("Steam Ctrl (BT)".to_owned()),
+                    transport: "Bluetooth".to_owned(),
+                }),
+                transport: Some(steam_controller_device::ControllerTransport::Bluetooth),
+                connected: true,
+                active: true,
+            },
+            xiao: bridge_runtime::XiaoStatus {
+                path: Some("/dev/cu.usbmodem11201".to_owned()),
+                usb_serial: Some("5E6EF905E5468F85".to_owned()),
+                handshake_complete: true,
+            },
+            ..BridgeStatus::default()
+        });
+        assert!(!text.contains("a1b2c3d4e5f6"));
+        assert!(text.contains("****e5f6"));
+        // The XIAO's MCU serial is a stable hardware identifier too.
+        assert!(!text.contains("5E6EF905E5468F85"));
+        assert!(text.contains("****8F85"));
+        // Transport, product, and port still have to be diagnosable.
+        assert!(text.contains("Steam Ctrl (BT)"));
+        assert!(text.contains("/dev/cu.usbmodem11201"));
     }
 
     #[test]

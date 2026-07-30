@@ -97,7 +97,7 @@ fn inspect_devices(index: Option<usize>) -> Result<(), String> {
         );
         println!(
             "  serial:             {}",
-            display_optional(device.serial_number.as_deref())
+            steam_controller_device::masked_serial(device.serial_number.as_deref())
         );
         println!("  candidate sibling collections: {sibling_count}");
     }

@@ -23,9 +23,12 @@ use controller_mapper::MapperConfig;
 use recording::{RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
 use serde_json::json;
 use steam_controller_device::{
-    enumerate, ControllerTransport, DeviceError, DeviceEvent, HidDeviceInfo, HidSession,
-    LizardModeHeartbeat, RawHidReport,
+    enumerate, masked_serial, ControllerTransport, DeviceError, DeviceEvent, HidDeviceInfo,
+    HidSession, LizardModeHeartbeat, RawHidReport,
 };
+
+// Frontends render status without depending on the device crate directly.
+pub use steam_controller_device::masked_serial as mask_serial_for_display;
 use steam_controller_protocol::{
     ConnectionState, DecodedReport, SteamControllerDecoder, EXTENDED_INPUT_REPORT_ID,
     INPUT_REPORT_ID,
@@ -121,11 +124,24 @@ pub struct ControllerStatus {
     pub last_state_age: Option<Duration>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct XiaoStatus {
     pub path: Option<String>,
     pub usb_serial: Option<String>,
     pub handshake_complete: bool,
+}
+
+/// Deliberately lossy for the same reason as [`HidDeviceInfo`]'s: this reaches
+/// Copy Diagnostics through `{:?}`, and `usb_serial` is a stable hardware
+/// identifier. Read the field directly when the real value is needed.
+impl std::fmt::Debug for XiaoStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XiaoStatus")
+            .field("path", &self.path)
+            .field("usb_serial", &masked_serial(self.usb_serial.as_deref()))
+            .field("handshake_complete", &self.handshake_complete)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -576,8 +592,9 @@ impl Supervisor {
             };
         });
         eprintln!(
-            "level=info event=xiao_ready path={:?} usb_serial={:?} protocol=1",
-            info.path, info.serial_number
+            "level=info event=xiao_ready path={:?} usb_serial={} protocol=1",
+            info.path,
+            masked_serial(info.serial_number.as_deref())
         );
         Discovery::Ready(OutputSession {
             output: Box::new(output),
@@ -778,11 +795,11 @@ impl Supervisor {
         });
         eprintln!(
             "level=info event=bridge_running input_transport={:?} input_interface={} \
-             input_product={:?} input_serial={:?} xiao_path={:?} lizard_mode={:?}",
+             input_product={:?} input_serial={} xiao_path={:?} lizard_mode={:?}",
             worker.device_info().controller_transport(),
             worker.device_info().interface_number,
             worker.device_info().product,
-            worker.device_info().serial_number,
+            masked_serial(worker.device_info().serial_number.as_deref()),
             output.xiao.as_ref().map(|info| info.path.as_str()),
             self.config.lizard_mode
         );
@@ -830,13 +847,20 @@ impl Supervisor {
                 ) {
                     Ok(ReportEffect::ControllerState) => {
                         last_controller_state = Instant::now();
-                        controller_state_seen = true;
                         controller_connected = true;
-                        self.update_status(|status| {
-                            status.source.active = true;
-                            status.controller.connected = true;
-                            status.controller.last_state_age = Some(Duration::ZERO);
-                        });
+                        // Only the first state publishes eagerly, so the UI reacts
+                        // without waiting for STATUS_INTERVAL. Doing this per report
+                        // would clone the whole status and take the shared lock at
+                        // controller report rate; the periodic block below keeps
+                        // these same fields current afterwards.
+                        if !controller_state_seen {
+                            controller_state_seen = true;
+                            self.update_status(|status| {
+                                status.source.active = true;
+                                status.controller.connected = true;
+                                status.controller.last_state_age = Some(Duration::ZERO);
+                            });
+                        }
                     }
                     Ok(ReportEffect::Connected) => {
                         controller_connected = true;
@@ -1186,9 +1210,9 @@ fn xiao_ambiguity_message<T>(valid: &[(SerialDeviceInfo, T)]) -> String {
         .iter()
         .map(|(info, _)| {
             format!(
-                "{} ({})",
+                "{} (serial {})",
                 info.path,
-                info.serial_number.as_deref().unwrap_or("no USB serial")
+                masked_serial(info.serial_number.as_deref())
             )
         })
         .collect::<Vec<_>>()
@@ -1209,9 +1233,9 @@ fn controller_source_description(enumeration_index: usize, info: &HidDeviceInfo)
         .controller_transport()
         .map_or_else(|| "Unknown".to_owned(), |value| value.to_string());
     format!(
-        "index {enumeration_index} {transport} product {:?} serial {:?} interface {}",
+        "index {enumeration_index} {transport} product {:?} serial {} interface {}",
         info.product.as_deref().unwrap_or("<unknown>"),
-        info.serial_number.as_deref().unwrap_or("<unknown>"),
+        masked_serial(info.serial_number.as_deref()),
         info.interface_number
     )
 }

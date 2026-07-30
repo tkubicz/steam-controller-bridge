@@ -236,6 +236,6 @@ signing, a DMG, and Launch at Login remain future work.
   GameController and browser clients. This is suitable for development
   hardware, but a distributable product needs an owned/licensed USB identity
   and a verified macOS recognition strategy.
-- A one-hour soak test, automatic lizard restoration timing, and
-  lizard-suppression failure timing have not been formally qualified.
+- Automatic lizard restoration timing and lizard-suppression failure timing
+  have not been formally qualified.
 - The keyboard simulator is line-oriented, not a production input UI.

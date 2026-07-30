@@ -677,7 +677,7 @@ mod tests {
             },
             vendor_id: Some(XIAO_USB_VENDOR_ID),
             product_id: Some(XIAO_USB_PRODUCT_ID),
-            serial_number: Some("5E6EF905E5468F85".to_owned()),
+            serial_number: Some("TESTSERIAL0000".to_owned()),
             manufacturer: Some(XIAO_USB_MANUFACTURER.to_owned()),
             product: Some(XIAO_USB_PRODUCT.to_owned()),
         };

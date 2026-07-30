@@ -27,7 +27,29 @@ impl std::fmt::Display for ControllerTransport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Formats a hardware serial for display, keeping only the last four characters.
+///
+/// A Bluetooth HID serial is the controller's MAC address, and users are asked to
+/// paste diagnostics into public issue reports, so no display path may print the
+/// whole value. Comparisons that identify a specific device keep using the field.
+#[must_use]
+pub fn masked_serial(value: Option<&str>) -> String {
+    match value.filter(|serial| !serial.is_empty()) {
+        None => "<none>".to_owned(),
+        // Fewer than five characters cannot be shortened without revealing most of
+        // the value, so nothing is kept.
+        Some(serial) if serial.chars().count() <= 4 => "****".to_owned(),
+        Some(serial) => {
+            let tail: String = serial
+                .chars()
+                .skip(serial.chars().count().saturating_sub(4))
+                .collect();
+            format!("****{tail}")
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct HidDeviceInfo {
     pub id: String,
     pub path: String,
@@ -40,6 +62,30 @@ pub struct HidDeviceInfo {
     pub manufacturer: Option<String>,
     pub product: Option<String>,
     pub transport: String,
+}
+
+/// Deliberately lossy: `serial_number` is masked so that any `{:?}` of this type,
+/// or of anything containing it, stays safe to paste into a bug report. Read the
+/// field directly when the real value is needed.
+impl std::fmt::Debug for HidDeviceInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HidDeviceInfo")
+            .field("id", &self.id)
+            .field("path", &self.path)
+            .field("vendor_id", &format_args!("{:#06x}", self.vendor_id))
+            .field("product_id", &format_args!("{:#06x}", self.product_id))
+            .field("usage_page", &format_args!("{:#06x}", self.usage_page))
+            .field("usage", &format_args!("{:#06x}", self.usage))
+            .field("interface_number", &self.interface_number)
+            .field(
+                "serial_number",
+                &masked_serial(self.serial_number.as_deref()),
+            )
+            .field("manufacturer", &self.manufacturer)
+            .field("product", &self.product)
+            .field("transport", &self.transport)
+            .finish()
+    }
 }
 
 impl HidDeviceInfo {
@@ -425,6 +471,30 @@ mod tests {
         target.transport = "Bluetooth".to_owned();
         target.usage = 2;
         assert_eq!(target.controller_transport(), None);
+    }
+
+    #[test]
+    fn serials_are_masked_to_the_last_four_characters() {
+        assert_eq!(masked_serial(None), "<none>");
+        assert_eq!(masked_serial(Some("")), "<none>");
+        assert_eq!(masked_serial(Some("ab")), "****");
+        assert_eq!(masked_serial(Some("abcd")), "****");
+        assert_eq!(masked_serial(Some("abcde")), "****bcde");
+        assert_eq!(masked_serial(Some("5E6EF905E5468F85")), "****8F85");
+        // A Bluetooth serial is a MAC address; only its tail survives.
+        assert_eq!(masked_serial(Some("a1:b2:c3:d4:e5:f6")), "****5:f6");
+    }
+
+    #[test]
+    fn debug_output_never_carries_a_whole_serial() {
+        let mut info = puck_target();
+        info.serial_number = Some("5E6EF905E5468F85".to_owned());
+        let rendered = format!("{info:?}");
+        assert!(!rendered.contains("5E6EF905E5468F85"));
+        assert!(rendered.contains("****8F85"));
+        // Non-identifying fields must still be readable for diagnostics.
+        assert!(rendered.contains("Steam Controller Puck"));
+        assert!(rendered.contains("0x28de"));
     }
 
     #[test]

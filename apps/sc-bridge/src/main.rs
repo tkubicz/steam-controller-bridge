@@ -75,7 +75,7 @@ fn run_live(args: &[String]) -> Result<(), String> {
         if last_summary.as_ref() != Some(&summary) {
             eprintln!(
                 "level=info event=status state={:?} detail={:?} input_connected={} \
-                 input_active={} input_transport={:?} input_product={:?} input_serial={:?} \
+                 input_active={} input_transport={:?} input_product={:?} input_serial={} \
                  controller_connected={} xiao_path={:?} battery={:?} lizard_suppressed={} \
                  lizard_refreshes={} lizard_failures={} lizard_refresh_age_ms={:?}",
                 status.state,
@@ -88,11 +88,13 @@ fn run_live(args: &[String]) -> Result<(), String> {
                     .identity
                     .as_ref()
                     .and_then(|info| info.product.as_deref()),
-                status
-                    .source
-                    .identity
-                    .as_ref()
-                    .and_then(|info| info.serial_number.as_deref()),
+                bridge_runtime::mask_serial_for_display(
+                    status
+                        .source
+                        .identity
+                        .as_ref()
+                        .and_then(|info| info.serial_number.as_deref()),
+                ),
                 status.controller.connected,
                 status.xiao.path,
                 status.battery_percent,

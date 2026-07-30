@@ -477,6 +477,11 @@ iTerm, or the application launching the command—then quit and reopen it.
     --duration-secs 30 --decoded
   ```
 
+  Capture files record the full device serial so that reports stay replayable. On
+  Bluetooth that serial is the controller's MAC address, so review a capture before
+  attaching it to a public issue. Status output, logs, and `Copy Diagnostics` show
+  only the last four characters and are safe to paste as-is.
+
 Do not send guessed feature/output reports. Only the fixed lizard-off setting
 and exact standard rumble output used by `sc-probe` and `sc-bridge` are
 permitted.
