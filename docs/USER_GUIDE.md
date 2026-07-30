@@ -451,8 +451,34 @@ Logs rotate at a bounded size under:
 
 Grant Input Monitoring to **Steam Controller Bridge** itself when using the
 app. Permission granted to Terminal does not automatically cover the app.
-Because this is an ad-hoc-signed source build, it is not notarized; use System
-Settings to approve it if macOS prompts.
+
+### Opening an unnotarized build
+
+The app is ad-hoc signed, not notarized, whether it came from a release download
+or a local `./tools/build-macos-app.sh`. A downloaded copy also carries macOS's
+quarantine flag, so double-clicking it reports that the app is damaged or cannot
+be opened. This is Gatekeeper refusing an unknown developer, not a broken build.
+
+Open it once the long way, and macOS remembers the choice:
+
+1. Move `Steam Controller Bridge.app` to `/Applications`.
+2. Right-click (or Control-click) it and choose **Open**.
+3. Confirm **Open** in the dialog that appears.
+
+If the dialog offers no Open button, approve the app under **System Settings →
+Privacy & Security**, where it appears shortly after the blocked launch. Removing
+the quarantine flag directly also works:
+
+```bash
+xattr -d com.apple.quarantine "/Applications/Steam Controller Bridge.app"
+```
+
+Verify a download before opening it, using the `SHA256SUMS.txt` published with
+each release:
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
 
 ## Troubleshooting
 
