@@ -23,10 +23,11 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/tkubicz/steam-controller-bridge"
-# These crates are consumed only through workspace paths. Marking them
-# unpublishable keeps `cargo publish` from firing by accident and lets
-# cargo-deny accept version-less path dependencies between them.
-publish = false
+
+# No crate here goes to crates.io. Each member sets `publish = false` directly
+# rather than inheriting it, so the intent is readable in the file you are
+# looking at. A new member that forgets it fails `cargo deny check bans`, which
+# rejects version-less path dependencies for a publishable crate.
 
 [workspace.dependencies]
 base64 = "0.22.1"

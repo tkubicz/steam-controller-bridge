@@ -42,6 +42,11 @@ first launch. Right-click the app and choose **Open** once; see
 
 Building from source instead is fully supported — see [build and test](#build-and-test).
 
+GitHub releases are the only distribution channel today. A Homebrew cask and an
+App Store build are intended later. Nothing here is published to crates.io: every
+workspace crate sets `publish = false`, and the library crates exist to structure
+this application rather than to be depended on externally.
+
 ## Why it identifies as an Xbox 360 controller
 
 The firmware enumerates with the Xbox 360 compatibility VID/PID `045e:028e`.

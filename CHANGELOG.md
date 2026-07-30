@@ -56,6 +56,8 @@ First public release. macOS only, and Steam Controller 2 (2026) only.
 - Button and axis mapping is fixed; there is no configuration file yet.
 - The macOS app is ad-hoc signed, not notarized. Gatekeeper needs a one-time
   right-click → Open.
+- GitHub releases are the only distribution channel. A Homebrew cask and an App
+  Store build are intended later, and no crate is published to crates.io.
 - Steam coexistence, multiple simultaneous controllers, and other HID consumers
   against the selected collection are unsupported.
 

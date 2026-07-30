@@ -3,7 +3,8 @@ name = "gamepad-state"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+# Not published to crates.io; distribution is GitHub releases only.
+publish = false
 
 [lints]
 workspace = true
