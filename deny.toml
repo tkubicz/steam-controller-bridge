@@ -1,16 +1,56 @@
+[graph]
+# This project ships macOS only: live HID access is macOS-gated by design, and
+# the release artifacts are a macOS app plus board firmware. Linux CI exists to
+# compile the unsupported-platform stubs and catch cfg-gated lints, not to
+# produce a supported build.
+#
+# Scoping the graph keeps the audit honest. Unscoped, it reports advisories from
+# dependencies that no shipped binary contains: the Wayland stack behind
+# eframe/winit (wayland-scanner, sctk-adwaita, ttf-parser) and the GTK3 tray
+# backend behind tray-icon (gtk-rs, proc-macro-error). On macOS, tray-icon uses
+# AppKit and eframe uses the Cocoa/glow backend, so none of it is linked.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+
 [advisories]
 version = 2
 yanked = "deny"
 
 [licenses]
 version = 2
-allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
+# Every entry below is present in the shipped dependency tree and is permissive.
+# Copyleft beyond MPL-2.0's file scope is deliberately absent: this project is
+# MIT, and OpenPuck's AGPL-3.0 sources are intentionally not vendored.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    # target-lexicon offers no plain-Apache-2.0 alternative.
+    "Apache-2.0 WITH LLVM-exception",
+    "Unicode-3.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    # serialport is linked into every binary. File-level copyleft only, so
+    # distributing this MIT workspace is fine as long as those files are not
+    # modified in place; see THIRD-PARTY-NOTICES.md.
+    "MPL-2.0",
+    # epaint_default_fonts embeds fonts in sc-visualizer builds. Both carry
+    # attribution requirements recorded in THIRD-PARTY-NOTICES.md.
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# The workspace crates are path-only and never published to crates.io, so their
+# internal dependencies have no version requirement to pin. Third-party wildcard
+# dependencies are still denied.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-

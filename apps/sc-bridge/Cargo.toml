@@ -3,6 +3,7 @@ name = "sc-bridge"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 bridge-core = { path = "../../crates/bridge-core" }
