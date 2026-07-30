@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup and troubleshooting guide
+    url: https://github.com/tkubicz/steam-controller-bridge/blob/main/docs/USER_GUIDE.md
+    about: >
+      Flashing, pairing, macOS permissions, and fixes for the common failures —
+      no reports arriving, ownership conflicts, stuck LED states, and missing
+      rumble. Worth checking before opening an issue.
+  - name: Security report
+    url: https://github.com/tkubicz/steam-controller-bridge/security/advisories/new
+    about: Report a vulnerability privately instead of opening a public issue.

@@ -1,14 +1,58 @@
 # Steam Controller Bridge
 
-Translate a Steam Controller into a conventional USB gamepad through a Seeed Studio XIAO nRF52840 bridge.
+Use a Steam Controller 2 as a standard USB Xbox gamepad on macOS — without Steam
+running — in browsers, games, and cloud gaming services. A Seeed Studio XIAO
+nRF52840 does the translation in hardware.
 
-> Compatibility: this project targets **Steam Controller 2 (2026)** only. The
-> original 2015 Steam Controller and receiver use a different protocol and are
-> not supported.
+<!-- Uncomment once the asset is captured; see docs/images/README.md
+![Steam Controller 2 connected through its Puck to a Mac, with the XIAO nRF52840 bridge](docs/images/hardware-topology.jpg)
+-->
+
+> **Requirements:** macOS 13 or later, a **Steam Controller 2 (2026)**, and a
+> non-Sense XIAO nRF52840. The original 2015 Steam Controller and its receiver
+> use a different protocol and are not supported.
+
+<!-- Uncomment once the asset is captured; see docs/images/README.md
+![The bridge driving a standard-mapped gamepad in a browser gamepad tester](docs/images/gamepad-tester.gif)
+-->
 
 For hardware requirements, firmware flashing, Steam Controller 2 pairing,
 macOS permissions, daily startup, verification, and troubleshooting, start with
 the [user guide](docs/USER_GUIDE.md).
+
+## Download
+
+Grab the latest [release](https://github.com/tkubicz/steam-controller-bridge/releases):
+
+| File | What it is |
+| --- | --- |
+| `steam-controller-bridge-xiao-nrf52840.uf2` | Firmware. Double-tap RESET on the XIAO and copy this onto the drive that mounts. |
+| `steam-controller-bridge-macos.zip` | The menu-bar application. |
+| `steam-controller-bridge-xiao-nrf52840-dfu.zip` | Firmware for serial DFU flashing, if you prefer `make flash`. |
+
+Verify a download against the published sums before flashing:
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
+
+The application is ad-hoc signed rather than notarized, so macOS blocks it on
+first launch. Right-click the app and choose **Open** once; see
+[opening an unnotarized build](docs/USER_GUIDE.md#opening-an-unnotarized-build).
+
+Building from source instead is fully supported — see [build and test](#build-and-test).
+
+## Why it identifies as an Xbox 360 controller
+
+The firmware enumerates with the Xbox 360 compatibility VID/PID `045e:028e`.
+This is deliberate: Apple's built-in driver will not publish a generic HID
+gamepad to GameController, so a standards-based HID personality enumerates at the
+USB layer but stays invisible to Safari, games, and streaming clients. Borrowing
+the identity is what makes the device work at all on macOS.
+
+It is not a claim of ownership or affiliation, and a distributable product would
+need an owned or licensed USB identity plus a re-qualified macOS recognition
+path. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## Status
 
@@ -159,6 +203,10 @@ macOS may reject protected keyboard/gamepad collections with an IOKit `not permi
 
 ## Visualizer
 
+<!-- Uncomment once the asset is captured; see docs/images/README.md
+![sc-visualizer showing raw, decoded, and mapped controller state side by side](docs/images/visualizer.png)
+-->
+
 After identifying the desired HID collection with `sc-probe`, open the live
 visualizer with the same snapshot index:
 
@@ -196,6 +244,10 @@ bridge. See [the bridge guide](docs/BRIDGE.md).
 
 ## macOS menu-bar app
 
+<!-- Uncomment once the asset is captured; see docs/images/README.md
+![The menu-bar dropdown showing bridge, input, controller, XIAO, battery, and haptics status](docs/images/menu-bar.png)
+-->
+
 Build an ad-hoc-signed, dockless local application:
 
 ```bash
@@ -231,11 +283,14 @@ signing, a DMG, and Launch at Login remain future work.
 - macOS access is intentionally shared at the native HID layer. The project
   lock excludes other project tools only; Steam's persistent
   `com.valvesoftware.steam.ipctool` LaunchAgent must be booted out before play.
-- The macOS-compatible output currently uses the Xbox 360 compatibility
-  VID/PID (`045e:028e`) so Apple's built-in driver will publish it to
-  GameController and browser clients. This is suitable for development
-  hardware, but a distributable product needs an owned/licensed USB identity
-  and a verified macOS recognition strategy.
+- Button and axis mapping is fixed. `sc-bridge` and the menu-bar app always use
+  the built-in profile; there is no configuration file and no remapping flag.
+  `sc-visualizer` can adjust mapping filters live, but nothing persists them.
+  Remapping is planned, not implemented.
+- The macOS application is ad-hoc signed rather than notarized, and there is no
+  DMG or Launch at Login.
+- The output uses the Xbox 360 compatibility USB identity described
+  [above](#why-it-identifies-as-an-xbox-360-controller).
 - Automatic lizard restoration timing and lizard-suppression failure timing
   have not been formally qualified.
 - The keyboard simulator is line-oriented, not a production input UI.
