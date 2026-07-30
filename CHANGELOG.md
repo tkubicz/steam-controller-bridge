@@ -28,7 +28,9 @@ First public release. macOS only, and Steam Controller 2 (2026) only.
   keyboard and pointer events while the bridge runs.
 - **macOS menu-bar application** (`sc-bridge-menu`) with bridge, input,
   controller, XIAO, battery, haptics, and error status; Start/Stop, Copy
-  Diagnostics, Input Monitoring settings, and rotated logs.
+  Diagnostics, Input Monitoring settings, and rotated logs. The bundle carries
+  an application icon, so it is identifiable in Finder and Spotlight rather than
+  showing the blank placeholder.
 - **Developer tooling**: `sc-probe` for HID enumeration, monitoring, capture, and
   the narrow lizard/rumble diagnostics; `sc-visualizer` for live raw, decoded,
   and mapped state; `gamepad-simulator` and `sc-replay` for hardware-free work.

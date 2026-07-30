@@ -15,6 +15,9 @@ cp "$PROJECT_DIR/target/release/sc-bridge-menu" "$CONTENTS_DIR/MacOS/sc-bridge-m
 cp "$PROJECT_DIR/packaging/macos/Info.plist" "$CONTENTS_DIR/Info.plist"
 cp "$PROJECT_DIR/packaging/macos/MenuBarTemplate.svg" \
   "$CONTENTS_DIR/Resources/MenuBarTemplate.svg"
+# Referenced by CFBundleIconFile. Regenerate with tools/make-app-icon.py.
+cp "$PROJECT_DIR/packaging/macos/AppIcon.icns" \
+  "$CONTENTS_DIR/Resources/AppIcon.icns"
 
 /usr/bin/codesign --force --deep --sign - "$APP_DIR"
 /usr/bin/codesign --verify --deep --strict "$APP_DIR"
