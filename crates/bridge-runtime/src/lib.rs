@@ -20,7 +20,10 @@ use bridge_output::{
     OutputDiagnostics, OutputFeedback, SerialConfig, SerialDeviceInfo, SerialOutput,
 };
 use controller_mapper::MapperConfig;
-use recording::{RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
+use recording::{
+    RecordingError, RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED,
+    KIND_DEVICE_DISCONNECTED,
+};
 use serde_json::json;
 use steam_controller_device::{
     masked_serial, ControllerEnumerator, ControllerTransport, DeviceError, DeviceEvent,
@@ -1673,9 +1676,8 @@ fn process_report(
     started: Instant,
 ) -> Result<ReportEffect, String> {
     let timestamp = elapsed_us(started);
-    record(
-        recording,
-        &RecordingEvent::raw_hid_with_metadata(
+    record_lazy(recording, || {
+        RecordingEvent::raw_hid_with_metadata(
             timestamp,
             report.report_id,
             &report.data,
@@ -1683,20 +1685,15 @@ fn process_report(
             Some(&report.transport),
             report.dropped_reports,
         )
-        .map_err(|error| error.to_string())?,
-    )?;
+    })?;
     match engine.process_report(report.report_id, &report.data, started.elapsed(), output) {
         Ok(ProcessOutcome::State { source, mapped, .. }) => {
-            record(
-                recording,
-                &RecordingEvent::decoded_steam_state(timestamp, &source)
-                    .map_err(|error| error.to_string())?,
-            )?;
-            record(
-                recording,
-                &RecordingEvent::mapped_gamepad_state(timestamp, &mapped)
-                    .map_err(|error| error.to_string())?,
-            )?;
+            record_lazy(recording, || {
+                RecordingEvent::decoded_steam_state(timestamp, &source)
+            })?;
+            record_lazy(recording, || {
+                RecordingEvent::mapped_gamepad_state(timestamp, &mapped)
+            })?;
             Ok(ReportEffect::ControllerState)
         }
         Ok(ProcessOutcome::Status(DecodedReport::Battery { status, .. })) => {
@@ -1725,16 +1722,17 @@ fn valid_battery_percent(percent: u8) -> Option<u8> {
     (percent <= 100).then_some(percent)
 }
 
-fn record(
+fn record_lazy(
     writer: &mut Option<RecordingWriter<File>>,
-    event: &RecordingEvent,
+    make_event: impl FnOnce() -> Result<RecordingEvent, RecordingError>,
 ) -> Result<(), String> {
-    if let Some(writer) = writer {
-        writer
-            .write_event(event)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(())
+    let Some(writer) = writer else {
+        return Ok(());
+    };
+    let event = make_event().map_err(|error| error.to_string())?;
+    writer
+        .write_event(&event)
+        .map_err(|error| error.to_string())
 }
 
 fn record_device_event(
@@ -1743,27 +1741,26 @@ fn record_device_event(
     kind: &str,
     info: Option<&HidDeviceInfo>,
 ) -> Result<(), String> {
-    let payload = info.map_or_else(
-        || json!({}),
-        |info| {
-            json!({
-                "id": info.id,
-                "path": info.path,
-                "vendor_id": info.vendor_id,
-                "product_id": info.product_id,
-                "usage_page": info.usage_page,
-                "usage": info.usage,
-                "interface_number": info.interface_number,
-                "transport": info.transport,
-                "product": info.product,
-                "manufacturer": info.manufacturer,
-            })
-        },
-    );
-    record(
-        writer,
-        &RecordingEvent::new(elapsed_us(started), kind, payload),
-    )
+    record_lazy(writer, || {
+        let payload = info.map_or_else(
+            || json!({}),
+            |info| {
+                json!({
+                    "id": info.id,
+                    "path": info.path,
+                    "vendor_id": info.vendor_id,
+                    "product_id": info.product_id,
+                    "usage_page": info.usage_page,
+                    "usage": info.usage,
+                    "interface_number": info.interface_number,
+                    "transport": info.transport,
+                    "product": info.product,
+                    "manufacturer": info.manufacturer,
+                })
+            },
+        );
+        Ok(RecordingEvent::new(elapsed_us(started), kind, payload))
+    })
 }
 
 fn elapsed_us(started: Instant) -> u64 {
@@ -2521,6 +2518,18 @@ mod tests {
         assert_eq!(valid_battery_percent(100), Some(100));
         assert_eq!(valid_battery_percent(101), None);
         assert_eq!(valid_battery_percent(u8::MAX), None);
+    }
+
+    #[test]
+    fn disabled_recording_does_not_construct_events() {
+        let mut writer = None;
+        let constructed = std::cell::Cell::new(false);
+        record_lazy(&mut writer, || {
+            constructed.set(true);
+            Ok(RecordingEvent::new(0, recording::KIND_RAW_HID, json!({})))
+        })
+        .unwrap();
+        assert!(!constructed.get());
     }
 
     #[test]

@@ -19,6 +19,7 @@ use winit::window::WindowId;
 use crate::model::{MenuModel, TrayState};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const PERIODIC_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const LOG_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 const START_ID: &str = "start";
 const STOP_ID: &str = "stop";
@@ -414,6 +415,8 @@ fn fill_icon_circle(
 struct StatusLogger {
     directory: PathBuf,
     path: PathBuf,
+    last_status: Option<BridgeStatus>,
+    last_write: Option<Instant>,
 }
 
 impl StatusLogger {
@@ -429,10 +432,19 @@ impl StatusLogger {
             )
         })?;
         let path = directory.join("sc-bridge.log");
-        Ok(Self { directory, path })
+        Ok(Self {
+            directory,
+            path,
+            last_status: None,
+            last_write: None,
+        })
     }
 
-    fn write_status(&self, status: &BridgeStatus) -> Result<(), String> {
+    fn write_status(&mut self, status: &BridgeStatus) -> Result<(), String> {
+        let now = Instant::now();
+        if !status_log_due(now, self.last_write, self.last_status.as_ref(), status) {
+            return Ok(());
+        }
         rotate_log(&self.path)?;
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -492,8 +504,36 @@ impl StatusLogger {
             status.bridge_metrics.output_packets,
             status.output_diagnostics.state_refreshes
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+        self.last_status = Some(status.clone());
+        self.last_write = Some(now);
+        Ok(())
     }
+}
+
+fn status_log_due(
+    now: Instant,
+    last_write: Option<Instant>,
+    previous: Option<&BridgeStatus>,
+    current: &BridgeStatus,
+) -> bool {
+    last_write
+        .is_none_or(|last_write| now.saturating_duration_since(last_write) >= PERIODIC_LOG_INTERVAL)
+        || previous.is_none_or(|previous| meaningful_status_changed(previous, current))
+}
+
+fn meaningful_status_changed(previous: &BridgeStatus, current: &BridgeStatus) -> bool {
+    previous.state != current.state
+        || previous.detail != current.detail
+        || previous.source != current.source
+        || previous.controller.connected != current.controller.connected
+        || previous.xiao != current.xiao
+        || previous.battery_percent != current.battery_percent
+        || previous.lizard.suppressed != current.lizard.suppressed
+        || previous.lizard.failures != current.lizard.failures
+        || previous.haptics.state != current.haptics.state
+        || previous.haptics.failures != current.haptics.failures
+        || previous.last_error != current.last_error
 }
 
 fn rotate_log(path: &Path) -> Result<(), String> {
@@ -574,6 +614,48 @@ mod tests {
         assert!(text.contains("lizard:"));
         assert!(text.contains("haptics:"));
         assert!(text.contains("output_diagnostics:"));
+    }
+
+    #[test]
+    fn status_logging_is_immediate_for_transitions_and_periodic_for_metrics() {
+        let now = Instant::now();
+        let initial = BridgeStatus::default();
+        assert!(status_log_due(now, None, None, &initial));
+
+        let mut metrics_only = initial.clone();
+        metrics_only.revision += 1;
+        metrics_only.bridge_metrics.input_reports += 64;
+        metrics_only.controller.last_state_age = Some(Duration::from_millis(2));
+        assert!(!status_log_due(
+            now + Duration::from_secs(1),
+            Some(now),
+            Some(&initial),
+            &metrics_only
+        ));
+        assert!(status_log_due(
+            now + PERIODIC_LOG_INTERVAL,
+            Some(now),
+            Some(&initial),
+            &metrics_only
+        ));
+
+        let mut transitioned = metrics_only.clone();
+        transitioned.state = bridge_runtime::RuntimeState::Running;
+        assert!(status_log_due(
+            now + Duration::from_millis(1),
+            Some(now),
+            Some(&initial),
+            &transitioned
+        ));
+
+        let mut failed = metrics_only;
+        failed.last_error = Some("controller failed".to_owned());
+        assert!(status_log_due(
+            now + Duration::from_millis(1),
+            Some(now),
+            Some(&initial),
+            &failed
+        ));
     }
 
     /// Copy Diagnostics is what the troubleshooting guide tells users to paste
