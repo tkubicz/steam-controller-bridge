@@ -16,9 +16,10 @@ The normal workflow is:
 Live mode defaults to automatic active-source discovery, automatic XIAO
 discovery, negotiated serial output, and lizard-mode suppression. The process
 may start before either endpoint is present. Missing hardware is scanned every
-500 ms; once controller candidates are open, the more expensive metadata scan
-backs off to two seconds while report probing remains responsive. State
-transitions are reported only when they change.
+500 ms. Once controller candidates are open, unchanged metadata scans back off
+from two seconds to a ten-second ceiling while already-open HID report queues
+are still checked every 500 ms. State transitions are reported only when they
+change.
 
 Controller discovery considers only official `28de:1304` USB, usage
 `ff00:0001`, interface 2–5 Puck collections and the `28de:1303` Bluetooth,
@@ -28,6 +29,12 @@ active only after a complete valid `0x42` or `0x45` state report. An idle Puck
 therefore does not block an active Bluetooth controller. Zero active sources
 waits; multiple active sources fail safely, list their global `sc-probe`
 indices and identities, and require `--index N`.
+
+An explicit `--index N` is a global `sc-probe list` index, so resolving it
+requires the full HID inventory. The runtime caches the selected stable
+identity and backs the global lookup off from two seconds to a ten-second
+ceiling while it is waiting to open the collection; open retries continue every
+500 ms. It does not rebuild the full-system HID metadata on every retry.
 
 XIAO discovery enumerates serial metadata rather than matching filenames. An
 automatic candidate must be a macOS `/dev/cu.*` callout port with exact
@@ -108,8 +115,16 @@ post-reconnect lease.
 
 Native HID access remains shared because the tested Puck rejects macOS seize
 access. A project-level ownership lock keyed by stable device identity excludes
-another bridge/probe/visualizer from the selected Puck or Bluetooth collection,
-but Steam and its persistent IPC helper must be stopped manually:
+other project processes. In automatic discovery, the bridge keeps every
+supported candidate session and its ownership lock open continuously while it
+waits for one to become active, not only during each 500 ms probe. Therefore
+`sc-probe` commands that open a collection and `sc-visualizer` cannot use any
+candidate slot until the bridge is stopped; `sc-probe list` remains available
+because enumeration does not open a collection. This persistent ownership
+avoids repeated macOS HID reader allocation. Its effect on controller sleep and
+battery during a long idle has not yet been measured, so long-idle hardware
+tests should monitor both; stop the bridge when prolonged idle battery behavior
+matters. Steam and its persistent IPC helper must also be stopped manually:
 
 ```bash
 launchctl bootout user/$(id -u)/com.valvesoftware.steam.ipctool

@@ -23,7 +23,7 @@ use controller_mapper::MapperConfig;
 use recording::{RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
 use serde_json::json;
 use steam_controller_device::{
-    enumerate, masked_serial, ControllerEnumerator, ControllerTransport, DeviceError, DeviceEvent,
+    masked_serial, ControllerEnumerator, ControllerTransport, DeviceError, DeviceEvent,
     HidDeviceInfo, HidSession, LizardModeHeartbeat, RawHidReport,
 };
 
@@ -35,8 +35,9 @@ use steam_controller_protocol::{
 };
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_millis(500);
-const STABLE_CONTROLLER_SCAN_INTERVAL: Duration = Duration::from_secs(2);
-const ACTIVE_PROBE_WINDOW: Duration = Duration::from_millis(500);
+const MIN_STABLE_CONTROLLER_SCAN_INTERVAL: Duration = Duration::from_secs(2);
+const MAX_STABLE_CONTROLLER_SCAN_INTERVAL: Duration = Duration::from_secs(10);
+const MAX_DISCOVERY_REPORTS_PER_CANDIDATE: usize = 4;
 const ACTIVE_SLOT_TIMEOUT: Duration = Duration::from_secs(1);
 const STATUS_INTERVAL: Duration = Duration::from_millis(250);
 const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -367,6 +368,7 @@ struct Supervisor {
     preferred_xiao_serial: Option<String>,
     controller_enumerator: Option<ControllerEnumerator>,
     controller_discovery: ControllerDiscoveryState<HidSession>,
+    indexed_controller_discovery: IndexedControllerDiscoveryState,
 }
 
 impl Supervisor {
@@ -386,6 +388,7 @@ impl Supervisor {
             preferred_xiao_serial: None,
             controller_enumerator: None,
             controller_discovery: ControllerDiscoveryState::new(),
+            indexed_controller_discovery: IndexedControllerDiscoveryState::new(),
         }
     }
 
@@ -396,7 +399,7 @@ impl Supervisor {
             self.service_idle_commands();
             if self.shutdown_requested {
                 drop(retained_output.take());
-                self.controller_discovery.clear();
+                self.clear_controller_discovery();
                 self.clear_hardware_status();
                 self.transition(RuntimeState::Stopped, "Bridge stopped", None);
                 acknowledge_all(&mut self.pending_shutdown_acks);
@@ -405,7 +408,7 @@ impl Supervisor {
             }
             if !self.desired_running {
                 drop(retained_output.take());
-                self.controller_discovery.clear();
+                self.clear_controller_discovery();
                 if self.current_state() != RuntimeState::Error {
                     self.transition(RuntimeState::Stopped, "Bridge stopped", None);
                 }
@@ -442,6 +445,7 @@ impl Supervisor {
                 }
             }
 
+            let controller_discovery_started = Instant::now();
             let active = match self.discover_controller_source() {
                 Discovery::Ready(active) => active,
                 Discovery::Wait { detail, error } => {
@@ -453,8 +457,10 @@ impl Supervisor {
                             status.xiao = XiaoStatus::default();
                         });
                     }
-                    if self.controller_discovery.is_empty() {
-                        self.wait_or_command(DISCOVERY_INTERVAL);
+                    let delay =
+                        controller_discovery_loop_delay(controller_discovery_started.elapsed());
+                    if !delay.is_zero() {
+                        self.wait_or_command(delay);
                     }
                     continue;
                 }
@@ -474,6 +480,7 @@ impl Supervisor {
             match self.run_active(active, output) {
                 Ok((ActiveExit::SourceLost, output)) => {
                     retained_output = Some(output);
+                    self.clear_controller_discovery();
                     self.transition(
                         RuntimeState::Discovering,
                         "Controller stopped reporting; rediscovering active input source",
@@ -614,16 +621,20 @@ impl Supervisor {
     fn discover_controller_source(&mut self) -> Discovery<ActiveControllerSource> {
         match self.config.controller {
             ControllerSelection::Index(index) => {
-                let devices = match enumerate() {
-                    Ok(devices) => devices,
-                    Err(error) => {
-                        return Discovery::Wait {
-                            detail: "Cannot enumerate Steam Controller HID collections".to_owned(),
-                            error: Some(error.to_string()),
-                        };
-                    }
-                };
-                let Some(info) = devices.get(index).cloned() else {
+                if self.indexed_controller_discovery.scan_due() {
+                    let discovered = self
+                        .controller_enumerator()
+                        .and_then(ControllerEnumerator::enumerate_all)
+                        .map_err(|error| error.to_string());
+                    self.indexed_controller_discovery.refresh(index, discovered);
+                }
+                if let Some(error) = self.indexed_controller_discovery.scan_error() {
+                    return Discovery::Wait {
+                        detail: "Cannot enumerate Steam Controller HID collections".to_owned(),
+                        error: Some(error.to_owned()),
+                    };
+                }
+                let Some(info) = self.indexed_controller_discovery.info().cloned() else {
                     return Discovery::Wait {
                         detail: format!("Waiting for Steam Controller collection index {index}"),
                         error: None,
@@ -636,13 +647,17 @@ impl Supervisor {
                          28de:1303 Bluetooth ff00:0001 interface -1 collection"
                     ));
                 }
-                match HidSession::open_info(&info) {
+                match self
+                    .controller_enumerator()
+                    .and_then(|enumerator| enumerator.open(&info))
+                {
                     Ok(mut session) => {
                         // Consume the synthetic open event here. The worker has
                         // already performed its initial suppression before it
                         // forwards any lifecycle or input event.
                         let _ = session.poll(Duration::ZERO);
                         self.update_source_discovered(&info, false);
+                        self.indexed_controller_discovery.clear();
                         Discovery::Ready(ActiveControllerSource {
                             info,
                             session,
@@ -663,19 +678,23 @@ impl Supervisor {
 
     fn discover_active_controller_source(&mut self) -> Discovery<ActiveControllerSource> {
         if self.controller_discovery.scan_due() {
-            let discovered = self.enumerate_controller_candidates();
-            self.controller_discovery.refresh(
-                discovered.map_err(|error| error.to_string()),
-                |_, info| {
-                    HidSession::open_info(info).map_err(|error| {
+            let discovered = self
+                .enumerate_controller_candidates()
+                .map_err(|error| error.to_string());
+            // Borrowed as a separate field so the open closure can reuse the
+            // shared context while the discovery state is mutated.
+            let enumerator = self.controller_enumerator.as_ref();
+            self.controller_discovery
+                .refresh(discovered, |_, info| match enumerator {
+                    Some(enumerator) => enumerator.open(info).map_err(|error| {
                         format!(
                             "{}: {}",
                             controller_source_identity(info),
                             ownership_guidance(&error)
                         )
-                    })
-                },
-            );
+                    }),
+                    None => Err("the HID context is unavailable".to_owned()),
+                });
         }
 
         if self.controller_discovery.is_empty() {
@@ -698,7 +717,7 @@ impl Supervisor {
             };
         }
 
-        let probe = self.controller_discovery.probe(ACTIVE_PROBE_WINDOW);
+        let probe = self.controller_discovery.probe();
         match choose_unique_active(&probe.active_indices) {
             Ok(None) => Discovery::Wait {
                 detail: "Steam Controller input found; waiting for valid controller state"
@@ -716,9 +735,16 @@ impl Supervisor {
                 })
             }
             Err(active_indices) => {
-                let global_indices_available = enumerate()
-                    .map(|devices| self.controller_discovery.resolve_global_indices(&devices))
-                    .is_ok_and(|result| result.is_ok());
+                let global = self
+                    .controller_enumerator()
+                    .and_then(ControllerEnumerator::enumerate_all);
+                let global_indices_available = match global {
+                    Ok(devices) => self
+                        .controller_discovery
+                        .resolve_global_indices(&devices)
+                        .is_ok(),
+                    Err(_) => false,
+                };
                 let sources = active_indices
                     .iter()
                     .map(|index| {
@@ -742,17 +768,33 @@ impl Supervisor {
         }
     }
 
-    fn enumerate_controller_candidates(
-        &mut self,
-    ) -> Result<Vec<(usize, HidDeviceInfo)>, DeviceError> {
+    /// Returns the shared HID context, building it on first use.
+    ///
+    /// One context serves filtered scans, full-inventory scans, and opening
+    /// sessions. Constructing a context enumerates every collection in the
+    /// system, so creating one per scan or per open attempt is what made idle
+    /// discovery expensive.
+    fn controller_enumerator(&mut self) -> Result<&mut ControllerEnumerator, DeviceError> {
         if self.controller_enumerator.is_none() {
             self.controller_enumerator = Some(ControllerEnumerator::new()?);
         }
-        self.controller_enumerator
+        Ok(self
+            .controller_enumerator
             .as_mut()
-            .expect("controller enumerator was initialized")
-            .enumerate()
+            .expect("controller enumerator was initialized"))
+    }
+
+    fn enumerate_controller_candidates(
+        &mut self,
+    ) -> Result<Vec<(usize, HidDeviceInfo)>, DeviceError> {
+        self.controller_enumerator()
+            .and_then(ControllerEnumerator::enumerate)
             .map(|devices| devices.into_iter().enumerate().collect())
+    }
+
+    fn clear_controller_discovery(&mut self) {
+        self.controller_discovery.clear();
+        self.indexed_controller_discovery.clear();
     }
 
     #[allow(clippy::too_many_lines)] // Safety ordering is clearest in one linear ownership loop.
@@ -1154,12 +1196,75 @@ struct ControllerProbe {
     failures: Vec<String>,
 }
 
+struct IndexedControllerDiscoveryState {
+    info: Option<HidDeviceInfo>,
+    next_scan: Instant,
+    stable_scan_interval: Duration,
+    scan_error: Option<String>,
+}
+
+impl IndexedControllerDiscoveryState {
+    fn new() -> Self {
+        Self {
+            info: None,
+            next_scan: Instant::now(),
+            stable_scan_interval: MIN_STABLE_CONTROLLER_SCAN_INTERVAL,
+            scan_error: None,
+        }
+    }
+
+    fn scan_due(&self) -> bool {
+        Instant::now() >= self.next_scan
+    }
+
+    fn refresh(&mut self, index: usize, discovered: Result<Vec<HidDeviceInfo>, String>) {
+        let previous = self.info.take();
+        match discovered {
+            Ok(devices) => {
+                self.info = devices.get(index).cloned();
+                self.scan_error = None;
+            }
+            Err(error) => {
+                self.info = None;
+                self.scan_error = Some(error);
+            }
+        }
+        let unchanged = previous
+            .as_ref()
+            .zip(self.info.as_ref())
+            .is_some_and(|(previous, current)| same_controller_collection(previous, current));
+        self.stable_scan_interval = if unchanged {
+            next_stable_controller_scan_interval(self.stable_scan_interval)
+        } else {
+            MIN_STABLE_CONTROLLER_SCAN_INTERVAL
+        };
+        self.next_scan = Instant::now()
+            + controller_inventory_scan_interval(self.info.is_some(), self.stable_scan_interval);
+    }
+
+    fn clear(&mut self) {
+        self.info = None;
+        self.next_scan = Instant::now();
+        self.stable_scan_interval = MIN_STABLE_CONTROLLER_SCAN_INTERVAL;
+        self.scan_error = None;
+    }
+
+    fn info(&self) -> Option<&HidDeviceInfo> {
+        self.info.as_ref()
+    }
+
+    fn scan_error(&self) -> Option<&str> {
+        self.scan_error.as_deref()
+    }
+}
+
 // Keep inactive collections open until the HID inventory changes. Reopening all
 // Puck slots for every probe creates native reader threads repeatedly and, on
 // macOS, leaves IOHID-owned report buffers retained by the main run loop.
 struct ControllerDiscoveryState<S> {
     candidates: Vec<ControllerCandidate<S>>,
     next_scan: Instant,
+    stable_scan_interval: Duration,
     supported_devices_seen: bool,
     open_failures: Vec<String>,
     scan_error: Option<String>,
@@ -1170,6 +1275,7 @@ impl<S> ControllerDiscoveryState<S> {
         Self {
             candidates: Vec::new(),
             next_scan: Instant::now(),
+            stable_scan_interval: MIN_STABLE_CONTROLLER_SCAN_INTERVAL,
             supported_devices_seen: false,
             open_failures: Vec::new(),
             scan_error: None,
@@ -1187,8 +1293,12 @@ impl<S> ControllerDiscoveryState<S> {
     ) -> ControllerReconcileMetrics {
         let Ok(discovered) = discovered else {
             self.scan_error = discovered.err();
-            self.next_scan =
-                Instant::now() + controller_inventory_scan_interval(!self.candidates.is_empty());
+            self.stable_scan_interval = MIN_STABLE_CONTROLLER_SCAN_INTERVAL;
+            self.next_scan = Instant::now()
+                + controller_inventory_scan_interval(
+                    !self.candidates.is_empty(),
+                    self.stable_scan_interval,
+                );
             return ControllerReconcileMetrics::default();
         };
 
@@ -1236,14 +1346,24 @@ impl<S> ControllerDiscoveryState<S> {
 
         metrics.removed = old_count.saturating_sub(metrics.reused);
         self.candidates = reconciled;
-        self.next_scan =
-            Instant::now() + controller_inventory_scan_interval(!self.candidates.is_empty());
+        let inventory_changed = metrics.opened > 0 || metrics.removed > 0 || metrics.failures > 0;
+        self.stable_scan_interval = if inventory_changed {
+            MIN_STABLE_CONTROLLER_SCAN_INTERVAL
+        } else {
+            next_stable_controller_scan_interval(self.stable_scan_interval)
+        };
+        self.next_scan = Instant::now()
+            + controller_inventory_scan_interval(
+                !self.candidates.is_empty(),
+                self.stable_scan_interval,
+            );
         metrics
     }
 
     fn clear(&mut self) {
         self.candidates.clear();
         self.next_scan = Instant::now();
+        self.stable_scan_interval = MIN_STABLE_CONTROLLER_SCAN_INTERVAL;
         self.supported_devices_seen = false;
         self.open_failures.clear();
         self.scan_error = None;
@@ -1277,16 +1397,22 @@ impl<S> ControllerDiscoveryState<S> {
     }
 
     fn resolve_global_indices(&mut self, devices: &[HidDeviceInfo]) -> Result<(), String> {
-        for candidate in &mut self.candidates {
-            let Some(index) = devices
-                .iter()
-                .position(|info| same_controller_collection(&candidate.info, info))
-            else {
-                return Err(format!(
-                    "cannot resolve the global index for {}",
-                    controller_source_identity(&candidate.info)
-                ));
-            };
+        let resolved = self
+            .candidates
+            .iter()
+            .map(|candidate| {
+                devices
+                    .iter()
+                    .position(|info| same_controller_collection(&candidate.info, info))
+                    .ok_or_else(|| {
+                        format!(
+                            "cannot resolve the global index for {}",
+                            controller_source_identity(&candidate.info)
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for (candidate, index) in self.candidates.iter_mut().zip(resolved) {
             candidate.enumeration_index = index;
         }
         Ok(())
@@ -1300,21 +1426,28 @@ impl<S> ControllerDiscoveryState<S> {
 }
 
 impl<S: ControllerProbeSession> ControllerDiscoveryState<S> {
-    fn probe(&mut self, window: Duration) -> ControllerProbe {
-        let timeout = discovery_timeout_per_candidate(window, self.candidates.len());
+    fn probe(&mut self) -> ControllerProbe {
         let mut decoder = SteamControllerDecoder::new();
         let mut active_indices = Vec::new();
         let mut failures = Vec::new();
         for (index, candidate) in self.candidates.iter_mut().enumerate() {
-            match candidate.session.poll_for_discovery(timeout) {
-                Ok(Some(DeviceEvent::Report(report)))
-                    if is_valid_controller_state(&mut decoder, &report) =>
-                {
-                    active_indices.push(index);
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    failures.push(format!("index {}: {error}", candidate.enumeration_index));
+            for _ in 0..MAX_DISCOVERY_REPORTS_PER_CANDIDATE {
+                match candidate.session.poll_for_discovery(Duration::ZERO) {
+                    Ok(Some(DeviceEvent::Report(report)))
+                        if is_valid_controller_state(&mut decoder, &report) =>
+                    {
+                        active_indices.push(index);
+                        break;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(error) => {
+                        failures.push(format!(
+                            "{}: {error}",
+                            controller_source_identity(&candidate.info)
+                        ));
+                        break;
+                    }
                 }
             }
         }
@@ -1325,17 +1458,25 @@ impl<S: ControllerProbeSession> ControllerDiscoveryState<S> {
     }
 }
 
-fn discovery_timeout_per_candidate(window: Duration, candidates: usize) -> Duration {
-    let divisor = u32::try_from(candidates.max(1)).unwrap_or(u32::MAX);
-    window / divisor
-}
-
-fn controller_inventory_scan_interval(has_open_candidates: bool) -> Duration {
+fn controller_inventory_scan_interval(
+    has_open_candidates: bool,
+    stable_scan_interval: Duration,
+) -> Duration {
     if has_open_candidates {
-        STABLE_CONTROLLER_SCAN_INTERVAL
+        stable_scan_interval
     } else {
         DISCOVERY_INTERVAL
     }
+}
+
+fn next_stable_controller_scan_interval(current: Duration) -> Duration {
+    current
+        .saturating_mul(2)
+        .min(MAX_STABLE_CONTROLLER_SCAN_INTERVAL)
+}
+
+fn controller_discovery_loop_delay(elapsed: Duration) -> Duration {
+    DISCOVERY_INTERVAL.saturating_sub(elapsed)
 }
 
 fn same_controller_collection(left: &HidDeviceInfo, right: &HidDeviceInfo) -> bool {
@@ -2273,6 +2414,23 @@ mod tests {
                 timeouts,
             }
         }
+
+        fn with_error(error: &str, timeouts: Arc<Mutex<Vec<Duration>>>) -> Self {
+            Self {
+                events: [Err(error.to_owned())].into(),
+                timeouts,
+            }
+        }
+
+        fn with_events(
+            events: Vec<Result<Option<DeviceEvent>, String>>,
+            timeouts: Arc<Mutex<Vec<Duration>>>,
+        ) -> Self {
+            Self {
+                events: events.into(),
+                timeouts,
+            }
+        }
     }
 
     impl ControllerProbeSession for FakeDiscoverySession {
@@ -2501,12 +2659,76 @@ mod tests {
     #[test]
     fn controller_inventory_scans_quickly_only_until_candidates_are_open() {
         assert_eq!(
-            controller_inventory_scan_interval(false),
+            controller_inventory_scan_interval(false, MAX_STABLE_CONTROLLER_SCAN_INTERVAL,),
             DISCOVERY_INTERVAL
         );
         assert_eq!(
-            controller_inventory_scan_interval(true),
-            STABLE_CONTROLLER_SCAN_INTERVAL
+            controller_inventory_scan_interval(true, MIN_STABLE_CONTROLLER_SCAN_INTERVAL,),
+            MIN_STABLE_CONTROLLER_SCAN_INTERVAL
+        );
+        assert_eq!(
+            next_stable_controller_scan_interval(MIN_STABLE_CONTROLLER_SCAN_INTERVAL),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            next_stable_controller_scan_interval(Duration::from_secs(8)),
+            MAX_STABLE_CONTROLLER_SCAN_INTERVAL
+        );
+        assert_eq!(
+            next_stable_controller_scan_interval(MAX_STABLE_CONTROLLER_SCAN_INTERVAL),
+            MAX_STABLE_CONTROLLER_SCAN_INTERVAL
+        );
+    }
+
+    #[test]
+    fn indexed_controller_discovery_caches_the_global_selection_between_scans() {
+        let selected = controller_info(
+            steam_controller_device::PROTEUS_PRODUCT_ID,
+            steam_controller_device::FIRST_PROTEUS_SLOT_INTERFACE,
+            "USB",
+        );
+        let mut unrelated = selected.clone();
+        unrelated.id = "unrelated".to_owned();
+        unrelated.path = "unrelated".to_owned();
+        unrelated.vendor_id = 0x1234;
+        unrelated.product_id = 0x5678;
+        let mut global = vec![unrelated; 44];
+        global[43] = selected.clone();
+
+        let mut discovery = IndexedControllerDiscoveryState::new();
+        discovery.refresh(43, Ok(global.clone()));
+
+        assert_eq!(discovery.info(), Some(&selected));
+        assert_eq!(discovery.scan_error(), None);
+        assert_eq!(
+            discovery.stable_scan_interval,
+            MIN_STABLE_CONTROLLER_SCAN_INTERVAL
+        );
+        assert!(!discovery.scan_due());
+        assert!(
+            discovery
+                .next_scan
+                .saturating_duration_since(Instant::now())
+                > Duration::from_secs(1)
+        );
+
+        discovery.refresh(43, Ok(global));
+        assert_eq!(discovery.stable_scan_interval, Duration::from_secs(4));
+    }
+
+    #[test]
+    fn controller_discovery_loop_keeps_nonblocking_probes_at_two_hertz() {
+        assert_eq!(
+            controller_discovery_loop_delay(Duration::ZERO),
+            DISCOVERY_INTERVAL
+        );
+        assert_eq!(
+            controller_discovery_loop_delay(DISCOVERY_INTERVAL + Duration::from_millis(1)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            controller_discovery_loop_delay(Duration::from_millis(100)),
+            Duration::from_millis(400)
         );
     }
 
@@ -2554,6 +2776,7 @@ mod tests {
             }
         );
         assert_eq!(next_session, 2);
+        assert_eq!(discovery.stable_scan_interval, Duration::from_secs(4));
         assert_eq!(discovery.candidate(0).enumeration_index, 12);
         assert_eq!(discovery.candidate(0).session, 2);
         assert_eq!(discovery.candidate(1).enumeration_index, 13);
@@ -2638,7 +2861,39 @@ mod tests {
     }
 
     #[test]
-    fn discovery_probe_uses_one_bounded_read_per_candidate() {
+    fn failed_global_index_resolution_does_not_partially_mutate_candidates() {
+        let puck = controller_info(
+            steam_controller_device::PROTEUS_PRODUCT_ID,
+            steam_controller_device::FIRST_PROTEUS_SLOT_INTERFACE,
+            "USB",
+        );
+        let bluetooth = controller_info(
+            steam_controller_device::STEAM_CONTROLLER_BLUETOOTH_PRODUCT_ID,
+            steam_controller_device::BLUETOOTH_CONTROLLER_INTERFACE,
+            "Bluetooth",
+        );
+        let mut discovery = ControllerDiscoveryState::new();
+        discovery.refresh(Ok(vec![(0, puck.clone()), (1, bluetooth)]), |index, _| {
+            Ok(index)
+        });
+
+        let mut unrelated = puck.clone();
+        unrelated.id = "unrelated".to_owned();
+        unrelated.path = "unrelated".to_owned();
+        unrelated.vendor_id = 0x1234;
+        unrelated.product_id = 0x5678;
+        let mut incomplete_global = vec![unrelated; 7];
+        incomplete_global[6] = puck;
+
+        assert!(discovery
+            .resolve_global_indices(&incomplete_global)
+            .is_err());
+        assert_eq!(discovery.candidate(0).enumeration_index, 0);
+        assert_eq!(discovery.candidate(1).enumeration_index, 1);
+    }
+
+    #[test]
+    fn discovery_probe_uses_nonblocking_reads_for_idle_candidates() {
         let timeouts = Arc::new(Mutex::new(Vec::new()));
         let mut discovery = ControllerDiscoveryState::new();
         let candidates = (0..4)
@@ -2664,15 +2919,96 @@ mod tests {
             }
         });
 
-        let probe = discovery.probe(ACTIVE_PROBE_WINDOW);
+        let probe = discovery.probe();
         assert_eq!(probe.active_indices, vec![2]);
         assert!(probe.failures.is_empty());
         assert_eq!(
             *timeouts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec![Duration::from_millis(125); 4]
+            vec![Duration::ZERO; 4]
         );
+    }
+
+    #[test]
+    fn discovery_probe_drains_a_bounded_prefix_to_find_fresh_state() {
+        let timeouts = Arc::new(Mutex::new(Vec::new()));
+        let puck = controller_info(
+            steam_controller_device::PROTEUS_PRODUCT_ID,
+            steam_controller_device::FIRST_PROTEUS_SLOT_INTERFACE,
+            "USB",
+        );
+        let connected = DeviceEvent::Connected(puck.clone());
+        let state = DeviceEvent::Report(controller_state_report(&puck.id));
+        let mut discovery = ControllerDiscoveryState::new();
+        discovery.refresh(Ok(vec![(40, puck)]), |_, _| {
+            Ok(FakeDiscoverySession::with_events(
+                vec![Ok(Some(connected.clone())), Ok(Some(state.clone()))],
+                Arc::clone(&timeouts),
+            ))
+        });
+
+        let probe = discovery.probe();
+        assert_eq!(probe.active_indices, vec![0]);
+        assert_eq!(
+            *timeouts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![Duration::ZERO; 2]
+        );
+    }
+
+    #[test]
+    fn discovery_probe_never_drains_more_than_the_fixed_limit() {
+        let timeouts = Arc::new(Mutex::new(Vec::new()));
+        let puck = controller_info(
+            steam_controller_device::PROTEUS_PRODUCT_ID,
+            steam_controller_device::FIRST_PROTEUS_SLOT_INTERFACE,
+            "USB",
+        );
+        let mut events = (0..MAX_DISCOVERY_REPORTS_PER_CANDIDATE + 3)
+            .map(|_| Ok(Some(DeviceEvent::Connected(puck.clone()))))
+            .collect::<Vec<_>>();
+        let mut discovery = ControllerDiscoveryState::new();
+        discovery.refresh(Ok(vec![(40, puck)]), |_, _| {
+            Ok(FakeDiscoverySession::with_events(
+                std::mem::take(&mut events),
+                Arc::clone(&timeouts),
+            ))
+        });
+
+        let probe = discovery.probe();
+        assert!(probe.active_indices.is_empty());
+        assert_eq!(
+            timeouts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            MAX_DISCOVERY_REPORTS_PER_CANDIDATE
+        );
+    }
+
+    #[test]
+    fn discovery_probe_failures_use_identity_not_filtered_indices() {
+        let timeouts = Arc::new(Mutex::new(Vec::new()));
+        let puck = controller_info(
+            steam_controller_device::PROTEUS_PRODUCT_ID,
+            steam_controller_device::FIRST_PROTEUS_SLOT_INTERFACE,
+            "USB",
+        );
+        let mut discovery = ControllerDiscoveryState::new();
+        discovery.refresh(Ok(vec![(2, puck)]), |_, _| {
+            Ok(FakeDiscoverySession::with_error(
+                "injected read failure",
+                Arc::clone(&timeouts),
+            ))
+        });
+
+        let probe = discovery.probe();
+        assert_eq!(probe.failures.len(), 1);
+        assert!(probe.failures[0].starts_with("Puck product"));
+        assert!(probe.failures[0].contains("injected read failure"));
+        assert!(!probe.failures[0].contains("index 2"));
     }
 
     #[test]

@@ -21,12 +21,12 @@ pub fn enumerate() -> Result<Vec<HidDeviceInfo>, DeviceError> {
     Ok(convert_and_sort(api.device_list()))
 }
 
-/// Reusable, narrowly filtered enumerator for automatic controller discovery.
+/// Reusable HID context for discovery.
 ///
-/// The first construction initializes HIDAPI. Later refreshes ask macOS only
-/// for Valve's VID instead of rebuilding metadata for every HID collection in
-/// the system. The result still passes through the exact Puck/Bluetooth
-/// classifier before it leaves this type.
+/// Constructing a [`HidApi`] initializes HIDAPI and enumerates every collection
+/// in the system, so doing it per scan or per open attempt is what made idle
+/// discovery expensive. This type builds one context and reuses it for filtered
+/// scans, full-inventory scans, and opening sessions.
 pub struct ControllerEnumerator {
     api: HidApi,
     initial_devices: Option<Vec<HidDeviceInfo>>,
@@ -40,24 +40,27 @@ impl ControllerEnumerator {
     /// Returns [`DeviceError`] when the native HID context cannot be initialized.
     pub fn new() -> Result<Self, DeviceError> {
         let api = HidApi::new().map_err(|error| backend_error(&error))?;
-        let initial_devices = convert_and_sort(api.device_list())
-            .into_iter()
-            .filter(HidDeviceInfo::is_supported_controller_source)
-            .collect();
+        // Constructing the context already enumerated everything, so keep that
+        // snapshot rather than immediately scanning again.
+        let initial_devices = Some(convert_and_sort(api.device_list()));
         Ok(Self {
             api,
-            initial_devices: Some(initial_devices),
+            initial_devices,
         })
     }
 
     /// Refreshes only the supported Puck and Bluetooth controller identities.
+    ///
+    /// Asks macOS for Valve's VID instead of rebuilding metadata for every HID
+    /// collection. The result still passes through the exact Puck/Bluetooth
+    /// classifier before it leaves this type.
     ///
     /// # Errors
     ///
     /// Returns [`DeviceError`] when native HID enumeration fails.
     pub fn enumerate(&mut self) -> Result<Vec<HidDeviceInfo>, DeviceError> {
         if let Some(initial_devices) = self.initial_devices.take() {
-            return Ok(initial_devices);
+            return Ok(supported_controllers(initial_devices));
         }
         self.api
             .reset_devices()
@@ -65,15 +68,59 @@ impl ControllerEnumerator {
         self.api
             .add_devices(PROTEUS_VENDOR_ID, 0)
             .map_err(|error| backend_error(&error))?;
-        Ok(convert_and_sort(self.api.device_list())
-            .into_iter()
-            .filter(HidDeviceInfo::is_supported_controller_source)
-            .collect())
+        Ok(supported_controllers(convert_and_sort(
+            self.api.device_list(),
+        )))
+    }
+
+    /// Refreshes the whole system inventory, whose ordering defines the global
+    /// indices `sc-probe list` prints and `--index N` selects.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError`] when native HID enumeration fails.
+    pub fn enumerate_all(&mut self) -> Result<Vec<HidDeviceInfo>, DeviceError> {
+        if let Some(initial_devices) = self.initial_devices.take() {
+            return Ok(initial_devices);
+        }
+        self.api
+            .refresh_devices()
+            .map_err(|error| backend_error(&error))?;
+        Ok(convert_and_sort(self.api.device_list()))
+    }
+
+    /// Opens a previously enumerated collection using this context.
+    ///
+    /// Retrying an open is the hot path whenever another process owns a
+    /// collection, so it must not build a HID context of its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError`] when the collection is no longer listed, is
+    /// already owned, or macOS refuses access.
+    pub fn open(&self, info: &HidDeviceInfo) -> Result<HidSession, DeviceError> {
+        let native = self
+            .api
+            .device_list()
+            .find(|candidate| matches_selected(candidate, info))
+            .cloned()
+            .ok_or(DeviceError::NotConnected)?;
+        HidSession::open_borrowed(&self.api, &native)
     }
 }
 
+fn supported_controllers(devices: Vec<HidDeviceInfo>) -> Vec<HidDeviceInfo> {
+    devices
+        .into_iter()
+        .filter(HidDeviceInfo::is_supported_controller_source)
+        .collect()
+}
+
 pub struct HidSession {
-    api: HidApi,
+    /// Only reconnection needs a context of its own. A session opened through
+    /// [`ControllerEnumerator`] starts without one and builds it lazily, so a
+    /// session that never loses its device never pays for a second enumeration.
+    api: Option<HidApi>,
     selected: HidDeviceInfo,
     _ownership_lock: File,
     device: Option<HidDevice>,
@@ -98,10 +145,13 @@ impl HidSession {
             .get(index)
             .cloned()
             .ok_or(DeviceError::InvalidIndex(index))?;
-        Self::open_native(api, &native)
+        Self::open_owned(api, &native)
     }
 
     /// Opens a previously enumerated collection by stable identity.
+    ///
+    /// Prefer [`ControllerEnumerator::open`] when a context already exists;
+    /// this constructs one.
     ///
     /// # Errors
     ///
@@ -114,21 +164,52 @@ impl HidSession {
             .find(|candidate| matches_selected(candidate, info))
             .cloned()
             .ok_or(DeviceError::NotConnected)?;
-        Self::open_native(api, &native)
+        Self::open_owned(api, &native)
     }
 
-    fn open_native(api: HidApi, native: &DeviceInfo) -> Result<Self, DeviceError> {
+    fn open_owned(api: HidApi, native: &DeviceInfo) -> Result<Self, DeviceError> {
+        let (selected, ownership_lock, device) = Self::claim(&api, native)?;
+        Ok(Self::new_session(
+            Some(api),
+            selected,
+            ownership_lock,
+            device,
+        ))
+    }
+
+    fn open_borrowed(api: &HidApi, native: &DeviceInfo) -> Result<Self, DeviceError> {
+        let (selected, ownership_lock, device) = Self::claim(api, native)?;
+        Ok(Self::new_session(None, selected, ownership_lock, device))
+    }
+
+    /// Takes the project ownership lock, then opens the native device.
+    ///
+    /// The lock is attempted first because it is the cheap check and the one
+    /// that fails when another project process already owns the collection.
+    fn claim(
+        api: &HidApi,
+        native: &DeviceInfo,
+    ) -> Result<(HidDeviceInfo, File, HidDevice), DeviceError> {
         let selected = convert_info(native);
         let ownership_lock = acquire_ownership_lock(&selected)?;
-        let device = native.open_device(&api).map_err(|error| {
+        let device = native.open_device(api).map_err(|error| {
             DeviceError::Backend(format!(
                 "cannot open the selected collection; verify Input Monitoring \
                  permission, fully quit Steam, boot out its ipcserver LaunchAgent, \
                  and then retry: {error}"
             ))
         })?;
+        Ok((selected, ownership_lock, device))
+    }
+
+    fn new_session(
+        api: Option<HidApi>,
+        selected: HidDeviceInfo,
+        ownership_lock: File,
+        device: HidDevice,
+    ) -> Self {
         let now = Instant::now();
-        Ok(Self {
+        Self {
             api,
             selected,
             _ownership_lock: ownership_lock,
@@ -136,7 +217,7 @@ impl HidSession {
             started: now,
             next_reconnect: now,
             pending_connected: true,
-        })
+        }
     }
 
     #[must_use]
@@ -232,16 +313,26 @@ impl HidSession {
                 );
                 return Ok(None);
             }
-            self.api
-                .refresh_devices()
-                .map_err(|error| backend_error(&error))?;
-            let candidate = self
+            // Reconnection is the only thing this session needs a context for,
+            // so a session opened through ControllerEnumerator builds one here
+            // rather than at open time.
+            if self.api.is_none() {
+                self.api = Some(HidApi::new().map_err(|error| backend_error(&error))?);
+            }
+            let selected = self.selected.clone();
+            let api = self
                 .api
+                .as_mut()
+                .ok_or_else(|| DeviceError::Backend("HID reconnect context missing".to_owned()))?;
+            api.refresh_devices()
+                .map_err(|error| backend_error(&error))?;
+            let candidate = api
                 .device_list()
-                .find(|candidate| matches_selected(candidate, &self.selected))
+                .find(|candidate| matches_selected(candidate, &selected))
                 .cloned();
             if let Some(candidate) = candidate {
-                if let Ok(device) = candidate.open_device(&self.api) {
+                let opened = candidate.open_device(api).ok();
+                if let Some(device) = opened {
                     self.selected = convert_info(&candidate);
                     self.device = Some(device);
                     return Ok(Some(DeviceEvent::Connected(self.selected.clone())));

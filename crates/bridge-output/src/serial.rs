@@ -398,6 +398,19 @@ impl ByteTransport for NativeTransport {
         Write::write_all(&mut self.0, bytes)
     }
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        // The serialport crate implements reads as `poll(timeout)` followed by
+        // `read`. During controller discovery there is normally no firmware
+        // feedback, so entering that one-millisecond poll on every service
+        // tick was measurable idle CPU. FIONREAD/TIOCINQ is nonblocking; keep
+        // the existing timeout for writes and only call `read` when bytes are
+        // already queued.
+        let queued = self
+            .0
+            .bytes_to_read()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if queued == 0 {
+            return Ok(0);
+        }
         Read::read(&mut self.0, buffer)
     }
 }

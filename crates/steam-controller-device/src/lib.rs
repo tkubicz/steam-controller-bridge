@@ -333,6 +333,24 @@ impl ControllerEnumerator {
     pub fn enumerate(&mut self) -> Result<Vec<HidDeviceInfo>, DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
+
+    /// Returns an unsupported-platform error on non-macOS hosts.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`DeviceError::UnsupportedPlatform`].
+    pub fn enumerate_all(&mut self) -> Result<Vec<HidDeviceInfo>, DeviceError> {
+        Err(DeviceError::UnsupportedPlatform)
+    }
+
+    /// Returns an unsupported-platform error without opening anything.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`DeviceError::UnsupportedPlatform`].
+    pub fn open(&self, _info: &HidDeviceInfo) -> Result<HidSession, DeviceError> {
+        Err(DeviceError::UnsupportedPlatform)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

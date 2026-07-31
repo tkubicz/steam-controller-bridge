@@ -338,7 +338,9 @@ needed. Live mode automatically:
 - completes the protocol-v1 Hello handshake before selecting the XIAO;
 - remembers the XIAO MCU serial number across a changed `/dev/cu.usbmodem…`
   path; and
-- waits and rescans every 500 ms when hardware is absent.
+- waits and rescans every 500 ms when hardware is absent. Once supported
+  collections are already open, report queues are still checked every 500 ms
+  while unchanged metadata scans back off from two to at most ten seconds.
 
 If more than one supported source produces controller states, the bridge
 refuses the ambiguity, lists transport/product/serial/index, and asks for
@@ -352,6 +354,15 @@ forms are:
 ./sc-bridge --port /dev/cu.usbmodemXXXX
 ./sc-bridge --index N --port /dev/cu.usbmodemXXXX --record session.jsonl
 ```
+
+While automatic discovery is waiting, it keeps each supported controller
+collection open so macOS does not repeatedly allocate HID readers. Stop the
+bridge before using `sc-probe monitor`, `sc-probe rumble`,
+`sc-probe suppress-lizard`, or `sc-visualizer`; `sc-probe list` is safe because
+it only enumerates metadata. The long-idle effect of keeping these collections
+open on controller sleep and battery has not yet been measured. Until that
+hardware observation is complete, stop the bridge for prolonged periods when
+idle battery life matters.
 
 Keep the terminal and XIAO connected while playing. Press `Ctrl-C` for orderly
 shutdown; the bridge sends a final neutral state before releasing the selected
