@@ -299,7 +299,7 @@ impl std::error::Error for DeviceError {}
 mod platform;
 
 #[cfg(target_os = "macos")]
-pub use platform::{enumerate, HidSession};
+pub use platform::{enumerate, ControllerEnumerator, HidSession};
 
 /// Returns an unsupported-platform error on non-macOS hosts.
 ///
@@ -309,6 +309,30 @@ pub use platform::{enumerate, HidSession};
 #[cfg(not(target_os = "macos"))]
 pub fn enumerate() -> Result<Vec<HidDeviceInfo>, DeviceError> {
     Err(DeviceError::UnsupportedPlatform)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub struct ControllerEnumerator;
+
+#[cfg(not(target_os = "macos"))]
+impl ControllerEnumerator {
+    /// Returns an unsupported-platform error on non-macOS hosts.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`DeviceError::UnsupportedPlatform`].
+    pub fn new() -> Result<Self, DeviceError> {
+        Err(DeviceError::UnsupportedPlatform)
+    }
+
+    /// Returns an unsupported-platform error on non-macOS hosts.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`DeviceError::UnsupportedPlatform`].
+    pub fn enumerate(&mut self) -> Result<Vec<HidDeviceInfo>, DeviceError> {
+        Err(DeviceError::UnsupportedPlatform)
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use hidapi::{BusType, DeviceInfo, HidApi, HidDevice};
 use rustix::fs::{flock, FlockOperation};
 
-use crate::{DeviceError, DeviceEvent, HidDeviceInfo, RawHidReport};
+use crate::{DeviceError, DeviceEvent, HidDeviceInfo, RawHidReport, PROTEUS_VENDOR_ID};
 
 const REPORT_BUFFER_SIZE: usize = 1024;
 const RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
@@ -18,9 +18,58 @@ const RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
 /// Returns [`DeviceError`] when the native HID context cannot be initialized.
 pub fn enumerate() -> Result<Vec<HidDeviceInfo>, DeviceError> {
     let api = HidApi::new().map_err(|error| backend_error(&error))?;
-    let mut devices: Vec<_> = api.device_list().map(convert_info).collect();
-    devices.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(devices)
+    Ok(convert_and_sort(api.device_list()))
+}
+
+/// Reusable, narrowly filtered enumerator for automatic controller discovery.
+///
+/// The first construction initializes HIDAPI. Later refreshes ask macOS only
+/// for Valve's VID instead of rebuilding metadata for every HID collection in
+/// the system. The result still passes through the exact Puck/Bluetooth
+/// classifier before it leaves this type.
+pub struct ControllerEnumerator {
+    api: HidApi,
+    initial_devices: Option<Vec<HidDeviceInfo>>,
+}
+
+impl ControllerEnumerator {
+    /// Creates a reusable enumerator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError`] when the native HID context cannot be initialized.
+    pub fn new() -> Result<Self, DeviceError> {
+        let api = HidApi::new().map_err(|error| backend_error(&error))?;
+        let initial_devices = convert_and_sort(api.device_list())
+            .into_iter()
+            .filter(HidDeviceInfo::is_supported_controller_source)
+            .collect();
+        Ok(Self {
+            api,
+            initial_devices: Some(initial_devices),
+        })
+    }
+
+    /// Refreshes only the supported Puck and Bluetooth controller identities.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError`] when native HID enumeration fails.
+    pub fn enumerate(&mut self) -> Result<Vec<HidDeviceInfo>, DeviceError> {
+        if let Some(initial_devices) = self.initial_devices.take() {
+            return Ok(initial_devices);
+        }
+        self.api
+            .reset_devices()
+            .map_err(|error| backend_error(&error))?;
+        self.api
+            .add_devices(PROTEUS_VENDOR_ID, 0)
+            .map_err(|error| backend_error(&error))?;
+        Ok(convert_and_sort(self.api.device_list())
+            .into_iter()
+            .filter(HidDeviceInfo::is_supported_controller_source)
+            .collect())
+    }
 }
 
 pub struct HidSession {
@@ -306,6 +355,12 @@ fn convert_info(info: &DeviceInfo) -> HidDeviceInfo {
         }
         .to_owned(),
     }
+}
+
+fn convert_and_sort<'a>(devices: impl Iterator<Item = &'a DeviceInfo>) -> Vec<HidDeviceInfo> {
+    let mut devices: Vec<_> = devices.map(convert_info).collect();
+    devices.sort_by(|left, right| left.path.cmp(&right.path));
+    devices
 }
 
 fn backend_error(error: &hidapi::HidError) -> DeviceError {

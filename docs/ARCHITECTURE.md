@@ -53,10 +53,16 @@ Simulator modes send a neutral state before normal exit. Outputs reject non-fini
 The HID session uses a bounded 1,024-byte report buffer. Automatic discovery
 opens only exact official Puck and direct Bluetooth vendor collections by
 stable identity and selects the unique source producing complete state
-reports. The integrated runtime then runs that session behind a bounded
-standard-library channel with latest-state semantics for reports while
-preserving lifecycle events. A lost source returns to discovery instead of
-trusting a stale numeric index.
+reports. Inactive candidate sessions remain open and are reconciled against
+Valve-VID-filtered metadata scans followed by exact identity checks; scans run
+every 500 ms while no candidate can be opened and every two seconds once the
+inventory is stable. Unchanged
+collections are never repeatedly opened and closed while the controller is
+asleep, while complete state reports are still probed in 500 ms windows. Each
+probe window performs one bounded read per candidate. The integrated runtime
+then runs the selected session behind a bounded standard-library channel with
+latest-state semantics for reports while preserving lifecycle events. A lost
+source returns to discovery instead of trusting a stale numeric index.
 
 Serial discovery retains USB metadata, rejects non-XIAO `usbmodem` ports, and
 uses the protocol Hello exchange as the final identity check. The MCU USB

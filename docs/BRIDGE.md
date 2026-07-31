@@ -15,8 +15,10 @@ The normal workflow is:
 
 Live mode defaults to automatic active-source discovery, automatic XIAO
 discovery, negotiated serial output, and lizard-mode suppression. The process
-may start before either endpoint is present. It scans at 500 ms intervals and
-reports state transitions only when they change.
+may start before either endpoint is present. Missing hardware is scanned every
+500 ms; once controller candidates are open, the more expensive metadata scan
+backs off to two seconds while report probing remains responsive. State
+transitions are reported only when they change.
 
 Controller discovery considers only official `28de:1304` USB, usage
 `ff00:0001`, interface 2–5 Puck collections and the `28de:1303` Bluetooth,
