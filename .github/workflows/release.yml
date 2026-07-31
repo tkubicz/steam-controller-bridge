@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  firmware:
+    # macOS only, for the same reason as the CI artifact job: the pinned Seeed
+    # nRF52 core bundles adafruit-nrfutil for macOS and Windows, and on Linux its
+    # recipe falls back to a bare PATH lookup that nothing satisfies.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+      - name: Install pinned Seeed nRF52 core
+        run: make -C firmware/xiao-nrf52840 setup
+      - name: Run native firmware tests
+        run: make -C firmware/xiao-nrf52840 test
+      - name: Build UF2 and DFU artifacts
+        run: make -C firmware/xiao-nrf52840 artifacts
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firmware
+          path: firmware/xiao-nrf52840/build/artifacts/
+
+  macos-app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and ad-hoc sign menu-bar application
+        run: ./tools/build-macos-app.sh
+      - name: Archive application bundle
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/Steam Controller Bridge.app" steam-controller-bridge-macos.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-app
+          path: steam-controller-bridge-macos.zip
+
+  publish:
+    needs: [firmware, macos-app]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+      - name: Collect release files
+        run: |
+          set -eu
+          mkdir -p release
+          mv artifacts/firmware/steam-controller-bridge-xiao-nrf52840.uf2 release/
+          mv artifacts/firmware/steam-controller-bridge-xiao-nrf52840-dfu.zip release/
+          mv artifacts/macos-app/steam-controller-bridge-macos.zip release/
+          # Published so users can verify a download before flashing hardware.
+          cd release && shasum -a 256 * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # Pre-releases (v0.1.0-rc1 and similar) are flagged so a dry run never
+          # displaces the latest stable release.
+          prerelease=""
+          case "${GITHUB_REF_NAME}" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            ${prerelease} \
+            release/*

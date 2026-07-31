@@ -8,6 +8,8 @@
     <string>Steam Controller Bridge</string>
     <key>CFBundleExecutable</key>
     <string>sc-bridge-menu</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.lynxware.steam-controller-bridge</string>
     <key>CFBundleInfoDictionaryVersion</key>

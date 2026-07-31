@@ -6,6 +6,10 @@ Recordings use UTF-8 newline-delimited JSON. Each non-empty line is one complete
 {"version":1,"timestamp_us":123456,"kind":"raw_hid","payload":{"report_id":66,"bytes":"AAH+/w=="}}
 ```
 
+> Connection metadata retains the unmasked device serial so that recordings stay
+> replayable against the collection they came from. On Bluetooth that serial is the
+> controller's MAC address; review a recording before sharing it publicly.
+
 ## Envelope
 
 | Field | Type | Meaning |

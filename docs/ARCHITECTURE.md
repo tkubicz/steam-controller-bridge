@@ -53,7 +53,30 @@ Simulator modes send a neutral state before normal exit. Outputs reject non-fini
 The HID session uses a bounded 1,024-byte report buffer. Automatic discovery
 opens only exact official Puck and direct Bluetooth vendor collections by
 stable identity and selects the unique source producing complete state
-reports. The integrated runtime then runs that session behind a bounded
+reports. Inactive candidate sessions remain open and are reconciled against
+Valve-VID-filtered metadata scans followed by exact identity checks; scans run
+every 500 ms while no candidate can be opened. Once candidates are open,
+unchanged inventories back off from two seconds to a ten-second ceiling and
+reset to two seconds when membership or open status changes. Explicit
+global-index selection uses the same adaptive ceiling for its full-system
+lookup while waiting for the collection to open. Unchanged collections are
+never repeatedly opened and closed while the controller is asleep.
+
+HIDAPI already receives reports on a native background reader for every open
+candidate. Discovery checks those buffered queues with at most four
+nonblocking reads per candidate every 500 ms, rather than creating sequential
+timed waits. This retains the existing controller-wake bound while letting the
+supervisor sleep between checks. Waiting XIAO service similarly checks the
+native serial queued-byte count before reading, avoiding an empty one-millisecond
+serial poll without changing the write timeout or active-state watchdog cadence.
+
+Keeping discovery sessions open also keeps this project's per-collection
+ownership locks continuously. Other bridge, probe-open, and visualizer
+processes therefore cannot open any supported candidate until discovery stops,
+although metadata enumeration remains available. This is intentional resource
+stability behavior, but whether a continuously open macOS IOHIDDevice changes
+controller sleep or long-idle battery behavior remains a hardware observation
+item. The integrated runtime runs the selected session behind a bounded
 standard-library channel with latest-state semantics for reports while
 preserving lifecycle events. A lost source returns to discovery instead of
 trusting a stale numeric index.

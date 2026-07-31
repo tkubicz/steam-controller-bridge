@@ -17,8 +17,9 @@ make -C firmware/xiao-nrf52840 build
 Physical acceptance additionally covers CDC/gamepad enumeration, every report
 field, a 30-second unchanged hold, host termination neutralization within 125
 ms, malformed recovery, reconnect/sequence wrap, Chrome and Safari Gamepad API
-behavior, one streaming service, and a one-hour soak. Detailed steps are in the
-firmware README; these results must not be inferred from native or CI builds.
+behavior, one streaming service, and an extended play session. Detailed steps are
+in the firmware README; these results must not be inferred from native or CI
+builds.
 
 The workspace has no hardware-dependent tests. Run the same gates as CI:
 
@@ -156,6 +157,7 @@ Subsequent hardware acceptance confirmed full control-by-control mapping,
 Boosteroid and GeForce NOW as a standard gamepad, end-to-end dual rumble with
 correct strong/weak actuator orientation, and that `A` emits no Space while
 touchpads do not move the pointer, with desktop mode returning after exit.
+Continuous play of more than an hour completed without degradation.
 
 On 2026-07-28, direct Bluetooth was additionally observed as `28de:1303`,
 transport Bluetooth, usage `ff00:0001`, interface `-1`. Its vendor collection
@@ -170,8 +172,8 @@ left-only and right-only 50% rumble diagnostics each completed seven output
 writes and an explicit final zero without a HID error.
 
 Bluetooth full-control mapping, lizard suppression, rumble, reconnect,
-sleep/wake, refresh failure handling, fault timing, and soak gates remain
-hardware acceptance work until explicitly recorded here.
+sleep/wake, refresh failure handling, and fault timing remain hardware
+acceptance work until explicitly recorded here.
 
 Bridge-core tests cover changed-state suppression, timeout neutralization,
 disconnect/reset/shutdown neutralization, repeated decode failures, and HID

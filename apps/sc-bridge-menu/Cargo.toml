@@ -3,6 +3,8 @@ name = "sc-bridge-menu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Not published to crates.io; distribution is GitHub releases only.
+publish = false
 
 [dependencies]
 bridge-runtime = { path = "../../crates/bridge-runtime" }

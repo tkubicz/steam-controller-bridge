@@ -35,11 +35,11 @@ The following paths have been verified on development hardware:
 
 Unless a bullet explicitly identifies Bluetooth, the end-to-end gameplay
 validation above used the Puck path. Bluetooth input, battery, suppression
-heartbeats, and independent rumble writes are verified; full in-game mapping,
-reconnect/sleep-wake, and soak testing remain below.
+heartbeats, and independent rumble writes are verified; full in-game mapping and
+reconnect/sleep-wake remain below.
 
-Explicit watchdog/disconnect timing, lizard restoration timing, reconnect
-stress, and the one-hour soak still require acceptance testing.
+Explicit watchdog/disconnect timing, lizard restoration timing, and reconnect
+stress still require acceptance testing.
 
 The bridge sends exactly one whitelisted controller setting and one whitelisted
 output shape on either exact supported input collection: SDL's lizard-mode-off
@@ -338,7 +338,9 @@ needed. Live mode automatically:
 - completes the protocol-v1 Hello handshake before selecting the XIAO;
 - remembers the XIAO MCU serial number across a changed `/dev/cu.usbmodem…`
   path; and
-- waits and rescans every 500 ms when hardware is absent.
+- waits and rescans every 500 ms when hardware is absent. Once supported
+  collections are already open, report queues are still checked every 500 ms
+  while unchanged metadata scans back off from two to at most ten seconds.
 
 If more than one supported source produces controller states, the bridge
 refuses the ambiguity, lists transport/product/serial/index, and asks for
@@ -352,6 +354,15 @@ forms are:
 ./sc-bridge --port /dev/cu.usbmodemXXXX
 ./sc-bridge --index N --port /dev/cu.usbmodemXXXX --record session.jsonl
 ```
+
+While automatic discovery is waiting, it keeps each supported controller
+collection open so macOS does not repeatedly allocate HID readers. Stop the
+bridge before using `sc-probe monitor`, `sc-probe rumble`,
+`sc-probe suppress-lizard`, or `sc-visualizer`; `sc-probe list` is safe because
+it only enumerates metadata. The long-idle effect of keeping these collections
+open on controller sleep and battery has not yet been measured. Until that
+hardware observation is complete, stop the bridge for prolonged periods when
+idle battery life matters.
 
 Keep the terminal and XIAO connected while playing. Press `Ctrl-C` for orderly
 shutdown; the bridge sends a final neutral state before releasing the selected
@@ -451,8 +462,34 @@ Logs rotate at a bounded size under:
 
 Grant Input Monitoring to **Steam Controller Bridge** itself when using the
 app. Permission granted to Terminal does not automatically cover the app.
-Because this is an ad-hoc-signed source build, it is not notarized; use System
-Settings to approve it if macOS prompts.
+
+### Opening an unnotarized build
+
+The app is ad-hoc signed, not notarized, whether it came from a release download
+or a local `./tools/build-macos-app.sh`. A downloaded copy also carries macOS's
+quarantine flag, so double-clicking it reports that the app is damaged or cannot
+be opened. This is Gatekeeper refusing an unknown developer, not a broken build.
+
+Open it once the long way, and macOS remembers the choice:
+
+1. Move `Steam Controller Bridge.app` to `/Applications`.
+2. Right-click (or Control-click) it and choose **Open**.
+3. Confirm **Open** in the dialog that appears.
+
+If the dialog offers no Open button, approve the app under **System Settings →
+Privacy & Security**, where it appears shortly after the blocked launch. Removing
+the quarantine flag directly also works:
+
+```bash
+xattr -d com.apple.quarantine "/Applications/Steam Controller Bridge.app"
+```
+
+Verify a download before opening it, using the `SHA256SUMS.txt` published with
+each release:
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
 
 ## Troubleshooting
 
@@ -476,6 +513,11 @@ iTerm, or the application launching the command—then quit and reopen it.
   target/release/sc-probe capture --index N --output reports.jsonl \
     --duration-secs 30 --decoded
   ```
+
+  Capture files record the full device serial so that reports stay replayable. On
+  Bluetooth that serial is the controller's MAC address, so review a capture before
+  attaching it to a public issue. Status output, logs, and `Copy Diagnostics` show
+  only the last four characters and are safe to paste as-is.
 
 Do not send guessed feature/output reports. Only the fixed lizard-off setting
 and exact standard rumble output used by `sc-probe` and `sc-bridge` are
@@ -609,8 +651,8 @@ personality.
 The bridge can be completed and hardware-qualified from this source workflow,
 but a broadly distributable product should additionally provide:
 
-- completed Bluetooth reconnect, sleep/wake, lizard restoration, and long-soak
-  acceptance; direct USB-C remains a separate future transport;
+- completed Bluetooth reconnect, sleep/wake, and lizard restoration acceptance;
+  direct USB-C remains a separate future transport;
 - hardware qualification of the narrow lizard-mode suppression lifecycle;
 - automated hardware acceptance and long-duration testing;
 - signed/notarized macOS binaries and downloadable firmware artifacts;

@@ -22,6 +22,14 @@ jobs:
       - run: cargo test --workspace --all-features
       - run: cargo build --workspace --all-targets
 
+  deny:
+    # Advisories, licences, banned crates, and source registries. The graph is
+    # scoped to macOS in deny.toml because that is what this project ships.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   firmware-tests:
     # Host-native parser/session tests. No Arduino toolchain required, so this
     # stays cheap and covers both GCC and Clang under -Werror.

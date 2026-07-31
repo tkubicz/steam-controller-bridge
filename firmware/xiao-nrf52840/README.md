@@ -142,4 +142,5 @@ Hardware evidence on 2026-07-27:
 - Boosteroid, GeForce NOW, every physical control, and end-to-end dual rumble
   with correct strong/weak actuator sides are confirmed on hardware.
 
-Explicit fault timing and the one-hour soak remain manual release gates.
+Sustained play of more than an hour completed without degradation. Explicit
+fault timing remains a manual release gate.

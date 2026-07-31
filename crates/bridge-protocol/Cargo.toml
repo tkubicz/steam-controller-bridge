@@ -3,6 +3,8 @@ name = "bridge-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Not published to crates.io; distribution is GitHub releases only.
+publish = false
 
 [dependencies]
 gamepad-state = { path = "../gamepad-state" }

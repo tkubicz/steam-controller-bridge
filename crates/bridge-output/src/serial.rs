@@ -11,6 +11,7 @@ pub const XIAO_USB_VENDOR_ID: u16 = 0x045e;
 pub const XIAO_USB_PRODUCT_ID: u16 = 0x028e;
 pub const XIAO_USB_MANUFACTURER: &str = "Lynxware";
 pub const XIAO_USB_PRODUCT: &str = "Steam Controller Bridge";
+const SERIAL_SERVICE_MIN_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialDeviceInfo {
@@ -398,6 +399,19 @@ impl ByteTransport for NativeTransport {
         Write::write_all(&mut self.0, bytes)
     }
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        // The serialport crate implements reads as `poll(timeout)` followed by
+        // `read`. During controller discovery there is normally no firmware
+        // feedback, so entering that one-millisecond poll on every service
+        // tick was measurable idle CPU. FIONREAD/TIOCINQ is nonblocking; keep
+        // the existing timeout for writes and only call `read` when bytes are
+        // already queued.
+        let queued = self
+            .0
+            .bytes_to_read()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        if queued == 0 {
+            return Ok(0);
+        }
         Read::read(&mut self.0, buffer)
     }
 }
@@ -411,6 +425,7 @@ pub struct SerialOutput {
     completed: SerialMetrics,
     connected_once: bool,
     desired_state: Option<GamepadState>,
+    last_poll: Option<Duration>,
 }
 
 impl SerialOutput {
@@ -428,6 +443,7 @@ impl SerialOutput {
             completed: SerialMetrics::default(),
             connected_once: false,
             desired_state: None,
+            last_poll: None,
         };
         output.connect()?;
         Ok(output)
@@ -441,10 +457,12 @@ impl SerialOutput {
         if self.connection.is_none() {
             self.connect()?;
         }
+        let now = self.clock.elapsed();
         let Some(connection) = self.connection.as_mut() else {
             return Err(SerialError::NotReady);
         };
-        let result = connection.poll(self.clock.elapsed());
+        let result = connection.poll(now);
+        self.last_poll = Some(now);
         if result.is_err() {
             self.disconnect();
         }
@@ -479,14 +497,14 @@ impl SerialOutput {
 
     fn connect(&mut self) -> Result<(), SerialError> {
         let port = serialport::new(&self.path, self.baud_rate)
-            // Idle reads must not consume a large part of the 25 ms service
-            // cadence; otherwise a nominal 50 ms refresh can become 70+ ms
-            // before USB/CDC scheduling and trip the firmware's 100 ms
-            // controller-data watchdog.
+            // Idle reads must not consume a large part of the host service
+            // cadence; otherwise state refreshes can approach the firmware's
+            // 100 ms controller-data watchdog after USB/CDC scheduling.
             .timeout(Duration::from_millis(1))
             .open()
             .map_err(|error| SerialError::Io(io::Error::other(error.to_string())))?;
         self.clock = Instant::now();
+        self.last_poll = None;
         let mut connection =
             SerialConnection::new(NativeTransport(port), self.config, Duration::ZERO)?;
         while connection.status() == SerialStatus::Handshaking {
@@ -500,6 +518,7 @@ impl SerialOutput {
         }
         self.connected_once = true;
         self.connection = Some(connection);
+        self.last_poll = Some(self.clock.elapsed());
         Ok(())
     }
 
@@ -560,6 +579,9 @@ impl GamepadOutput for SerialOutput {
             .map_err(|error| OutputError::Transport(error.to_string()))
     }
     fn service(&mut self) -> Result<(), OutputError> {
+        if !serial_service_due(self.clock.elapsed(), self.last_poll) {
+            return Ok(());
+        }
         for attempt in 0..2 {
             match self.poll() {
                 Ok(()) => return Ok(()),
@@ -597,6 +619,10 @@ impl Drop for SerialOutput {
             let _ = connection.send_neutral_now();
         }
     }
+}
+
+fn serial_service_due(now: Duration, last_poll: Option<Duration>) -> bool {
+    last_poll.is_none_or(|last_poll| now.saturating_sub(last_poll) >= SERIAL_SERVICE_MIN_INTERVAL)
 }
 
 /// Enumerates native serial port names.
@@ -677,7 +703,7 @@ mod tests {
             },
             vendor_id: Some(XIAO_USB_VENDOR_ID),
             product_id: Some(XIAO_USB_PRODUCT_ID),
-            serial_number: Some("5E6EF905E5468F85".to_owned()),
+            serial_number: Some("TESTSERIAL0000".to_owned()),
             manufacturer: Some(XIAO_USB_MANUFACTURER.to_owned()),
             product: Some(XIAO_USB_PRODUCT.to_owned()),
         };
@@ -699,6 +725,30 @@ mod tests {
         dialin.path = "/dev/tty.usbmodem11201".to_owned();
         assert_eq!(dialin.is_xiao_bridge(), !cfg!(target_os = "macos"));
     }
+
+    #[test]
+    fn serial_service_cadence_avoids_redundant_polls_without_missing_deadlines() {
+        assert!(serial_service_due(Duration::ZERO, None));
+        assert!(!serial_service_due(
+            SERIAL_SERVICE_MIN_INTERVAL
+                .checked_sub(Duration::from_nanos(1))
+                .unwrap(),
+            Some(Duration::ZERO)
+        ));
+        assert!(serial_service_due(
+            SERIAL_SERVICE_MIN_INTERVAL,
+            Some(Duration::ZERO)
+        ));
+        assert!(!serial_service_due(
+            Duration::from_millis(105),
+            Some(Duration::from_millis(100))
+        ));
+        assert!(serial_service_due(
+            Duration::from_millis(110),
+            Some(Duration::from_millis(100))
+        ));
+    }
+
     fn messages(bytes: &[u8]) -> Vec<Message> {
         StreamDecoder::new()
             .push(bytes)

@@ -3,6 +3,8 @@ name = "bridge-output"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Not published to crates.io; distribution is GitHub releases only.
+publish = false
 
 [dependencies]
 bridge-protocol = { path = "../bridge-protocol" }

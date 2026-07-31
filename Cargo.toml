@@ -24,6 +24,11 @@ edition = "2021"
 license = "MIT"
 repository = "https://github.com/tkubicz/steam-controller-bridge"
 
+# No crate here goes to crates.io. Each member sets `publish = false` directly
+# rather than inheriting it, so the intent is readable in the file you are
+# looking at. A new member that forgets it fails `cargo deny check bans`, which
+# rejects version-less path dependencies for a publishable crate.
+
 [workspace.dependencies]
 base64 = "0.22.1"
 serde = { version = "1.0.228", features = ["derive"] }
