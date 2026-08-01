@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-07-30
+## [1.0.0] - 2026-07-30
 
 First public release. macOS only, and Steam Controller 2 (2026) only.
 
@@ -63,5 +63,5 @@ First public release. macOS only, and Steam Controller 2 (2026) only.
 - Steam coexistence, multiple simultaneous controllers, and other HID consumers
   against the selected collection are unsupported.
 
-[Unreleased]: https://github.com/tkubicz/steam-controller-bridge/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/tkubicz/steam-controller-bridge/releases/tag/v0.1.0
+[Unreleased]: https://github.com/tkubicz/steam-controller-bridge/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/tkubicz/steam-controller-bridge/releases/tag/v1.0.0
