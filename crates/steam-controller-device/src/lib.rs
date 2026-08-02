@@ -156,6 +156,12 @@ impl HidDeviceInfo {
     pub fn supports_rumble(&self) -> bool {
         self.is_supported_controller_source()
     }
+
+    /// Returns whether the narrow controller power-off command may be sent.
+    #[must_use]
+    pub fn supports_power_off(&self) -> bool {
+        self.is_supported_controller_source()
+    }
 }
 
 /// Portable scheduling state for the SDL-compatible lizard-off heartbeat.
@@ -241,6 +247,13 @@ pub enum DeviceError {
         usage: u16,
         interface_number: i32,
     },
+    UnsupportedPowerOffTarget {
+        vendor_id: u16,
+        product_id: u16,
+        usage_page: u16,
+        usage: u16,
+        interface_number: i32,
+    },
     UnsupportedPlatform,
 }
 
@@ -280,6 +293,21 @@ impl std::fmt::Display for DeviceError {
             } => write!(
                 f,
                 "refusing rumble write to unsupported collection \
+                 {vendor_id:04x}:{product_id:04x} usage \
+                 {usage_page:04x}:{usage:04x} interface {interface_number}; \
+                 select either an active 28de:1304 ff00:0001 USB Puck slot on \
+                 interface 2-5 or the 28de:1303 ff00:0001 Bluetooth collection \
+                 on interface -1"
+            ),
+            Self::UnsupportedPowerOffTarget {
+                vendor_id,
+                product_id,
+                usage_page,
+                usage,
+                interface_number,
+            } => write!(
+                f,
+                "refusing power-off write to unsupported collection \
                  {vendor_id:04x}:{product_id:04x} usage \
                  {usage_page:04x}:{usage:04x} interface {interface_number}; \
                  select either an active 28de:1304 ff00:0001 USB Puck slot on \
@@ -404,6 +432,15 @@ impl HidSession {
     pub fn set_rumble(&self, _low_frequency: u16, _high_frequency: u16) -> Result<(), DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
+
+    /// Returns an unsupported-platform error without attempting a feature write.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`DeviceError::UnsupportedPlatform`].
+    pub fn power_off(&self) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedPlatform)
+    }
 }
 
 #[cfg(test)]
@@ -461,6 +498,7 @@ mod tests {
         assert!(target.is_supported_controller_source());
         assert!(target.supports_lizard_mode_suppression());
         assert!(target.supports_rumble());
+        assert!(target.supports_power_off());
 
         for mutate in [
             |info: &mut HidDeviceInfo| info.vendor_id = 0,
@@ -477,6 +515,7 @@ mod tests {
             assert!(!other.is_supported_controller_source());
             assert!(!other.supports_lizard_mode_suppression());
             assert!(!other.supports_rumble());
+            assert!(!other.supports_power_off());
         }
     }
 
@@ -501,6 +540,7 @@ mod tests {
         );
         assert!(target.supports_lizard_mode_suppression());
         assert!(target.supports_rumble());
+        assert!(target.supports_power_off());
 
         target.product_id = PROTEUS_PRODUCT_ID;
         assert_eq!(target.controller_transport(), None);

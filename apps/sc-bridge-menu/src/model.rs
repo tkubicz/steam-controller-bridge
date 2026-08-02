@@ -1,4 +1,4 @@
-use bridge_runtime::{BridgeStatus, RuntimeState};
+use bridge_runtime::{AutomaticShutdownPhase, BridgeStatus, PuckDockAction, RuntimeState};
 
 const MAX_PROBLEM_CHARS: usize = 48;
 
@@ -31,6 +31,7 @@ pub struct MenuModel {
     pub xiao: String,
     pub battery: String,
     pub haptics: String,
+    pub automatic_shutdown: String,
     pub problem: String,
     pub has_error: bool,
     pub tray_state: TrayState,
@@ -69,6 +70,7 @@ impl MenuModel {
                 |percent| format!("Battery: {percent}%"),
             ),
             haptics: format!("Haptics: {:?}", status.haptics.state),
+            automatic_shutdown: automatic_shutdown_label(status),
             problem: status.last_error.as_deref().map_or_else(
                 || "Problem: None".to_owned(),
                 |error| format!("Problem: {}", friendly_error(error)),
@@ -79,6 +81,45 @@ impl MenuModel {
             stop_enabled: !matches!(status.state, RuntimeState::Stopped | RuntimeState::Stopping),
         }
     }
+}
+
+fn automatic_shutdown_label(status: &BridgeStatus) -> String {
+    let automatic = status.automatic_shutdown;
+    let value = match automatic.phase {
+        AutomaticShutdownPhase::PoweringOff => "Powering off…".to_owned(),
+        AutomaticShutdownPhase::Sleeping => "Controller sleeping".to_owned(),
+        AutomaticShutdownPhase::Degraded => "Degraded".to_owned(),
+        AutomaticShutdownPhase::Disabled => "Off".to_owned(),
+        AutomaticShutdownPhase::Monitoring => automatic.configured_timeout.map_or_else(
+            || {
+                if automatic.puck_dock_action == PuckDockAction::PowerOff {
+                    "On Puck".to_owned()
+                } else {
+                    "Off".to_owned()
+                }
+            },
+            |timeout| {
+                format!(
+                    "Idle {} / {}{}",
+                    format_duration(automatic.neutral_idle_age.unwrap_or_default()),
+                    format_duration(timeout),
+                    if automatic.puck_dock_action == PuckDockAction::PowerOff {
+                        " · Puck"
+                    } else {
+                        ""
+                    }
+                )
+            },
+        ),
+    };
+    format!("Auto shutdown: {value}")
+}
+
+fn format_duration(duration: std::time::Duration) -> String {
+    let seconds = duration.as_secs();
+    let minutes = seconds / 60;
+    let seconds = seconds % 60;
+    format!("{minutes}:{seconds:02}")
 }
 
 fn tray_state(status: &BridgeStatus) -> TrayState {
@@ -162,6 +203,9 @@ fn friendly_error(error: &str) -> String {
     }
     if lower.contains("lizard-mode") {
         return "Controller safety setup failed".to_owned();
+    }
+    if lower.contains("automatic controller shutdown") {
+        return "Controller could not be powered off".to_owned();
     }
     if lower.contains("hello handshake") || lower.contains("hello-handshake") {
         return "XIAO firmware handshake failed".to_owned();
@@ -280,6 +324,7 @@ mod tests {
         assert!(running.stop_enabled);
         assert_eq!(running.battery, "Battery: 87%");
         assert_eq!(running.haptics, "Haptics: Active");
+        assert_eq!(running.automatic_shutdown, "Auto shutdown: Off");
     }
 
     #[test]
@@ -320,6 +365,34 @@ mod tests {
         let summary = friendly_error(&error);
         assert!(summary.chars().count() <= MAX_PROBLEM_CHARS + 1);
         assert!(summary.ends_with('…'));
+    }
+
+    #[test]
+    fn automatic_shutdown_state_is_compact_and_failures_are_friendly() {
+        let mut status = ready_status(ControllerTransport::Puck);
+        status.automatic_shutdown = bridge_runtime::AutomaticShutdownStatus {
+            configured_timeout: Some(std::time::Duration::from_mins(15)),
+            puck_dock_action: PuckDockAction::PowerOff,
+            neutral_idle_age: Some(std::time::Duration::from_secs(65)),
+            phase: AutomaticShutdownPhase::Monitoring,
+            ..bridge_runtime::AutomaticShutdownStatus::default()
+        };
+        let monitoring = MenuModel::from_status(&status);
+        assert_eq!(
+            monitoring.automatic_shutdown,
+            "Auto shutdown: Idle 1:05 / 15:00 · Puck"
+        );
+
+        status.automatic_shutdown.phase = AutomaticShutdownPhase::Degraded;
+        status.last_error = Some(
+            "automatic controller shutdown failed; gameplay continues: backend detail".to_owned(),
+        );
+        let degraded = MenuModel::from_status(&status);
+        assert_eq!(degraded.automatic_shutdown, "Auto shutdown: Degraded");
+        assert_eq!(
+            degraded.problem,
+            "Problem: Controller could not be powered off"
+        );
     }
 
     #[test]

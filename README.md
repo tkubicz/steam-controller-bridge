@@ -123,6 +123,27 @@ Use `./sc-bridge --index N` or `./sc-bridge --port /dev/cu.usbmodem…` only to
 resolve an ambiguity or diagnose a specific endpoint. See the
 [user guide](docs/USER_GUIDE.md) for the one-time setup.
 
+The live bridge defaults to powering an inactive controller off after 15
+minutes of meaningful neutral input. Continuous state reports, IMU noise,
+rumble, and XIAO refresh traffic do not postpone it. Configure the timeout with:
+
+```bash
+./sc-bridge --idle-shutdown never
+./sc-bridge --idle-shutdown 5
+```
+
+An independent opt-in can turn the controller off as soon as a fresh Puck
+`Charging`/`Charged` report confirms it was placed on the official Puck:
+
+```bash
+./sc-bridge --puck-dock-action power-off
+```
+
+That action fires once per placement. Waking the controller while it remains on
+the Puck does not immediately turn it off again; remove it long enough to emit a
+fresh `Discharging` report before the next placement can trigger another
+shutdown. The option defaults to `leave`.
+
 ## Simulator
 
 Generate one automated cycle as readable state changes:
@@ -203,6 +224,17 @@ cargo run -p sc-probe -- rumble --index 0 --low 0 --high 32768
 The diagnostic suppresses lizard mode, refreshes rumble every 40 ms, and always
 attempts a zero write before it exits.
 
+The narrowly allowlisted power-off diagnostic changes controller state
+immediately:
+
+```bash
+cargo run -p sc-probe -- power-off --index 0
+```
+
+It accepts only an exact supported Puck or Bluetooth controller collection,
+sends the fixed `01 9f 04 6f 66 66 21 …` command, and never exposes arbitrary
+feature writes. Press Steam to wake the controller again.
+
 The session reports disconnects and automatically attempts to reopen the same collection identity every 500 ms. Capture files include connection metadata, transport, source collection identity, report ID, base64 bytes, and the available dropped-report count. `--decoded` additionally records typed Steam Controller 2 state reports.
 
 macOS may reject protected keyboard/gamepad collections with an IOKit `not permitted` error until the terminal or Codex host has Input Monitoring permission. Listing and metadata inspection do not require opening the collection.
@@ -263,7 +295,10 @@ open "dist/Steam Controller Bridge.app"
 
 The menu app embeds the same runtime, starts it automatically, and presents
 short, grouped bridge, readiness, hardware, battery, haptics, and problem
-lines. The menu-bar icon distinguishes Off, On but waiting, Controller ready,
+lines. `Idle Shutdown` offers Never/5/10/15/30-minute choices, and `Turn Off
+When Placed on Puck` controls the independent immediate-dock action. Both are
+applied live and saved under `~/Library/Application Support/Steam Controller
+Bridge/`. The menu-bar icon distinguishes Off, On but waiting, Controller ready,
 and Action required states. Friendly problem summaries stay bounded; use
 `Copy Full Error`, `Copy Diagnostics`, or the rotated log folder for the
 complete technical detail. Start/Stop, Input Monitoring settings, and Quit are
@@ -278,8 +313,13 @@ signing, a DMG, and Launch at Login remain future work.
 - Only the exact official Proteus Puck `28de:1304` active slots and the direct
   Bluetooth `28de:1303` vendor collection are permitted to receive the
   SDL-compatible lizard-off feature report and exact standard dual-rumble
-  output. Arbitrary controller initialization, settings, mappings, custom
+  output, plus the fixed `0x9f` power-off command. Arbitrary controller
+  initialization, settings, mappings, custom
   haptics, and feature/output writes remain intentionally unavailable.
+- Automatic-shutdown protocol, scheduling, and recovery are covered by native
+  tests, but real Puck/Bluetooth power-off, charge-state transitions, and
+  stay-asleep behavior remain an explicit hardware acceptance gate. Use the
+  documented `sc-probe power-off --index N` procedure before relying on it.
 - Steam coexistence, multiple simultaneous SC2 controllers, and running another
   HID consumer against the selected slot are unsupported.
 - Automatic discovery deliberately reports an ambiguity instead of choosing

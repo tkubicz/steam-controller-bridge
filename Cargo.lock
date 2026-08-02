@@ -231,6 +231,7 @@ dependencies = [
  "bridge-core",
  "bridge-output",
  "controller-mapper",
+ "gamepad-state",
  "recording",
  "serde_json",
  "steam-controller-device",
@@ -2754,6 +2755,8 @@ name = "sc-bridge-menu"
 version = "0.1.0"
 dependencies = [
  "bridge-runtime",
+ "serde",
+ "serde_json",
  "steam-controller-device",
  "tiny-skia 0.12.0",
  "tray-icon",

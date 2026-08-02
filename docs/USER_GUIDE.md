@@ -41,11 +41,11 @@ reconnect/sleep-wake remain below.
 Explicit watchdog/disconnect timing, lizard restoration timing, and reconnect
 stress still require acceptance testing.
 
-The bridge sends exactly one whitelisted controller setting and one whitelisted
-output shape on either exact supported input collection: SDL's lizard-mode-off
-command and standard dual rumble. It does not expose arbitrary feature/output
-writes, initialization, mapping clears, settings, trigger rumble, tones, or
-scripted haptics.
+On either exact supported input collection, the bridge exposes only three fixed
+operations: SDL's lizard-mode-off setting, standard dual rumble, and the
+`0x9f`/`off!` controller power-off command. It does not expose arbitrary
+feature/output writes, initialization, mapping clears, settings, trigger
+rumble, tones, or scripted haptics.
 
 ## What you need
 
@@ -282,6 +282,20 @@ actuator. Values are `0..65535`. The command suppresses lizard mode, refreshes
 rumble every 40 ms, and attempts an explicit zero on duration expiry, Ctrl-C,
 or error.
 
+Test the restricted controller power-off command only after selecting the
+active exact Puck or Bluetooth collection:
+
+```bash
+target/release/sc-probe power-off --index N
+```
+
+The command prints an explicit warning, sends a short nonblocking burst of the
+fixed `0x9f`/`off!` feature report, and reports every attempted write. It cannot
+send arbitrary feature reports. Run it with the controller both off and on the
+Puck before relying on automatic shutdown: confirm that charging continues,
+the controller stays off, and pressing Steam wakes it normally. Do not run it
+alongside the bridge, Steam, another probe, or the visualizer.
+
 ## 6. Verify the XIAO output independently
 
 Before involving the controller, test the host-to-XIAO path. Find the XIAO CDC
@@ -379,6 +393,47 @@ The diagnostic option
 `--lizard-mode leave` retains the old native keyboard/mouse behavior and is not
 suitable for gameplay.
 
+### Automatic controller shutdown
+
+The live serial bridge defaults to turning the controller off after 15 minutes
+without meaningful controller input. A held button, stick outside its mapped
+dead zone, trigger, pad touch/press, or grip touch keeps the controller awake.
+Continuous HID reports, IMU movement, sub-dead-zone jitter, rumble, lizard
+heartbeats, and XIAO refresh traffic do not count as activity.
+
+Configure the idle policy in whole minutes, or disable it:
+
+```bash
+./sc-bridge --idle-shutdown 5
+./sc-bridge --idle-shutdown 30
+./sc-bridge --idle-shutdown never
+```
+
+The independent Puck-placement policy is opt-in:
+
+```bash
+./sc-bridge --puck-dock-action power-off
+```
+
+It fires only after a fresh `Charging` or `Charged` battery report from the
+selected official Puck source. It does not fire for Bluetooth charging, an
+attached empty Puck, or battery percentage changes. The event has priority over
+the idle timer and safely neutralizes a held gamepad state before power-off.
+
+Placement power-off is one-shot. Waking the controller while it remains on the
+Puck does not immediately turn it off again. Remove it until a fresh
+`Discharging` report is received, then placing it back creates a new episode.
+Disabling and re-enabling the option also begins a new episode. Stop and Quit
+never power the controller off as a side effect; they retain the normal neutral
+and lizard-restoration behavior.
+
+On a successful automatic shutdown the menu/log status briefly reports
+`Controller sleeping`, discovery ignores the dying report tail for 2.5 seconds,
+and then waits for a normal Steam-button wake. A failed command does not stop
+gameplay: status becomes `Degraded`, lizard suppression and input resume, and a
+neutral idle attempt is rate-limited to once per 30 seconds. User activity after
+a failed placement attempt cancels that placement's retries.
+
 For a first end-to-end test:
 
 1. Confirm the XIAO LED is solid green.
@@ -443,6 +498,9 @@ The menu opens compact, grouped status and actions:
 - input transport, controller, and XIAO state;
 - battery percentage, or `Unknown` until a valid `0x43` report arrives;
 - haptics `Idle`, `Active`, or `Degraded`;
+- automatic shutdown state and current neutral-idle time;
+- an `Idle Shutdown` submenu with `Never`, 5, 10, 15, and 30 minutes;
+- `Turn Off When Placed on Puck`, disabled by default;
 - a short, friendly problem summary;
 - `Copy Full Error` for the complete technical error;
 - `Start Bridge` and `Stop Bridge`;
@@ -459,6 +517,16 @@ Logs rotate at a bounded size under:
 ```text
 ~/Library/Logs/Steam Controller Bridge/
 ```
+
+Menu choices are applied to the running bridge without restarting it and saved
+atomically in:
+
+```text
+~/Library/Application Support/Steam Controller Bridge/settings.json
+```
+
+Missing, malformed, unsupported-version, or out-of-range settings fall back to
+15 minutes plus `Leave On` and produce one startup warning.
 
 Grant Input Monitoring to **Steam Controller Bridge** itself when using the
 app. Permission granted to Terminal does not automatically cover the app.
@@ -492,6 +560,24 @@ shasum -a 256 -c SHA256SUMS.txt
 ```
 
 ## Troubleshooting
+
+### The controller did not turn off automatically
+
+- Confirm the bridge uses serial output and the XIAO is ready. Replay, dump,
+  file, and mock modes never power off hardware.
+- Inspect `Auto shutdown` in the menu or copied diagnostics. `Off` means the
+  timeout is `Never` and Puck placement is disabled.
+- For idle shutdown, confirm no button, pad/grip touch, stick, or trigger is
+  continuously active. The displayed neutral-idle timer should advance.
+- For immediate shutdown, confirm the input says `Puck` and charge state becomes
+  `Charging` or `Charged`. Bluetooth external power is intentionally ignored.
+- If the placement episode is already handled, remove the awake controller
+  until a `Discharging` report arrives before docking it again.
+- Use `sc-probe power-off --index N` with the bridge stopped to validate the
+  hardware command independently. A successful build is not proof that the
+  Puck relay or Bluetooth controller accepted it.
+- `Degraded` keeps gameplay available. Copy diagnostics for the full backend
+  error and retry state.
 
 ### `sc-probe` reports `not permitted`
 

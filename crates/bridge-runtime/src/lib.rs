@@ -5,6 +5,8 @@
 //! lizard-mode feature command is sent only after exactly one active source has
 //! been identified.
 
+mod idle_shutdown;
+
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
@@ -37,6 +39,8 @@ use steam_controller_protocol::{
     INPUT_REPORT_ID,
 };
 
+use idle_shutdown::IdleActivityTracker;
+
 const DISCOVERY_INTERVAL: Duration = Duration::from_millis(500);
 const MIN_STABLE_CONTROLLER_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_STABLE_CONTROLLER_SCAN_INTERVAL: Duration = Duration::from_secs(10);
@@ -48,6 +52,14 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const RUMBLE_REFRESH_INTERVAL: Duration = Duration::from_millis(40);
 const RUMBLE_LEASE_TIMEOUT: Duration = Duration::from_millis(100);
 const RUMBLE_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+const DEFAULT_IDLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_mins(15);
+const AUTOMATIC_SHUTDOWN_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const POWER_OFF_COOLDOWN: Duration = Duration::from_millis(2_500);
+const BATTERY_STATUS_FRESHNESS: Duration = Duration::from_secs(30);
+const POWER_OFF_BURST_WRITES: u8 = 3;
+const POWER_OFF_BURST_INTERVAL: Duration = Duration::from_millis(10);
+const MIN_IDLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_mins(1);
+pub const MAX_IDLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_hours(24);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerSelection {
@@ -65,6 +77,38 @@ pub enum SerialSelection {
 pub enum LizardMode {
     Suppress,
     Leave,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PuckDockAction {
+    #[default]
+    LeaveOn,
+    PowerOff,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControllerChargeState {
+    Discharging,
+    Charging,
+    Charged,
+    Unknown(u8),
+}
+
+impl ControllerChargeState {
+    #[must_use]
+    pub const fn from_raw(value: u8) -> Self {
+        match value {
+            1 => Self::Discharging,
+            2 => Self::Charging,
+            4 => Self::Charged,
+            other => Self::Unknown(other),
+        }
+    }
+
+    #[must_use]
+    pub const fn is_external_power(self) -> bool {
+        matches!(self, Self::Charging | Self::Charged)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +130,8 @@ pub struct RuntimeConfig {
     pub serial_config: SerialConfig,
     pub baud_rate: u32,
     pub recording_path: Option<PathBuf>,
+    pub idle_shutdown_timeout: Option<Duration>,
+    pub puck_dock_action: PuckDockAction,
 }
 
 impl Default for RuntimeConfig {
@@ -100,6 +146,8 @@ impl Default for RuntimeConfig {
             serial_config: SerialConfig::default(),
             baud_rate: 115_200,
             recording_path: None,
+            idle_shutdown_timeout: Some(DEFAULT_IDLE_SHUTDOWN_TIMEOUT),
+            puck_dock_action: PuckDockAction::LeaveOn,
         }
     }
 }
@@ -176,6 +224,53 @@ pub struct HapticsStatus {
     pub last_command_age: Option<Duration>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutomaticShutdownPhase {
+    #[default]
+    Disabled,
+    Monitoring,
+    PoweringOff,
+    Sleeping,
+    Degraded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownTrigger {
+    IdleTimeout,
+    PuckDock,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutomaticShutdownStatus {
+    pub configured_timeout: Option<Duration>,
+    pub puck_dock_action: PuckDockAction,
+    pub puck_dock_episode_handled: bool,
+    pub neutral_idle_age: Option<Duration>,
+    pub phase: AutomaticShutdownPhase,
+    pub trigger: Option<ShutdownTrigger>,
+    pub successful_shutdowns: u64,
+    pub failures: u64,
+    pub last_successful_shutdown_age: Option<Duration>,
+    pub retry_after: Option<Duration>,
+}
+
+impl Default for AutomaticShutdownStatus {
+    fn default() -> Self {
+        Self {
+            configured_timeout: Some(DEFAULT_IDLE_SHUTDOWN_TIMEOUT),
+            puck_dock_action: PuckDockAction::LeaveOn,
+            puck_dock_episode_handled: false,
+            neutral_idle_age: None,
+            phase: AutomaticShutdownPhase::Disabled,
+            trigger: None,
+            successful_shutdowns: 0,
+            failures: 0,
+            last_successful_shutdown_age: None,
+            retry_after: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BridgeStatus {
     pub revision: u64,
@@ -185,8 +280,10 @@ pub struct BridgeStatus {
     pub controller: ControllerStatus,
     pub xiao: XiaoStatus,
     pub battery_percent: Option<u8>,
+    pub battery_charge_state: Option<ControllerChargeState>,
     pub lizard: LizardStatus,
     pub haptics: HapticsStatus,
+    pub automatic_shutdown: AutomaticShutdownStatus,
     pub bridge_metrics: BridgeMetrics,
     pub output_diagnostics: OutputDiagnostics,
     pub last_error: Option<String>,
@@ -202,8 +299,10 @@ impl Default for BridgeStatus {
             controller: ControllerStatus::default(),
             xiao: XiaoStatus::default(),
             battery_percent: None,
+            battery_charge_state: None,
             lizard: LizardStatus::default(),
             haptics: HapticsStatus::default(),
+            automatic_shutdown: AutomaticShutdownStatus::default(),
             bridge_metrics: BridgeMetrics::default(),
             output_diagnostics: OutputDiagnostics::default(),
             last_error: None,
@@ -228,6 +327,8 @@ enum RuntimeCommand {
     Start(CommandAck),
     Stop(CommandAck),
     Shutdown(CommandAck),
+    SetIdleShutdown(Option<Duration>, CommandAck),
+    SetPuckDockAction(PuckDockAction, CommandAck),
 }
 
 pub struct BridgeRuntime;
@@ -238,6 +339,12 @@ impl BridgeRuntime {
         let status = Arc::new(Mutex::new(BridgeStatus {
             state: RuntimeState::Discovering,
             detail: "Starting bridge runtime".to_owned(),
+            automatic_shutdown: AutomaticShutdownStatus {
+                configured_timeout: config.idle_shutdown_timeout,
+                puck_dock_action: config.puck_dock_action,
+                phase: automatic_shutdown_phase(&config),
+                ..AutomaticShutdownStatus::default()
+            },
             ..BridgeStatus::default()
         }));
         let worker_status = Arc::clone(&status);
@@ -277,6 +384,25 @@ impl BridgeHandle {
         self.request(RuntimeCommand::Stop)
     }
 
+    /// Queues an idle-shutdown timeout update without blocking the caller.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has stopped.
+    pub fn request_set_idle_shutdown_timeout(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<(), RuntimeError> {
+        self.request(|ack| RuntimeCommand::SetIdleShutdown(timeout, ack))
+    }
+
+    /// Queues an immediate Puck-dock action update without blocking the caller.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has stopped.
+    pub fn request_set_puck_dock_action(&self, action: PuckDockAction) -> Result<(), RuntimeError> {
+        self.request(|ack| RuntimeCommand::SetPuckDockAction(action, ack))
+    }
+
     /// Requests an idempotent runtime start and waits until the request is accepted.
     ///
     /// # Errors
@@ -292,6 +418,22 @@ impl BridgeHandle {
     /// Returns an error if the runtime thread stops or cleanup fails.
     pub fn stop(&self) -> Result<(), RuntimeError> {
         self.command(RuntimeCommand::Stop)
+    }
+
+    /// Updates the idle-shutdown timeout without restarting HID or serial.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has stopped.
+    pub fn set_idle_shutdown_timeout(&self, timeout: Option<Duration>) -> Result<(), RuntimeError> {
+        self.command(|ack| RuntimeCommand::SetIdleShutdown(timeout, ack))
+    }
+
+    /// Updates the immediate Puck-dock action without restarting HID or serial.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has stopped.
+    pub fn set_puck_dock_action(&self, action: PuckDockAction) -> Result<(), RuntimeError> {
+        self.command(|ack| RuntimeCommand::SetPuckDockAction(action, ack))
     }
 
     /// Stops safely and terminates the runtime thread.
@@ -360,6 +502,176 @@ impl Drop for BridgeHandle {
     }
 }
 
+fn automatic_shutdown_phase(config: &RuntimeConfig) -> AutomaticShutdownPhase {
+    if config.idle_shutdown_timeout.is_none() && config.puck_dock_action == PuckDockAction::LeaveOn
+    {
+        AutomaticShutdownPhase::Disabled
+    } else {
+        AutomaticShutdownPhase::Monitoring
+    }
+}
+
+fn validate_idle_shutdown_timeout(timeout: Option<Duration>) -> Result<(), String> {
+    if timeout.is_some_and(|value| value < MIN_IDLE_SHUTDOWN_TIMEOUT) {
+        return Err("idle-shutdown timeout must be at least one minute".to_owned());
+    }
+    if timeout.is_some_and(|value| value > MAX_IDLE_SHUTDOWN_TIMEOUT) {
+        return Err("idle-shutdown timeout cannot exceed 1440 minutes".to_owned());
+    }
+    Ok(())
+}
+
+struct AutomaticShutdownRuntime {
+    phase: AutomaticShutdownPhase,
+    trigger: Option<ShutdownTrigger>,
+    successful_shutdowns: u64,
+    failures: u64,
+    last_success: Option<Instant>,
+    retry_after: Option<Instant>,
+    dock_identity: Option<HidDeviceInfo>,
+    dock_episode_handled: bool,
+    dock_failure_at: Option<Instant>,
+}
+
+impl AutomaticShutdownRuntime {
+    fn new(config: &RuntimeConfig) -> Self {
+        Self {
+            phase: automatic_shutdown_phase(config),
+            trigger: None,
+            successful_shutdowns: 0,
+            failures: 0,
+            last_success: None,
+            retry_after: None,
+            dock_identity: None,
+            dock_episode_handled: false,
+            dock_failure_at: None,
+        }
+    }
+
+    fn source_selected(&mut self, info: &HidDeviceInfo, config: &RuntimeConfig) {
+        if self
+            .dock_identity
+            .as_ref()
+            .is_some_and(|identity| !same_controller_collection(identity, info))
+        {
+            self.clear_dock_episode("source_replaced");
+        }
+        self.dock_identity = Some(info.clone());
+        self.phase = automatic_shutdown_phase(config);
+        self.trigger = None;
+        self.retry_after = None;
+        self.dock_failure_at = None;
+    }
+
+    fn set_dock_action(&mut self, action: PuckDockAction, config: &RuntimeConfig) {
+        if action != config.puck_dock_action {
+            self.clear_dock_episode("policy_changed");
+        }
+    }
+
+    fn clear_dock_episode(&mut self, reason: &str) {
+        if self.dock_episode_handled {
+            eprintln!("level=info event=puck_dock_episode_cleared reason={reason:?}");
+        }
+        self.dock_episode_handled = false;
+        self.dock_failure_at = None;
+    }
+
+    fn observe_charge_state(
+        &mut self,
+        info: &HidDeviceInfo,
+        charge_state: ControllerChargeState,
+        action: PuckDockAction,
+    ) -> bool {
+        if charge_state == ControllerChargeState::Discharging {
+            self.clear_dock_episode("discharging");
+            return false;
+        }
+        action == PuckDockAction::PowerOff
+            && info.controller_transport() == Some(ControllerTransport::Puck)
+            && charge_state.is_external_power()
+            && !self.dock_episode_handled
+    }
+
+    fn activity_after_failed_dock_attempt(&mut self, now: Instant) {
+        if self.trigger == Some(ShutdownTrigger::PuckDock)
+            && self.dock_failure_at.is_some_and(|failure| now > failure)
+            && !self.dock_episode_handled
+        {
+            self.dock_episode_handled = true;
+            self.retry_after = None;
+            eprintln!(
+                "level=info event=puck_dock_episode_handled reason=activity_after_failed_shutdown"
+            );
+        }
+    }
+
+    fn begin(&mut self, trigger: ShutdownTrigger) {
+        self.phase = AutomaticShutdownPhase::PoweringOff;
+        self.trigger = Some(trigger);
+        eprintln!("level=info event=automatic_shutdown_started trigger={trigger:?}");
+    }
+
+    fn succeeded(&mut self, now: Instant, trigger: ShutdownTrigger) {
+        self.phase = AutomaticShutdownPhase::Sleeping;
+        self.trigger = Some(trigger);
+        self.successful_shutdowns = self.successful_shutdowns.wrapping_add(1);
+        self.last_success = Some(now);
+        self.retry_after = None;
+        self.dock_failure_at = None;
+        if trigger == ShutdownTrigger::PuckDock {
+            self.dock_episode_handled = true;
+            eprintln!("level=info event=puck_dock_episode_handled reason=power_off_succeeded");
+        }
+        eprintln!("level=info event=automatic_shutdown_succeeded trigger={trigger:?}");
+    }
+
+    fn failed(&mut self, now: Instant, trigger: ShutdownTrigger, error: &str) {
+        self.phase = AutomaticShutdownPhase::Degraded;
+        self.trigger = Some(trigger);
+        self.failures = self.failures.wrapping_add(1);
+        self.retry_after = Some(now + AUTOMATIC_SHUTDOWN_RETRY_INTERVAL);
+        self.dock_failure_at = (trigger == ShutdownTrigger::PuckDock).then_some(now);
+        eprintln!(
+            "level=warn event=automatic_shutdown_failed trigger={trigger:?} error={error:?} retry_ms={}",
+            AUTOMATIC_SHUTDOWN_RETRY_INTERVAL.as_millis()
+        );
+    }
+
+    fn retry_due(&self, now: Instant) -> bool {
+        self.retry_after.is_none_or(|deadline| now >= deadline)
+    }
+
+    fn status(
+        &self,
+        config: &RuntimeConfig,
+        idle_age: Option<Duration>,
+        now: Instant,
+    ) -> AutomaticShutdownStatus {
+        AutomaticShutdownStatus {
+            configured_timeout: config.idle_shutdown_timeout,
+            puck_dock_action: config.puck_dock_action,
+            puck_dock_episode_handled: self.dock_episode_handled,
+            neutral_idle_age: idle_age,
+            phase: self.phase,
+            trigger: self.trigger,
+            successful_shutdowns: self.successful_shutdowns,
+            failures: self.failures,
+            last_successful_shutdown_age: self
+                .last_success
+                .map(|last| now.saturating_duration_since(last)),
+            retry_after: self
+                .retry_after
+                .map(|retry| retry.saturating_duration_since(now)),
+        }
+    }
+}
+
+struct ControllerCooldown {
+    info: HidDeviceInfo,
+    until: Instant,
+}
+
 struct Supervisor {
     config: RuntimeConfig,
     status: Arc<Mutex<BridgeStatus>>,
@@ -372,6 +684,8 @@ struct Supervisor {
     controller_enumerator: Option<ControllerEnumerator>,
     controller_discovery: ControllerDiscoveryState<HidSession>,
     indexed_controller_discovery: IndexedControllerDiscoveryState,
+    automatic_shutdown: AutomaticShutdownRuntime,
+    controller_cooldown: Option<ControllerCooldown>,
 }
 
 impl Supervisor {
@@ -380,6 +694,7 @@ impl Supervisor {
         status: Arc<Mutex<BridgeStatus>>,
         commands: Receiver<RuntimeCommand>,
     ) -> Self {
+        let automatic_shutdown = AutomaticShutdownRuntime::new(&config);
         Self {
             config,
             status,
@@ -392,6 +707,8 @@ impl Supervisor {
             controller_enumerator: None,
             controller_discovery: ControllerDiscoveryState::new(),
             indexed_controller_discovery: IndexedControllerDiscoveryState::new(),
+            automatic_shutdown,
+            controller_cooldown: None,
         }
     }
 
@@ -496,6 +813,26 @@ impl Supervisor {
                         status.xiao = XiaoStatus::default();
                     });
                     self.transition(RuntimeState::Waiting, &message, Some(&message));
+                }
+                Ok((ActiveExit::AutomaticShutdown { info, trigger }, output)) => {
+                    retained_output = Some(output);
+                    self.controller_cooldown = Some(ControllerCooldown {
+                        info,
+                        until: Instant::now() + POWER_OFF_COOLDOWN,
+                    });
+                    self.clear_controller_discovery();
+                    self.clear_controller_status();
+                    self.transition(
+                        RuntimeState::Waiting,
+                        &format!(
+                            "Controller sleeping after {}; press Steam to wake",
+                            match trigger {
+                                ShutdownTrigger::IdleTimeout => "idle timeout",
+                                ShutdownTrigger::PuckDock => "Puck placement",
+                            }
+                        ),
+                        None,
+                    );
                 }
                 Ok((ActiveExit::Stopped, _)) => {
                     retained_output = None;
@@ -650,6 +987,14 @@ impl Supervisor {
                          28de:1303 Bluetooth ff00:0001 interface -1 collection"
                     ));
                 }
+                if self.source_on_cooldown(&info) {
+                    return Discovery::Wait {
+                        detail:
+                            "Controller is finishing automatic shutdown; waiting for a fresh wake"
+                                .to_owned(),
+                        error: None,
+                    };
+                }
                 match self
                     .controller_enumerator()
                     .and_then(|enumerator| enumerator.open(&info))
@@ -728,6 +1073,15 @@ impl Supervisor {
                 error: self.controller_discovery.current_errors(&probe.failures),
             },
             Ok(Some(selected)) => {
+                let selected_info = self.controller_discovery.candidate(selected).info.clone();
+                if self.source_on_cooldown(&selected_info) {
+                    return Discovery::Wait {
+                        detail:
+                            "Controller is finishing automatic shutdown; waiting for a fresh wake"
+                                .to_owned(),
+                        error: None,
+                    };
+                }
                 let candidate = self.controller_discovery.select(selected);
                 let info = candidate.info;
                 self.update_source_discovered(&info, true);
@@ -800,12 +1154,28 @@ impl Supervisor {
         self.indexed_controller_discovery.clear();
     }
 
+    fn source_on_cooldown(&mut self, info: &HidDeviceInfo) -> bool {
+        let now = Instant::now();
+        if self
+            .controller_cooldown
+            .as_ref()
+            .is_some_and(|cooldown| now >= cooldown.until)
+        {
+            self.controller_cooldown = None;
+        }
+        self.controller_cooldown.as_ref().is_some_and(|cooldown| {
+            same_controller_collection(&cooldown.info, info) && now < cooldown.until
+        })
+    }
+
     #[allow(clippy::too_many_lines)] // Safety ordering is clearest in one linear ownership loop.
     fn run_active(
         &mut self,
         active: ActiveControllerSource,
         mut output: OutputSession,
     ) -> Result<(ActiveExit, OutputSession), String> {
+        self.automatic_shutdown
+            .source_selected(&active.info, &self.config);
         let initial_controller_seen = active.controller_seen;
         let mut engine = BridgeEngine::new(self.config.bridge, self.config.mapper)
             .map_err(|error| error.to_string())?;
@@ -838,8 +1208,17 @@ impl Supervisor {
         let mut last_status = Instant::now()
             .checked_sub(STATUS_INTERVAL)
             .unwrap_or_else(Instant::now);
+        let mut idle_activity = IdleActivityTracker::new(self.config.idle_shutdown_timeout);
+        let mut latest_charge_state: Option<ControllerChargeState> = None;
+        let mut last_charge_report = None;
+        let mut pending_automatic_shutdown = None;
         engine.connected();
+        self.automatic_shutdown.phase = automatic_shutdown_phase(&self.config);
+        self.automatic_shutdown.trigger = None;
         self.transition(RuntimeState::Running, "Bridge running", None);
+        let automatic_status = self
+            .automatic_shutdown
+            .status(&self.config, None, Instant::now());
         self.update_status(|status| {
             status.source.connected = true;
             status.source.active = initial_controller_seen;
@@ -847,6 +1226,7 @@ impl Supervisor {
             status.controller.last_state_age = initial_controller_seen.then_some(Duration::ZERO);
             status.lizard = worker.lizard_diagnostics();
             status.haptics = worker.haptics_diagnostics();
+            status.automatic_shutdown = automatic_status;
         });
         eprintln!(
             "level=info event=bridge_running input_transport={:?} input_interface={} \
@@ -866,7 +1246,9 @@ impl Supervisor {
         )?;
 
         let exit = loop {
-            if let Some(command_exit) = self.service_active_commands() {
+            if let Some(command_exit) =
+                self.service_active_commands(started.elapsed(), &mut idle_activity)
+            {
                 break command_exit;
             }
             if let Some(error) = worker.take_failure() {
@@ -899,10 +1281,17 @@ impl Supervisor {
                     &mut *output.output,
                     &mut recording,
                     started,
+                    &mut idle_activity,
                 ) {
-                    Ok(ReportEffect::ControllerState) => {
+                    Ok(ReportEffect::ControllerState {
+                        meaningful_activity,
+                    }) => {
                         last_controller_state = Instant::now();
                         controller_connected = true;
+                        if meaningful_activity {
+                            self.automatic_shutdown
+                                .activity_after_failed_dock_attempt(Instant::now());
+                        }
                         // Only the first state publishes eagerly, so the UI reacts
                         // without waiting for STATUS_INTERVAL. Doing this per report
                         // would clone the whole status and take the shared lock at
@@ -920,10 +1309,36 @@ impl Supervisor {
                     Ok(ReportEffect::Connected) => {
                         controller_connected = true;
                     }
-                    Ok(ReportEffect::Battery(percent)) => {
+                    Ok(ReportEffect::Battery {
+                        percent,
+                        charge_state,
+                    }) => {
+                        let charging_transition = latest_charge_state
+                            .is_some_and(|previous| !previous.is_external_power())
+                            && charge_state.is_external_power();
+                        latest_charge_state = Some(charge_state);
+                        last_charge_report = Some(Instant::now());
+                        if charging_transition {
+                            idle_activity.reset(started.elapsed());
+                            eprintln!(
+                                "level=info event=idle_shutdown_timer_reset reason=charging_transition"
+                            );
+                        }
+                        let dock_event = self.automatic_shutdown.observe_charge_state(
+                            worker.device_info(),
+                            charge_state,
+                            self.config.puck_dock_action,
+                        );
                         self.update_status(|status| {
                             status.battery_percent = percent;
+                            status.battery_charge_state = Some(charge_state);
                         });
+                        if dock_event && self.automatic_shutdown.retry_due(Instant::now()) {
+                            eprintln!(
+                                "level=info event=puck_dock_detected charge_state={charge_state:?}"
+                            );
+                            pending_automatic_shutdown = Some(ShutdownTrigger::PuckDock);
+                        }
                     }
                     Ok(ReportEffect::Disconnected) => {
                         let _ = engine.disconnected(&mut *output.output);
@@ -967,12 +1382,89 @@ impl Supervisor {
                     } => worker.set_rumble(low_frequency, high_frequency),
                 }
             }
+            let now = Instant::now();
+            let dock_retry_due = self.automatic_shutdown.trigger == Some(ShutdownTrigger::PuckDock)
+                && self.automatic_shutdown.phase == AutomaticShutdownPhase::Degraded
+                && !self.automatic_shutdown.dock_episode_handled
+                && self.automatic_shutdown.retry_due(now)
+                && worker.device_info().controller_transport() == Some(ControllerTransport::Puck)
+                && latest_charge_state.is_some_and(ControllerChargeState::is_external_power)
+                && last_charge_report.is_some_and(|reported| {
+                    now.saturating_duration_since(reported) <= BATTERY_STATUS_FRESHNESS
+                });
+            let idle_shutdown_due = idle_activity.deadline_reached(started.elapsed())
+                && idle_activity.is_neutral()
+                && self.automatic_shutdown.retry_due(now);
+            let automatic_trigger = pending_automatic_shutdown
+                .take()
+                .or_else(|| dock_retry_due.then_some(ShutdownTrigger::PuckDock))
+                .or_else(|| idle_shutdown_due.then_some(ShutdownTrigger::IdleTimeout));
+            if let Some(trigger) = automatic_trigger {
+                if output.xiao.is_none() {
+                    eprintln!(
+                        "level=warn event=automatic_shutdown_skipped trigger={trigger:?} reason=xiao_not_ready"
+                    );
+                } else if trigger != ShutdownTrigger::IdleTimeout || idle_activity.is_neutral() {
+                    self.automatic_shutdown.begin(trigger);
+                    let powering_off = self.automatic_shutdown.status(
+                        &self.config,
+                        idle_activity.idle_age(started.elapsed()),
+                        now,
+                    );
+                    self.update_status(|status| status.automatic_shutdown = powering_off);
+                    match engine.shutdown(&mut *output.output) {
+                        Ok(_) => match worker.power_off() {
+                            Ok(()) => {
+                                self.automatic_shutdown.succeeded(Instant::now(), trigger);
+                                let automatic = self.automatic_shutdown.status(
+                                    &self.config,
+                                    idle_activity.idle_age(started.elapsed()),
+                                    Instant::now(),
+                                );
+                                self.update_status(|status| {
+                                    status.automatic_shutdown = automatic;
+                                    status.last_error = None;
+                                });
+                                break ActiveExit::AutomaticShutdown {
+                                    info: worker.device_info().clone(),
+                                    trigger,
+                                };
+                            }
+                            Err(error) => {
+                                self.automatic_shutdown
+                                    .failed(Instant::now(), trigger, &error);
+                                let automatic = self.automatic_shutdown.status(
+                                    &self.config,
+                                    idle_activity.idle_age(started.elapsed()),
+                                    Instant::now(),
+                                );
+                                self.update_status(|status| {
+                                    status.automatic_shutdown = automatic;
+                                    status.last_error = Some(format!(
+                                        "automatic controller shutdown failed; gameplay continues: {error}"
+                                    ));
+                                });
+                            }
+                        },
+                        Err(error) => {
+                            break ActiveExit::OutputLost(format!(
+                                "cannot neutralize XIAO before automatic controller shutdown: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
             if last_controller_state.elapsed() >= ACTIVE_SLOT_TIMEOUT {
                 let _ = engine.disconnected(&mut *output.output);
                 break ActiveExit::SourceLost;
             }
             if last_status.elapsed() >= STATUS_INTERVAL {
                 let controller_age = last_controller_state.elapsed();
+                let automatic = self.automatic_shutdown.status(
+                    &self.config,
+                    idle_activity.idle_age(started.elapsed()),
+                    Instant::now(),
+                );
                 self.update_status(|status| {
                     status.bridge_metrics = engine.metrics();
                     status.output_diagnostics = output.output.diagnostics();
@@ -984,6 +1476,7 @@ impl Supervisor {
                         controller_connected && controller_age < ACTIVE_SLOT_TIMEOUT;
                     status.controller.last_state_age =
                         controller_connected.then_some(controller_age);
+                    status.automatic_shutdown = automatic;
                 });
                 last_status = Instant::now();
             }
@@ -992,11 +1485,16 @@ impl Supervisor {
         self.transition(RuntimeState::Stopping, "Neutralizing output", None);
         let neutral_result = engine.shutdown(&mut *output.output);
         let worker_result = worker.shutdown();
+        idle_activity.pause();
+        let automatic = self
+            .automatic_shutdown
+            .status(&self.config, None, Instant::now());
         self.update_status(|status| {
             status.bridge_metrics = engine.metrics();
             status.output_diagnostics = output.output.diagnostics();
             status.lizard = worker.lizard_diagnostics();
             status.haptics = worker.haptics_diagnostics();
+            status.automatic_shutdown = automatic;
         });
         self.clear_controller_status();
         record_device_event(&mut recording, started, KIND_DEVICE_DISCONNECTED, None)?;
@@ -1062,10 +1560,38 @@ impl Supervisor {
                 self.clear_hardware_status();
                 self.pending_shutdown_acks.push(ack);
             }
+            RuntimeCommand::SetIdleShutdown(timeout, ack) => {
+                let result = validate_idle_shutdown_timeout(timeout);
+                if result.is_ok() {
+                    self.config.idle_shutdown_timeout = timeout;
+                    self.automatic_shutdown.phase = automatic_shutdown_phase(&self.config);
+                    self.update_status(|status| {
+                        status.automatic_shutdown.configured_timeout = timeout;
+                        status.automatic_shutdown.phase = automatic_shutdown_phase(&self.config);
+                        status.automatic_shutdown.neutral_idle_age = None;
+                    });
+                }
+                let _ = ack.send(result);
+            }
+            RuntimeCommand::SetPuckDockAction(action, ack) => {
+                self.automatic_shutdown
+                    .set_dock_action(action, &self.config);
+                self.config.puck_dock_action = action;
+                self.automatic_shutdown.phase = automatic_shutdown_phase(&self.config);
+                let automatic = self
+                    .automatic_shutdown
+                    .status(&self.config, None, Instant::now());
+                self.update_status(|status| status.automatic_shutdown = automatic);
+                let _ = ack.send(Ok(()));
+            }
         }
     }
 
-    fn service_active_commands(&mut self) -> Option<ActiveExit> {
+    fn service_active_commands(
+        &mut self,
+        now: Duration,
+        idle_activity: &mut IdleActivityTracker,
+    ) -> Option<ActiveExit> {
         while let Ok(command) = self.commands.try_recv() {
             match command {
                 RuntimeCommand::Start(ack) => {
@@ -1080,6 +1606,27 @@ impl Supervisor {
                     self.desired_running = false;
                     self.shutdown_requested = true;
                     return Some(ActiveExit::ShutdownWithAck(ack));
+                }
+                RuntimeCommand::SetIdleShutdown(timeout, ack) => {
+                    let result = validate_idle_shutdown_timeout(timeout);
+                    if result.is_ok() {
+                        self.config.idle_shutdown_timeout = timeout;
+                        idle_activity.set_timeout(timeout, now);
+                        self.automatic_shutdown.phase = automatic_shutdown_phase(&self.config);
+                        eprintln!(
+                            "level=info event=idle_shutdown_setting_changed timeout_secs={:?}",
+                            timeout.map(|value| value.as_secs())
+                        );
+                    }
+                    let _ = ack.send(result);
+                }
+                RuntimeCommand::SetPuckDockAction(action, ack) => {
+                    self.automatic_shutdown
+                        .set_dock_action(action, &self.config);
+                    self.config.puck_dock_action = action;
+                    self.automatic_shutdown.phase = automatic_shutdown_phase(&self.config);
+                    eprintln!("level=info event=puck_dock_action_changed action={action:?}");
+                    let _ = ack.send(Ok(()));
                 }
             }
         }
@@ -1131,6 +1678,7 @@ impl Supervisor {
             status.source = ControllerSourceStatus::default();
             status.controller = ControllerStatus::default();
             status.battery_percent = None;
+            status.battery_charge_state = None;
             status.lizard = LizardStatus::default();
         });
     }
@@ -1141,6 +1689,7 @@ impl Supervisor {
             status.controller = ControllerStatus::default();
             status.xiao = XiaoStatus::default();
             status.battery_percent = None;
+            status.battery_charge_state = None;
             status.lizard = LizardStatus::default();
         });
     }
@@ -1158,8 +1707,10 @@ impl Supervisor {
             || status.controller != previous.controller
             || status.xiao != previous.xiao
             || status.battery_percent != previous.battery_percent
+            || status.battery_charge_state != previous.battery_charge_state
             || status.lizard != previous.lizard
             || status.haptics != previous.haptics
+            || status.automatic_shutdown != previous.automatic_shutdown
             || status.bridge_metrics != previous.bridge_metrics
             || status.output_diagnostics != previous.output_diagnostics
             || status.last_error != previous.last_error;
@@ -1538,6 +2089,10 @@ fn service_waiting_output(output: Option<&mut OutputSession>) -> bool {
 enum ActiveExit {
     SourceLost,
     OutputLost(String),
+    AutomaticShutdown {
+        info: HidDeviceInfo,
+        trigger: ShutdownTrigger,
+    },
     Stopped,
     Shutdown,
     StoppedWithAck(CommandAck),
@@ -1661,9 +2216,14 @@ fn is_latest_state_report(report_id: u8) -> bool {
 
 #[derive(Debug)]
 enum ReportEffect {
-    ControllerState,
+    ControllerState {
+        meaningful_activity: bool,
+    },
     Connected,
-    Battery(Option<u8>),
+    Battery {
+        percent: Option<u8>,
+        charge_state: ControllerChargeState,
+    },
     Disconnected,
     None,
 }
@@ -1674,6 +2234,7 @@ fn process_report(
     output: &mut dyn GamepadOutput,
     recording: &mut Option<RecordingWriter<File>>,
     started: Instant,
+    idle_activity: &mut IdleActivityTracker,
 ) -> Result<ReportEffect, String> {
     let timestamp = elapsed_us(started);
     record_lazy(recording, || {
@@ -1688,16 +2249,22 @@ fn process_report(
     })?;
     match engine.process_report(report.report_id, &report.data, started.elapsed(), output) {
         Ok(ProcessOutcome::State { source, mapped, .. }) => {
+            let meaningful_activity = idle_activity.observe(started.elapsed(), &source, &mapped);
             record_lazy(recording, || {
                 RecordingEvent::decoded_steam_state(timestamp, &source)
             })?;
             record_lazy(recording, || {
                 RecordingEvent::mapped_gamepad_state(timestamp, &mapped)
             })?;
-            Ok(ReportEffect::ControllerState)
+            Ok(ReportEffect::ControllerState {
+                meaningful_activity,
+            })
         }
         Ok(ProcessOutcome::Status(DecodedReport::Battery { status, .. })) => {
-            Ok(ReportEffect::Battery(valid_battery_percent(status.percent)))
+            Ok(ReportEffect::Battery {
+                percent: valid_battery_percent(status.percent),
+                charge_state: ControllerChargeState::from_raw(status.charge_state),
+            })
         }
         Ok(ProcessOutcome::Status(DecodedReport::Connection(ConnectionState::Disconnected))) => {
             Ok(ReportEffect::Disconnected)
@@ -2109,6 +2676,96 @@ enum HidWorkerEvent {
     ReportReady,
 }
 
+enum HidWorkerControl {
+    PowerOff(CommandAck),
+}
+
+struct PowerOffSequence {
+    ack: Option<CommandAck>,
+    attempts: u8,
+    successes: u8,
+    last_error: Option<String>,
+    next_write: Duration,
+    disconnected_after_success: bool,
+}
+
+trait PowerOffWriter {
+    fn write_power_off(&self) -> Result<(), String>;
+}
+
+impl PowerOffWriter for HidSession {
+    fn write_power_off(&self) -> Result<(), String> {
+        self.power_off().map_err(|error| error.to_string())
+    }
+}
+
+impl PowerOffSequence {
+    fn new(ack: CommandAck, now: Duration) -> Self {
+        Self {
+            ack: Some(ack),
+            attempts: 0,
+            successes: 0,
+            last_error: None,
+            next_write: now,
+            disconnected_after_success: false,
+        }
+    }
+
+    fn service(
+        &mut self,
+        now: Duration,
+        session: &impl PowerOffWriter,
+    ) -> Option<Result<(), String>> {
+        if self.disconnected_after_success {
+            return Some(Ok(()));
+        }
+        if now < self.next_write {
+            return None;
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        match session.write_power_off() {
+            Ok(()) => {
+                self.successes = self.successes.saturating_add(1);
+                eprintln!(
+                    "level=info event=controller_power_off_write attempt={} total={} result=success",
+                    self.attempts, POWER_OFF_BURST_WRITES
+                );
+            }
+            Err(error) => {
+                self.last_error = Some(error.clone());
+                eprintln!(
+                    "level=warn event=controller_power_off_write attempt={} total={} result=failure error={error:?}",
+                    self.attempts, POWER_OFF_BURST_WRITES
+                );
+            }
+        }
+        if self.attempts >= POWER_OFF_BURST_WRITES {
+            if self.successes > 0 {
+                Some(Ok(()))
+            } else {
+                Some(Err(self.last_error.clone().unwrap_or_else(|| {
+                    "all controller power-off writes failed".to_owned()
+                })))
+            }
+        } else {
+            self.next_write = now.saturating_add(POWER_OFF_BURST_INTERVAL);
+            None
+        }
+    }
+
+    fn note_disconnected(&mut self) {
+        if self.successes > 0 {
+            self.disconnected_after_success = true;
+        }
+    }
+
+    fn finish(&mut self, result: Result<(), String>) {
+        if let Some(ack) = self.ack.take() {
+            let _ = ack.send(result);
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct LatestReportState {
     report: Option<RawHidReport>,
@@ -2168,6 +2825,7 @@ struct HidWorker {
     failure_receiver: Receiver<String>,
     latest_report: Arc<LatestReportSlot>,
     latest_rumble: Arc<LatestRumbleSlot>,
+    control_sender: mpsc::Sender<HidWorkerControl>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     started: Instant,
@@ -2192,6 +2850,7 @@ impl HidWorker {
         let worker_latest_report = Arc::clone(&latest_report);
         let latest_rumble = Arc::new(LatestRumbleSlot::default());
         let worker_latest_rumble = Arc::clone(&latest_rumble);
+        let (control_sender, control_receiver) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let lizard_metrics = Arc::new(SharedLizardMetrics::default());
@@ -2216,20 +2875,62 @@ impl HidWorker {
             let mut lizard = initial_lizard;
             let mut haptics = HapticsSupervisor::new(worker_haptics_metrics);
             haptics.connected(worker_started.elapsed(), &session);
+            let mut accepting_input = true;
+            let mut power_off_sequence: Option<PowerOffSequence> = None;
             while !worker_stop.load(Ordering::Acquire) {
-                if let Err(error) = lizard.service(worker_started.elapsed(), &session) {
-                    worker_latest_report.clear(&dropped);
-                    let _ = failure_sender.send(format!(
-                        "lizard-mode refresh failed; XIAO was neutralized and input stopped: {error}"
-                    ));
-                    break;
+                if power_off_sequence.is_none() {
+                    if let Ok(HidWorkerControl::PowerOff(ack)) = control_receiver.try_recv() {
+                        accepting_input = false;
+                        worker_latest_report.clear(&dropped);
+                        worker_latest_rumble.clear();
+                        haptics.shutdown(worker_started.elapsed(), &session);
+                        lizard.disconnected();
+                        power_off_sequence =
+                            Some(PowerOffSequence::new(ack, worker_started.elapsed()));
+                    }
                 }
-                if let Some(command) = worker_latest_rumble.take() {
-                    haptics.command(worker_started.elapsed(), &session, command);
+                if let Some(sequence) = power_off_sequence.as_mut() {
+                    if let Some(result) = sequence.service(worker_started.elapsed(), &session) {
+                        let failed = result.is_err();
+                        sequence.finish(result);
+                        power_off_sequence = None;
+                        if failed {
+                            accepting_input = true;
+                            haptics.connected(worker_started.elapsed(), &session);
+                            if let Err(error) = lizard.connected(worker_started.elapsed(), &session)
+                            {
+                                worker_latest_report.clear(&dropped);
+                                let _ = failure_sender.send(format!(
+                                    "lizard-mode suppression could not resume after a failed \
+                                     power-off attempt: {error}"
+                                ));
+                                break;
+                            }
+                        }
+                    }
                 }
-                haptics.service(worker_started.elapsed(), &session);
+                if accepting_input {
+                    if let Err(error) = lizard.service(worker_started.elapsed(), &session) {
+                        worker_latest_report.clear(&dropped);
+                        let _ = failure_sender.send(format!(
+                            "lizard-mode refresh failed; XIAO was neutralized and input stopped: {error}"
+                        ));
+                        break;
+                    }
+                }
+                if accepting_input {
+                    if let Some(command) = worker_latest_rumble.take() {
+                        haptics.command(worker_started.elapsed(), &session, command);
+                    }
+                }
+                if accepting_input {
+                    haptics.service(worker_started.elapsed(), &session);
+                }
                 match session.poll(RUNTIME_POLL_INTERVAL) {
                     Ok(Some(DeviceEvent::Connected(info))) => {
+                        if !accepting_input {
+                            continue;
+                        }
                         if let Err(error) = lizard.connected(worker_started.elapsed(), &session) {
                             worker_latest_report.clear(&dropped);
                             let _ = failure_sender.send(format!(
@@ -2247,6 +2948,13 @@ impl HidWorker {
                         }
                     }
                     Ok(Some(DeviceEvent::Disconnected)) => {
+                        if let Some(sequence) = power_off_sequence.as_mut() {
+                            sequence.note_disconnected();
+                            continue;
+                        }
+                        if !accepting_input {
+                            continue;
+                        }
                         haptics.disconnected();
                         worker_latest_rumble.clear();
                         lizard.disconnected();
@@ -2256,6 +2964,9 @@ impl HidWorker {
                         }
                     }
                     Ok(Some(DeviceEvent::Report(report))) => {
+                        if !accepting_input {
+                            continue;
+                        }
                         let published = if is_latest_state_report(report.report_id) {
                             publish_report(&sender, &worker_latest_report, report, &dropped)
                         } else {
@@ -2293,6 +3004,7 @@ impl HidWorker {
             failure_receiver,
             latest_report,
             latest_rumble,
+            control_sender,
             stop,
             handle: Some(handle),
             started: worker_started,
@@ -2326,6 +3038,16 @@ impl HidWorker {
         let coalesced = self.latest_rumble.publish(command);
         self.haptics_metrics
             .record_command(self.started.elapsed(), coalesced);
+    }
+
+    fn power_off(&self) -> Result<(), String> {
+        let (ack_sender, ack_receiver) = mpsc::channel();
+        self.control_sender
+            .send(HidWorkerControl::PowerOff(ack_sender))
+            .map_err(|_| "HID worker stopped before controller power-off could start".to_owned())?;
+        ack_receiver
+            .recv_timeout(COMMAND_TIMEOUT)
+            .map_err(|_| "controller power-off sequence timed out".to_owned())?
     }
 
     fn take_latest_report(&self) -> Option<RawHidReport> {
@@ -2459,6 +3181,31 @@ mod tests {
         }
     }
 
+    struct FakePowerOffWriter {
+        results: Mutex<std::collections::VecDeque<Result<(), String>>>,
+        writes: AtomicU64,
+    }
+
+    impl FakePowerOffWriter {
+        fn new(results: impl IntoIterator<Item = Result<(), String>>) -> Self {
+            Self {
+                results: Mutex::new(results.into_iter().collect()),
+                writes: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl PowerOffWriter for FakePowerOffWriter {
+        fn write_power_off(&self) -> Result<(), String> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            self.results
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+                .unwrap_or(Ok(()))
+        }
+    }
+
     fn serial_info(path: &str, serial: &str) -> SerialDeviceInfo {
         SerialDeviceInfo {
             path: path.to_owned(),
@@ -2510,6 +3257,20 @@ mod tests {
         assert_eq!(config.serial, SerialSelection::AutoXiao);
         assert_eq!(config.output, OutputSelection::Serial);
         assert_eq!(config.lizard_mode, LizardMode::Suppress);
+        assert_eq!(config.idle_shutdown_timeout, Some(Duration::from_mins(15)));
+        assert_eq!(config.puck_dock_action, PuckDockAction::LeaveOn);
+    }
+
+    #[test]
+    fn runtime_timeout_updates_enforce_the_documented_minimum_and_maximum() {
+        assert!(validate_idle_shutdown_timeout(None).is_ok());
+        assert!(validate_idle_shutdown_timeout(Some(Duration::from_secs(59))).is_err());
+        assert!(validate_idle_shutdown_timeout(Some(Duration::from_mins(1))).is_ok());
+        assert!(validate_idle_shutdown_timeout(Some(Duration::from_hours(24))).is_ok());
+        assert!(validate_idle_shutdown_timeout(Some(
+            Duration::from_hours(24) + Duration::from_secs(1)
+        ))
+        .is_err());
     }
 
     #[test]
@@ -3084,12 +3845,147 @@ mod tests {
     }
 
     #[test]
+    fn charge_states_follow_the_sdl_triton_values() {
+        assert_eq!(
+            ControllerChargeState::from_raw(1),
+            ControllerChargeState::Discharging
+        );
+        assert_eq!(
+            ControllerChargeState::from_raw(2),
+            ControllerChargeState::Charging
+        );
+        assert_eq!(
+            ControllerChargeState::from_raw(4),
+            ControllerChargeState::Charged
+        );
+        assert_eq!(
+            ControllerChargeState::from_raw(3),
+            ControllerChargeState::Unknown(3)
+        );
+    }
+
+    #[test]
+    fn puck_dock_shutdown_is_exact_edge_triggered_and_one_shot() {
+        let config = RuntimeConfig {
+            puck_dock_action: PuckDockAction::PowerOff,
+            ..RuntimeConfig::default()
+        };
+        let puck = controller_info(
+            steam_controller_device::PROTEUS_PRODUCT_ID,
+            steam_controller_device::FIRST_PROTEUS_SLOT_INTERFACE,
+            "USB",
+        );
+        let bluetooth = controller_info(
+            steam_controller_device::STEAM_CONTROLLER_BLUETOOTH_PRODUCT_ID,
+            steam_controller_device::BLUETOOTH_CONTROLLER_INTERFACE,
+            "Bluetooth",
+        );
+        let mut automatic = AutomaticShutdownRuntime::new(&config);
+        automatic.source_selected(&puck, &config);
+        assert!(!automatic.observe_charge_state(
+            &puck,
+            ControllerChargeState::Discharging,
+            PuckDockAction::PowerOff
+        ));
+        assert!(automatic.observe_charge_state(
+            &puck,
+            ControllerChargeState::Charging,
+            PuckDockAction::PowerOff
+        ));
+        automatic.succeeded(Instant::now(), ShutdownTrigger::PuckDock);
+        assert!(!automatic.observe_charge_state(
+            &puck,
+            ControllerChargeState::Charged,
+            PuckDockAction::PowerOff
+        ));
+
+        automatic.source_selected(&puck, &config);
+        assert!(!automatic.observe_charge_state(
+            &puck,
+            ControllerChargeState::Charging,
+            PuckDockAction::PowerOff
+        ));
+        automatic.observe_charge_state(
+            &puck,
+            ControllerChargeState::Discharging,
+            PuckDockAction::PowerOff,
+        );
+        assert!(automatic.observe_charge_state(
+            &puck,
+            ControllerChargeState::Charging,
+            PuckDockAction::PowerOff
+        ));
+        assert!(!automatic.observe_charge_state(
+            &bluetooth,
+            ControllerChargeState::Charging,
+            PuckDockAction::PowerOff
+        ));
+        assert!(!automatic.observe_charge_state(
+            &puck,
+            ControllerChargeState::Unknown(3),
+            PuckDockAction::PowerOff
+        ));
+    }
+
+    #[test]
+    fn power_off_burst_is_scheduled_and_one_success_is_sufficient() {
+        let (ack, _receiver) = mpsc::channel();
+        let writer =
+            FakePowerOffWriter::new([Err("first".to_owned()), Ok(()), Err("third".to_owned())]);
+        let mut sequence = PowerOffSequence::new(ack, Duration::ZERO);
+        assert_eq!(sequence.service(Duration::ZERO, &writer), None);
+        assert_eq!(sequence.service(Duration::from_millis(9), &writer), None);
+        assert_eq!(writer.writes.load(Ordering::Relaxed), 1);
+        assert_eq!(sequence.service(Duration::from_millis(10), &writer), None);
+        assert_eq!(
+            sequence.service(Duration::from_millis(20), &writer),
+            Some(Ok(()))
+        );
+        assert_eq!(writer.writes.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn all_failed_power_off_writes_report_the_last_error() {
+        let (ack, _receiver) = mpsc::channel();
+        let writer = FakePowerOffWriter::new([
+            Err("one".to_owned()),
+            Err("two".to_owned()),
+            Err("three".to_owned()),
+        ]);
+        let mut sequence = PowerOffSequence::new(ack, Duration::ZERO);
+        assert_eq!(sequence.service(Duration::ZERO, &writer), None);
+        assert_eq!(sequence.service(Duration::from_millis(10), &writer), None);
+        assert_eq!(
+            sequence.service(Duration::from_millis(20), &writer),
+            Some(Err("three".to_owned()))
+        );
+    }
+
+    #[test]
     fn start_stop_and_shutdown_are_idempotent_while_waiting() {
         let handle = BridgeRuntime::spawn(RuntimeConfig {
             controller: ControllerSelection::Index(usize::MAX),
             output: OutputSelection::Mock,
             ..RuntimeConfig::default()
         });
+        handle
+            .set_idle_shutdown_timeout(Some(Duration::from_mins(5)))
+            .unwrap();
+        handle
+            .set_idle_shutdown_timeout(Some(Duration::from_mins(5)))
+            .unwrap();
+        handle
+            .set_puck_dock_action(PuckDockAction::PowerOff)
+            .unwrap();
+        let status = handle.status();
+        assert_eq!(
+            status.automatic_shutdown.configured_timeout,
+            Some(Duration::from_mins(5))
+        );
+        assert_eq!(
+            status.automatic_shutdown.puck_dock_action,
+            PuckDockAction::PowerOff
+        );
         handle.stop().unwrap();
         handle.stop().unwrap();
         assert_eq!(handle.status().state, RuntimeState::Stopped);

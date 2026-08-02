@@ -39,6 +39,14 @@ ten-byte SC2 output vector, independent/zero/full-scale channels, latest-value
 coalescing, 25 ms firmware feedback, 40 ms actuator refresh, 100 ms lease
 expiry, 500 ms degraded retry, reconnect clearing, and safety-zero priority.
 
+Automatic-shutdown coverage includes the complete 64-byte `0x9f`/`off!`
+feature vector, exact device allowlist, charge-state typing, meaningful
+activity without report-arrival resets, timeout changes, Puck-only fresh-dock
+detection, one-shot placement latching, scheduled three-write bursts,
+disconnect-after-success handling, failure recovery, runtime command updates,
+and neutral-before-power-off ordering. These portable tests do not prove that
+real hardware accepts or remains asleep after the command.
+
 Recording tests cover typed raw and gamepad round trips, timestamp ordering, unknown events, seeking, deterministic replay, malformed/truncated input, version rejection, and identical simulator-state replay.
 
 Steam Controller protocol tests cover all 30 OpenPuck button bits, every
@@ -105,6 +113,38 @@ strong/weak magnitudes, Boosteroid, GeForce NOW, rapid and continuous effects,
 and zero within 100 ms after effect stop, browser exit, bridge termination, or
 controller/XIAO disconnect. These physical results must not be inferred from unit
 tests or a successful firmware build.
+
+Test the fixed controller power-off command separately before enabling an
+automatic policy on development hardware:
+
+```bash
+cargo run -p sc-probe -- power-off --index N
+```
+
+Run the command for the exact active Puck collection with the controller both
+undocked and docked/charging, then for the exact supported Bluetooth collection.
+Record the `0x43` charge-state sequence for placement and removal. Acceptance
+requires that charging continues while powered off, the controller does not
+immediately reconnect while still docked, pressing Steam wakes it, and the
+post-command state tail fits inside the 2.5-second discovery cooldown. A
+Bluetooth disconnect after at least one successful write is a successful
+outcome. Do not infer any of these results from unit tests.
+
+After that gate, exercise live automatic shutdown with:
+
+```bash
+./sc-bridge --idle-shutdown 5
+./sc-bridge --idle-shutdown never --puck-dock-action power-off
+```
+
+For the idle path, hold every meaningful control beyond the deadline, then
+release to neutral and verify exactly one shutdown after the full interval.
+Verify IMU motion, state-report traffic, rumble, and sub-dead-zone noise do not
+reset the timer. For the Puck path, verify immediate shutdown from a fresh
+charging report, no Bluetooth/USB-cable false positive, no repeat when waking
+on the same placement, re-arming only after `Discharging`, and safe recovery
+from an injected write failure. Stop/Quit must neutralize and restore lizard
+mode without powering the controller off.
 
 Linux CI compiles the hardware-independent API and explicit unsupported-platform implementation; it does not require `hidapi` system libraries or physical hardware.
 

@@ -138,6 +138,31 @@ devices and collections are rejected before a write. Digital-mapping clears,
 arbitrary settings, custom actuator commands, and explicit lizard-on writes
 remain unavailable.
 
+## Restricted controller power-off
+
+The same exact supported-controller allowlist permits one additional feature
+command:
+
+```text
+01 9f 04 6f 66 66 21 00 ... 00
+```
+
+`0x9f` is `TURN_OFF_CONTROLLER`; its four-byte payload is ASCII `off!`. The
+remainder of the 64-byte feature report is zero. The device crate exposes only
+`HidSession::power_off()` and does not expose general feature writes. The live
+runtime sends a short scheduled burst because the Puck relay has no host-visible
+acknowledgement, then ignores the known dying-report tail before discovery.
+
+The `0x43` charge-state byte follows SDL's Triton enumeration: `1` is
+`Discharging`, `2` is `Charging`, and `4` is charging complete/`Charged`;
+reset/source-validation and unrecognized values remain typed `Unknown`. Only a
+fresh charging/charged report from a selected Puck source may drive the opt-in
+immediate-dock policy.
+
+The command and post-off tail behavior are corroborated by
+[OpenPuck's implementation](https://github.com/safijari/openpuck/blob/f0f8c63df16ca5f5fcc94faac47f3bbfd821ff6a/OpenPuck/puck_hid.cpp#L316-L328).
+No AGPL implementation code is copied.
+
 ## Standard dual rumble
 
 The same exact Puck-or-Bluetooth allowlist permits one ordinary HID output

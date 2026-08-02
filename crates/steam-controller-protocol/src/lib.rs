@@ -19,14 +19,16 @@ pub const LIZARD_KEYBOARD_REPORT_SIZE: usize = 9;
 pub const FEATURE_REPORT_SIZE: usize = 64;
 pub const RUMBLE_OUTPUT_REPORT_SIZE: usize = 10;
 pub const RUMBLE_OUTPUT_REPORT_ID: u8 = 0x80;
+pub const POWER_OFF_COMMAND: u8 = 0x9f;
 
 const FEATURE_REPORT_ID: u8 = 0x01;
 const SET_SETTINGS_VALUES: u8 = 0x87;
 const CONTROLLER_SETTING_SIZE: u8 = 3;
 const SETTING_LIZARD_MODE: u8 = 9;
 const LIZARD_MODE_OFF: u16 = 0;
+const POWER_OFF_PAYLOAD: [u8; 4] = *b"off!";
 
-/// Builds the sole controller feature report this project permits.
+/// Builds the fixed lizard-suppression feature report this project permits.
 ///
 /// This matches SDL's Steam Controller 2/Triton lizard-mode suppression
 /// command. The report ID is included in the returned 64-byte buffer.
@@ -40,6 +42,25 @@ pub const fn lizard_mode_off_feature_report() -> [u8; FEATURE_REPORT_SIZE] {
     let value = LIZARD_MODE_OFF.to_le_bytes();
     report[4] = value[0];
     report[5] = value[1];
+    report
+}
+
+/// Builds the sole controller power-management feature report this project
+/// permits.
+///
+/// The fixed `0x9f` command and `off!` payload are used by the official
+/// controller protocol and observed by `OpenPuck`. The report ID is included in
+/// the returned zero-padded 64-byte buffer.
+#[must_use]
+pub const fn power_off_feature_report() -> [u8; FEATURE_REPORT_SIZE] {
+    let mut report = [0_u8; FEATURE_REPORT_SIZE];
+    report[0] = FEATURE_REPORT_ID;
+    report[1] = POWER_OFF_COMMAND;
+    report[2] = 4;
+    report[3] = POWER_OFF_PAYLOAD[0];
+    report[4] = POWER_OFF_PAYLOAD[1];
+    report[5] = POWER_OFF_PAYLOAD[2];
+    report[6] = POWER_OFF_PAYLOAD[3];
     report
 }
 
@@ -404,6 +425,14 @@ mod tests {
             rumble_output_report(u16::MAX, u16::MAX),
             [0x80, 0, 0, 0xff, 0xff, 0, 0xff, 0xff, 0, 0]
         );
+    }
+
+    #[test]
+    fn power_off_feature_report_matches_golden_vector() {
+        let report = power_off_feature_report();
+        assert_eq!(report.len(), FEATURE_REPORT_SIZE);
+        assert_eq!(&report[..7], &[0x01, 0x9f, 0x04, b'o', b'f', b'f', b'!']);
+        assert!(report[7..].iter().all(|byte| *byte == 0));
     }
 
     fn input_report(report_id: u8) -> Vec<u8> {

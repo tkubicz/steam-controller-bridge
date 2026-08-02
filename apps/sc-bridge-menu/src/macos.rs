@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bridge_runtime::{BridgeHandle, BridgeRuntime, BridgeStatus, RuntimeConfig};
+use bridge_runtime::{BridgeHandle, BridgeRuntime, BridgeStatus, PuckDockAction, RuntimeConfig};
+use serde::{Deserialize, Serialize};
 use tiny_skia::{
     FillRule, LineCap, LineJoin, Paint, Path as SkiaPath, PathBuilder, Pixmap, Stroke, Transform,
 };
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -28,6 +29,84 @@ const COPY_ID: &str = "copy-diagnostics";
 const SETTINGS_ID: &str = "input-monitoring";
 const LOGS_ID: &str = "open-logs";
 const QUIT_ID: &str = "quit";
+const IDLE_NEVER_ID: &str = "idle-never";
+const IDLE_5_ID: &str = "idle-5";
+const IDLE_10_ID: &str = "idle-10";
+const IDLE_15_ID: &str = "idle-15";
+const IDLE_30_ID: &str = "idle-30";
+const PUCK_DOCK_ID: &str = "puck-dock-power-off";
+const SETTINGS_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AppSettings {
+    version: u32,
+    idle_shutdown_minutes: Option<u64>,
+    power_off_on_puck: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            version: SETTINGS_VERSION,
+            idle_shutdown_minutes: Some(15),
+            power_off_on_puck: false,
+        }
+    }
+}
+
+fn settings_path() -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or("HOME is not set; cannot locate the application settings directory")?;
+    Ok(home.join("Library/Application Support/Steam Controller Bridge/settings.json"))
+}
+
+fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (AppSettings::default(), None);
+        }
+        Err(error) => {
+            return (
+                AppSettings::default(),
+                Some(format!("cannot read '{}': {error}", path.display())),
+            );
+        }
+    };
+    let parsed = serde_json::from_slice::<AppSettings>(&bytes).map_err(|error| error.to_string());
+    match parsed {
+        Ok(settings)
+            if settings.version == SETTINGS_VERSION
+                && settings
+                    .idle_shutdown_minutes
+                    .is_none_or(|minutes| matches!(minutes, 5 | 10 | 15 | 30)) =>
+        {
+            (settings, None)
+        }
+        Ok(settings) => (
+            AppSettings::default(),
+            Some(format!(
+                "unsupported or invalid settings version/options: {settings:?}"
+            )),
+        ),
+        Err(error) => (
+            AppSettings::default(),
+            Some(format!("invalid settings JSON: {error}")),
+        ),
+    }
+}
+
+fn save_settings(path: &Path, settings: &AppSettings) -> Result<(), String> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| format!("settings path '{}' has no parent", path.display()))?;
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let temporary = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
+    fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
+    fs::rename(&temporary, path).map_err(|error| error.to_string())
+}
 
 pub fn run() -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|error| error.to_string())?;
@@ -45,10 +124,13 @@ struct MenuItems {
     xiao: MenuItem,
     battery: MenuItem,
     haptics: MenuItem,
+    automatic_shutdown: MenuItem,
     problem: MenuItem,
     start: MenuItem,
     stop: MenuItem,
     copy_error: MenuItem,
+    idle_shutdown: Vec<(Option<u64>, CheckMenuItem)>,
+    puck_dock: CheckMenuItem,
 }
 
 struct MenuApp {
@@ -59,23 +141,44 @@ struct MenuApp {
     last_model: Option<MenuModel>,
     next_poll: Instant,
     logger: StatusLogger,
+    settings: AppSettings,
+    settings_path: PathBuf,
     shutting_down: bool,
 }
 
 impl MenuApp {
     fn new() -> Result<Self, String> {
+        let settings_path = settings_path()?;
+        let (settings, warning) = load_settings(&settings_path);
+        if let Some(warning) = warning {
+            eprintln!("level=warn event=settings_load_failed message={warning:?} action=defaults");
+        }
+        let config = RuntimeConfig {
+            idle_shutdown_timeout: settings
+                .idle_shutdown_minutes
+                .map(|minutes| Duration::from_secs(minutes * 60)),
+            puck_dock_action: if settings.power_off_on_puck {
+                PuckDockAction::PowerOff
+            } else {
+                PuckDockAction::LeaveOn
+            },
+            ..RuntimeConfig::default()
+        };
         Ok(Self {
-            runtime: BridgeRuntime::spawn(RuntimeConfig::default()),
+            runtime: BridgeRuntime::spawn(config),
             tray: None,
             items: None,
             last_revision: u64::MAX,
             last_model: None,
             next_poll: Instant::now(),
             logger: StatusLogger::new()?,
+            settings,
+            settings_path,
             shutting_down: false,
         })
     }
 
+    #[allow(clippy::too_many_lines)] // Native menu construction keeps item ownership and order together.
     fn create_tray(&mut self) -> Result<(), String> {
         let bridge = MenuItem::new("Bridge: Starting", false, None);
         let status = MenuItem::new("Status: Looking for hardware", false, None);
@@ -84,6 +187,7 @@ impl MenuApp {
         let xiao = MenuItem::new("XIAO: Discovering", false, None);
         let battery = MenuItem::new("Battery: Unknown", false, None);
         let haptics = MenuItem::new("Haptics: Idle", false, None);
+        let automatic_shutdown = MenuItem::new("Auto shutdown: Idle 0:00 / 15:00", false, None);
         let problem = MenuItem::new("Problem: None", false, None);
         let start = MenuItem::with_id(START_ID, "Start Bridge", false, None);
         let stop = MenuItem::with_id(STOP_ID, "Stop Bridge", true, None);
@@ -92,6 +196,74 @@ impl MenuApp {
         let settings = MenuItem::with_id(SETTINGS_ID, "Open Input Monitoring Settings", true, None);
         let logs = MenuItem::with_id(LOGS_ID, "Open Log Folder", true, None);
         let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
+        let idle_shutdown = vec![
+            (
+                None,
+                CheckMenuItem::with_id(
+                    IDLE_NEVER_ID,
+                    "Never",
+                    true,
+                    self.settings.idle_shutdown_minutes.is_none(),
+                    None,
+                ),
+            ),
+            (
+                Some(5),
+                CheckMenuItem::with_id(
+                    IDLE_5_ID,
+                    "5 minutes",
+                    true,
+                    self.settings.idle_shutdown_minutes == Some(5),
+                    None,
+                ),
+            ),
+            (
+                Some(10),
+                CheckMenuItem::with_id(
+                    IDLE_10_ID,
+                    "10 minutes",
+                    true,
+                    self.settings.idle_shutdown_minutes == Some(10),
+                    None,
+                ),
+            ),
+            (
+                Some(15),
+                CheckMenuItem::with_id(
+                    IDLE_15_ID,
+                    "15 minutes",
+                    true,
+                    self.settings.idle_shutdown_minutes == Some(15),
+                    None,
+                ),
+            ),
+            (
+                Some(30),
+                CheckMenuItem::with_id(
+                    IDLE_30_ID,
+                    "30 minutes",
+                    true,
+                    self.settings.idle_shutdown_minutes == Some(30),
+                    None,
+                ),
+            ),
+        ];
+        let idle_submenu = Submenu::with_items(
+            "Idle Shutdown",
+            true,
+            &idle_shutdown
+                .iter()
+                .map(|(_, item)| item as &dyn tray_icon::menu::IsMenuItem)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| error.to_string())?;
+        let puck_dock = CheckMenuItem::with_id(
+            PUCK_DOCK_ID,
+            "Turn Off When Placed on Puck",
+            true,
+            self.settings.power_off_on_puck,
+            None,
+        );
         let separator1 = PredefinedMenuItem::separator();
         let separator2 = PredefinedMenuItem::separator();
         let separator3 = PredefinedMenuItem::separator();
@@ -105,12 +277,15 @@ impl MenuApp {
             &xiao,
             &battery,
             &haptics,
+            &automatic_shutdown,
             &separator2,
             &problem,
             &copy_error,
             &separator3,
             &start,
             &stop,
+            &idle_submenu,
+            &puck_dock,
             &separator4,
             &copy,
             &settings,
@@ -133,10 +308,13 @@ impl MenuApp {
             xiao,
             battery,
             haptics,
+            automatic_shutdown,
             problem,
             start,
             stop,
             copy_error,
+            idle_shutdown,
+            puck_dock,
         });
         self.tray = Some(tray);
         self.refresh_status();
@@ -162,6 +340,7 @@ impl MenuApp {
                 items.xiao.set_text(&model.xiao);
                 items.battery.set_text(&model.battery);
                 items.haptics.set_text(&model.haptics);
+                items.automatic_shutdown.set_text(&model.automatic_shutdown);
                 items.problem.set_text(&model.problem);
                 items.start.set_enabled(model.start_enabled);
                 items.stop.set_enabled(model.stop_enabled);
@@ -203,6 +382,41 @@ impl MenuApp {
                     eprintln!("cannot stop bridge: {error}");
                 }
             }
+            IDLE_NEVER_ID | IDLE_5_ID | IDLE_10_ID | IDLE_15_ID | IDLE_30_ID => {
+                let minutes = match id {
+                    IDLE_NEVER_ID => None,
+                    IDLE_5_ID => Some(5),
+                    IDLE_10_ID => Some(10),
+                    IDLE_15_ID => Some(15),
+                    IDLE_30_ID => Some(30),
+                    _ => unreachable!(),
+                };
+                let timeout = minutes.map(|minutes| Duration::from_secs(minutes * 60));
+                if let Err(error) = self.runtime.request_set_idle_shutdown_timeout(timeout) {
+                    eprintln!("cannot update idle shutdown: {error}");
+                } else {
+                    self.settings.idle_shutdown_minutes = minutes;
+                    self.update_setting_checkmarks();
+                    if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+                        eprintln!("cannot save menu settings: {error}");
+                    }
+                }
+            }
+            PUCK_DOCK_ID => {
+                self.settings.power_off_on_puck = !self.settings.power_off_on_puck;
+                let action = if self.settings.power_off_on_puck {
+                    PuckDockAction::PowerOff
+                } else {
+                    PuckDockAction::LeaveOn
+                };
+                if let Err(error) = self.runtime.request_set_puck_dock_action(action) {
+                    self.settings.power_off_on_puck = !self.settings.power_off_on_puck;
+                    eprintln!("cannot update Puck dock action: {error}");
+                } else if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+                    eprintln!("cannot save menu settings: {error}");
+                }
+                self.update_setting_checkmarks();
+            }
             COPY_ERROR_ID => {
                 if let Some(error) = self.runtime.status().last_error {
                     if let Err(copy_error) = copy_text(&error) {
@@ -242,6 +456,15 @@ impl MenuApp {
         self.shutting_down = true;
         if let Err(error) = self.runtime.shutdown() {
             eprintln!("bridge shutdown failed: {error}");
+        }
+    }
+
+    fn update_setting_checkmarks(&self) {
+        if let Some(items) = &self.items {
+            for (minutes, item) in &items.idle_shutdown {
+                item.set_checked(*minutes == self.settings.idle_shutdown_minutes);
+            }
+            items.puck_dock.set_checked(self.settings.power_off_on_puck);
         }
     }
 }
@@ -460,11 +683,12 @@ impl StatusLogger {
             "timestamp={timestamp} revision={} state={:?} detail={:?} \
              input_connected={} input_active={} input_transport={:?} \
              input_product={:?} input_serial={} controller_connected={} xiao_path={:?} \
-             xiao_serial={} battery={:?} lizard_suppressed={} \
+             xiao_serial={} battery={:?} charge_state={:?} lizard_suppressed={} \
              lizard_refreshes={} lizard_failures={} lizard_refresh_age_ms={:?} last_error={:?} \
              haptics_state={:?} rumble_commands={} rumble_writes={} rumble_refreshes={} \
              rumble_coalesced={} rumble_failures={} rumble_command_age_ms={:?} \
-             input_reports={} dropped_reports={} output_packets={} state_refreshes={}",
+             input_reports={} dropped_reports={} output_packets={} state_refreshes={} \
+             automatic_shutdown={:?}",
             status.revision,
             status.state,
             status.detail,
@@ -487,6 +711,7 @@ impl StatusLogger {
             status.xiao.path,
             bridge_runtime::mask_serial_for_display(status.xiao.usb_serial.as_deref()),
             status.battery_percent,
+            status.battery_charge_state,
             status.lizard.suppressed,
             status.lizard.refreshes,
             status.lizard.failures,
@@ -502,7 +727,8 @@ impl StatusLogger {
             status.bridge_metrics.input_reports,
             status.bridge_metrics.dropped_input_reports,
             status.bridge_metrics.output_packets,
-            status.output_diagnostics.state_refreshes
+            status.output_diagnostics.state_refreshes,
+            status.automatic_shutdown
         )
         .map_err(|error| error.to_string())?;
         self.last_status = Some(status.clone());
@@ -529,10 +755,18 @@ fn meaningful_status_changed(previous: &BridgeStatus, current: &BridgeStatus) ->
         || previous.controller.connected != current.controller.connected
         || previous.xiao != current.xiao
         || previous.battery_percent != current.battery_percent
+        || previous.battery_charge_state != current.battery_charge_state
         || previous.lizard.suppressed != current.lizard.suppressed
         || previous.lizard.failures != current.lizard.failures
         || previous.haptics.state != current.haptics.state
         || previous.haptics.failures != current.haptics.failures
+        || previous.automatic_shutdown.phase != current.automatic_shutdown.phase
+        || previous.automatic_shutdown.trigger != current.automatic_shutdown.trigger
+        || previous.automatic_shutdown.puck_dock_action
+            != current.automatic_shutdown.puck_dock_action
+        || previous.automatic_shutdown.puck_dock_episode_handled
+            != current.automatic_shutdown.puck_dock_episode_handled
+        || previous.automatic_shutdown.failures != current.automatic_shutdown.failures
         || previous.last_error != current.last_error
 }
 
@@ -559,8 +793,14 @@ fn diagnostics_text(status: &BridgeStatus) -> String {
     let _ = writeln!(text, "controller: {:?}", status.controller);
     let _ = writeln!(text, "xiao: {:?}", status.xiao);
     let _ = writeln!(text, "battery_percent: {:?}", status.battery_percent);
+    let _ = writeln!(
+        text,
+        "battery_charge_state: {:?}",
+        status.battery_charge_state
+    );
     let _ = writeln!(text, "lizard: {:?}", status.lizard);
     let _ = writeln!(text, "haptics: {:?}", status.haptics);
+    let _ = writeln!(text, "automatic_shutdown: {:?}", status.automatic_shutdown);
     let _ = writeln!(text, "bridge_metrics: {:?}", status.bridge_metrics);
     let _ = writeln!(text, "output_diagnostics: {:?}", status.output_diagnostics);
     let _ = writeln!(text, "last_error: {:?}", status.last_error);
@@ -606,6 +846,44 @@ fn open_path(path: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn temporary_settings_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "steam-controller-bridge-{name}-{}-settings.json",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn menu_settings_round_trip_and_invalid_data_falls_back() {
+        let path = temporary_settings_path("round-trip");
+        let settings = AppSettings {
+            version: SETTINGS_VERSION,
+            idle_shutdown_minutes: None,
+            power_off_on_puck: true,
+        };
+        save_settings(&path, &settings).unwrap();
+        assert_eq!(load_settings(&path), (settings, None));
+
+        fs::write(&path, b"not json").unwrap();
+        let (fallback, warning) = load_settings(&path);
+        assert_eq!(fallback, AppSettings::default());
+        assert!(warning.is_some());
+
+        save_settings(
+            &path,
+            &AppSettings {
+                version: SETTINGS_VERSION + 1,
+                idle_shutdown_minutes: Some(1),
+                power_off_on_puck: true,
+            },
+        )
+        .unwrap();
+        let (fallback, warning) = load_settings(&path);
+        assert_eq!(fallback, AppSettings::default());
+        assert!(warning.is_some());
+        let _ = fs::remove_file(path);
+    }
+
     #[test]
     fn diagnostics_include_hardware_and_safety_state() {
         let text = diagnostics_text(&BridgeStatus::default());
@@ -613,6 +891,7 @@ mod tests {
         assert!(text.contains("xiao:"));
         assert!(text.contains("lizard:"));
         assert!(text.contains("haptics:"));
+        assert!(text.contains("automatic_shutdown:"));
         assert!(text.contains("output_diagnostics:"));
     }
 
