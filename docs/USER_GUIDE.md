@@ -746,4 +746,5 @@ but a broadly distributable product should additionally provide:
   depend on another vendor's Xbox 360 compatibility identity;
 - hardware qualification of dual-rumble expiry and disconnect timing, beyond
   the confirmed delivery path;
-- versioned releases and a supported upgrade/recovery procedure.
+- Developer ID signing, notarization, and a supported upgrade/recovery
+  procedure beyond the current versioned GitHub downloads.

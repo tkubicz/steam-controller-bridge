@@ -1,16 +1,9 @@
 # Changelog
 
-All notable changes to this project are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses
+Release Please generates this file from Conventional Commit squash merges. Do
+not edit release entries by hand; correct the originating pull-request metadata
+and let the release pull request regenerate them. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-### Fixed
-
-- Reuse the four native macOS menu-bar status images instead of constructing a
-  fresh `NSImage` on every Ready/Waiting/Off/Error transition. This prevents
-  long-running menu apps from accumulating AppKit/CoreUI/ColorSync cache entries.
 
 ## [1.0.0] - 2026-07-30
 
@@ -69,5 +62,4 @@ First public release. macOS only, and Steam Controller 2 (2026) only.
 - Steam coexistence, multiple simultaneous controllers, and other HID consumers
   against the selected collection are unsupported.
 
-[Unreleased]: https://github.com/tkubicz/steam-controller-bridge/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/tkubicz/steam-controller-bridge/releases/tag/v1.0.0

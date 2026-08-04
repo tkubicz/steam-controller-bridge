@@ -101,6 +101,15 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 No physical hardware is required. The recording crate uses the established `serde`, `serde_json`, and `base64` crates; the timing, protocol, output, and simulator paths otherwise use the standard library.
 
+## Contributing and releases
+
+Pull requests use Conventional Commit titles and squash merging. Release Please
+turns those merged titles into the workspace version, `CHANGELOG.md`, the
+version tag, and the matching GitHub Release notes. Maintainers review and merge
+the generated release pull request; they do not maintain a second set of notes
+or create version tags manually. See [CONTRIBUTING.md](CONTRIBUTING.md) for title
+formats, multi-entry changes, and the stable-release procedure.
+
 ## Daily use
 
 After flashing the XIAO, connecting the Steam Controller 2 through its official

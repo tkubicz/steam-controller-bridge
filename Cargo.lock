@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bridge-output",
  "controller-mapper",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-output"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bridge-protocol",
  "gamepad-state",
@@ -219,14 +219,14 @@ dependencies = [
 
 [[package]]
 name = "bridge-protocol"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "gamepad-state",
 ]
 
 [[package]]
 name = "bridge-runtime"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bridge-core",
  "bridge-output",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "controller-mapper"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "gamepad-state",
  "steam-controller-protocol",
@@ -985,7 +985,7 @@ dependencies = [
 
 [[package]]
 name = "gamepad-simulator"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bridge-output",
  "gamepad-state",
@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "gamepad-state"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "gdk"
@@ -2623,7 +2623,7 @@ dependencies = [
 
 [[package]]
 name = "recording"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64",
  "bridge-output",
@@ -2741,7 +2741,7 @@ dependencies = [
 
 [[package]]
 name = "sc-bridge"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bridge-core",
  "bridge-output",
@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "sc-bridge-menu"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bridge-runtime",
  "objc2 0.6.4",
@@ -2767,7 +2767,7 @@ dependencies = [
 
 [[package]]
 name = "sc-probe"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ctrlc",
  "recording",
@@ -2778,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "sc-replay"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bridge-output",
  "recording",
@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "sc-visualizer"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bridge-output",
  "controller-mapper",
@@ -3050,7 +3050,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "steam-controller-device"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "hidapi",
  "rustix 1.1.4",
@@ -3059,7 +3059,7 @@ dependencies = [
 
 [[package]]
 name = "steam-controller-protocol"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
 ]

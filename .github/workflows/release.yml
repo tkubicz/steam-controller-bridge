@@ -2,19 +2,80 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+  workflow_dispatch:
 
-permissions:
-  contents: write
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions: {}
 
 jobs:
+  release_please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      release_sha: ${{ steps.release.outputs.sha }}
+      release_body: ${{ steps.release.outputs.body }}
+    steps:
+      - name: Create or update the release pull request
+        id: release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
+        with:
+          token: ${{ github.token }}
+          target-branch: main
+
+      # Pull requests created with GITHUB_TOKEN do not start ordinary CI
+      # automatically. workflow_dispatch is an explicit GitHub-supported
+      # exception, so validate the generated head without a PAT.
+      - name: Dispatch CI for the release pull request
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR: ${{ steps.release.outputs.pr }}
+        run: |
+          set -euo pipefail
+          branch=$(jq -r '.headBranchName // empty' <<<"${RELEASE_PR}")
+          if [[ -z "${branch}" ]]; then
+            echo "Release Please did not return a release-PR branch" >&2
+            exit 1
+          fi
+          gh workflow run ci.yml --repo "${GITHUB_REPOSITORY}" --ref "${branch}"
+
+  validate:
+    needs: release_please
+    if: needs.release_please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release_please.outputs.release_sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+      - run: cargo build --workspace --all-targets
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   firmware:
-    # macOS only, for the same reason as the CI artifact job: the pinned Seeed
-    # nRF52 core bundles adafruit-nrfutil for macOS and Windows, and on Linux its
-    # recipe falls back to a bare PATH lookup that nothing satisfies.
+    needs: release_please
+    if: needs.release_please.outputs.release_created == 'true'
+    # The pinned Seeed core bundles adafruit-nrfutil for macOS and Windows. Its
+    # Linux recipe instead expects an unavailable executable on PATH.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release_please.outputs.release_sha }}
       - name: Install Arduino CLI
         uses: arduino/setup-arduino-cli@v2
       - name: Install pinned Seeed nRF52 core
@@ -29,9 +90,13 @@ jobs:
           path: firmware/xiao-nrf52840/build/artifacts/
 
   macos-app:
+    needs: release_please
+    if: needs.release_please.outputs.release_created == 'true'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release_please.outputs.release_sha }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Build and ad-hoc sign menu-bar application
         run: ./tools/build-macos-app.sh
@@ -43,33 +108,52 @@ jobs:
           path: steam-controller-bridge-macos.zip
 
   publish:
-    needs: [firmware, macos-app]
+    needs: [release_please, validate, firmware, macos-app]
+    if: needs.release_please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v7
         with:
           path: artifacts
-      - name: Collect release files
+      - name: Collect and checksum release files
         run: |
-          set -eu
+          set -euo pipefail
           mkdir -p release
           mv artifacts/firmware/steam-controller-bridge-xiao-nrf52840.uf2 release/
           mv artifacts/firmware/steam-controller-bridge-xiao-nrf52840-dfu.zip release/
           mv artifacts/macos-app/steam-controller-bridge-macos.zip release/
-          # Published so users can verify a download before flashing hardware.
-          cd release && shasum -a 256 * > SHA256SUMS.txt && cat SHA256SUMS.txt
-      - name: Publish release
+          cd release
+          sha256sum steam-controller-bridge-* > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+      - name: Verify the generated draft
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_BODY: ${{ needs.release_please.outputs.release_body }}
+          RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
         run: |
-          set -eu
-          # Pre-releases (v0.1.0-rc1 and similar) are flagged so a dry run never
-          # displaces the latest stable release.
-          prerelease=""
-          case "${GITHUB_REF_NAME}" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            ${prerelease} \
-            release/*
+          set -euo pipefail
+          gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --json body,isDraft > release-metadata.json
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("release-metadata.json", encoding="utf-8") as metadata_file:
+              metadata = json.load(metadata_file)
+          if not metadata["isDraft"]:
+              raise SystemExit("refusing to upload to a release that is already public")
+          if metadata["body"].rstrip() != os.environ["RELEASE_BODY"].rstrip():
+              raise SystemExit("GitHub release body differs from generated CHANGELOG notes")
+          PY
+      - name: Upload artifacts and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --clobber release/*
+          gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --draft=false --latest
