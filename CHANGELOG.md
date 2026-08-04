@@ -5,6 +5,18 @@ not edit release entries by hand; correct the originating pull-request metadata
 and let the release pull request regenerate them. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.0.0...v1.1.0) (2026-08-04)
+
+
+### Features
+
+* add configurable controller idle shutdown ([05f399c](https://github.com/tkubicz/steam-controller-bridge/commit/05f399ca55dcc44f6e13cf16b9f50f01cdb96b62))
+
+
+### Bug Fixes
+
+* **menu:** reuse native status images to bound memory usage ([05f399c](https://github.com/tkubicz/steam-controller-bridge/commit/05f399ca55dcc44f6e13cf16b9f50f01cdb96b62))
+
 ## [1.0.0] - 2026-07-30
 
 First public release. macOS only, and Steam Controller 2 (2026) only.
