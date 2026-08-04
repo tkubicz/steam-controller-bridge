@@ -25,6 +25,9 @@ jobs:
       release_sha: ${{ steps.release.outputs.sha }}
       release_body: ${{ steps.release.outputs.body }}
     steps:
+      - name: Check out the target branch
+        uses: actions/checkout@v7
+
       - name: Create or update the release pull request
         id: release
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
