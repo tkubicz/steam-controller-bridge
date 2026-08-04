@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bridge_runtime::{BridgeHandle, BridgeRuntime, BridgeStatus, PuckDockAction, RuntimeConfig};
+use bridge_runtime::{
+    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, PuckDockAction,
+    RuntimeConfig, StatusLogRecord, StatusLogTracker,
+};
 use objc2::{rc::Retained, MainThreadMarker};
 use objc2_app_kit::{NSImage, NSStatusBarButton};
 use serde::{Deserialize, Serialize};
@@ -22,8 +25,8 @@ use winit::window::WindowId;
 use crate::model::{MenuModel, TrayState};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
-const PERIODIC_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const LOG_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
+const LOG_TRUNCATION_MARKER: &str = " log_truncated=true\n";
 const START_ID: &str = "start";
 const STOP_ID: &str = "stop";
 const COPY_ERROR_ID: &str = "copy-error";
@@ -329,6 +332,9 @@ impl MenuApp {
 
     fn refresh_status(&mut self) {
         let status = self.runtime.status();
+        if let Err(error) = self.logger.write_status(&status) {
+            eprintln!("cannot write menu-app diagnostics: {error}");
+        }
         if status.revision == self.last_revision {
             return;
         }
@@ -361,9 +367,6 @@ impl MenuApp {
                 let _ = tray.set_tooltip(Some(model.tray_state.tooltip()));
             }
             self.last_model = Some(model);
-        }
-        if let Err(error) = self.logger.write_status(&status) {
-            eprintln!("cannot write menu-app diagnostics: {error}");
         }
         self.last_revision = status.revision;
     }
@@ -690,8 +693,9 @@ fn fill_icon_circle(
 struct StatusLogger {
     directory: PathBuf,
     path: PathBuf,
-    last_status: Option<BridgeStatus>,
-    last_write: Option<Instant>,
+    started: Instant,
+    tracker: StatusLogTracker,
+    pending_batch: Option<String>,
 }
 
 impl StatusLogger {
@@ -710,123 +714,101 @@ impl StatusLogger {
         Ok(Self {
             directory,
             path,
-            last_status: None,
-            last_write: None,
+            started: Instant::now(),
+            tracker: StatusLogTracker::default(),
+            pending_batch: None,
         })
     }
 
     fn write_status(&mut self, status: &BridgeStatus) -> Result<(), String> {
-        let now = Instant::now();
-        if !status_log_due(now, self.last_write, self.last_status.as_ref(), status) {
+        self.flush_pending()?;
+        let records = self.tracker.observe(self.started.elapsed(), status);
+        if records.is_empty() {
             return Ok(());
         }
-        rotate_log(&self.path)?;
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let mut log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(|error| error.to_string())?;
-        writeln!(
-            log,
-            "timestamp={timestamp} revision={} state={:?} detail={:?} \
-             input_connected={} input_active={} input_transport={:?} \
-             input_product={:?} input_serial={} controller_connected={} xiao_path={:?} \
-             xiao_serial={} battery={:?} charge_state={:?} lizard_suppressed={} \
-             lizard_refreshes={} lizard_failures={} lizard_refresh_age_ms={:?} last_error={:?} \
-             haptics_state={:?} rumble_commands={} rumble_writes={} rumble_refreshes={} \
-             rumble_coalesced={} rumble_failures={} rumble_command_age_ms={:?} \
-             input_reports={} dropped_reports={} output_packets={} state_refreshes={} \
-             automatic_shutdown={:?}",
-            status.revision,
-            status.state,
-            status.detail,
-            status.source.connected,
-            status.source.active,
-            status.source.transport,
-            status
-                .source
-                .identity
-                .as_ref()
-                .and_then(|info| info.product.as_deref()),
-            bridge_runtime::mask_serial_for_display(
-                status
-                    .source
-                    .identity
-                    .as_ref()
-                    .and_then(|info| info.serial_number.as_deref()),
-            ),
-            status.controller.connected,
-            status.xiao.path,
-            bridge_runtime::mask_serial_for_display(status.xiao.usb_serial.as_deref()),
-            status.battery_percent,
-            status.battery_charge_state,
-            status.lizard.suppressed,
-            status.lizard.refreshes,
-            status.lizard.failures,
-            status.lizard.last_refresh_age.map(|age| age.as_millis()),
-            status.last_error,
-            status.haptics.state,
-            status.haptics.commands_received,
-            status.haptics.writes,
-            status.haptics.refreshes,
-            status.haptics.coalesced_commands,
-            status.haptics.failures,
-            status.haptics.last_command_age.map(|age| age.as_millis()),
-            status.bridge_metrics.input_reports,
-            status.bridge_metrics.dropped_input_reports,
-            status.bridge_metrics.output_packets,
-            status.output_diagnostics.state_refreshes,
-            status.automatic_shutdown
-        )
-        .map_err(|error| error.to_string())?;
-        self.last_status = Some(status.clone());
-        self.last_write = Some(now);
+        self.write_records(&records, unix_timestamp())
+    }
+
+    #[cfg(test)]
+    fn write_status_at(
+        &mut self,
+        status: &BridgeStatus,
+        elapsed: Duration,
+        timestamp: u64,
+    ) -> Result<(), String> {
+        self.flush_pending()?;
+        let records = self.tracker.observe(elapsed, status);
+        if records.is_empty() {
+            return Ok(());
+        }
+        self.write_records(&records, timestamp)
+    }
+
+    fn write_records(&mut self, records: &[StatusLogRecord], timestamp: u64) -> Result<(), String> {
+        let mut batch = String::new();
+        for record in records {
+            let _ = writeln!(batch, "timestamp={timestamp} {record}");
+        }
+        let batch = bounded_log_batch(batch);
+        if let Err(error) = write_log_batch(&self.path, &batch) {
+            self.pending_batch = Some(batch);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn flush_pending(&mut self) -> Result<(), String> {
+        let Some(batch) = self.pending_batch.take() else {
+            return Ok(());
+        };
+        if let Err(error) = write_log_batch(&self.path, &batch) {
+            self.pending_batch = Some(batch);
+            return Err(error);
+        }
         Ok(())
     }
 }
 
-fn status_log_due(
-    now: Instant,
-    last_write: Option<Instant>,
-    previous: Option<&BridgeStatus>,
-    current: &BridgeStatus,
-) -> bool {
-    last_write
-        .is_none_or(|last_write| now.saturating_duration_since(last_write) >= PERIODIC_LOG_INTERVAL)
-        || previous.is_none_or(|previous| meaningful_status_changed(previous, current))
+fn write_log_batch(path: &Path, batch: &str) -> Result<(), String> {
+    rotate_log(path, batch.len() as u64)?;
+    let mut log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    log.write_all(batch.as_bytes())
+        .map_err(|error| error.to_string())
 }
 
-fn meaningful_status_changed(previous: &BridgeStatus, current: &BridgeStatus) -> bool {
-    previous.state != current.state
-        || previous.detail != current.detail
-        || previous.source != current.source
-        || previous.controller.connected != current.controller.connected
-        || previous.xiao != current.xiao
-        || previous.battery_percent != current.battery_percent
-        || previous.battery_charge_state != current.battery_charge_state
-        || previous.lizard.suppressed != current.lizard.suppressed
-        || previous.lizard.failures != current.lizard.failures
-        || previous.haptics.state != current.haptics.state
-        || previous.haptics.failures != current.haptics.failures
-        || previous.automatic_shutdown.phase != current.automatic_shutdown.phase
-        || previous.automatic_shutdown.trigger != current.automatic_shutdown.trigger
-        || previous.automatic_shutdown.puck_dock_action
-            != current.automatic_shutdown.puck_dock_action
-        || previous.automatic_shutdown.puck_dock_episode_handled
-            != current.automatic_shutdown.puck_dock_episode_handled
-        || previous.automatic_shutdown.failures != current.automatic_shutdown.failures
-        || previous.last_error != current.last_error
+fn bounded_log_batch(mut batch: String) -> String {
+    // Writing a log line must not be able to panic. A limit that does not fit
+    // usize cannot be exceeded by an in-memory batch anyway, so saturating to
+    // usize::MAX simply means "never truncate" on such a platform.
+    let limit = usize::try_from(LOG_LIMIT_BYTES).unwrap_or(usize::MAX);
+    if batch.len() <= limit {
+        return batch;
+    }
+    let mut end = limit.saturating_sub(LOG_TRUNCATION_MARKER.len());
+    while !batch.is_char_boundary(end) {
+        end -= 1;
+    }
+    batch.truncate(end);
+    batch.push_str(LOG_TRUNCATION_MARKER);
+    batch
 }
 
-fn rotate_log(path: &Path) -> Result<(), String> {
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn rotate_log(path: &Path, incoming_bytes: u64) -> Result<(), String> {
     let Ok(metadata) = path.metadata() else {
         return Ok(());
     };
-    if metadata.len() < LOG_LIMIT_BYTES {
+    if metadata.len() == 0 || metadata.len().saturating_add(incoming_bytes) <= LOG_LIMIT_BYTES {
         return Ok(());
     }
     let rotated = path.with_extension("log.1");
@@ -837,26 +819,7 @@ fn rotate_log(path: &Path) -> Result<(), String> {
 }
 
 fn diagnostics_text(status: &BridgeStatus) -> String {
-    let mut text = String::new();
-    let _ = writeln!(text, "Steam Controller Bridge diagnostics");
-    let _ = writeln!(text, "state: {:?}", status.state);
-    let _ = writeln!(text, "detail: {}", status.detail);
-    let _ = writeln!(text, "input_source: {:?}", status.source);
-    let _ = writeln!(text, "controller: {:?}", status.controller);
-    let _ = writeln!(text, "xiao: {:?}", status.xiao);
-    let _ = writeln!(text, "battery_percent: {:?}", status.battery_percent);
-    let _ = writeln!(
-        text,
-        "battery_charge_state: {:?}",
-        status.battery_charge_state
-    );
-    let _ = writeln!(text, "lizard: {:?}", status.lizard);
-    let _ = writeln!(text, "haptics: {:?}", status.haptics);
-    let _ = writeln!(text, "automatic_shutdown: {:?}", status.automatic_shutdown);
-    let _ = writeln!(text, "bridge_metrics: {:?}", status.bridge_metrics);
-    let _ = writeln!(text, "output_diagnostics: {:?}", status.output_diagnostics);
-    let _ = writeln!(text, "last_error: {:?}", status.last_error);
-    text
+    format_status_diagnostics(status)
 }
 
 fn copy_diagnostics(status: &BridgeStatus) -> Result<(), String> {
@@ -905,6 +868,23 @@ mod tests {
         ))
     }
 
+    fn temporary_log_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "steam-controller-bridge-{name}-{}-sc-bridge.log",
+            std::process::id()
+        ))
+    }
+
+    fn test_logger(path: PathBuf) -> StatusLogger {
+        StatusLogger {
+            directory: path.parent().unwrap().to_path_buf(),
+            path,
+            started: Instant::now(),
+            tracker: StatusLogTracker::default(),
+            pending_batch: None,
+        }
+    }
+
     #[test]
     fn menu_settings_round_trip_and_invalid_data_falls_back() {
         let path = temporary_settings_path("round-trip");
@@ -939,7 +919,7 @@ mod tests {
     #[test]
     fn diagnostics_include_hardware_and_safety_state() {
         let text = diagnostics_text(&BridgeStatus::default());
-        assert!(text.contains("input_source:"));
+        assert!(text.contains("source:"));
         assert!(text.contains("xiao:"));
         assert!(text.contains("lizard:"));
         assert!(text.contains("haptics:"));
@@ -948,45 +928,108 @@ mod tests {
     }
 
     #[test]
-    fn status_logging_is_immediate_for_transitions_and_periodic_for_metrics() {
-        let now = Instant::now();
+    fn menu_logger_writes_periodic_snapshots_without_a_revision_change() {
+        let path = temporary_log_path("periodic");
+        let _ = fs::remove_file(&path);
+        let mut logger = test_logger(path.clone());
+        let status = BridgeStatus::default();
+        logger
+            .write_status_at(&status, Duration::ZERO, 100)
+            .unwrap();
+        logger
+            .write_status_at(&status, bridge_runtime::STATUS_SNAPSHOT_INTERVAL, 400)
+            .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("event=status_snapshot").count(), 2);
+        assert!(text.contains("reason=startup"));
+        assert!(text.contains("reason=periodic"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rotation_keeps_an_error_change_and_snapshot_in_the_same_file() {
+        let path = temporary_log_path("rotation");
+        let rotated = path.with_extension("log.1");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&rotated);
+        let mut logger = test_logger(path.clone());
         let initial = BridgeStatus::default();
-        assert!(status_log_due(now, None, None, &initial));
+        logger
+            .write_status_at(&initial, Duration::ZERO, 100)
+            .unwrap();
+        fs::write(
+            &path,
+            vec![b'x'; usize::try_from(LOG_LIMIT_BYTES - 16).unwrap()],
+        )
+        .unwrap();
 
-        let mut metrics_only = initial.clone();
-        metrics_only.revision += 1;
-        metrics_only.bridge_metrics.input_reports += 64;
-        metrics_only.controller.last_state_age = Some(Duration::from_millis(2));
-        assert!(!status_log_due(
-            now + Duration::from_secs(1),
-            Some(now),
-            Some(&initial),
-            &metrics_only
-        ));
-        assert!(status_log_due(
-            now + PERIODIC_LOG_INTERVAL,
-            Some(now),
-            Some(&initial),
-            &metrics_only
-        ));
-
-        let mut transitioned = metrics_only.clone();
-        transitioned.state = bridge_runtime::RuntimeState::Running;
-        assert!(status_log_due(
-            now + Duration::from_millis(1),
-            Some(now),
-            Some(&initial),
-            &transitioned
-        ));
-
-        let mut failed = metrics_only;
+        let mut failed = initial;
+        failed.revision = 1;
         failed.last_error = Some("controller failed".to_owned());
-        assert!(status_log_due(
-            now + Duration::from_millis(1),
-            Some(now),
-            Some(&initial),
-            &failed
+        logger
+            .write_status_at(&failed, Duration::from_secs(1), 101)
+            .unwrap();
+
+        let active = fs::read_to_string(&path).unwrap();
+        assert!(active.contains("event=status_change"));
+        assert!(active.contains("event=status_snapshot reason=error"));
+        assert!(rotated.metadata().unwrap().len() >= LOG_LIMIT_BYTES - 16);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(rotated);
+    }
+
+    #[test]
+    fn failed_writes_are_retried_without_losing_the_record() {
+        let directory = std::env::temp_dir().join(format!(
+            "steam-controller-bridge-retry-{}",
+            std::process::id()
         ));
+        let path = directory.join("sc-bridge.log");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&directory);
+        let mut logger = test_logger(path.clone());
+        let status = BridgeStatus::default();
+
+        assert!(logger
+            .write_status_at(&status, Duration::ZERO, 100)
+            .is_err());
+        fs::create_dir_all(&directory).unwrap();
+        logger
+            .write_status_at(&status, Duration::from_secs(1), 101)
+            .unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("event=status_snapshot").count(), 1);
+        assert!(text.contains("timestamp=100"));
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir(directory);
+    }
+
+    #[test]
+    fn oversized_error_batches_are_explicitly_truncated_to_the_log_limit() {
+        let path = temporary_log_path("oversized");
+        let rotated = path.with_extension("log.1");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&rotated);
+        let mut logger = test_logger(path.clone());
+        let initial = BridgeStatus::default();
+        logger
+            .write_status_at(&initial, Duration::ZERO, 100)
+            .unwrap();
+
+        let mut failed = initial;
+        failed.revision = 1;
+        failed.last_error = Some("x".repeat(usize::try_from(LOG_LIMIT_BYTES).unwrap() + 1_024));
+        logger
+            .write_status_at(&failed, Duration::from_secs(1), 101)
+            .unwrap();
+
+        let active = fs::read(&path).unwrap();
+        assert_eq!(active.len(), usize::try_from(LOG_LIMIT_BYTES).unwrap());
+        assert!(active.ends_with(LOG_TRUNCATION_MARKER.as_bytes()));
+        assert!(rotated.metadata().unwrap().len() < LOG_LIMIT_BYTES);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(rotated);
     }
 
     /// Copy Diagnostics is what the troubleshooting guide tells users to paste

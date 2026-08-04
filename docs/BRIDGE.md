@@ -192,7 +192,11 @@ The app starts the runtime automatically and exposes Start, Stop, Input
 Monitoring settings, log folder, and Quit.
 
 Structured status transitions are written with bounded rotation under
-`~/Library/Logs/Steam Controller Bridge/`. The bundle identifier is
-`com.lynxware.steam-controller-bridge`, `LSUIElement` removes ordinary Dock
-presence, and the source-build package is ad-hoc signed. Developer ID signing,
-notarization, DMG distribution, and Launch at Login are intentionally deferred.
+`~/Library/Logs/Steam Controller Bridge/`. Meaningful transitions use concise
+`status_change` records; full `status_snapshot` records are written on startup,
+every five minutes even when the revision is unchanged, and immediately for a
+new error or failure-counter increase. The CLI uses the same records on stderr.
+The bundle identifier is `com.lynxware.steam-controller-bridge`, `LSUIElement`
+removes ordinary Dock presence, and the source-build package is ad-hoc signed.
+Developer ID signing, notarization, DMG distribution, and Launch at Login are
+intentionally deferred.

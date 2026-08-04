@@ -311,8 +311,11 @@ Bridge/`. The menu-bar icon distinguishes Off, On but waiting, Controller ready,
 and Action required states. Friendly problem summaries stay bounded; use
 `Copy Full Error`, `Copy Diagnostics`, or the rotated log folder for the
 complete technical detail. Start/Stop, Input Monitoring settings, and Quit are
-also available. This source-built application is not notarized; release
-signing, a DMG, and Launch at Login remain future work.
+also available. Logs write concise `status_change` records immediately, full
+`status_snapshot` records at startup and every five minutes, and an immediate
+full snapshot when an error or failure appears. This source-built application
+is not notarized; release signing, a DMG, and Launch at Login remain future
+work.
 
 ## Known limitations
 

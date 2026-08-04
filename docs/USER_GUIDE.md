@@ -518,6 +518,18 @@ Logs rotate at a bounded size under:
 ~/Library/Logs/Steam Controller Bridge/
 ```
 
+The active `sc-bridge.log` and one `sc-bridge.log.1` file are limited to 2 MiB
+each. `event=status_change` lines contain only meaningful fields that changed,
+so controller and hardware transitions are easy to spot. A complete
+`event=status_snapshot` is written at startup and every five minutes, including
+metrics and continuously changing ages. A new error or an increase in decode,
+framing, checksum, lizard, haptics, or automatic-shutdown failures writes an
+immediate full snapshot with `reason=error`. An unchanged persistent error is
+not repeated on every status revision.
+
+The `sc-bridge` command uses the same change and snapshot records on stderr,
+but terminal output is not written to or rotated in the menu app's log folder.
+
 Menu choices are applied to the running bridge without restarting it and saved
 atomically in:
 

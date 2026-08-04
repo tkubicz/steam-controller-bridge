@@ -12,8 +12,8 @@ use bridge_output::{
     DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput, SerialConfig, SerialOutput,
 };
 use bridge_runtime::{
-    BridgeRuntime, BridgeStatus, ControllerSelection, LizardMode, OutputSelection, PuckDockAction,
-    RuntimeConfig, RuntimeState, SerialSelection, MAX_IDLE_SHUTDOWN_TIMEOUT,
+    BridgeRuntime, ControllerSelection, LizardMode, OutputSelection, PuckDockAction, RuntimeConfig,
+    RuntimeState, SerialSelection, StatusLogTracker, MAX_IDLE_SHUTDOWN_TIMEOUT,
 };
 use recording::{ReplayOptions, ReplaySession, ReplayTiming};
 
@@ -53,13 +53,11 @@ fn run_live(args: &[String]) -> Result<(), String> {
     ctrlc::set_handler(move || signal_stop.store(true, Ordering::Release))
         .map_err(|error| format!("cannot install Ctrl-C handler: {error}"))?;
     let started = Instant::now();
-    let mut last_summary = None;
+    let mut status_log = StatusLogTracker::default();
     let result = loop {
         let status = handle.status();
-        let summary = status_summary(&status);
-        if last_summary.as_ref() != Some(&summary) {
-            log_status(&status);
-            last_summary = Some(summary);
+        for record in status_log.observe(started.elapsed(), &status) {
+            eprintln!("{record}");
         }
         if status.state == RuntimeState::Error {
             break Err(status.last_error.unwrap_or_else(|| status.detail.clone()));
@@ -72,105 +70,6 @@ fn run_live(args: &[String]) -> Result<(), String> {
     };
     let shutdown = handle.shutdown().map_err(|error| error.to_string());
     result.and(shutdown)
-}
-
-fn status_summary(status: &BridgeStatus) -> String {
-    format!(
-        "{:?}|{}|{:?}|{}|{:?}|{:?}|{}|{}|{}|{:?}|{}|{}|{:?}|{:?}|{:?}|{}|{}|{}|{}",
-        status.state,
-        status.detail,
-        status.source,
-        status.controller.connected,
-        status.xiao.path,
-        status.battery_percent,
-        status.lizard.suppressed,
-        status.lizard.refreshes,
-        status.lizard.failures,
-        status.haptics.state,
-        status.haptics.refreshes / 25,
-        status.haptics.failures,
-        status.last_error,
-        status.automatic_shutdown.phase,
-        status.automatic_shutdown.trigger,
-        status.automatic_shutdown.puck_dock_episode_handled,
-        status.automatic_shutdown.successful_shutdowns,
-        status.automatic_shutdown.failures,
-        status
-            .automatic_shutdown
-            .neutral_idle_age
-            .map_or(0, |age| age.as_secs() / 60)
-    )
-}
-
-fn log_status(status: &BridgeStatus) {
-    eprintln!(
-        "level=info event=status state={:?} detail={:?} input_connected={} \
-         input_active={} input_transport={:?} input_product={:?} input_serial={} \
-         controller_connected={} xiao_path={:?} battery={:?} charge_state={:?} \
-         lizard_suppressed={} lizard_refreshes={} lizard_failures={} lizard_refresh_age_ms={:?}",
-        status.state,
-        status.detail,
-        status.source.connected,
-        status.source.active,
-        status.source.transport,
-        status
-            .source
-            .identity
-            .as_ref()
-            .and_then(|info| info.product.as_deref()),
-        bridge_runtime::mask_serial_for_display(
-            status
-                .source
-                .identity
-                .as_ref()
-                .and_then(|info| info.serial_number.as_deref()),
-        ),
-        status.controller.connected,
-        status.xiao.path,
-        status.battery_percent,
-        status.battery_charge_state,
-        status.lizard.suppressed,
-        status.lizard.refreshes,
-        status.lizard.failures,
-        status.lizard.last_refresh_age.map(|age| age.as_millis())
-    );
-    eprintln!(
-        "level=info event=automatic_shutdown phase={:?} trigger={:?} \
-         idle_timeout_secs={:?} idle_age_ms={:?} puck_dock_action={:?} \
-         puck_dock_handled={} successes={} failures={} retry_after_ms={:?}",
-        status.automatic_shutdown.phase,
-        status.automatic_shutdown.trigger,
-        status
-            .automatic_shutdown
-            .configured_timeout
-            .map(|timeout| timeout.as_secs()),
-        status
-            .automatic_shutdown
-            .neutral_idle_age
-            .map(|age| age.as_millis()),
-        status.automatic_shutdown.puck_dock_action,
-        status.automatic_shutdown.puck_dock_episode_handled,
-        status.automatic_shutdown.successful_shutdowns,
-        status.automatic_shutdown.failures,
-        status
-            .automatic_shutdown
-            .retry_after
-            .map(|delay| delay.as_millis())
-    );
-    eprintln!(
-        "level=info event=haptics state={:?} commands={} writes={} refreshes={} \
-         coalesced={} failures={} last_command_age_ms={:?}",
-        status.haptics.state,
-        status.haptics.commands_received,
-        status.haptics.writes,
-        status.haptics.refreshes,
-        status.haptics.coalesced_commands,
-        status.haptics.failures,
-        status.haptics.last_command_age.map(|age| age.as_millis())
-    );
-    if let Some(error) = &status.last_error {
-        eprintln!("level=warn event=status_error message={error:?}");
-    }
 }
 
 fn live_config(args: &[String]) -> Result<RuntimeConfig, String> {
