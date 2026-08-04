@@ -31,25 +31,17 @@ Release Please uses that block in place of the squash title. Correct inaccurate
 notes in the merged pull-request metadata and rerun Release Please; do not edit
 `CHANGELOG.md` or the GitHub Release independently.
 
-For the initial automated release only, the pull request that introduces idle
-shutdown and this release workflow must use this complete override so the two
-user-visible changes remain distinct and the bootstrap version is deterministic:
-
-```text
-BEGIN_COMMIT_OVERRIDE
-feat: add configurable controller idle shutdown
-
-fix(menu): reuse native status images to bound memory usage
-
-Release-As: 1.1.0
-END_COMMIT_OVERRIDE
-```
-
 ## Releasing
 
 Release Please runs after changes land on `main` and maintains a release pull
 request containing the generated `CHANGELOG.md`, Cargo workspace version,
 `Cargo.lock`, and version manifest. To publish a stable release:
+
+The repository is one versioned product: every member inherits
+`workspace.package.version` through `version.workspace = true`. The root Rust
+release strategy discovers and updates all members and the lockfile. Do not add
+Release Please's `cargo-workspace` plugin; it expects literal member versions
+and rejects Cargo's inherited-version syntax.
 
 1. Review the generated notes and version in the Release Please pull request.
 2. Fix source pull-request metadata if an entry is inaccurate, then rerun the
