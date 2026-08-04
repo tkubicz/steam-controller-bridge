@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Reuse the four native macOS menu-bar status images instead of constructing a
+  fresh `NSImage` on every Ready/Waiting/Off/Error transition. This prevents
+  long-running menu apps from accumulating AppKit/CoreUI/ColorSync cache entries.
+
 ## [1.0.0] - 2026-07-30
 
 First public release. macOS only, and Steam Controller 2 (2026) only.

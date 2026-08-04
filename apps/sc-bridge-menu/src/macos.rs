@@ -6,6 +6,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bridge_runtime::{BridgeHandle, BridgeRuntime, BridgeStatus, PuckDockAction, RuntimeConfig};
+use objc2::{rc::Retained, MainThreadMarker};
+use objc2_app_kit::{NSImage, NSStatusBarButton};
 use serde::{Deserialize, Serialize};
 use tiny_skia::{
     FillRule, LineCap, LineJoin, Paint, Path as SkiaPath, PathBuilder, Pixmap, Stroke, Transform,
@@ -136,6 +138,7 @@ struct MenuItems {
 struct MenuApp {
     runtime: BridgeHandle,
     tray: Option<TrayIcon>,
+    tray_icons: Option<NativeTrayIcons>,
     items: Option<MenuItems>,
     last_revision: u64,
     last_model: Option<MenuModel>,
@@ -167,6 +170,7 @@ impl MenuApp {
         Ok(Self {
             runtime: BridgeRuntime::spawn(config),
             tray: None,
+            tray_icons: None,
             items: None,
             last_revision: u64::MAX,
             last_model: None,
@@ -300,6 +304,7 @@ impl MenuApp {
             .with_icon_as_template(true)
             .build()
             .map_err(|error| error.to_string())?;
+        let tray_icons = NativeTrayIcons::capture(&tray)?;
         self.items = Some(MenuItems {
             bridge,
             status,
@@ -316,6 +321,7 @@ impl MenuApp {
             idle_shutdown,
             puck_dock,
         });
+        self.tray_icons = Some(tray_icons);
         self.tray = Some(tray);
         self.refresh_status();
         Ok(())
@@ -348,16 +354,8 @@ impl MenuApp {
             }
             if let Some(tray) = &self.tray {
                 if icon_changed {
-                    match template_icon(model.tray_state) {
-                        Ok(icon) => {
-                            // `set_icon` installs a non-template NSImage on macOS even when
-                            // the tray was originally built with `with_icon_as_template`.
-                            // Mark every replacement as a template so AppKit recolors it.
-                            if let Err(error) = tray.set_icon_with_as_template(Some(icon), true) {
-                                eprintln!("cannot update menu-bar icon: {error}");
-                            }
-                        }
-                        Err(error) => eprintln!("cannot render menu-bar icon: {error}"),
+                    if let Some(icons) = &self.tray_icons {
+                        icons.install(model.tray_state);
                     }
                 }
                 let _ = tray.set_tooltip(Some(model.tray_state.tooltip()));
@@ -466,6 +464,60 @@ impl MenuApp {
             }
             items.puck_dock.set_checked(self.settings.power_off_on_puck);
         }
+    }
+}
+
+struct NativeTrayIcons {
+    button: Retained<NSStatusBarButton>,
+    off: Retained<NSImage>,
+    waiting: Retained<NSImage>,
+    ready: Retained<NSImage>,
+    error: Retained<NSImage>,
+}
+
+impl NativeTrayIcons {
+    fn capture(tray: &TrayIcon) -> Result<Self, String> {
+        let mtm =
+            MainThreadMarker::new().ok_or("menu-bar icons must be created on the main thread")?;
+        let status_item = tray
+            .ns_status_item()
+            .ok_or("tray-icon did not create a native macOS status item")?;
+        let button = status_item
+            .button(mtm)
+            .ok_or("the native macOS status item has no button")?;
+        let waiting = button
+            .image()
+            .ok_or("tray-icon did not install the initial menu-bar image")?;
+        let render = |state| {
+            tray.set_icon_with_as_template(Some(template_icon(state)?), true)
+                .map_err(|error| error.to_string())?;
+            button
+                .image()
+                .ok_or_else(|| "tray-icon did not install a menu-bar status image".to_owned())
+        };
+        let off = render(TrayState::Off)?;
+        let ready = render(TrayState::Ready)?;
+        let error = render(TrayState::Error)?;
+
+        let icons = Self {
+            button,
+            off,
+            waiting,
+            ready,
+            error,
+        };
+        icons.install(TrayState::Waiting);
+        Ok(icons)
+    }
+
+    fn install(&self, state: TrayState) {
+        let image = match state {
+            TrayState::Off => &self.off,
+            TrayState::Waiting => &self.waiting,
+            TrayState::Ready => &self.ready,
+            TrayState::Error => &self.error,
+        };
+        self.button.setImage(Some(image));
     }
 }
 

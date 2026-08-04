@@ -42,9 +42,11 @@ game/browser -> Xbox OUT -> XIAO -> CDC Rumble -> bridge-runtime
 - `sc-probe` lists and inspects all HID collections, monitors one explicitly selected collection, and records raw lifecycle/report events plus optional decoded states. It does not contain hard-coded device identifiers or feature-report bytes.
 - `sc-visualizer` owns the optional `eframe` GUI. A dedicated HID polling thread feeds a bounded 64-event channel; the UI drains it into decoder, mapper, recording, and mock-output diagnostics without introducing GUI dependencies into any library or CLI.
 - `sc-bridge` is a thin command-line frontend over `bridge-runtime` for live input and `recording` for replay. Its live defaults are automatic discovery plus serial output.
-- `sc-bridge-menu` is a macOS-only, windowless `winit`/`tray-icon` frontend over the same runtime. It owns menu rendering, actions, log rotation, and local `.app` packaging, not controller logic.
+- `sc-bridge-menu` is a macOS-only, windowless `winit`/`tray-icon` frontend over the same runtime. It owns menu rendering, actions, log rotation, and local `.app` packaging, not controller logic. At startup it renders the four status states once, retains their native images through `tray-icon`'s documented `NSStatusItem` access, and swaps those same objects on transitions instead of creating new AppKit/CoreUI cache identities.
 
-All crates forbid unsafe code. Only the recording layer uses third-party serialization and base64 libraries. The GUI, HID, mapping, and serial layers remain separate components.
+All project-authored crates forbid unsafe code. Only the recording layer uses
+third-party serialization and base64 libraries. The GUI, HID, mapping, and
+serial layers remain separate components.
 
 ## Lifecycle and safety
 

@@ -18,6 +18,8 @@ steam-controller-device = { path = "../../crates/steam-controller-device" }
 tiny-skia.workspace = true
 tray-icon.workspace = true
 winit.workspace = true
+objc2.workspace = true
+objc2-app-kit.workspace = true
 
 [lints]
 workspace = true

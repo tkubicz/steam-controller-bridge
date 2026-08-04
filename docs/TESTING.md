@@ -173,6 +173,13 @@ an `LSUIElement` `.app`, ad-hoc signs and verifies it, archives it, and uploads
 the bundle artifact. This proves source packaging, not Developer ID trust or
 notarization.
 
+The menu app renders and retains one native image for each of its four status
+states at startup. A native memory stress run cycles them 1,000 times and
+compares `leaks` memory graphs before and after. Acceptance requires the 352 KiB
+CoreUI/ColorSync allocation count, decoded 48 KiB image count, and
+definite leaked-byte count to remain unchanged; ordinary Rust heap tests cannot
+substitute for this AppKit check.
+
 The 2026-07-27 development-hardware smoke test additionally confirmed:
 
 - the active Puck slot produced valid extended `0x42` reports at about 250 Hz;
