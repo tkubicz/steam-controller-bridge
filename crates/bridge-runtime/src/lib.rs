@@ -39,6 +39,13 @@ use steam_controller_protocol::{
     INPUT_REPORT_ID,
 };
 
+mod status_log;
+
+pub use status_log::{
+    format_status_diagnostics, StatusLogChange, StatusLogLevel, StatusLogRecord,
+    StatusLogRecordKind, StatusLogTracker, StatusSnapshotReason, STATUS_SNAPSHOT_INTERVAL,
+};
+
 use idle_shutdown::IdleActivityTracker;
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_millis(500);
@@ -1634,7 +1641,7 @@ impl Supervisor {
     }
 
     fn transition(&self, state: RuntimeState, detail: &str, error: Option<&str>) {
-        let changed = self.update_status(|status| {
+        self.update_status(|status| {
             status.state = state;
             detail.clone_into(&mut status.detail);
             if let Some(error) = error {
@@ -1643,16 +1650,6 @@ impl Supervisor {
                 status.last_error = None;
             }
         });
-        if changed {
-            let level = if state == RuntimeState::Error {
-                "error"
-            } else {
-                "info"
-            };
-            eprintln!(
-                "level={level} event=runtime_state state={state:?} detail={detail:?} error={error:?}"
-            );
-        }
     }
 
     fn current_state(&self) -> RuntimeState {
