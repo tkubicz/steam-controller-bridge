@@ -393,6 +393,41 @@ The diagnostic option
 `--lizard-mode leave` retains the old native keyboard/mouse behavior and is not
 suitable for gameplay.
 
+### Extra-button desktop bindings
+
+The menu app can bind L4, L5, R4, R5, and Quick Access to keyboard chords or
+left/right/middle/back/forward mouse buttons. Choose `Bindings -> Edit
+Bindings…`, create or edit a profile, and Save. At launch the app automatically
+requests Input Monitoring through the original controller HID-open path. Once
+macOS reports that grant, it requests Accessibility before a profile needs any
+bindings, avoiding simultaneous system prompts. This adds the app under **System
+Settings -> Privacy & Security -> Accessibility**. Grant access there if macOS
+opens Settings; the bridge detects the change and enables bindings without a
+restart. The native request registers the app, so the manual `+` file picker is
+not part of the normal flow. `Request Accessibility Permission…` and `Open
+Accessibility Settings` are available for a request that was previously denied.
+Accessibility is separate from Input Monitoring.
+
+The profile file is
+`~/Library/Application Support/Steam Controller Bridge/bindings.json` and is
+reloaded after a valid atomic editor save. Profile switches release old held
+outputs and wait for already-held controller buttons to be released. Stop,
+Quit, disconnect, output failure, and permission loss also release all held
+desktop inputs. A desktop binding failure reports Permission required or
+Degraded while the standard gamepad continues running.
+
+For opt-in CLI use, both arguments are required:
+
+```bash
+./sc-bridge \
+  --bindings "$HOME/Library/Application Support/Steam Controller Bridge/bindings.json" \
+  --profile Default
+```
+
+Replay rejects these arguments. Pads-as-pointer/scroll, trigger clicks, and
+configurable stick clicks are not part of this milestone. See
+[Desktop bindings](DESKTOP_BINDINGS.md) for schema and edge behavior.
+
 ### Automatic controller shutdown
 
 The live serial bridge defaults to turning the controller off after 15 minutes

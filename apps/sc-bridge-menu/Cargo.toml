@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 bridge-runtime = { path = "../../crates/bridge-runtime" }
+desktop-bindings = { path = "../../crates/desktop-bindings" }
 serde.workspace = true
 serde_json.workspace = true
 
@@ -15,6 +16,7 @@ serde_json.workspace = true
 steam-controller-device = { path = "../../crates/steam-controller-device" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+eframe.workspace = true
 tiny-skia.workspace = true
 tray-icon.workspace = true
 winit.workspace = true

@@ -83,7 +83,8 @@ Status distinguishes `Stopped`, `Discovering`, `Waiting`, `Starting`,
 `Running`, `Stopping`, and `Error`. It includes selected input identity and
 `ControllerTransport::{Puck, Bluetooth}`, controller-state connectivity, XIAO
 path/serial/Hello state, lizard refresh state, haptics idle/active/degraded
-state and counters, a best-effort battery percentage from `0x43`,
+state and counters, desktop binding profile/permission/held-output/failure
+state, a best-effort battery percentage from `0x43`,
 typed `Discharging`/`Charging`/`Charged` charge state, automatic-shutdown
 phase/trigger/counters,
 bridge/output metrics, and the latest actionable error. Battery values above
@@ -95,8 +96,11 @@ CLI subprocess.
 
 ## Lifecycle and safety
 
-Input reports use one replaceable latest-state slot. New snapshots overwrite
-stale motion if output temporarily stalls; lifecycle events remain ordered.
+Input reports use a bounded 64-entry transition-preserving mailbox. New analog
+snapshots overwrite only the newest queued state with the same desktop-binding
+mask; bindable button changes remain ordered. Overflow releases all injected
+desktop inputs, clears stale transitions, and retains the newest snapshot as a
+new non-emitting baseline; lifecycle events remain ordered.
 The bridge sends neutral after 200 ms without a valid controller state or after
 three consecutive decode failures.
 
@@ -189,7 +193,9 @@ The template icon reflects the whole usable path: an x badge means Off,
 ellipsis means On but waiting for hardware, a check means the controller
 source and XIAO are both ready, and an exclamation mark means Action required.
 The app starts the runtime automatically and exposes Start, Stop, Input
-Monitoring settings, log folder, and Quit.
+Monitoring settings, a dynamic Bindings profile submenu/editor, Accessibility
+settings, log folder, and Quit. Binding failures have their own
+ready/permission/degraded status and never stop gamepad output.
 
 Structured status transitions are written with bounded rotation under
 `~/Library/Logs/Steam Controller Bridge/`. Meaningful transitions use concise

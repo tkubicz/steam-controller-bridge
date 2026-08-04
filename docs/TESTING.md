@@ -163,10 +163,23 @@ refreshed state delivery have been exercised with a flashed XIAO.
 
 Runtime and CLI tests cover zero-argument defaults, explicit controller/port
 overrides, exact XIAO metadata filtering, callout-versus-tty filtering,
-battery-range handling, latest-report replacement, and replay's unchanged dump
-default. Menu-model tests cover Puck/Bluetooth source rendering, battery
+battery-range handling, transition-preserving report coalescing and overflow,
+paired live binding-profile flags, replay injection rejection, and replay's
+unchanged dump default. Desktop-binding tests cover schema/profile validation,
+atomic default creation and persistence, baseline suppression, edge ordering,
+overlapping reference counts, profile-switch suppression, rapid mouse
+transitions, disconnect cleanup, sink failure recovery, and explicit macOS key
+conversions. Menu tests cover settings-v1 migration plus Puck/Bluetooth source rendering, battery
 unknown/percentage, haptics state, error visibility, and Start/Stop enablement.
 macOS tests build the tray frontend, diagnostics renderer, and template icon.
+On a clean TCC state, launching the packaged menu app must retain the original
+Input Monitoring behavior: the controller runtime's `IOHIDDeviceOpen` attempt
+causes the system dialog, with no explicit Core Graphics `ListenEvent` request.
+It must not issue `PostEvent` or Accessibility while Input Monitoring is still
+pending. After the IOHID grant is detected, it requests `PostEvent` and then the
+adapter's Accessibility trust, even when the Default profile is all-unbound.
+The app must appear in both Privacy & Security lists without using the `+` file
+picker; grants must be detected without a restart.
 
 The `macos-app` CI job builds the current-architecture release binary, creates
 an `LSUIElement` `.app`, ad-hoc signs and verifies it, archives it, and uploads
@@ -227,6 +240,12 @@ writes and an explicit final zero without a HID error.
 Bluetooth full-control mapping, lizard suppression, rumble, reconnect,
 sleep/wake, refresh failure handling, and fault timing remain hardware
 acceptance work until explicitly recorded here.
+
+Desktop bindings also require hardware acceptance on both Puck `0x42` and
+Bluetooth `0x45`: capture each of L4/L5/R4/R5/Quick Access individually, verify
+rapid taps and held outputs, F5/F9 in a foreground test app, all five mouse
+buttons where recognized, and no stuck input across Stop, disconnect, profile
+switch, and Accessibility revocation.
 
 Bridge-core tests cover changed-state suppression, timeout neutralization,
 disconnect/reset/shutdown neutralization, repeated decode failures, and HID

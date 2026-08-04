@@ -13,10 +13,10 @@ cargo deny check licenses
 cargo metadata --format-version 1 --filter-platform aarch64-apple-darwin
 ```
 
-## Embedded fonts — `sc-visualizer` only
+## Embedded fonts — `sc-visualizer` and bindings editor
 
 `epaint_default_fonts`, reached through `eframe` → `egui` → `epaint`, embeds font
-binaries directly into the `sc-visualizer` executable. The crate as a whole is
+binaries directly into the `sc-visualizer` and `sc-bridge-menu` executables. The crate as a whole is
 `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0`.
 
 | Font | License |
@@ -32,8 +32,14 @@ Full texts ship inside the crate as `fonts/UFL.txt`, `fonts/Hack-Regular.txt`,
 
 Neither the SIL OFL nor the Ubuntu Font Licence restricts distributing a program
 that embeds the fonts. Both require that their notices travel with the binary,
-which is the purpose of this file. `sc-bridge` and `sc-bridge-menu` do not depend
-on `epaint_default_fonts` and embed no fonts.
+which is the purpose of this file. The menu binary uses these fonts only in its
+`--bindings-editor` window; `sc-bridge` embeds no fonts.
+
+## `enigo`
+
+`enigo` provides the replaceable macOS keyboard/mouse injection adapter used by
+opt-in desktop bindings. It is used unmodified under the MIT license. Source:
+<https://github.com/enigo-rs/enigo>
 
 ## `serialport` — Mozilla Public License 2.0
 

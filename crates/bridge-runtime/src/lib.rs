@@ -7,6 +7,7 @@
 
 mod idle_shutdown;
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
 use std::path::PathBuf;
@@ -22,6 +23,7 @@ use bridge_output::{
     OutputDiagnostics, OutputFeedback, SerialConfig, SerialDeviceInfo, SerialOutput,
 };
 use controller_mapper::MapperConfig;
+use desktop_bindings::{bindable_mask, BindingEngine, BindingProfile, DesktopInputSink};
 use recording::{
     RecordingError, RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED,
     KIND_DEVICE_DISCONNECTED,
@@ -36,7 +38,7 @@ use steam_controller_device::{
 pub use steam_controller_device::masked_serial as mask_serial_for_display;
 use steam_controller_protocol::{
     ConnectionState, DecodedReport, SteamControllerDecoder, EXTENDED_INPUT_REPORT_ID,
-    INPUT_REPORT_ID,
+    EXTENDED_INPUT_REPORT_SIZE, INPUT_REPORT_ID, INPUT_REPORT_SIZE,
 };
 
 mod status_log;
@@ -53,12 +55,14 @@ const MIN_STABLE_CONTROLLER_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_STABLE_CONTROLLER_SCAN_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_DISCOVERY_REPORTS_PER_CANDIDATE: usize = 4;
 const ACTIVE_SLOT_TIMEOUT: Duration = Duration::from_secs(1);
+const INPUT_MAILBOX_CAPACITY: usize = 64;
 const STATUS_INTERVAL: Duration = Duration::from_millis(250);
 const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const RUMBLE_REFRESH_INTERVAL: Duration = Duration::from_millis(40);
 const RUMBLE_LEASE_TIMEOUT: Duration = Duration::from_millis(100);
 const RUMBLE_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+const DESKTOP_BINDINGS_PERMISSION_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_IDLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_mins(15);
 const AUTOMATIC_SHUTDOWN_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const POWER_OFF_COOLDOWN: Duration = Duration::from_millis(2_500);
@@ -139,6 +143,8 @@ pub struct RuntimeConfig {
     pub recording_path: Option<PathBuf>,
     pub idle_shutdown_timeout: Option<Duration>,
     pub puck_dock_action: PuckDockAction,
+    /// Optional desktop-input profile. `None` keeps injection completely disabled.
+    pub binding_profile: Option<BindingProfile>,
 }
 
 impl Default for RuntimeConfig {
@@ -155,6 +161,7 @@ impl Default for RuntimeConfig {
             recording_path: None,
             idle_shutdown_timeout: Some(DEFAULT_IDLE_SHUTDOWN_TIMEOUT),
             puck_dock_action: PuckDockAction::LeaveOn,
+            binding_profile: None,
         }
     }
 }
@@ -232,6 +239,26 @@ pub struct HapticsStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DesktopBindingsState {
+    #[default]
+    Disabled,
+    Ready,
+    PermissionRequired,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DesktopBindingsStatus {
+    pub state: DesktopBindingsState,
+    pub active_profile_id: Option<String>,
+    pub active_profile_name: Option<String>,
+    pub configured_binding_count: usize,
+    pub held_output_count: usize,
+    pub failures: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AutomaticShutdownPhase {
     #[default]
     Disabled,
@@ -290,6 +317,7 @@ pub struct BridgeStatus {
     pub battery_charge_state: Option<ControllerChargeState>,
     pub lizard: LizardStatus,
     pub haptics: HapticsStatus,
+    pub bindings: DesktopBindingsStatus,
     pub automatic_shutdown: AutomaticShutdownStatus,
     pub bridge_metrics: BridgeMetrics,
     pub output_diagnostics: OutputDiagnostics,
@@ -309,6 +337,7 @@ impl Default for BridgeStatus {
             battery_charge_state: None,
             lizard: LizardStatus::default(),
             haptics: HapticsStatus::default(),
+            bindings: DesktopBindingsStatus::default(),
             automatic_shutdown: AutomaticShutdownStatus::default(),
             bridge_metrics: BridgeMetrics::default(),
             output_diagnostics: OutputDiagnostics::default(),
@@ -336,6 +365,8 @@ enum RuntimeCommand {
     Shutdown(CommandAck),
     SetIdleShutdown(Option<Duration>, CommandAck),
     SetPuckDockAction(PuckDockAction, CommandAck),
+    SetBindingProfile(Option<BindingProfile>, CommandAck),
+    EnableDesktopBindings(CommandAck),
 }
 
 pub struct BridgeRuntime;
@@ -352,6 +383,7 @@ impl BridgeRuntime {
                 phase: automatic_shutdown_phase(&config),
                 ..AutomaticShutdownStatus::default()
             },
+            bindings: DesktopBindingsRuntime::new(config.binding_profile.clone()).status(),
             ..BridgeStatus::default()
         }));
         let worker_status = Arc::clone(&status);
@@ -410,6 +442,25 @@ impl BridgeHandle {
         self.request(|ack| RuntimeCommand::SetPuckDockAction(action, ack))
     }
 
+    /// Queues a binding-profile switch without restarting HID or serial.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has stopped.
+    pub fn request_set_binding_profile(
+        &self,
+        profile: Option<BindingProfile>,
+    ) -> Result<(), RuntimeError> {
+        self.request(|ack| RuntimeCommand::SetBindingProfile(profile, ack))
+    }
+
+    /// Explicitly asks macOS to enable desktop bindings, allowing a permission prompt.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has stopped.
+    pub fn request_enable_desktop_bindings(&self) -> Result<(), RuntimeError> {
+        self.request(RuntimeCommand::EnableDesktopBindings)
+    }
+
     /// Requests an idempotent runtime start and waits until the request is accepted.
     ///
     /// # Errors
@@ -441,6 +492,22 @@ impl BridgeHandle {
     /// Returns an error if the runtime thread has stopped.
     pub fn set_puck_dock_action(&self, action: PuckDockAction) -> Result<(), RuntimeError> {
         self.command(|ack| RuntimeCommand::SetPuckDockAction(action, ack))
+    }
+
+    /// Switches the active binding profile without restarting HID or serial.
+    ///
+    /// # Errors
+    /// Returns an error when profile cleanup fails or the runtime has stopped.
+    pub fn set_binding_profile(&self, profile: Option<BindingProfile>) -> Result<(), RuntimeError> {
+        self.command(|ack| RuntimeCommand::SetBindingProfile(profile, ack))
+    }
+
+    /// Explicitly retries desktop-input initialization and may show macOS's prompt.
+    ///
+    /// # Errors
+    /// Returns an error when permission/backend initialization fails.
+    pub fn enable_desktop_bindings(&self) -> Result<(), RuntimeError> {
+        self.command(RuntimeCommand::EnableDesktopBindings)
     }
 
     /// Stops safely and terminates the runtime thread.
@@ -677,6 +744,207 @@ impl AutomaticShutdownRuntime {
 struct ControllerCooldown {
     info: HidDeviceInfo,
     until: Instant,
+}
+
+fn binding_status_for_profile(profile: Option<&BindingProfile>) -> DesktopBindingsStatus {
+    let Some(profile) = profile else {
+        return DesktopBindingsStatus::default();
+    };
+    DesktopBindingsStatus {
+        state: if profile.bindings.configured_count() == 0 {
+            DesktopBindingsState::Disabled
+        } else {
+            DesktopBindingsState::PermissionRequired
+        },
+        active_profile_id: Some(profile.id.clone()),
+        active_profile_name: Some(profile.name.clone()),
+        configured_binding_count: profile.bindings.configured_count(),
+        ..DesktopBindingsStatus::default()
+    }
+}
+
+struct DesktopBindingsRuntime {
+    engine: Option<BindingEngine>,
+    sink: Option<Box<dyn DesktopInputSink>>,
+    last_buttons: Option<steam_controller_protocol::SteamButtons>,
+    status: DesktopBindingsStatus,
+    next_permission_retry: Instant,
+}
+
+impl DesktopBindingsRuntime {
+    fn new(profile: Option<BindingProfile>) -> Self {
+        let status = binding_status_for_profile(profile.as_ref());
+        let mut runtime = Self {
+            engine: profile.map(BindingEngine::new),
+            sink: None,
+            last_buttons: None,
+            status,
+            next_permission_retry: Instant::now(),
+        };
+        if runtime.status.configured_binding_count > 0 {
+            runtime.initialize_sink();
+        }
+        runtime
+    }
+
+    #[cfg(test)]
+    fn with_sink(profile: BindingProfile, sink: Box<dyn DesktopInputSink>) -> Self {
+        let mut status = binding_status_for_profile(Some(&profile));
+        status.state = DesktopBindingsState::Ready;
+        Self {
+            engine: Some(BindingEngine::new(profile)),
+            sink: Some(sink),
+            last_buttons: None,
+            status,
+            next_permission_retry: Instant::now(),
+        }
+    }
+
+    fn status(&self) -> DesktopBindingsStatus {
+        let mut status = self.status.clone();
+        status.held_output_count = self
+            .engine
+            .as_ref()
+            .map_or(0, BindingEngine::held_output_count);
+        status
+    }
+
+    fn observe(&mut self, buttons: steam_controller_protocol::SteamButtons) {
+        self.last_buttons = Some(buttons);
+        if self.sink.is_none()
+            && self.status.state == DesktopBindingsState::PermissionRequired
+            && Instant::now() >= self.next_permission_retry
+        {
+            // The native permission prompt is asynchronous. Once the user grants
+            // access, reconnect without prompting again and use this report as the
+            // engine's non-emitting baseline.
+            self.initialize_sink();
+        }
+        let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut()) else {
+            return;
+        };
+        if let Err(error) = engine.observe(buttons, sink.as_mut()) {
+            self.fail(&error);
+        }
+    }
+
+    fn replace_profile(&mut self, profile: Option<BindingProfile>) -> Result<(), String> {
+        if let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut()) {
+            if let Err(error) = engine.disconnect(sink.as_mut()) {
+                self.fail(&error);
+                return Err(error);
+            }
+        }
+        let status = binding_status_for_profile(profile.as_ref());
+        self.engine = profile.map(BindingEngine::new);
+        self.status = status;
+        if self.status.configured_binding_count == 0 {
+            self.sink = None;
+            return Ok(());
+        }
+        if self.sink.is_none() {
+            self.initialize_sink();
+        } else {
+            self.status.state = DesktopBindingsState::Ready;
+            self.status.last_error = None;
+        }
+        if let (Some(buttons), Some(engine), Some(sink)) =
+            (self.last_buttons, self.engine.as_mut(), self.sink.as_mut())
+        {
+            if let Err(error) = engine.observe(buttons, sink.as_mut()) {
+                self.fail(&error);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn enable(&mut self) -> Result<(), String> {
+        if self.status.configured_binding_count == 0 {
+            return Ok(());
+        }
+        self.initialize_sink();
+        if self.sink.is_none() {
+            return Err(self
+                .status
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "desktop bindings are unavailable".to_owned()));
+        }
+        if let (Some(buttons), Some(engine), Some(sink)) =
+            (self.last_buttons, self.engine.as_mut(), self.sink.as_mut())
+        {
+            if let Err(error) = engine.observe(buttons, sink.as_mut()) {
+                self.fail(&error);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn disconnect(&mut self) {
+        if let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut()) {
+            if let Err(error) = engine.disconnect(sink.as_mut()) {
+                self.fail(&error);
+            }
+        }
+        self.last_buttons = None;
+    }
+
+    fn overflow(&mut self) {
+        self.disconnect();
+        self.status.state = DesktopBindingsState::Degraded;
+        self.status.failures = self.status.failures.saturating_add(1);
+        self.status.last_error = Some(
+            "input transition mailbox overflowed; held inputs released and state rebaselined"
+                .to_owned(),
+        );
+    }
+
+    fn initialize_sink(&mut self) {
+        match create_desktop_sink() {
+            Ok(sink) => {
+                self.sink = Some(sink);
+                self.status.state = DesktopBindingsState::Ready;
+                self.status.last_error = None;
+            }
+            Err(error) => {
+                self.sink = None;
+                self.status.state =
+                    if error.contains("permission") || error.contains("Accessibility") {
+                        self.next_permission_retry =
+                            Instant::now() + DESKTOP_BINDINGS_PERMISSION_RETRY_INTERVAL;
+                        DesktopBindingsState::PermissionRequired
+                    } else {
+                        DesktopBindingsState::Degraded
+                    };
+                self.status.last_error = Some(bounded_error(&error));
+            }
+        }
+    }
+
+    fn fail(&mut self, error: &str) {
+        self.status.state = DesktopBindingsState::Degraded;
+        self.status.failures = self.status.failures.saturating_add(1);
+        self.status.last_error = Some(bounded_error(error));
+        self.sink = None;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn create_desktop_sink() -> Result<Box<dyn DesktopInputSink>, String> {
+    desktop_bindings::MacOsDesktopInput::new()
+        .map(|sink| Box::new(sink) as Box<dyn DesktopInputSink>)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn create_desktop_sink() -> Result<Box<dyn DesktopInputSink>, String> {
+    Err("desktop bindings are only available on macOS".to_owned())
+}
+
+fn bounded_error(error: &str) -> String {
+    const MAX_ERROR_CHARS: usize = 512;
+    error.chars().take(MAX_ERROR_CHARS).collect()
 }
 
 struct Supervisor {
@@ -1219,6 +1487,7 @@ impl Supervisor {
         let mut latest_charge_state: Option<ControllerChargeState> = None;
         let mut last_charge_report = None;
         let mut pending_automatic_shutdown = None;
+        let mut bindings = DesktopBindingsRuntime::new(self.config.binding_profile.clone());
         engine.connected();
         self.automatic_shutdown.phase = automatic_shutdown_phase(&self.config);
         self.automatic_shutdown.trigger = None;
@@ -1233,6 +1502,7 @@ impl Supervisor {
             status.controller.last_state_age = initial_controller_seen.then_some(Duration::ZERO);
             status.lizard = worker.lizard_diagnostics();
             status.haptics = worker.haptics_diagnostics();
+            status.bindings = bindings.status();
             status.automatic_shutdown = automatic_status;
         });
         eprintln!(
@@ -1252,13 +1522,14 @@ impl Supervisor {
             Some(worker.device_info()),
         )?;
 
-        let exit = loop {
+        let exit = 'active: loop {
             if let Some(command_exit) =
-                self.service_active_commands(started.elapsed(), &mut idle_activity)
+                self.service_active_commands(started.elapsed(), &mut idle_activity, &mut bindings)
             {
                 break command_exit;
             }
             if let Some(error) = worker.take_failure() {
+                bindings.disconnect();
                 let _ = engine.shutdown(&mut *output.output);
                 worker.shutdown()?;
                 self.clear_controller_status();
@@ -1281,7 +1552,18 @@ impl Supervisor {
                     break ActiveExit::SourceLost;
                 }
             }
-            if let Some(report) = direct_report.or_else(|| worker.take_latest_report()) {
+            let mut reports = direct_report.into_iter().collect::<Vec<_>>();
+            let batch = worker.take_report_batch();
+            if batch.overflowed {
+                bindings.overflow();
+                let binding_status = bindings.status();
+                self.update_status(|status| status.bindings = binding_status);
+                eprintln!(
+                    "level=warn event=desktop_binding_mailbox_overflow action=release_and_rebaseline"
+                );
+            }
+            reports.extend(batch.reports);
+            for report in reports {
                 match process_report(
                     &report,
                     &mut engine,
@@ -1292,7 +1574,9 @@ impl Supervisor {
                 ) {
                     Ok(ReportEffect::ControllerState {
                         meaningful_activity,
+                        buttons,
                     }) => {
+                        bindings.observe(buttons);
                         last_controller_state = Instant::now();
                         controller_connected = true;
                         if meaningful_activity {
@@ -1349,11 +1633,11 @@ impl Supervisor {
                     }
                     Ok(ReportEffect::Disconnected) => {
                         let _ = engine.disconnected(&mut *output.output);
-                        break ActiveExit::SourceLost;
+                        break 'active ActiveExit::SourceLost;
                     }
                     Ok(ReportEffect::None) => {}
                     Err(error) if is_output_error(&error) => {
-                        break ActiveExit::OutputLost(format!(
+                        break 'active ActiveExit::OutputLost(format!(
                             "XIAO output failed; waiting for reconnect: {error}"
                         ));
                     }
@@ -1477,6 +1761,7 @@ impl Supervisor {
                     status.output_diagnostics = output.output.diagnostics();
                     status.lizard = worker.lizard_diagnostics();
                     status.haptics = worker.haptics_diagnostics();
+                    status.bindings = bindings.status();
                     status.source.active =
                         controller_state_seen && controller_age < ACTIVE_SLOT_TIMEOUT;
                     status.controller.connected =
@@ -1490,6 +1775,7 @@ impl Supervisor {
         };
 
         self.transition(RuntimeState::Stopping, "Neutralizing output", None);
+        bindings.disconnect();
         let neutral_result = engine.shutdown(&mut *output.output);
         let worker_result = worker.shutdown();
         idle_activity.pause();
@@ -1501,6 +1787,7 @@ impl Supervisor {
             status.output_diagnostics = output.output.diagnostics();
             status.lizard = worker.lizard_diagnostics();
             status.haptics = worker.haptics_diagnostics();
+            status.bindings = bindings.status();
             status.automatic_shutdown = automatic;
         });
         self.clear_controller_status();
@@ -1591,6 +1878,20 @@ impl Supervisor {
                 self.update_status(|status| status.automatic_shutdown = automatic);
                 let _ = ack.send(Ok(()));
             }
+            RuntimeCommand::SetBindingProfile(profile, ack) => {
+                self.config.binding_profile = profile;
+                let binding_status =
+                    DesktopBindingsRuntime::new(self.config.binding_profile.clone()).status();
+                self.update_status(|status| status.bindings = binding_status);
+                let _ = ack.send(Ok(()));
+            }
+            RuntimeCommand::EnableDesktopBindings(ack) => {
+                let mut bindings = DesktopBindingsRuntime::new(self.config.binding_profile.clone());
+                let result = bindings.enable();
+                let binding_status = bindings.status();
+                self.update_status(|status| status.bindings = binding_status);
+                let _ = ack.send(result);
+            }
         }
     }
 
@@ -1598,6 +1899,7 @@ impl Supervisor {
         &mut self,
         now: Duration,
         idle_activity: &mut IdleActivityTracker,
+        bindings: &mut DesktopBindingsRuntime,
     ) -> Option<ActiveExit> {
         while let Ok(command) = self.commands.try_recv() {
             match command {
@@ -1634,6 +1936,21 @@ impl Supervisor {
                     self.automatic_shutdown.phase = automatic_shutdown_phase(&self.config);
                     eprintln!("level=info event=puck_dock_action_changed action={action:?}");
                     let _ = ack.send(Ok(()));
+                }
+                RuntimeCommand::SetBindingProfile(profile, ack) => {
+                    let result = bindings.replace_profile(profile.clone());
+                    if result.is_ok() {
+                        self.config.binding_profile = profile;
+                    }
+                    let binding_status = bindings.status();
+                    self.update_status(|status| status.bindings = binding_status);
+                    let _ = ack.send(result);
+                }
+                RuntimeCommand::EnableDesktopBindings(ack) => {
+                    let result = bindings.enable();
+                    let binding_status = bindings.status();
+                    self.update_status(|status| status.bindings = binding_status);
+                    let _ = ack.send(result);
                 }
             }
         }
@@ -1707,6 +2024,7 @@ impl Supervisor {
             || status.battery_charge_state != previous.battery_charge_state
             || status.lizard != previous.lizard
             || status.haptics != previous.haptics
+            || status.bindings != previous.bindings
             || status.automatic_shutdown != previous.automatic_shutdown
             || status.bridge_metrics != previous.bridge_metrics
             || status.output_diagnostics != previous.output_diagnostics
@@ -2215,6 +2533,7 @@ fn is_latest_state_report(report_id: u8) -> bool {
 enum ReportEffect {
     ControllerState {
         meaningful_activity: bool,
+        buttons: steam_controller_protocol::SteamButtons,
     },
     Connected,
     Battery {
@@ -2255,6 +2574,7 @@ fn process_report(
             })?;
             Ok(ReportEffect::ControllerState {
                 meaningful_activity,
+                buttons: source.buttons,
             })
         }
         Ok(ProcessOutcome::Status(DecodedReport::Battery { status, .. })) => {
@@ -2764,45 +3084,69 @@ impl PowerOffSequence {
 }
 
 #[derive(Debug, Default)]
-struct LatestReportState {
-    report: Option<RawHidReport>,
+struct TransitionMailboxState {
+    reports: VecDeque<RawHidReport>,
     notification_pending: bool,
+    overflowed: bool,
 }
 
 #[derive(Debug, Default)]
-struct LatestReportSlot {
-    state: Mutex<LatestReportState>,
+struct TransitionReportMailbox {
+    state: Mutex<TransitionMailboxState>,
 }
 
-impl LatestReportSlot {
+#[derive(Debug, Default)]
+struct TransitionReportBatch {
+    reports: Vec<RawHidReport>,
+    overflowed: bool,
+}
+
+impl TransitionReportMailbox {
     fn publish(&self, report: RawHidReport, dropped: &AtomicU64) -> bool {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.report.replace(report).is_some() {
+        let same_bindable_state = state.reports.back().is_some_and(|newest| {
+            raw_bindable_mask(newest).is_some()
+                && raw_bindable_mask(newest) == raw_bindable_mask(&report)
+        });
+        if same_bindable_state {
+            let _ = state.reports.pop_back();
+            state.reports.push_back(report);
             dropped.fetch_add(1, Ordering::Relaxed);
+        } else if state.reports.len() == INPUT_MAILBOX_CAPACITY {
+            dropped.fetch_add(state.reports.len() as u64, Ordering::Relaxed);
+            state.reports.clear();
+            state.reports.push_back(report);
+            state.overflowed = true;
+        } else {
+            state.reports.push_back(report);
         }
         let needs_notification = !state.notification_pending;
         state.notification_pending = true;
         needs_notification
     }
 
-    fn take(&self) -> Option<RawHidReport> {
+    fn take_all(&self) -> TransitionReportBatch {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.notification_pending = false;
-        state.report.take()
+        TransitionReportBatch {
+            reports: state.reports.drain(..).collect(),
+            overflowed: std::mem::take(&mut state.overflowed),
+        }
     }
 
     fn has_pending(&self) -> bool {
-        self.state
+        !self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .report
-            .is_some()
+            .reports
+            .is_empty()
     }
 
     fn clear(&self, dropped: &AtomicU64) {
@@ -2810,17 +3154,37 @@ impl LatestReportSlot {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.report.take().is_some() {
-            dropped.fetch_add(1, Ordering::Relaxed);
+        if !state.reports.is_empty() {
+            dropped.fetch_add(state.reports.len() as u64, Ordering::Relaxed);
+            state.reports.clear();
         }
         state.notification_pending = false;
+        state.overflowed = false;
     }
+}
+
+fn raw_bindable_mask(report: &RawHidReport) -> Option<u8> {
+    let valid_size = match report.report_id {
+        INPUT_REPORT_ID => report.data.len() == INPUT_REPORT_SIZE,
+        EXTENDED_INPUT_REPORT_ID => report.data.len() == EXTENDED_INPUT_REPORT_SIZE,
+        _ => false,
+    };
+    if !valid_size {
+        return None;
+    }
+    let buttons = steam_controller_protocol::SteamButtons(u32::from_le_bytes([
+        report.data[2],
+        report.data[3],
+        report.data[4],
+        report.data[5],
+    ]));
+    Some(bindable_mask(buttons))
 }
 
 struct HidWorker {
     receiver: Receiver<HidWorkerEvent>,
     failure_receiver: Receiver<String>,
-    latest_report: Arc<LatestReportSlot>,
+    report_mailbox: Arc<TransitionReportMailbox>,
     latest_rumble: Arc<LatestRumbleSlot>,
     control_sender: mpsc::Sender<HidWorkerControl>,
     stop: Arc<AtomicBool>,
@@ -2843,8 +3207,8 @@ impl HidWorker {
         } = active;
         let (sender, receiver) = mpsc::sync_channel(64);
         let (failure_sender, failure_receiver) = mpsc::channel();
-        let latest_report = Arc::new(LatestReportSlot::default());
-        let worker_latest_report = Arc::clone(&latest_report);
+        let report_mailbox = Arc::new(TransitionReportMailbox::default());
+        let worker_latest_report = Arc::clone(&report_mailbox);
         let latest_rumble = Arc::new(LatestRumbleSlot::default());
         let worker_latest_rumble = Arc::clone(&latest_rumble);
         let (control_sender, control_receiver) = mpsc::channel();
@@ -2999,7 +3363,7 @@ impl HidWorker {
         Ok(Self {
             receiver,
             failure_receiver,
-            latest_report,
+            report_mailbox,
             latest_rumble,
             control_sender,
             stop,
@@ -3047,12 +3411,12 @@ impl HidWorker {
             .map_err(|_| "controller power-off sequence timed out".to_owned())?
     }
 
-    fn take_latest_report(&self) -> Option<RawHidReport> {
-        self.latest_report.take()
+    fn take_report_batch(&self) -> TransitionReportBatch {
+        self.report_mailbox.take_all()
     }
 
     fn has_pending_report(&self) -> bool {
-        self.latest_report.has_pending()
+        self.report_mailbox.has_pending()
     }
 
     fn shutdown(&mut self) -> Result<(), String> {
@@ -3094,7 +3458,7 @@ fn send_worker_event(
 
 fn publish_report(
     sender: &SyncSender<HidWorkerEvent>,
-    latest_report: &LatestReportSlot,
+    latest_report: &TransitionReportMailbox,
     report: RawHidReport,
     dropped: &AtomicU64,
 ) -> bool {
@@ -3256,6 +3620,7 @@ mod tests {
         assert_eq!(config.lizard_mode, LizardMode::Suppress);
         assert_eq!(config.idle_shutdown_timeout, Some(Duration::from_mins(15)));
         assert_eq!(config.puck_dock_action, PuckDockAction::LeaveOn);
+        assert!(config.binding_profile.is_none());
     }
 
     #[test]
@@ -3291,21 +3656,214 @@ mod tests {
     }
 
     #[test]
-    fn latest_report_slot_replaces_stale_input() {
-        let slot = LatestReportSlot::default();
+    fn transition_mailbox_coalesces_analog_reports_but_preserves_button_edges() {
+        let mailbox = TransitionReportMailbox::default();
         let dropped = AtomicU64::new(0);
-        let report = |id| RawHidReport {
-            timestamp: Duration::ZERO,
-            report_id: id,
-            data: vec![id],
-            source_device_id: "slot".to_owned(),
-            transport: "USB".to_owned(),
-            dropped_reports: 0,
+        let report = |sequence: u8, buttons: u32| {
+            let mut data = vec![0; steam_controller_protocol::INPUT_REPORT_SIZE];
+            data[0] = INPUT_REPORT_ID;
+            data[1] = sequence;
+            data[2..6].copy_from_slice(&buttons.to_le_bytes());
+            RawHidReport {
+                timestamp: Duration::ZERO,
+                report_id: INPUT_REPORT_ID,
+                data,
+                source_device_id: "mailbox".to_owned(),
+                transport: "USB".to_owned(),
+                dropped_reports: 0,
+            }
         };
-        assert!(slot.publish(report(1), &dropped));
-        assert!(!slot.publish(report(2), &dropped));
-        assert_eq!(slot.take().map(|value| value.report_id), Some(2));
-        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        let r4 = 1_u32 << steam_controller_protocol::SteamButton::RightGrip4 as u8;
+        assert!(mailbox.publish(report(1, 0), &dropped));
+        assert!(!mailbox.publish(report(2, 0), &dropped));
+        assert!(!mailbox.publish(report(3, r4), &dropped));
+        assert!(!mailbox.publish(report(4, r4), &dropped));
+        assert!(!mailbox.publish(report(5, 0), &dropped));
+        let batch = mailbox.take_all();
+        assert!(!batch.overflowed);
+        assert_eq!(
+            batch
+                .reports
+                .iter()
+                .map(|report| report.data[1])
+                .collect::<Vec<_>>(),
+            vec![2, 4, 5]
+        );
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn transition_mailbox_overflow_retains_newest_as_recovery_baseline() {
+        let mailbox = TransitionReportMailbox::default();
+        let dropped = AtomicU64::new(0);
+        let capacity = u8::try_from(INPUT_MAILBOX_CAPACITY).unwrap();
+        for sequence in 0..=capacity {
+            let mut data = vec![0; steam_controller_protocol::INPUT_REPORT_SIZE];
+            data[0] = INPUT_REPORT_ID;
+            data[1] = sequence;
+            let buttons = if sequence % 2 == 0 {
+                0
+            } else {
+                1_u32 << steam_controller_protocol::SteamButton::RightGrip4 as u8
+            };
+            data[2..6].copy_from_slice(&buttons.to_le_bytes());
+            let _ = mailbox.publish(
+                RawHidReport {
+                    timestamp: Duration::ZERO,
+                    report_id: INPUT_REPORT_ID,
+                    data,
+                    source_device_id: "mailbox".to_owned(),
+                    transport: "USB".to_owned(),
+                    dropped_reports: 0,
+                },
+                &dropped,
+            );
+        }
+        let batch = mailbox.take_all();
+        assert!(batch.overflowed);
+        assert_eq!(batch.reports.len(), 1);
+        assert_eq!(batch.reports[0].data[1], capacity);
+        assert_eq!(
+            dropped.load(Ordering::Relaxed),
+            INPUT_MAILBOX_CAPACITY as u64
+        );
+    }
+
+    #[derive(Clone)]
+    struct SharedDesktopSink(Arc<Mutex<Vec<String>>>);
+
+    impl DesktopInputSink for SharedDesktopSink {
+        fn key(&mut self, key: desktop_bindings::KeyboardKey, pressed: bool) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("key:{key:?}:{pressed}"));
+            Ok(())
+        }
+
+        fn modifier(
+            &mut self,
+            modifier: desktop_bindings::Modifier,
+            pressed: bool,
+        ) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("modifier:{modifier:?}:{pressed}"));
+            Ok(())
+        }
+
+        fn mouse_button(
+            &mut self,
+            button: desktop_bindings::MouseButton,
+            pressed: bool,
+        ) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("mouse:{button:?}:{pressed}"));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn runtime_binding_observation_does_not_change_gamepad_output() {
+        let report = |sequence: u8, buttons: u32| {
+            let mut data = vec![0; INPUT_REPORT_SIZE];
+            data[0] = INPUT_REPORT_ID;
+            data[1] = sequence;
+            data[2..6].copy_from_slice(&buttons.to_le_bytes());
+            RawHidReport {
+                timestamp: Duration::ZERO,
+                report_id: INPUT_REPORT_ID,
+                data,
+                source_device_id: "runtime-test".to_owned(),
+                transport: "USB".to_owned(),
+                dropped_reports: 0,
+            }
+        };
+        let r4 = 1_u32 << steam_controller_protocol::SteamButton::RightGrip4 as u8;
+        let reports = [report(1, 0), report(2, r4), report(3, 0)];
+
+        let mut profile = BindingProfile::default();
+        profile.bindings.r4 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F5,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut bindings = DesktopBindingsRuntime::with_sink(
+            profile,
+            Box::new(SharedDesktopSink(Arc::clone(&events))),
+        );
+        let mut bound_engine =
+            BridgeEngine::new(BridgeConfig::default(), MapperConfig::default()).unwrap();
+        let mut control_engine =
+            BridgeEngine::new(BridgeConfig::default(), MapperConfig::default()).unwrap();
+        bound_engine.connected();
+        control_engine.connected();
+        let mut bound_output = MockOutput::default();
+        let mut control_output = MockOutput::default();
+        let mut bound_idle = IdleActivityTracker::new(None);
+        let mut control_idle = IdleActivityTracker::new(None);
+        let started = Instant::now();
+        for report in &reports {
+            let effect = process_report(
+                report,
+                &mut bound_engine,
+                &mut bound_output,
+                &mut None,
+                started,
+                &mut bound_idle,
+            )
+            .unwrap();
+            if let ReportEffect::ControllerState { buttons, .. } = effect {
+                bindings.observe(buttons);
+            }
+            let _ = process_report(
+                report,
+                &mut control_engine,
+                &mut control_output,
+                &mut None,
+                started,
+                &mut control_idle,
+            )
+            .unwrap();
+        }
+        assert_eq!(bound_output.states, control_output.states);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["key:F5:true".to_owned(), "key:F5:false".to_owned()]
+        );
+    }
+
+    #[test]
+    fn replacing_profile_keeps_an_existing_authorized_sink_ready() {
+        let mut first = BindingProfile::default();
+        first.bindings.r4 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F5,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut bindings = DesktopBindingsRuntime::with_sink(
+            first,
+            Box::new(SharedDesktopSink(Arc::clone(&events))),
+        );
+        let mut second = BindingProfile {
+            name: "Second".to_owned(),
+            ..BindingProfile::default()
+        };
+        second.bindings.r5 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F9,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+
+        bindings.replace_profile(Some(second)).unwrap();
+
+        let status = bindings.status();
+        assert_eq!(status.state, DesktopBindingsState::Ready);
+        assert_eq!(status.configured_binding_count, 1);
+        assert!(status.last_error.is_none());
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[test]

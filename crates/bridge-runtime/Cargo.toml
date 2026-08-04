@@ -11,6 +11,7 @@ repository.workspace = true
 bridge-core = { path = "../bridge-core" }
 bridge-output = { path = "../bridge-output" }
 controller-mapper = { path = "../controller-mapper" }
+desktop-bindings = { path = "../desktop-bindings" }
 gamepad-state = { path = "../gamepad-state" }
 recording = { path = "../recording" }
 serde_json.workspace = true

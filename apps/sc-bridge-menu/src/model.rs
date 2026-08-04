@@ -1,4 +1,6 @@
-use bridge_runtime::{AutomaticShutdownPhase, BridgeStatus, PuckDockAction, RuntimeState};
+use bridge_runtime::{
+    AutomaticShutdownPhase, BridgeStatus, DesktopBindingsState, PuckDockAction, RuntimeState,
+};
 
 const MAX_PROBLEM_CHARS: usize = 48;
 
@@ -31,6 +33,7 @@ pub struct MenuModel {
     pub xiao: String,
     pub battery: String,
     pub haptics: String,
+    pub bindings: String,
     pub automatic_shutdown: String,
     pub problem: String,
     pub has_error: bool,
@@ -70,6 +73,7 @@ impl MenuModel {
                 |percent| format!("Battery: {percent}%"),
             ),
             haptics: format!("Haptics: {:?}", status.haptics.state),
+            bindings: bindings_label(status),
             automatic_shutdown: automatic_shutdown_label(status),
             problem: status.last_error.as_deref().map_or_else(
                 || "Problem: None".to_owned(),
@@ -81,6 +85,21 @@ impl MenuModel {
             stop_enabled: !matches!(status.state, RuntimeState::Stopped | RuntimeState::Stopping),
         }
     }
+}
+
+fn bindings_label(status: &BridgeStatus) -> String {
+    let profile = status
+        .bindings
+        .active_profile_name
+        .as_deref()
+        .unwrap_or("None");
+    let state = match status.bindings.state {
+        DesktopBindingsState::Disabled => "Disabled",
+        DesktopBindingsState::Ready => "Ready",
+        DesktopBindingsState::PermissionRequired => "Permission required",
+        DesktopBindingsState::Degraded => "Degraded",
+    };
+    format!("Bindings: {profile} · {state}")
 }
 
 fn automatic_shutdown_label(status: &BridgeStatus) -> String {
@@ -324,7 +343,25 @@ mod tests {
         assert!(running.stop_enabled);
         assert_eq!(running.battery, "Battery: 87%");
         assert_eq!(running.haptics, "Haptics: Active");
+        assert_eq!(running.bindings, "Bindings: None · Disabled");
         assert_eq!(running.automatic_shutdown, "Auto shutdown: Off");
+    }
+
+    #[test]
+    fn binding_permission_and_profile_are_visible_without_marking_gamepad_failed() {
+        let mut status = ready_status(ControllerTransport::Puck);
+        status.bindings = bridge_runtime::DesktopBindingsStatus {
+            state: DesktopBindingsState::PermissionRequired,
+            active_profile_id: Some("gaming".to_owned()),
+            active_profile_name: Some("Gaming".to_owned()),
+            configured_binding_count: 2,
+            last_error: Some("Accessibility permission required".to_owned()),
+            ..bridge_runtime::DesktopBindingsStatus::default()
+        };
+        let model = MenuModel::from_status(&status);
+        assert_eq!(model.bindings, "Bindings: Gaming · Permission required");
+        assert_eq!(model.tray_state, TrayState::Ready);
+        assert!(!model.has_error);
     }
 
     #[test]
