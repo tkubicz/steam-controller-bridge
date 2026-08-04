@@ -34,14 +34,16 @@ notes in the merged pull-request metadata and rerun Release Please; do not edit
 ## Releasing
 
 Release Please runs after changes land on `main` and maintains a release pull
-request containing the generated `CHANGELOG.md`, Cargo workspace version,
+request containing the generated `CHANGELOG.md`, Cargo workspace versions,
 `Cargo.lock`, and version manifest. To publish a stable release:
 
-The repository is one versioned product: every member inherits
-`workspace.package.version` through `version.workspace = true`. The root Rust
-release strategy discovers and updates all members and the lockfile. Do not add
-Release Please's `cargo-workspace` plugin; it expects literal member versions
-and rejects Cargo's inherited-version syntax.
+The repository is one versioned product. Each member carries the same literal
+package version because Release Please's Rust updater does not support this
+virtual workspace or Cargo's `version.workspace = true` syntax. The supported
+simple strategy updates `version.txt`, `workspace.package.version`, and every
+member version together. The release workflow then asks Cargo to update
+`Cargo.lock` on the generated release branch before dispatching CI. Do not add
+Release Please's `cargo-workspace` plugin or change only one version file.
 
 1. Review the generated notes and version in the Release Please pull request.
 2. Fix source pull-request metadata if an entry is inaccurate, then rerun the

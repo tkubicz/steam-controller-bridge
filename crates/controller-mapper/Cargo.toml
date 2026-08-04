@@ -1,6 +1,6 @@
 [package]
 name = "controller-mapper"
-version.workspace = true
+version = "1.0.0"
 edition.workspace = true
 license.workspace = true
 # Not published to crates.io; distribution is GitHub releases only.
@@ -12,4 +12,3 @@ steam-controller-protocol = { path = "../steam-controller-protocol" }
 
 [lints]
 workspace = true
-
