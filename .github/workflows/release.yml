@@ -47,6 +47,16 @@ jobs:
             echo "Release Please did not return a release-PR branch" >&2
             exit 1
           fi
+          git fetch origin "${branch}"
+          git checkout --detach FETCH_HEAD
+          cargo metadata --format-version 1 > /dev/null
+          if ! git diff --quiet -- Cargo.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock
+            git commit -m "chore: update Cargo.lock for release"
+            git push origin "HEAD:${branch}"
+          fi
           gh workflow run ci.yml --repo "${GITHUB_REPOSITORY}" --ref "${branch}"
 
   validate:
