@@ -781,7 +781,10 @@ fn write_log_batch(path: &Path, batch: &str) -> Result<(), String> {
 }
 
 fn bounded_log_batch(mut batch: String) -> String {
-    let limit = usize::try_from(LOG_LIMIT_BYTES).expect("log limit fits usize");
+    // Writing a log line must not be able to panic. A limit that does not fit
+    // usize cannot be exceeded by an in-memory batch anyway, so saturating to
+    // usize::MAX simply means "never truncate" on such a platform.
+    let limit = usize::try_from(LOG_LIMIT_BYTES).unwrap_or(usize::MAX);
     if batch.len() <= limit {
         return batch;
     }

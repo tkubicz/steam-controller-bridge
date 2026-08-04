@@ -39,6 +39,7 @@ impl fmt::Display for StatusSnapshotReason {
     }
 }
 
+/// Copyable discriminant for callers that only need to classify a record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusLogRecordKind {
     Snapshot(StatusSnapshotReason),
@@ -47,16 +48,23 @@ pub enum StatusLogRecordKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusLogRecord {
-    kind: StatusLogRecordKind,
     level: StatusLogLevel,
     revision: u64,
-    data: StatusLogRecordData,
+    body: StatusLogRecordBody,
 }
 
+/// Each variant carries its own payload so a record cannot be built with a
+/// kind that disagrees with its contents. Formatting a log line must never be
+/// able to panic.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum StatusLogRecordData {
-    Snapshot(String),
-    Changes(Vec<StatusLogChange>),
+enum StatusLogRecordBody {
+    Snapshot {
+        reason: StatusSnapshotReason,
+        status: String,
+    },
+    Change {
+        changes: Vec<StatusLogChange>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +94,10 @@ impl StatusLogChange {
 impl StatusLogRecord {
     #[must_use]
     pub const fn kind(&self) -> StatusLogRecordKind {
-        self.kind
+        match &self.body {
+            StatusLogRecordBody::Snapshot { reason, .. } => StatusLogRecordKind::Snapshot(*reason),
+            StatusLogRecordBody::Change { .. } => StatusLogRecordKind::Change,
+        }
     }
 
     #[must_use]
@@ -101,9 +112,9 @@ impl StatusLogRecord {
 
     #[must_use]
     pub fn changes(&self) -> &[StatusLogChange] {
-        match &self.data {
-            StatusLogRecordData::Changes(changes) => changes,
-            StatusLogRecordData::Snapshot(_) => &[],
+        match &self.body {
+            StatusLogRecordBody::Change { changes } => changes,
+            StatusLogRecordBody::Snapshot { .. } => &[],
         }
     }
 }
@@ -111,17 +122,18 @@ impl StatusLogRecord {
 impl fmt::Display for StatusLogRecord {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "level={} event=", self.level)?;
-        match (&self.kind, &self.data) {
-            (StatusLogRecordKind::Snapshot(reason), StatusLogRecordData::Snapshot(status)) => {
-                write!(
-                    formatter,
-                    "status_snapshot reason={reason} revision={} status={status}",
-                    self.revision
-                )
-            }
-            (StatusLogRecordKind::Change, StatusLogRecordData::Changes(changes)) => {
+        match &self.body {
+            StatusLogRecordBody::Snapshot { reason, status } => write!(
+                formatter,
+                "status_snapshot reason={reason} revision={} status={status}",
+                self.revision
+            ),
+            StatusLogRecordBody::Change { changes } => {
                 write!(formatter, "status_change revision={}", self.revision)?;
                 for change in changes {
+                    // `last_error` records only a transition, and its own
+                    // snapshot carries the message, so the arrow form would add
+                    // nothing readable here.
                     if change.field == "last_error" {
                         write!(formatter, " last_error={}", change.current)?;
                     } else {
@@ -134,7 +146,6 @@ impl fmt::Display for StatusLogRecord {
                 }
                 Ok(())
             }
-            _ => unreachable!("status log record kind and payload are constructed together"),
         }
     }
 }
@@ -225,10 +236,9 @@ fn change_record(
     changes: Vec<StatusLogChange>,
 ) -> StatusLogRecord {
     StatusLogRecord {
-        kind: StatusLogRecordKind::Change,
         level,
         revision,
-        data: StatusLogRecordData::Changes(changes),
+        body: StatusLogRecordBody::Change { changes },
     }
 }
 
@@ -239,10 +249,12 @@ fn snapshot_record(reason: StatusSnapshotReason, status: &BridgeStatus) -> Statu
         StatusSnapshotReason::Startup | StatusSnapshotReason::Periodic => StatusLogLevel::Info,
     };
     StatusLogRecord {
-        kind: StatusLogRecordKind::Snapshot(reason),
         level,
         revision: status.revision,
-        data: StatusLogRecordData::Snapshot(format!("{status:?}")),
+        body: StatusLogRecordBody::Snapshot {
+            reason,
+            status: format!("{status:?}"),
+        },
     }
 }
 
@@ -256,10 +268,14 @@ fn status_changes(previous: &BridgeStatus, current: &BridgeStatus) -> Vec<Status
     core_status_changes(&mut changes, previous, current);
     safety_status_changes(&mut changes, previous, current);
     failure_status_changes(&mut changes, previous, current);
+    // Deliberately records only the transition, not the message: setting or
+    // changing an error always emits a snapshot alongside this record, and that
+    // snapshot carries the text. Keeping it out here keeps change lines short
+    // and stops the message being duplicated on consecutive lines.
     if previous.last_error != current.last_error {
         let (previous, current) = match (&previous.last_error, &current.last_error) {
             (_, None) => ("set", "cleared"),
-            (None, Some(_)) => ("clear", "set"),
+            (None, Some(_)) => ("cleared", "set"),
             (Some(_), Some(_)) => ("set", "changed"),
         };
         changes.push(StatusLogChange {
