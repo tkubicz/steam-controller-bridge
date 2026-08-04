@@ -5,6 +5,14 @@ not edit release entries by hand; correct the originating pull-request metadata
 and let the release pull request regenerate them. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.1.0...v1.2.0) (2026-08-04)
+
+
+### Features
+
+* log status changes as deltas with periodic snapshots ([bfacf56](https://github.com/tkubicz/steam-controller-bridge/commit/bfacf56bdacc08ae051fa518523b56f4a4e78977))
+* log status changes as deltas with periodic snapshots ([#10](https://github.com/tkubicz/steam-controller-bridge/issues/10)) ([bfacf56](https://github.com/tkubicz/steam-controller-bridge/commit/bfacf56bdacc08ae051fa518523b56f4a4e78977))
+
 ## [1.1.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.0.0...v1.1.0) (2026-08-04)
 
 
