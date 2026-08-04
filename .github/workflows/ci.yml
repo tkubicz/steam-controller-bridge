@@ -3,8 +3,22 @@ name: CI
 on:
   push:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
 
 jobs:
+  pr-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test the title validator
+        run: python3 tools/check-pr-title.py --self-test
+      - name: Validate pull-request title
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: python3 tools/check-pr-title.py "${PR_TITLE}"
+
   test:
     strategy:
       # Never let one platform's failure hide the other platform's result.

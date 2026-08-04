@@ -8,6 +8,8 @@ publish = false
 
 [dependencies]
 bridge-runtime = { path = "../../crates/bridge-runtime" }
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 steam-controller-device = { path = "../../crates/steam-controller-device" }
@@ -16,6 +18,8 @@ steam-controller-device = { path = "../../crates/steam-controller-device" }
 tiny-skia.workspace = true
 tray-icon.workspace = true
 winit.workspace = true
+objc2.workspace = true
+objc2-app-kit.workspace = true
 
 [lints]
 workspace = true

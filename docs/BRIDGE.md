@@ -53,6 +53,18 @@ Overrides remain available:
 ./sc-bridge --output dump
 ```
 
+Automatic shutdown is available only with live serial output to a ready XIAO:
+
+```bash
+./sc-bridge --idle-shutdown never
+./sc-bridge --idle-shutdown 10
+./sc-bridge --puck-dock-action power-off
+```
+
+The idle timeout defaults to 15 minutes and accepts whole minutes from 1 to
+1440, or `never`. The Puck-dock action is independent and defaults to `leave`.
+Replay and dump/file/mock diagnostic outputs never power off hardware.
+
 Replay keeps textual dump output as its default:
 
 ```bash
@@ -72,6 +84,8 @@ Status distinguishes `Stopped`, `Discovering`, `Waiting`, `Starting`,
 `ControllerTransport::{Puck, Bluetooth}`, controller-state connectivity, XIAO
 path/serial/Hello state, lizard refresh state, haptics idle/active/degraded
 state and counters, a best-effort battery percentage from `0x43`,
+typed `Discharging`/`Charging`/`Charged` charge state, automatic-shutdown
+phase/trigger/counters,
 bridge/output metrics, and the latest actionable error. Battery values above
 100 are ignored and battery state is cleared when the controller disconnects
 or the source changes.
@@ -98,6 +112,29 @@ Every owned transition follows this ordering:
 2. send SC2 rumble zero;
 3. stop the lizard heartbeat;
 4. release output and HID devices.
+
+Configured automatic shutdown inserts the fixed controller power-off command
+between steps 3 and 4. The runtime first requires a ready XIAO and neutralizes
+it, cancels the rumble lease and writes zero, stops future lizard refreshes,
+then schedules a three-write `0x9f "off!"` burst in the HID worker before
+releasing ownership. A 2.5-second stable-identity cooldown ignores trailing
+post-shutdown reports. A failed power-off write is nonfatal to gameplay: lizard
+suppression is restored, input resumes, status becomes `Degraded`, and retries
+are bounded to once every 30 seconds.
+
+Meaningful idle activity is any physical button, mapped stick/trigger outside
+its existing dead zone, trackpad touch/click, or grip touch. Report arrival,
+sequence changes, IMU data, sub-dead-zone jitter, lizard heartbeats, rumble, and
+XIAO state refreshes do not count. Neutral time begins on the active-to-neutral
+transition and resets on reconnect, Start, a setting change, or entry into a
+known charging state.
+
+The immediate Puck action is edge-triggered from a fresh valid `0x43` report on
+the selected Puck source with charge state `Charging` or `Charged`. It does not
+infer placement from enumeration or battery percentage, and Bluetooth external
+power never counts as Puck placement. A supervisor-level latch makes it fire
+once per placement even across worker release, cooldown, and a deliberate wake
+while still docked. A later fresh `Discharging` report re-arms it.
 
 Live mode sends the fixed SDL-compatible lizard-off report only after one source
 is selected and refreshes it every three seconds. An initial or refresh write

@@ -12,8 +12,8 @@ use bridge_output::{
     DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput, SerialConfig, SerialOutput,
 };
 use bridge_runtime::{
-    BridgeRuntime, ControllerSelection, LizardMode, OutputSelection, RuntimeConfig, RuntimeState,
-    SerialSelection,
+    BridgeRuntime, BridgeStatus, ControllerSelection, LizardMode, OutputSelection, PuckDockAction,
+    RuntimeConfig, RuntimeState, SerialSelection, MAX_IDLE_SHUTDOWN_TIMEOUT,
 };
 use recording::{ReplayOptions, ReplaySession, ReplayTiming};
 
@@ -56,67 +56,9 @@ fn run_live(args: &[String]) -> Result<(), String> {
     let mut last_summary = None;
     let result = loop {
         let status = handle.status();
-        let summary = format!(
-            "{:?}|{}|{:?}|{}|{:?}|{:?}|{}|{}|{}|{:?}|{}|{}|{:?}",
-            status.state,
-            status.detail,
-            status.source,
-            status.controller.connected,
-            status.xiao.path,
-            status.battery_percent,
-            status.lizard.suppressed,
-            status.lizard.refreshes,
-            status.lizard.failures,
-            status.haptics.state,
-            status.haptics.refreshes / 25,
-            status.haptics.failures,
-            status.last_error
-        );
+        let summary = status_summary(&status);
         if last_summary.as_ref() != Some(&summary) {
-            eprintln!(
-                "level=info event=status state={:?} detail={:?} input_connected={} \
-                 input_active={} input_transport={:?} input_product={:?} input_serial={} \
-                 controller_connected={} xiao_path={:?} battery={:?} lizard_suppressed={} \
-                 lizard_refreshes={} lizard_failures={} lizard_refresh_age_ms={:?}",
-                status.state,
-                status.detail,
-                status.source.connected,
-                status.source.active,
-                status.source.transport,
-                status
-                    .source
-                    .identity
-                    .as_ref()
-                    .and_then(|info| info.product.as_deref()),
-                bridge_runtime::mask_serial_for_display(
-                    status
-                        .source
-                        .identity
-                        .as_ref()
-                        .and_then(|info| info.serial_number.as_deref()),
-                ),
-                status.controller.connected,
-                status.xiao.path,
-                status.battery_percent,
-                status.lizard.suppressed,
-                status.lizard.refreshes,
-                status.lizard.failures,
-                status.lizard.last_refresh_age.map(|age| age.as_millis())
-            );
-            eprintln!(
-                "level=info event=haptics state={:?} commands={} writes={} refreshes={} \
-                 coalesced={} failures={} last_command_age_ms={:?}",
-                status.haptics.state,
-                status.haptics.commands_received,
-                status.haptics.writes,
-                status.haptics.refreshes,
-                status.haptics.coalesced_commands,
-                status.haptics.failures,
-                status.haptics.last_command_age.map(|age| age.as_millis())
-            );
-            if let Some(error) = &status.last_error {
-                eprintln!("level=warn event=status_error message={error:?}");
-            }
+            log_status(&status);
             last_summary = Some(summary);
         }
         if status.state == RuntimeState::Error {
@@ -130,6 +72,105 @@ fn run_live(args: &[String]) -> Result<(), String> {
     };
     let shutdown = handle.shutdown().map_err(|error| error.to_string());
     result.and(shutdown)
+}
+
+fn status_summary(status: &BridgeStatus) -> String {
+    format!(
+        "{:?}|{}|{:?}|{}|{:?}|{:?}|{}|{}|{}|{:?}|{}|{}|{:?}|{:?}|{:?}|{}|{}|{}|{}",
+        status.state,
+        status.detail,
+        status.source,
+        status.controller.connected,
+        status.xiao.path,
+        status.battery_percent,
+        status.lizard.suppressed,
+        status.lizard.refreshes,
+        status.lizard.failures,
+        status.haptics.state,
+        status.haptics.refreshes / 25,
+        status.haptics.failures,
+        status.last_error,
+        status.automatic_shutdown.phase,
+        status.automatic_shutdown.trigger,
+        status.automatic_shutdown.puck_dock_episode_handled,
+        status.automatic_shutdown.successful_shutdowns,
+        status.automatic_shutdown.failures,
+        status
+            .automatic_shutdown
+            .neutral_idle_age
+            .map_or(0, |age| age.as_secs() / 60)
+    )
+}
+
+fn log_status(status: &BridgeStatus) {
+    eprintln!(
+        "level=info event=status state={:?} detail={:?} input_connected={} \
+         input_active={} input_transport={:?} input_product={:?} input_serial={} \
+         controller_connected={} xiao_path={:?} battery={:?} charge_state={:?} \
+         lizard_suppressed={} lizard_refreshes={} lizard_failures={} lizard_refresh_age_ms={:?}",
+        status.state,
+        status.detail,
+        status.source.connected,
+        status.source.active,
+        status.source.transport,
+        status
+            .source
+            .identity
+            .as_ref()
+            .and_then(|info| info.product.as_deref()),
+        bridge_runtime::mask_serial_for_display(
+            status
+                .source
+                .identity
+                .as_ref()
+                .and_then(|info| info.serial_number.as_deref()),
+        ),
+        status.controller.connected,
+        status.xiao.path,
+        status.battery_percent,
+        status.battery_charge_state,
+        status.lizard.suppressed,
+        status.lizard.refreshes,
+        status.lizard.failures,
+        status.lizard.last_refresh_age.map(|age| age.as_millis())
+    );
+    eprintln!(
+        "level=info event=automatic_shutdown phase={:?} trigger={:?} \
+         idle_timeout_secs={:?} idle_age_ms={:?} puck_dock_action={:?} \
+         puck_dock_handled={} successes={} failures={} retry_after_ms={:?}",
+        status.automatic_shutdown.phase,
+        status.automatic_shutdown.trigger,
+        status
+            .automatic_shutdown
+            .configured_timeout
+            .map(|timeout| timeout.as_secs()),
+        status
+            .automatic_shutdown
+            .neutral_idle_age
+            .map(|age| age.as_millis()),
+        status.automatic_shutdown.puck_dock_action,
+        status.automatic_shutdown.puck_dock_episode_handled,
+        status.automatic_shutdown.successful_shutdowns,
+        status.automatic_shutdown.failures,
+        status
+            .automatic_shutdown
+            .retry_after
+            .map(|delay| delay.as_millis())
+    );
+    eprintln!(
+        "level=info event=haptics state={:?} commands={} writes={} refreshes={} \
+         coalesced={} failures={} last_command_age_ms={:?}",
+        status.haptics.state,
+        status.haptics.commands_received,
+        status.haptics.writes,
+        status.haptics.refreshes,
+        status.haptics.coalesced_commands,
+        status.haptics.failures,
+        status.haptics.last_command_age.map(|age| age.as_millis())
+    );
+    if let Some(error) = &status.last_error {
+        eprintln!("level=warn event=status_error message={error:?}");
+    }
 }
 
 fn live_config(args: &[String]) -> Result<RuntimeConfig, String> {
@@ -159,6 +200,28 @@ fn live_config(args: &[String]) -> Result<RuntimeConfig, String> {
             ));
         }
     };
+    let mut idle_shutdown_timeout = parse_idle_shutdown(args)?;
+    let mut puck_dock_action = match value_after(args, "--puck-dock-action").unwrap_or("leave") {
+        "leave" => PuckDockAction::LeaveOn,
+        "power-off" => PuckDockAction::PowerOff,
+        other => {
+            return Err(format!(
+                "invalid --puck-dock-action value '{other}'; expected leave or power-off"
+            ));
+        }
+    };
+    if output != OutputSelection::Serial {
+        if value_after(args, "--idle-shutdown").is_some()
+            || value_after(args, "--puck-dock-action").is_some()
+        {
+            return Err(
+                "automatic controller shutdown requires live serial output to a ready XIAO"
+                    .to_owned(),
+            );
+        }
+        idle_shutdown_timeout = None;
+        puck_dock_action = PuckDockAction::LeaveOn;
+    }
     Ok(RuntimeConfig {
         controller,
         serial,
@@ -174,6 +237,8 @@ fn live_config(args: &[String]) -> Result<RuntimeConfig, String> {
         },
         baud_rate: parse_value(args, "--baud", 115_200_u32)?,
         recording_path: value_after(args, "--record").map(PathBuf::from),
+        idle_shutdown_timeout,
+        puck_dock_action,
         ..RuntimeConfig::default()
     })
 }
@@ -194,6 +259,14 @@ fn parse_live_output(args: &[String]) -> Result<OutputSelection, String> {
 }
 
 fn run_replay(args: &[String]) -> Result<(), String> {
+    if value_after(args, "--idle-shutdown").is_some()
+        || value_after(args, "--puck-dock-action").is_some()
+    {
+        return Err(
+            "automatic controller shutdown options require live input and are unavailable in replay mode"
+                .to_owned(),
+        );
+    }
     let mut output = make_replay_output(args)?;
     let path = value_after(args, "--file").ok_or("replay input requires --file PATH")?;
     let session = ReplaySession::read(io::BufReader::new(
@@ -269,6 +342,23 @@ fn parse_value<T: std::str::FromStr>(args: &[String], flag: &str, default: T) ->
     })
 }
 
+fn parse_idle_shutdown(args: &[String]) -> Result<Option<Duration>, String> {
+    let Some(value) = value_after(args, "--idle-shutdown") else {
+        return Ok(RuntimeConfig::default().idle_shutdown_timeout);
+    };
+    if value == "never" {
+        return Ok(None);
+    }
+    let minutes = value.parse::<u64>().map_err(|_| {
+        format!("invalid --idle-shutdown value '{value}'; expected never or MINUTES")
+    })?;
+    let timeout = Duration::from_secs(minutes.saturating_mul(60));
+    if minutes == 0 || timeout > MAX_IDLE_SHUTDOWN_TIMEOUT {
+        return Err("--idle-shutdown must be never or a whole number from 1 to 1440".to_owned());
+    }
+    Ok(Some(timeout))
+}
+
 fn print_help() {
     println!(
         "sc-bridge [options]\n\n\
@@ -281,6 +371,10 @@ fn print_help() {
          --port <auto|PATH>         Automatic XIAO discovery or fixed CDC port\n\
          --lizard-mode <suppress|leave>\n\
                                     Suppress native keyboard/mouse mode (default: suppress)\n\
+         --idle-shutdown <never|MINUTES>\n\
+                                    Neutral idle timeout (default: 15; maximum: 1440)\n\
+         --puck-dock-action <leave|power-off>\n\
+                                    Optional immediate shutdown when placed on Puck\n\
          --file PATH                Replay recording input\n\
          --output <dump|pretty|json|raw|file|mock|serial>\n\
                                     Live default: serial; replay default: dump\n\
@@ -310,6 +404,8 @@ mod tests {
         assert_eq!(config.controller, ControllerSelection::AutoActive);
         assert_eq!(config.serial, SerialSelection::AutoXiao);
         assert_eq!(config.output, OutputSelection::Serial);
+        assert_eq!(config.idle_shutdown_timeout, Some(Duration::from_mins(15)));
+        assert_eq!(config.puck_dock_action, PuckDockAction::LeaveOn);
     }
 
     #[test]
@@ -327,6 +423,31 @@ mod tests {
         let config = live_config(&args(&["--controller", "auto", "--port", "auto"])).unwrap();
         assert_eq!(config.controller, ControllerSelection::AutoActive);
         assert_eq!(config.serial, SerialSelection::AutoXiao);
+    }
+
+    #[test]
+    fn automatic_shutdown_options_parse_independently() {
+        let config = live_config(&args(&[
+            "--idle-shutdown",
+            "5",
+            "--puck-dock-action",
+            "power-off",
+        ]))
+        .unwrap();
+        assert_eq!(config.idle_shutdown_timeout, Some(Duration::from_mins(5)));
+        assert_eq!(config.puck_dock_action, PuckDockAction::PowerOff);
+
+        let never = live_config(&args(&["--idle-shutdown", "never"])).unwrap();
+        assert_eq!(never.idle_shutdown_timeout, None);
+        assert_eq!(never.puck_dock_action, PuckDockAction::LeaveOn);
+    }
+
+    #[test]
+    fn automatic_shutdown_rejects_invalid_values() {
+        for value in ["0", "1441", "soon"] {
+            assert!(live_config(&args(&["--idle-shutdown", value])).is_err());
+        }
+        assert!(live_config(&args(&["--puck-dock-action", "maybe"])).is_err());
     }
 
     #[test]

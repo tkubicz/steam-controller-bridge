@@ -32,6 +32,7 @@ fn run() -> Result<(), String> {
         "capture" => capture(&args),
         "suppress-lizard" => suppress_lizard(&args),
         "rumble" => rumble(&args),
+        "power-off" => power_off(&args),
         command => Err(format!("unknown command '{command}'")),
     }
 }
@@ -367,6 +368,51 @@ fn rumble(args: &[String]) -> Result<(), String> {
     result.and(stop_result)
 }
 
+fn power_off(args: &[String]) -> Result<(), String> {
+    let index = required_index(args)?;
+    let (info, mut session) = open_supported_controller_input(index)?;
+    eprintln!(
+        "WARNING: powering off Steam Controller 2 collection {index} ({}, interface {}).",
+        info.controller_transport()
+            .map_or_else(|| "Unknown".to_owned(), |transport| transport.to_string()),
+        info.interface_number
+    );
+    let mut successes = 0_u8;
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        match session.power_off() {
+            Ok(()) => {
+                successes += 1;
+                eprintln!("power-off write {attempt}/3 succeeded");
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+                eprintln!("power-off write {attempt}/3 failed: {error}");
+            }
+        }
+        if attempt < 3 {
+            match session.poll(Duration::from_millis(10)) {
+                Ok(_) => {}
+                Err(error) if successes > 0 => {
+                    eprintln!(
+                        "controller became unavailable after a successful power-off write: {error}"
+                    );
+                    break;
+                }
+                Err(error) => last_error = Some(error.to_string()),
+            }
+        }
+    }
+    if successes == 0 {
+        Err(last_error.unwrap_or_else(|| "all power-off writes failed".to_owned()))
+    } else {
+        eprintln!(
+            "power-off accepted ({successes} successful write(s)); press Steam to wake the controller"
+        );
+        Ok(())
+    }
+}
+
 fn open_supported_controller_input(index: usize) -> Result<(HidDeviceInfo, HidSession), String> {
     let devices = enumerate().map_err(|error| error.to_string())?;
     let info = devices
@@ -535,7 +581,7 @@ fn hex_bytes(bytes: &[u8]) -> String {
 
 fn print_help() {
     println!(
-        "sc-probe <command> [options]\n\nCommands:\n  list                                      List every HID collection\n  inspect [--index N]                       Show complete metadata and sibling count\n  monitor --index N [--raw]                 Decode or print raw live reports\n  capture --index N --output PATH [--decoded]\n                                            Capture raw and optional decoded JSONL\n  suppress-lizard --index N                 Safely test SC2 lizard-mode suppression\n  rumble --index N [--low N] [--high N] [--duration-ms N]\n                                            Test dual SC2 rumble (defaults: 50%/50%, 1 second)\n\nOptions:\n  --duration-secs N                         Stop monitor/capture/suppression after N seconds\n  --low N --high N                          Rumble channel intensity, 0..65535\n  --duration-ms N                           Rumble duration in milliseconds\n  -h, --help"
+        "sc-probe <command> [options]\n\nCommands:\n  list                                      List every HID collection\n  inspect [--index N]                       Show complete metadata and sibling count\n  monitor --index N [--raw]                 Decode or print raw live reports\n  capture --index N --output PATH [--decoded]\n                                            Capture raw and optional decoded JSONL\n  suppress-lizard --index N                 Safely test SC2 lizard-mode suppression\n  rumble --index N [--low N] [--high N] [--duration-ms N]\n                                            Test dual SC2 rumble (defaults: 50%/50%, 1 second)\n  power-off --index N                       Power off the selected SC2\n\nOptions:\n  --duration-secs N                         Stop monitor/capture/suppression after N seconds\n  --low N --high N                          Rumble channel intensity, 0..65535\n  --duration-ms N                           Rumble duration in milliseconds\n  -h, --help"
     );
 }
 
