@@ -348,14 +348,14 @@ impl BindingsEditor {
 
     fn draw_leaders(&self, painter: &egui::Painter, layout: &CanvasLayout) {
         for callout in CONTROL_CALLOUTS {
-            let target = control_rect(layout.view(callout.view), callout.control);
+            let target = control_rect(layout.view(callout.view), callout.control).center();
             let label = layout.label(callout);
             let selected = self.selected_control == callout.control;
+            // The leader runs from the label's edge to the middle of the
+            // control. Its tail is hidden because the control is painted over
+            // it, so it lands on the control's own edge whatever shape it is.
             painter.line_segment(
-                [
-                    nearest_point_on_rect(label, target.center()),
-                    nearest_point_on_rect(target, label.center()),
-                ],
+                [rect_edge_towards(label, target), target],
                 egui::Stroke::new(
                     if selected { 1.8 } else { 1.1 },
                     if selected { ACCENT } else { DETAIL },
@@ -585,7 +585,11 @@ impl BindingsEditor {
                     egui::Layout::left_to_right(egui::Align::Min),
                     |ui| {
                         ui.spacing_mut().item_spacing.x = 0.0;
-                        self.controller_canvas(ui, canvas_width);
+                        // The canvas places its labels with `Ui::put`, which
+                        // leaves the cursor at the last label instead of at the
+                        // canvas's own edge. Scoping it keeps the column widths
+                        // honest, so the inspector ends on the frame's margin.
+                        ui.scope(|ui| self.controller_canvas(ui, canvas_width));
                         ui.add_space(COLUMN_GAP);
                         self.binding_inspector(ui);
                     },
@@ -837,11 +841,24 @@ fn unit_rect(view: egui::Rect, center: [f32; 2], size: [f32; 2]) -> egui::Rect {
     )
 }
 
-fn nearest_point_on_rect(rect: egui::Rect, point: egui::Pos2) -> egui::Pos2 {
-    egui::pos2(
-        point.x.clamp(rect.left(), rect.right()),
-        point.y.clamp(rect.top(), rect.bottom()),
-    )
+/// Where a ray from the middle of `rect` towards `toward` leaves the rectangle.
+fn rect_edge_towards(rect: egui::Rect, toward: egui::Pos2) -> egui::Pos2 {
+    let center = rect.center();
+    let delta = toward - center;
+    let half = rect.size() * 0.5;
+    let reach = |distance: f32, half: f32| {
+        if distance.abs() > f32::EPSILON {
+            half / distance.abs()
+        } else {
+            f32::INFINITY
+        }
+    };
+    let scale = reach(delta.x, half.x).min(reach(delta.y, half.y));
+    if scale.is_finite() {
+        center + delta * scale
+    } else {
+        center
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -856,89 +873,111 @@ fn nearest_point_on_rect(rect: egui::Rect, point: egui::Pos2) -> egui::Pos2 {
 /// Left half of the silhouette, from the top centre down to the bottom centre.
 /// The right half is mirrored from it, which keeps the body exactly symmetric.
 ///
-/// Traced from the hardware photograph. The shell is narrowest up at the
-/// shoulders; from there the outer edge rakes steadily *outwards* the whole way
-/// down, so the silhouette is at its widest low in the grips before the tips
-/// round off. A straight bottom edge spans the notch between the two grips.
-const BODY_HALF: [[f32; 2]; 30] = [
-    [0.500, 0.176],
-    [0.370, 0.176],
-    [0.272, 0.181],
-    [0.212, 0.192],
-    [0.172, 0.208],
-    [0.142, 0.232],
-    [0.120, 0.264],
-    [0.104, 0.302],
-    [0.092, 0.348],
-    [0.082, 0.400],
-    [0.074, 0.456],
-    [0.068, 0.512],
-    [0.063, 0.570],
-    [0.060, 0.628],
-    [0.058, 0.686],
-    [0.062, 0.740],
-    [0.074, 0.788],
-    [0.096, 0.826],
-    [0.130, 0.850],
-    [0.172, 0.861],
-    [0.214, 0.856],
-    [0.256, 0.844],
-    [0.292, 0.822],
-    [0.320, 0.792],
-    [0.340, 0.756],
-    [0.352, 0.720],
-    [0.356, 0.700],
-    [0.390, 0.690],
-    [0.444, 0.685],
-    [0.500, 0.683],
-];
-
-const TRACKPADS: [[f32; 2]; 2] = [[0.330, 0.521], [0.670, 0.521]];
-const TRACKPAD_SIZE: [f32; 2] = [0.208, 0.204];
-const TRACKPAD_CORNER: f32 = 0.034;
-/// The pads are canted to follow the arc a thumb sweeps through.
-const TRACKPAD_TILT: f32 = 0.157;
-const STICKS: [[f32; 2]; 2] = [[0.368, 0.354], [0.632, 0.354]];
-const STICK_RADIUS: f32 = 0.0515;
-const DPAD_CENTER: [f32; 2] = [0.203, 0.303];
-const DPAD_ARM: f32 = 0.047;
-const DPAD_THICKNESS: f32 = 0.016;
-const FACE_BUTTONS: [f32; 2] = [0.766, 0.299];
-const FACE_BUTTON_OFFSET: f32 = 0.0515;
-const FACE_BUTTON_RADIUS: f32 = 0.0235;
-const OPTION_BUTTONS: [[f32; 2]; 2] = [[0.335, 0.229], [0.665, 0.229]];
-const OPTION_SIZE: [f32; 2] = [0.055, 0.020];
-const STATUS_LED: [f32; 2] = [0.500, 0.238];
-const STEAM_BUTTON: [f32; 2] = [0.500, 0.302];
-const STEAM_RADIUS: f32 = 0.0265;
-const QUICK_ACCESS: [f32; 2] = [0.500, 0.527];
-const QUICK_ACCESS_SIZE: [f32; 2] = [0.070, 0.030];
-
-/// Rear shoulder controls as (name, centre, size, rotation).
+/// Traced pixel by pixel from `reference-front.jpg`: the drawing's background
+/// was flood filled from the border, and this is the boundary of what the fill
+/// could not reach, resampled along the path. The gap in the top edge is where
+/// the bumpers cover the shell.
 ///
-/// The two are told apart by shape and place rather than by a label: a trigger
-/// is the long paddle raked back into the shell at the corner, a bumper the
-/// thin strip lying along the top edge inboard of it.
-const SHOULDERS: [(&str, [f32; 2], [f32; 2], f32); 4] = [
-    ("R2", [0.190, 0.335], [0.082, 0.150], -0.297),
-    ("R1", [0.295, 0.211], [0.140, 0.026], -0.060),
-    ("L2", [0.810, 0.335], [0.082, 0.150], 0.297),
-    ("L1", [0.705, 0.211], [0.140, 0.026], 0.060),
+/// Key proportions, for anyone checking against the reference: the shell is
+/// 1.46 times as wide as it is tall, at its widest 73% of the way down, and the
+/// notch between the grips opens 82% down and spans 45% of the width.
+const BODY_HALF: [[f32; 2]; 43] = [
+    [0.500, 0.200],
+    [0.472, 0.200],
+    [0.443, 0.200],
+    [0.415, 0.201],
+    [0.386, 0.202],
+    [0.358, 0.202],
+    [0.330, 0.204],
+    [0.159, 0.237],
+    [0.131, 0.283],
+    [0.121, 0.309],
+    [0.114, 0.336],
+    [0.106, 0.362],
+    [0.099, 0.389],
+    [0.091, 0.414],
+    [0.084, 0.441],
+    [0.077, 0.467],
+    [0.071, 0.493],
+    [0.066, 0.520],
+    [0.061, 0.546],
+    [0.057, 0.573],
+    [0.053, 0.598],
+    [0.051, 0.625],
+    [0.050, 0.651],
+    [0.051, 0.678],
+    [0.053, 0.704],
+    [0.058, 0.726],
+    [0.067, 0.749],
+    [0.080, 0.771],
+    [0.101, 0.793],
+    [0.158, 0.815],
+    [0.166, 0.815],
+    [0.175, 0.815],
+    [0.183, 0.815],
+    [0.218, 0.793],
+    [0.232, 0.771],
+    [0.243, 0.749],
+    [0.259, 0.726],
+    [0.299, 0.706],
+    [0.339, 0.705],
+    [0.379, 0.704],
+    [0.420, 0.704],
+    [0.460, 0.703],
+    [0.500, 0.703],
 ];
-const SHOULDER_CORNER: f32 = 0.022;
-/// The shell seam across the top, broken by the USB-C port at its centre.
-const TOP_SEAM: [f32; 2] = [0.500, 0.202];
-const TOP_SEAM_WIDTH: f32 = 0.240;
-const USB_PORT_SIZE: [f32; 2] = [0.052, 0.014];
-const PUCK_CONNECTOR: [f32; 2] = [0.500, 0.295];
-const PUCK_CONNECTOR_SIZE: [f32; 2] = [0.095, 0.034];
 
-/// Rear grip paddles as (control, centre, size). `L*` mirrors `R*`.
+// Front-face controls, all measured from `reference-front.jpg` by finding the
+// regions its outlines enclose.
+const TRACKPADS: [[f32; 2]; 2] = [[0.329, 0.567], [0.671, 0.567]];
+const TRACKPAD_SIZE: [f32; 2] = [0.180, 0.180];
+const TRACKPAD_CORNER: f32 = 0.031;
+/// The pads are canted to follow the arc a thumb sweeps through.
+const TRACKPAD_TILT: f32 = 0.171;
+const STICKS: [[f32; 2]; 2] = [[0.370, 0.399], [0.630, 0.399]];
+const STICK_RADIUS: f32 = 0.066;
+const DPAD_CENTER: [f32; 2] = [0.225, 0.334];
+const DPAD_ARM: f32 = 0.064;
+const DPAD_THICKNESS: f32 = 0.021;
+const FACE_BUTTONS: [f32; 2] = [0.776, 0.334];
+const FACE_BUTTON_OFFSET: f32 = 0.052;
+const FACE_BUTTON_RADIUS: f32 = 0.024;
+const OPTION_BUTTONS: [[f32; 2]; 2] = [[0.341, 0.271], [0.659, 0.271]];
+const OPTION_SIZE: [f32; 2] = [0.052, 0.020];
+const STEAM_BUTTON: [f32; 2] = [0.500, 0.334];
+const STEAM_RADIUS: f32 = 0.025;
+const QUICK_ACCESS: [f32; 2] = [0.500, 0.569];
+const QUICK_ACCESS_SIZE: [f32; 2] = [0.066, 0.022];
+/// The bumpers ride on top of the shell at the corners, so they deliberately
+/// break the outline just as they do in the reference.
+const BUMPERS: [[f32; 2]; 2] = [[0.234, 0.213], [0.766, 0.213]];
+const BUMPER_SIZE: [f32; 2] = [0.132, 0.043];
+
+/// Rear shoulder controls as (name, centre, size, rotation), measured from
+/// `reference-back.jpeg`. Seen from behind each side is one big trigger wing
+/// wrapping the top corner, with the bumper riding along its upper edge.
+const SHOULDERS: [(&str, [f32; 2], [f32; 2], f32); 4] = [
+    ("R2", [0.232, 0.262], [0.147, 0.116], -0.240),
+    ("R1", [0.234, 0.207], [0.132, 0.040], -0.140),
+    ("L2", [0.768, 0.262], [0.147, 0.116], 0.240),
+    ("L1", [0.766, 0.207], [0.132, 0.040], 0.140),
+];
+const SHOULDER_CORNER: f32 = 0.030;
+/// The shell seam across the top, broken by the USB-C port at its centre.
+const TOP_SEAM: [f32; 2] = [0.500, 0.222];
+const TOP_SEAM_WIDTH: f32 = 0.300;
+const USB_PORT_SIZE: [f32; 2] = [0.045, 0.012];
+const PUCK_CONNECTOR: [f32; 2] = [0.500, 0.291];
+const PUCK_CONNECTOR_SIZE: [f32; 2] = [0.104, 0.027];
+
+/// Rear grip paddles as (control, centre, size), measured from
+/// `reference-back.jpeg`. The lower pair sits further out than the upper pair,
+/// following the grips as they splay.
 const GRIP_PADDLES: [(BindableControl, [f32; 2], [f32; 2]); 4] = [
-    (BindableControl::R4, [0.224, 0.533], [0.058, 0.092]),
-    (BindableControl::R5, [0.197, 0.658], [0.054, 0.082]),
-    (BindableControl::L4, [0.776, 0.533], [0.058, 0.092]),
-    (BindableControl::L5, [0.803, 0.658], [0.054, 0.082]),
+    (BindableControl::R4, [0.266, 0.533], [0.065, 0.093]),
+    (BindableControl::R5, [0.226, 0.655], [0.052, 0.090]),
+    (BindableControl::L4, [0.734, 0.533], [0.065, 0.093]),
+    (BindableControl::L5, [0.774, 0.655], [0.052, 0.090]),
 ];
 
 /// Where a bindable control is drawn, so the artwork, the hit area and the
@@ -1146,6 +1185,18 @@ fn draw_front_face(
     let detail = egui::Stroke::new(1.3, DETAIL);
     let outline = egui::Stroke::new(1.5, OUTLINE);
 
+    // The bumpers sit on the shell's top corners, breaking the outline.
+    for center in BUMPERS {
+        let bumper = unit_rect(view, center, BUMPER_SIZE);
+        painter.rect_filled(bumper, bumper.height() * 0.5, SURFACE);
+        painter.rect_stroke(
+            bumper,
+            bumper.height() * 0.5,
+            egui::Stroke::new(1.6, OUTLINE),
+            egui::StrokeKind::Inside,
+        );
+    }
+
     for (pad, inset) in trackpad_shapes() {
         pad.paint(painter, view, INSET, outline);
         inset.outline(painter, view, detail);
@@ -1179,8 +1230,6 @@ fn draw_front_face(
         painter.rect_filled(button, scale * 0.010, INSET);
         painter.rect_stroke(button, scale * 0.010, detail, egui::StrokeKind::Inside);
     }
-
-    painter.circle_stroke(normalized_point(view, STATUS_LED), scale * 0.006, detail);
 
     let steam = normalized_point(view, STEAM_BUTTON);
     painter.circle_filled(steam, scale * STEAM_RADIUS, INSET);
@@ -1575,9 +1624,9 @@ mod tests {
             assert_inside_body("a View/Menu button", center, OPTION_SIZE);
         }
         assert_inside_body("the Steam button", STEAM_BUTTON, [STEAM_RADIUS * 2.0; 2]);
-        for shoulder in shoulder_shapes() {
-            assert_polygon_inside_body("a bumper or trigger", &shoulder.points);
-        }
+        // The shoulders are deliberately not checked: in both references the
+        // bumpers and trigger wings wrap over the shell's top edge rather than
+        // sitting inside it. Their placement is covered by the test below.
         assert_inside_body("the USB-C port", TOP_SEAM, USB_PORT_SIZE);
         assert_inside_body("the shell seam", TOP_SEAM, [TOP_SEAM_WIDTH, 0.0]);
         assert_inside_body("the puck connector", PUCK_CONNECTOR, PUCK_CONNECTOR_SIZE);
@@ -1594,25 +1643,38 @@ mod tests {
                 .copied()
                 .expect("every shoulder is described once")
         };
-        for (trigger, bumper, outboard) in [("R2", "R1", -1.0_f32), ("L2", "L1", 1.0_f32)] {
+        for (trigger, bumper) in [("R2", "R1"), ("L2", "L1")] {
             let (_, trigger_at, trigger_size, _) = shoulder(trigger);
             let (_, bumper_at, bumper_size, _) = shoulder(bumper);
-            // The trigger is the deep paddle at the corner...
-            assert!((trigger_at[0] - 0.5) * outboard > (bumper_at[0] - 0.5) * outboard);
-            assert!(trigger_at[1] > bumper_at[1]);
-            assert!(trigger_size[1] > bumper_size[1] * 3.0);
-            // ...and the bumper is the thin strip lying on the top edge.
-            assert!(bumper_size[0] > bumper_size[1] * 4.0);
+            // In the reference the trigger is the deep wing wrapping the top
+            // corner, with the bumper as a thin strip riding above it.
+            assert!(
+                trigger_at[1] > bumper_at[1],
+                "the bumper should sit above the trigger"
+            );
+            assert!(
+                trigger_size[1] > bumper_size[1] * 2.5,
+                "the trigger should be far deeper than the bumper",
+            );
+            assert!(
+                bumper_size[0] > bumper_size[1] * 3.0,
+                "the bumper should read as a strip, not a block",
+            );
         }
     }
 
     #[test]
-    fn the_grips_rake_outwards_above_a_straight_bottom_edge() {
-        let shoulder = BODY_HALF
-            .iter()
-            .copied()
-            .find(|[_, y]| *y > 0.20)
-            .expect("the outline reaches the shoulders");
+    fn the_silhouette_keeps_the_proportions_of_the_reference_drawing() {
+        // Every figure here was measured off reference-front.jpg by flood
+        // filling its background, so this fails if the outline drifts away
+        // from the hardware rather than merely away from a previous drawing.
+        let bounds = body_bounds();
+        let aspect = bounds.width() / bounds.height();
+        assert!(
+            (aspect - 1.463).abs() < 0.03,
+            "the shell is 1.463 times as wide as it is tall in the reference, got {aspect}",
+        );
+
         let widest = BODY_HALF
             .iter()
             .copied()
@@ -1624,35 +1686,48 @@ mod tests {
                 }
             })
             .expect("the outline has points");
-        // The outer edge leans away from the centreline the whole way down, so
-        // the body is widest in the grips rather than up at the shoulders.
+        let widest_at = (widest[1] - bounds.top()) / bounds.height();
         assert!(
-            widest[1] > shoulder[1],
-            "the body is widest at {widest:?}, above the grips, so they taper inwards",
+            (widest_at - 0.733).abs() < 0.04,
+            "the reference is widest 73% of the way down, this is widest at {widest_at}",
         );
-        let (run, drop) = (shoulder[0] - widest[0], widest[1] - shoulder[1]);
-        let rake = run.atan2(drop).to_degrees();
-        assert!(
-            (9.0..22.0).contains(&rake),
-            "the grips rake outwards at {rake}°, which reads as straight down",
-        );
-        assert!(
-            drop > 0.35,
-            "the rake only covers {drop} of the body height",
-        );
-        let bottom: Vec<f32> = BODY_HALF
+
+        // The notch between the grips: the bottom edge is the run of points
+        // that sits above the grip tips.
+        let tip = BODY_HALF
             .iter()
             .copied()
-            .filter(|[x, y]| *x > 0.38 && *y > 0.60)
-            .map(|[_, y]| y)
+            .reduce(|lowest, point| if point[1] > lowest[1] { point } else { lowest })
+            .expect("the outline has points");
+        let bottom: Vec<[f32; 2]> = BODY_HALF
+            .iter()
+            .copied()
+            .filter(|[x, y]| *x > 0.28 && *y > 0.60 && *y < tip[1] - 0.05)
             .collect();
-        assert!(bottom.len() >= 3, "the bottom edge needs several points");
-        let (lowest, highest) = bottom.iter().fold((f32::MAX, f32::MIN), |range, y| {
+        assert!(bottom.len() >= 4, "the bottom edge needs several points");
+        let notch_at = (bottom[0][1] - bounds.top()) / bounds.height();
+        assert!(
+            (notch_at - 0.819).abs() < 0.04,
+            "the notch opens 82% down in the reference, here it opens at {notch_at}",
+        );
+        let notch_width = 2.0 * (0.5 - bottom[0][0]) / bounds.width();
+        assert!(
+            (notch_width - 0.447).abs() < 0.06,
+            "the notch spans 45% of the width in the reference, here {notch_width}",
+        );
+        let (lowest, highest) = bottom.iter().fold((f32::MAX, f32::MIN), |range, [_, y]| {
             (range.0.min(*y), range.1.max(*y))
         });
         assert!(
             highest - lowest < 0.01,
             "the bottom edge is not straight: it spans {lowest}..{highest}",
+        );
+
+        // The grips hang below that bottom edge and taper to narrow tips.
+        let hang = (tip[1] - bottom[0][1]) / bounds.height();
+        assert!(
+            (hang - 0.181).abs() < 0.04,
+            "the grips hang 18% of the body below the bottom edge, here {hang}",
         );
     }
 
@@ -1701,15 +1776,46 @@ mod tests {
         let upper = layout.label(CONTROL_CALLOUTS[1]);
         let lower = layout.label(CONTROL_CALLOUTS[2]);
         assert!(upper.bottom() < lower.top(), "stacked labels overlap");
+
+        // Every leader has to start on its label's edge and run at the middle
+        // of the control it names.
+        for callout in CONTROL_CALLOUTS {
+            let label = layout.label(callout);
+            let target = control_rect(layout.view(callout.view), callout.control).center();
+            let start = rect_edge_towards(label, target);
+            let on_edge = (start.x - label.left()).abs() < 0.01
+                || (start.x - label.right()).abs() < 0.01
+                || (start.y - label.top()).abs() < 0.01
+                || (start.y - label.bottom()).abs() < 0.01;
+            assert!(
+                on_edge,
+                "the {} leader starts at {start:?}, off its label's edge",
+                callout.control.label()
+            );
+            // Start, label centre and target are collinear, so the leader
+            // points straight at the middle of the control.
+            let along = target - label.center();
+            let out = start - label.center();
+            let cross = along.x.mul_add(out.y, -(along.y * out.x));
+            assert!(
+                cross.abs() < 0.5,
+                "the {} leader does not aim at the control's middle",
+                callout.control.label(),
+            );
+        }
     }
 
     #[test]
     fn the_diagram_and_the_inspector_fit_inside_the_window() {
-        let content_width = MIN_WINDOW_SIZE[0] - 40.0;
-        let canvas_width = (content_width - INSPECTOR_WIDTH - COLUMN_GAP).max(CANVAS_MIN_WIDTH);
-        assert!(
-            canvas_width + COLUMN_GAP + INSPECTOR_WIDTH <= content_width,
-            "the row overflows the window margin at the minimum window size",
-        );
+        for window in [MIN_WINDOW_SIZE[0], WINDOW_SIZE[0]] {
+            let content_width = window - 40.0;
+            let canvas_width = (content_width - INSPECTOR_WIDTH - COLUMN_GAP).max(CANVAS_MIN_WIDTH);
+            // Exactly, not merely within: the inspector's right edge is what
+            // the Save and Cancel buttons line up against.
+            assert!(
+                (canvas_width + COLUMN_GAP + INSPECTOR_WIDTH - content_width).abs() < f32::EPSILON,
+                "at a {window}pt window the row does not fill the content width",
+            );
+        }
     }
 }
