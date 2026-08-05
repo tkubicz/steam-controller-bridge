@@ -4,20 +4,21 @@ The input path and bounded reverse-feedback path are:
 
 ```text
 Steam Controller HID -> protocol decoder -> SteamControllerState
+                                             |              |
+                                             v              v
+                                   mapping and filters  desktop-bindings
+                                             |              |
+                                             v              v
+keyboard/automated simulator ----------> GamepadState   macOS keyboard/mouse
                                              |
-keyboard/automated simulator                  v
-          |                         mapping and filters
-          |                                  |
-          +-------------> GamepadState <-----+
-          |
-          v
- explicit wire conversion and framing
-          |
-          v
- mock / dump / file / JSONL recording
-                         |
-                         v
-                 deterministic/timed replay
+                                             v
+                                explicit wire conversion and framing
+                                             |
+                                             v
+                              mock / dump / file / JSONL recording
+                                             |
+                                             v
+                                deterministic/timed replay
 
 game/browser -> Xbox OUT -> XIAO -> CDC Rumble -> bridge-runtime
                                                   |
@@ -35,6 +36,7 @@ game/browser -> Xbox OUT -> XIAO -> CDC Rumble -> bridge-runtime
 - `steam-controller-device` owns HID collection metadata, raw reports, lifecycle events, stable enumeration ordering, and reconnecting sessions. Only its private `platform` module depends on `hidapi`; non-macOS builds expose an explicit unsupported-platform stub.
 - `steam-controller-protocol` owns the Steam Controller 2 host-facing `0x45`/`0x42` state layouts, status reports, button masks, motion fields, and structured decode errors. It has no HID or transport dependency and preserves each complete validated report.
 - `controller-mapper` owns the validated default mapping profile and allocation-free filter pipeline. Its only inputs are decoded controller state, elapsed time, and explicit configuration; disconnect handling resets its optional smoothing history.
+- `desktop-bindings` owns the versioned profile schema, validation and atomic persistence, bindable-control edge engine, shared-output reference counts, and platform-neutral `DesktopInputSink`. Its target-gated macOS adapter is the only layer that exposes Enigo types.
 - `bridge-core` owns the hardware-independent integrated state machine: decode/map timing, changed-state suppression, reconnect counters, repeated-failure and timeout safety, mapper reset, and neutral output.
 - `bridge-runtime` owns reusable live discovery and orchestration: uniquely active Puck-or-Bluetooth source selection, metadata/Hello-verified XIAO selection, HID/serial ownership, lizard suppression, bounded rumble leasing, typed battery/charge state, meaningful-idle tracking, one-shot Puck-dock detection, automatic power-off, status snapshots, reconnect recovery, and neutral/rumble-zero-before-release cleanup. Its shared status-log tracker converts snapshots into immediate semantic deltas, five-minute full snapshots, and error-context snapshots for both frontends.
 - `gamepad-simulator` owns deterministic and keyboard-driven sources. It depends on output interfaces but not protocol internals.
@@ -44,9 +46,9 @@ game/browser -> Xbox OUT -> XIAO -> CDC Rumble -> bridge-runtime
 - `sc-bridge` is a thin command-line frontend over `bridge-runtime` for live input and `recording` for replay. Its live defaults are automatic discovery plus serial output.
 - `sc-bridge-menu` is a macOS-only, windowless `winit`/`tray-icon` frontend over the same runtime. It owns menu rendering, actions, log rotation, and local `.app` packaging, not controller logic. At startup it renders the four status states once, retains their native images through `tray-icon`'s documented `NSStatusItem` access, and swaps those same objects on transitions instead of creating new AppKit/CoreUI cache identities.
 
-All project-authored crates forbid unsafe code. Only the recording layer uses
-third-party serialization and base64 libraries. The GUI, HID, mapping, and
-serial layers remain separate components.
+All project-authored crates forbid unsafe code. Recording and desktop bindings
+use the shared serialization libraries; only recording uses base64. The GUI,
+HID, mapping, and serial layers remain separate components.
 
 ## Lifecycle and safety
 
@@ -88,9 +90,12 @@ processes therefore cannot open any supported candidate until discovery stops,
 although metadata enumeration remains available. This is intentional resource
 stability behavior, but whether a continuously open macOS IOHIDDevice changes
 controller sleep or long-idle battery behavior remains a hardware observation
-item. The integrated runtime runs the selected session behind a bounded
-standard-library channel with latest-state semantics for reports while
-preserving lifecycle events. A lost source returns to discovery instead of
+item. The integrated runtime runs the selected session behind a 64-entry
+transition mailbox. Analog-only reports replace the newest queued report only
+when the five bindable bits are unchanged; each L4/L5/R4/R5/Quick Access edge
+remains ordered. Overflow releases desktop outputs, discards stale transitions,
+and retains the newest state as a non-emitting recovery baseline. Lifecycle
+events remain ordered. A lost source returns to discovery instead of
 trusting a stale numeric index.
 
 Serial discovery retains USB metadata, rejects non-XIAO `usbmodem` ports, and

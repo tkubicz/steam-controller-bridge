@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 controller-mapper = { path = "../../crates/controller-mapper" }
 bridge-output = { path = "../../crates/bridge-output" }
-eframe.workspace = true
+eframe = { workspace = true, features = ["wayland", "x11"] }
 gamepad-state = { path = "../../crates/gamepad-state" }
 recording = { path = "../../crates/recording" }
 serde_json.workspace = true

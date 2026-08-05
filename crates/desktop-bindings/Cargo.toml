@@ -1,0 +1,20 @@
+[package]
+name = "desktop-bindings"
+version = "1.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+steam-controller-protocol = { path = "../steam-controller-protocol" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+enigo.workspace = true
+objc2-core-graphics.workspace = true
+objc2-io-kit.workspace = true
+
+[lints]
+workspace = true

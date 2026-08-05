@@ -387,6 +387,36 @@ fn safety_status_changes(
     );
     push_change(
         changes,
+        "bindings_state",
+        &previous.bindings.state,
+        &current.bindings.state,
+    );
+    push_change(
+        changes,
+        "binding_profile",
+        &previous.bindings.active_profile_name,
+        &current.bindings.active_profile_name,
+    );
+    push_change(
+        changes,
+        "configured_bindings",
+        &previous.bindings.configured_binding_count,
+        &current.bindings.configured_binding_count,
+    );
+    push_change(
+        changes,
+        "binding_failures",
+        &previous.bindings.failures,
+        &current.bindings.failures,
+    );
+    push_change(
+        changes,
+        "binding_last_error",
+        &previous.bindings.last_error,
+        &current.bindings.last_error,
+    );
+    push_change(
+        changes,
         "idle_timeout",
         &previous.automatic_shutdown.configured_timeout,
         &current.automatic_shutdown.configured_timeout,
@@ -490,6 +520,12 @@ fn tracked_status_changed(previous: &BridgeStatus, current: &BridgeStatus) -> bo
         || previous.lizard.failures != current.lizard.failures
         || previous.haptics.state != current.haptics.state
         || previous.haptics.failures != current.haptics.failures
+        || previous.bindings.state != current.bindings.state
+        || previous.bindings.active_profile_id != current.bindings.active_profile_id
+        || previous.bindings.active_profile_name != current.bindings.active_profile_name
+        || previous.bindings.configured_binding_count != current.bindings.configured_binding_count
+        || previous.bindings.failures != current.bindings.failures
+        || previous.bindings.last_error != current.bindings.last_error
         || previous.automatic_shutdown.configured_timeout
             != current.automatic_shutdown.configured_timeout
         || previous.automatic_shutdown.puck_dock_action
@@ -513,6 +549,7 @@ fn has_failures(status: &BridgeStatus) -> bool {
         || status.output_diagnostics.checksum_failures > 0
         || status.lizard.failures > 0
         || status.haptics.failures > 0
+        || status.bindings.failures > 0
         || status.automatic_shutdown.failures > 0
 }
 
@@ -524,6 +561,7 @@ fn failures_increased(previous: &BridgeStatus, current: &BridgeStatus) -> bool {
             > previous.output_diagnostics.checksum_failures
         || current.lizard.failures > previous.lizard.failures
         || current.haptics.failures > previous.haptics.failures
+        || current.bindings.failures > previous.bindings.failures
         || current.automatic_shutdown.failures > previous.automatic_shutdown.failures
 }
 
@@ -549,6 +587,7 @@ mod tests {
             "xiao:",
             "lizard:",
             "haptics:",
+            "bindings:",
             "automatic_shutdown:",
             "bridge_metrics:",
             "output_diagnostics:",
@@ -649,6 +688,9 @@ mod tests {
         current.xiao.handshake_complete = true;
         current.lizard.suppressed = true;
         current.haptics.state = crate::HapticsState::Active;
+        current.bindings.state = crate::DesktopBindingsState::Ready;
+        current.bindings.active_profile_name = Some("Default".to_owned());
+        current.bindings.configured_binding_count = 2;
         current.automatic_shutdown.configured_timeout = None;
         current.automatic_shutdown.phase = crate::AutomaticShutdownPhase::Monitoring;
         current.automatic_shutdown.puck_dock_action = crate::PuckDockAction::PowerOff;
@@ -661,6 +703,9 @@ mod tests {
             "xiao_path=",
             "lizard_suppressed=",
             "haptics_state=",
+            "bindings_state=",
+            "binding_profile=",
+            "configured_bindings=",
             "idle_timeout=",
             "automatic_shutdown_phase=",
             "puck_dock_action=",
@@ -677,6 +722,7 @@ mod tests {
             |status: &mut BridgeStatus| status.output_diagnostics.checksum_failures += 1,
             |status: &mut BridgeStatus| status.lizard.failures += 1,
             |status: &mut BridgeStatus| status.haptics.failures += 1,
+            |status: &mut BridgeStatus| status.bindings.failures += 1,
             |status: &mut BridgeStatus| status.automatic_shutdown.failures += 1,
         ] {
             let initial = BridgeStatus::default();

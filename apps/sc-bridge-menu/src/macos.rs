@@ -9,6 +9,11 @@ use bridge_runtime::{
     format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, PuckDockAction,
     RuntimeConfig, StatusLogRecord, StatusLogTracker,
 };
+use desktop_bindings::{
+    default_store_path, input_monitoring_access, load_or_create_store, parse_store,
+    preflight_accessibility_access, preflight_post_event_access, request_accessibility_access,
+    request_input_monitoring_access, request_post_event_access, BindingStore, PermissionState,
+};
 use objc2::{rc::Retained, MainThreadMarker};
 use objc2_app_kit::{NSImage, NSStatusBarButton};
 use serde::{Deserialize, Serialize};
@@ -20,18 +25,22 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::window::WindowId;
 
-use crate::model::{MenuModel, TrayState};
+use crate::model::{MenuModel, RunAction, TrayState};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const LOG_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 const LOG_TRUNCATION_MARKER: &str = " log_truncated=true\n";
-const START_ID: &str = "start";
-const STOP_ID: &str = "stop";
+const RUN_TOGGLE_ID: &str = "run-toggle";
 const COPY_ERROR_ID: &str = "copy-error";
 const COPY_ID: &str = "copy-diagnostics";
 const SETTINGS_ID: &str = "input-monitoring";
+const ACCESSIBILITY_ID: &str = "accessibility";
+const ENABLE_BINDINGS_ID: &str = "enable-bindings";
+const EDIT_BINDINGS_ID: &str = "edit-bindings";
+const BINDING_PROFILE_PREFIX: &str = "binding-profile:";
 const LOGS_ID: &str = "open-logs";
 const QUIT_ID: &str = "quit";
 const IDLE_NEVER_ID: &str = "idle-never";
@@ -40,13 +49,58 @@ const IDLE_10_ID: &str = "idle-10";
 const IDLE_15_ID: &str = "idle-15";
 const IDLE_30_ID: &str = "idle-30";
 const PUCK_DOCK_ID: &str = "puck-dock-power-off";
-const SETTINGS_VERSION: u32 = 1;
+const SETTINGS_VERSION: u32 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionStage {
+    InputMonitoring,
+    PostEvent,
+    Accessibility,
+    Ready,
+}
+
+const fn permission_stage(
+    input_monitoring: bool,
+    post_event: bool,
+    accessibility: bool,
+) -> PermissionStage {
+    if !input_monitoring {
+        PermissionStage::InputMonitoring
+    } else if !post_event {
+        PermissionStage::PostEvent
+    } else if !accessibility {
+        PermissionStage::Accessibility
+    } else {
+        PermissionStage::Ready
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct AppSettings {
     version: u32,
     idle_shutdown_minutes: Option<u64>,
     power_off_on_puck: bool,
+    #[serde(default = "default_binding_profile_id")]
+    active_binding_profile: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BindingsFileFingerprint {
+    length: u64,
+    modified: SystemTime,
+}
+
+fn bindings_file_fingerprint(path: &Path) -> Result<BindingsFileFingerprint, String> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    let modified = metadata.modified().map_err(|error| error.to_string())?;
+    Ok(BindingsFileFingerprint {
+        length: metadata.len(),
+        modified,
+    })
+}
+
+fn default_binding_profile_id() -> String {
+    desktop_bindings::DEFAULT_PROFILE_ID.to_owned()
 }
 
 impl Default for AppSettings {
@@ -55,6 +109,7 @@ impl Default for AppSettings {
             version: SETTINGS_VERSION,
             idle_shutdown_minutes: Some(15),
             power_off_on_puck: false,
+            active_binding_profile: default_binding_profile_id(),
         }
     }
 }
@@ -81,12 +136,13 @@ fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
     };
     let parsed = serde_json::from_slice::<AppSettings>(&bytes).map_err(|error| error.to_string());
     match parsed {
-        Ok(settings)
-            if settings.version == SETTINGS_VERSION
+        Ok(mut settings)
+            if matches!(settings.version, 1 | SETTINGS_VERSION)
                 && settings
                     .idle_shutdown_minutes
                     .is_none_or(|minutes| matches!(minutes, 5 | 10 | 15 | 30)) =>
         {
+            settings.version = SETTINGS_VERSION;
             (settings, None)
         }
         Ok(settings) => (
@@ -114,7 +170,18 @@ fn save_settings(path: &Path, settings: &AppSettings) -> Result<(), String> {
 }
 
 pub fn run() -> Result<(), String> {
-    let event_loop = EventLoop::new().map_err(|error| error.to_string())?;
+    // A menu bar app has no windows and no Dock icon, and it must not take
+    // focus when it starts. Winit otherwise runs as a regular foreground app
+    // and calls `activateIgnoringOtherApps` at launch. In that state macOS
+    // tears down the status item's menu the first time a submenu is opened
+    // after launch, taking the whole menu with it; every later open is fine.
+    // Declaring the app an accessory and leaving the frontmost app alone keeps
+    // the menu up. Either one alone is enough, and both are correct here.
+    let event_loop = EventLoop::builder()
+        .with_activation_policy(ActivationPolicy::Accessory)
+        .with_activate_ignoring_other_apps(false)
+        .build()
+        .map_err(|error| error.to_string())?;
     let mut app = MenuApp::new()?;
     event_loop
         .run_app(&mut app)
@@ -129,13 +196,37 @@ struct MenuItems {
     xiao: MenuItem,
     battery: MenuItem,
     haptics: MenuItem,
+    bindings: MenuItem,
     automatic_shutdown: MenuItem,
     problem: MenuItem,
-    start: MenuItem,
-    stop: MenuItem,
+    run_toggle: MenuItem,
     copy_error: MenuItem,
     idle_shutdown: Vec<(Option<u64>, CheckMenuItem)>,
     puck_dock: CheckMenuItem,
+    bindings_submenu: Submenu,
+    binding_profiles: Vec<(String, CheckMenuItem)>,
+}
+
+fn binding_profile_menu_items(
+    store: &BindingStore,
+    active_profile_id: &str,
+) -> Vec<(String, CheckMenuItem)> {
+    store
+        .profiles
+        .iter()
+        .map(|profile| {
+            (
+                profile.id.clone(),
+                CheckMenuItem::with_id(
+                    format!("{BINDING_PROFILE_PREFIX}{}", profile.id),
+                    &profile.name,
+                    true,
+                    profile.id.eq_ignore_ascii_case(active_profile_id),
+                    None,
+                ),
+            )
+        })
+        .collect()
 }
 
 struct MenuApp {
@@ -149,6 +240,10 @@ struct MenuApp {
     logger: StatusLogger,
     settings: AppSettings,
     settings_path: PathBuf,
+    bindings_path: PathBuf,
+    binding_store: BindingStore,
+    bindings_file_fingerprint: BindingsFileFingerprint,
+    permission_request_pending: Option<PermissionStage>,
     shutting_down: bool,
 }
 
@@ -159,6 +254,18 @@ impl MenuApp {
         if let Some(warning) = warning {
             eprintln!("level=warn event=settings_load_failed message={warning:?} action=defaults");
         }
+        let bindings_path = default_store_path()?;
+        let binding_store = load_or_create_store(&bindings_path)?;
+        let active_profile = binding_store
+            .profile_by_id(&settings.active_binding_profile)
+            .or_else(|| binding_store.profiles.first())
+            .cloned();
+        let mut settings = settings;
+        if let Some(profile) = &active_profile {
+            settings.active_binding_profile.clone_from(&profile.id);
+        }
+        save_settings(&settings_path, &settings)?;
+        let bindings_file_fingerprint = bindings_file_fingerprint(&bindings_path)?;
         let config = RuntimeConfig {
             idle_shutdown_timeout: settings
                 .idle_shutdown_minutes
@@ -168,6 +275,7 @@ impl MenuApp {
             } else {
                 PuckDockAction::LeaveOn
             },
+            binding_profile: active_profile,
             ..RuntimeConfig::default()
         };
         Ok(Self {
@@ -181,6 +289,10 @@ impl MenuApp {
             logger: StatusLogger::new()?,
             settings,
             settings_path,
+            bindings_path,
+            binding_store,
+            bindings_file_fingerprint,
+            permission_request_pending: None,
             shutting_down: false,
         })
     }
@@ -194,13 +306,18 @@ impl MenuApp {
         let xiao = MenuItem::new("XIAO: Discovering", false, None);
         let battery = MenuItem::new("Battery: Unknown", false, None);
         let haptics = MenuItem::new("Haptics: Idle", false, None);
+        let bindings = MenuItem::new("Bindings: Disabled", false, None);
         let automatic_shutdown = MenuItem::new("Auto shutdown: Idle 0:00 / 15:00", false, None);
         let problem = MenuItem::new("Problem: None", false, None);
-        let start = MenuItem::with_id(START_ID, "Start Bridge", false, None);
-        let stop = MenuItem::with_id(STOP_ID, "Stop Bridge", true, None);
+        let run_toggle = MenuItem::with_id(RUN_TOGGLE_ID, "Start Bridge", false, None);
         let copy_error = MenuItem::with_id(COPY_ERROR_ID, "Copy Full Error", false, None);
         let copy = MenuItem::with_id(COPY_ID, "Copy Diagnostics", true, None);
         let settings = MenuItem::with_id(SETTINGS_ID, "Open Input Monitoring Settings", true, None);
+        let accessibility =
+            MenuItem::with_id(ACCESSIBILITY_ID, "Open Accessibility Settings", true, None);
+        let enable_bindings =
+            MenuItem::with_id(ENABLE_BINDINGS_ID, "Request Permissions…", true, None);
+        let edit_bindings = MenuItem::with_id(EDIT_BINDINGS_ID, "Edit Bindings…", true, None);
         let logs = MenuItem::with_id(LOGS_ID, "Open Log Folder", true, None);
         let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
         let idle_shutdown = vec![
@@ -271,32 +388,61 @@ impl MenuApp {
             self.settings.power_off_on_puck,
             None,
         );
-        let separator1 = PredefinedMenuItem::separator();
-        let separator2 = PredefinedMenuItem::separator();
-        let separator3 = PredefinedMenuItem::separator();
-        let separator4 = PredefinedMenuItem::separator();
+        let binding_profiles =
+            binding_profile_menu_items(&self.binding_store, &self.settings.active_binding_profile);
+        let bindings_submenu = Submenu::new("Bindings", true);
+        for (_, item) in &binding_profiles {
+            bindings_submenu
+                .append(item)
+                .map_err(|error| error.to_string())?;
+        }
+        bindings_submenu
+            .append(&PredefinedMenuItem::separator())
+            .map_err(|error| error.to_string())?;
+        bindings_submenu
+            .append(&edit_bindings)
+            .map_err(|error| error.to_string())?;
+        // Everything that asks macOS for a permission, or sends you to the
+        // pane that grants it, lives together rather than being scattered
+        // through the menu.
+        let permissions_submenu = Submenu::with_items(
+            "Permissions",
+            true,
+            &[
+                &enable_bindings,
+                &PredefinedMenuItem::separator(),
+                &settings,
+                &accessibility,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        let separators: [PredefinedMenuItem; 6] =
+            std::array::from_fn(|_| PredefinedMenuItem::separator());
         let menu = Menu::with_items(&[
             &bridge,
             &status,
-            &separator1,
+            &separators[0],
             &controller,
             &input,
             &xiao,
             &battery,
             &haptics,
-            &automatic_shutdown,
-            &separator2,
+            &bindings,
+            &separators[1],
             &problem,
             &copy_error,
-            &separator3,
-            &start,
-            &stop,
+            &separators[2],
+            &run_toggle,
+            &separators[3],
+            &automatic_shutdown,
             &idle_submenu,
             &puck_dock,
-            &separator4,
+            &separators[4],
+            &bindings_submenu,
+            &permissions_submenu,
             &copy,
-            &settings,
             &logs,
+            &separators[5],
             &quit,
         ])
         .map_err(|error| error.to_string())?;
@@ -316,13 +462,15 @@ impl MenuApp {
             xiao,
             battery,
             haptics,
+            bindings,
             automatic_shutdown,
             problem,
-            start,
-            stop,
+            run_toggle,
             copy_error,
             idle_shutdown,
             puck_dock,
+            bindings_submenu,
+            binding_profiles,
         });
         self.tray_icons = Some(tray_icons);
         self.tray = Some(tray);
@@ -352,10 +500,11 @@ impl MenuApp {
                 items.xiao.set_text(&model.xiao);
                 items.battery.set_text(&model.battery);
                 items.haptics.set_text(&model.haptics);
+                items.bindings.set_text(&model.bindings);
                 items.automatic_shutdown.set_text(&model.automatic_shutdown);
                 items.problem.set_text(&model.problem);
-                items.start.set_enabled(model.start_enabled);
-                items.stop.set_enabled(model.stop_enabled);
+                items.run_toggle.set_text(model.run_action.label());
+                items.run_toggle.set_enabled(model.run_enabled);
                 items.copy_error.set_enabled(model.has_error);
             }
             if let Some(tray) = &self.tray {
@@ -373,14 +522,21 @@ impl MenuApp {
 
     fn handle_menu_event(&mut self, id: &str, event_loop: &ActiveEventLoop) {
         match id {
-            START_ID => {
-                if let Err(error) = self.runtime.request_start() {
-                    eprintln!("cannot start bridge: {error}");
-                }
-            }
-            STOP_ID => {
-                if let Err(error) = self.runtime.request_stop() {
-                    eprintln!("cannot stop bridge: {error}");
+            RUN_TOGGLE_ID => {
+                // One control: what it does depends on what the bridge is
+                // doing, which is what its label already says.
+                let starts = self
+                    .last_model
+                    .as_ref()
+                    .is_none_or(|model| model.run_action == RunAction::Start);
+                let result = if starts {
+                    self.runtime.request_start()
+                } else {
+                    self.runtime.request_stop()
+                };
+                if let Err(error) = result {
+                    let action = if starts { "start" } else { "stop" };
+                    eprintln!("cannot {action} bridge: {error}");
                 }
             }
             IDLE_NEVER_ID | IDLE_5_ID | IDLE_10_ID | IDLE_15_ID | IDLE_30_ID => {
@@ -430,11 +586,14 @@ impl MenuApp {
                     eprintln!("cannot copy diagnostics: {error}");
                 }
             }
-            SETTINGS_ID => {
-                if let Err(error) = open_path(
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
-                ) {
-                    eprintln!("cannot open Input Monitoring settings: {error}");
+            SETTINGS_ID => open_privacy_pane(PrivacyPane::InputMonitoring),
+            ACCESSIBILITY_ID => open_privacy_pane(PrivacyPane::Accessibility),
+            ENABLE_BINDINGS_ID => {
+                self.request_permissions_in_order(true);
+            }
+            EDIT_BINDINGS_ID => {
+                if let Err(error) = launch_bindings_editor() {
+                    eprintln!("cannot launch bindings editor: {error}");
                 }
             }
             LOGS_ID => {
@@ -445,6 +604,10 @@ impl MenuApp {
             QUIT_ID => {
                 self.shutdown();
                 event_loop.exit();
+            }
+            _ if id.starts_with(BINDING_PROFILE_PREFIX) => {
+                let profile_id = &id[BINDING_PROFILE_PREFIX.len()..];
+                self.select_binding_profile(profile_id);
             }
             _ => {}
         }
@@ -466,6 +629,229 @@ impl MenuApp {
                 item.set_checked(*minutes == self.settings.idle_shutdown_minutes);
             }
             items.puck_dock.set_checked(self.settings.power_off_on_puck);
+            for (profile_id, item) in &items.binding_profiles {
+                item.set_checked(*profile_id == self.settings.active_binding_profile);
+            }
+        }
+    }
+
+    fn select_binding_profile(&mut self, profile_id: &str) {
+        if self
+            .settings
+            .active_binding_profile
+            .eq_ignore_ascii_case(profile_id)
+        {
+            return;
+        }
+        let Some(profile) = self.binding_store.profile_by_id(profile_id).cloned() else {
+            return;
+        };
+        if let Err(error) = self
+            .runtime
+            .request_set_binding_profile(Some(profile.clone()))
+        {
+            eprintln!("cannot switch binding profile: {error}");
+            return;
+        }
+        self.settings.active_binding_profile = profile.id;
+        self.update_setting_checkmarks();
+        if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+            eprintln!("cannot save active binding profile: {error}");
+        }
+        self.request_permissions_in_order(false);
+    }
+
+    fn reload_bindings_if_changed(&mut self) {
+        let fingerprint = match bindings_file_fingerprint(&self.bindings_path) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                eprintln!("cannot inspect binding profiles: {error}");
+                return;
+            }
+        };
+        if fingerprint == self.bindings_file_fingerprint {
+            return;
+        }
+        let bytes = match fs::read(&self.bindings_path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("cannot reload binding profiles: {error}");
+                return;
+            }
+        };
+        let store = match parse_store(&bytes) {
+            Ok(store) => store,
+            Err(error) => {
+                eprintln!(
+                    "level=warn event=binding_profiles_reload_failed error={error:?} action=keep_previous"
+                );
+                return;
+            }
+        };
+        let profile = store
+            .profile_by_id(&self.settings.active_binding_profile)
+            .or_else(|| store.profiles.first())
+            .cloned();
+        if let Some(profile) = profile {
+            let current = self
+                .binding_store
+                .profile_by_id(&self.settings.active_binding_profile);
+            if current != Some(&profile) {
+                if let Err(error) = self
+                    .runtime
+                    .request_set_binding_profile(Some(profile.clone()))
+                {
+                    eprintln!("cannot apply reloaded binding profile: {error}");
+                    return;
+                }
+                self.request_permissions_in_order(false);
+            }
+            self.settings.active_binding_profile.clone_from(&profile.id);
+            if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+                eprintln!("cannot save active binding profile: {error}");
+            }
+        }
+        self.binding_store = store;
+        self.bindings_file_fingerprint = fingerprint;
+        if let Err(error) = self.rebuild_bindings_submenu() {
+            eprintln!("cannot rebuild Bindings menu: {error}");
+        }
+    }
+
+    fn rebuild_bindings_submenu(&mut self) -> Result<(), String> {
+        let Some(items) = self.items.as_mut() else {
+            return Ok(());
+        };
+        while items.bindings_submenu.remove_at(0).is_some() {}
+        items.binding_profiles =
+            binding_profile_menu_items(&self.binding_store, &self.settings.active_binding_profile);
+        for (_, item) in &items.binding_profiles {
+            items
+                .bindings_submenu
+                .append(item)
+                .map_err(|error| error.to_string())?;
+        }
+        // The permission items live in their own submenu, so this one only
+        // carries the profiles and the editor.
+        let separator = PredefinedMenuItem::separator();
+        let edit = MenuItem::with_id(EDIT_BINDINGS_ID, "Edit Bindings…", true, None);
+        for item in [&separator as &dyn tray_icon::menu::IsMenuItem, &edit] {
+            items
+                .bindings_submenu
+                .append(item)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Walks the permission chain, asking macOS for whatever is missing.
+    ///
+    /// `interactive` marks the run as something the user just asked for. Only
+    /// then may this open a System Settings pane: macOS shows no dialog for a
+    /// permission it has already recorded a refusal for, so the pane is the
+    /// only way forward -- but opening it on every launch would be obnoxious.
+    fn request_permissions_in_order(&mut self, interactive: bool) {
+        // Ask macOS directly rather than inferring the grant from a controller
+        // having opened: the two are different questions, and inferring it left
+        // this doing nothing at all whenever no controller was attached.
+        let input_monitoring = input_monitoring_access() == PermissionState::Granted;
+        // Do not even query later TCC services until the preceding service is
+        // granted. macOS can otherwise register simultaneous requests as
+        // denied without presenting the original Input Monitoring prompt.
+        let mut post_event = input_monitoring && preflight_post_event_access();
+        let mut accessibility = post_event && preflight_accessibility_access();
+        let mut input_monitoring_granted = input_monitoring;
+
+        loop {
+            match permission_stage(input_monitoring_granted, post_event, accessibility) {
+                PermissionStage::InputMonitoring => {
+                    // An undecided permission produces macOS's dialog. A
+                    // refusal it already recorded produces nothing, so the
+                    // only way forward is the settings pane.
+                    let undecided = input_monitoring_access() == PermissionState::Undecided;
+                    let granted = undecided && request_input_monitoring_access();
+                    self.permission_request_pending =
+                        (!granted).then_some(PermissionStage::InputMonitoring);
+                    eprintln!(
+                        "level=info event=input_monitoring_permission_requested \
+                         granted={granted} undecided={undecided} api=IOHIDRequestAccess"
+                    );
+                    if !granted {
+                        if interactive && !undecided {
+                            open_privacy_pane(PrivacyPane::InputMonitoring);
+                        }
+                        return;
+                    }
+                    input_monitoring_granted = true;
+                }
+                PermissionStage::PostEvent => {
+                    let granted = request_post_event_access();
+                    self.permission_request_pending =
+                        (!granted).then_some(PermissionStage::PostEvent);
+                    eprintln!(
+                        "level=info event=post_event_permission_requested granted={granted} \
+                         api=CGRequestPostEventAccess"
+                    );
+                    if !granted {
+                        if interactive {
+                            open_privacy_pane(PrivacyPane::Accessibility);
+                        }
+                        return;
+                    }
+                    post_event = true;
+                    accessibility = preflight_accessibility_access();
+                }
+                PermissionStage::Accessibility => {
+                    let granted = request_accessibility_access();
+                    self.permission_request_pending =
+                        (!granted).then_some(PermissionStage::Accessibility);
+                    eprintln!(
+                        "level=info event=accessibility_permission_requested granted={granted} \
+                         api=AXIsProcessTrustedWithOptions"
+                    );
+                    if !granted {
+                        if interactive {
+                            open_privacy_pane(PrivacyPane::Accessibility);
+                        }
+                        return;
+                    }
+                    accessibility = true;
+                }
+                PermissionStage::Ready => {
+                    self.permission_request_pending = None;
+                    self.activate_desktop_bindings_after_permission();
+                    return;
+                }
+            }
+        }
+    }
+
+    fn observe_permission_grants(&mut self) {
+        match self.permission_request_pending {
+            Some(PermissionStage::InputMonitoring)
+                if input_monitoring_access() == PermissionState::Granted =>
+            {
+                self.permission_request_pending = None;
+                eprintln!("level=info event=input_monitoring_permission_granted");
+                self.request_permissions_in_order(false);
+            }
+            Some(PermissionStage::PostEvent) if preflight_post_event_access() => {
+                self.permission_request_pending = None;
+                eprintln!("level=info event=post_event_permission_granted");
+                self.request_permissions_in_order(false);
+            }
+            Some(PermissionStage::Accessibility) if preflight_accessibility_access() => {
+                self.permission_request_pending = None;
+                eprintln!("level=info event=accessibility_permission_granted");
+                self.activate_desktop_bindings_after_permission();
+            }
+            _ => {}
+        }
+    }
+
+    fn activate_desktop_bindings_after_permission(&self) {
+        if let Err(error) = self.runtime.request_enable_desktop_bindings() {
+            eprintln!("cannot activate desktop bindings after Accessibility grant: {error}");
         }
     }
 }
@@ -531,7 +917,9 @@ impl ApplicationHandler for MenuApp {
                 eprintln!("cannot create menu-bar icon: {error}");
                 self.shutdown();
                 event_loop.exit();
+                return;
             }
+            self.request_permissions_in_order(false);
         }
     }
 
@@ -548,6 +936,8 @@ impl ApplicationHandler for MenuApp {
             self.handle_menu_event(event.id.as_ref(), event_loop);
         }
         if Instant::now() >= self.next_poll {
+            self.reload_bindings_if_changed();
+            self.observe_permission_grants();
             self.refresh_status();
             self.next_poll = Instant::now() + POLL_INTERVAL;
         }
@@ -845,6 +1235,44 @@ fn copy_text(value: &str) -> Result<(), String> {
     }
 }
 
+/// The System Settings panes a user has to visit when macOS has already
+/// recorded a refusal, since nothing can re-prompt after that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivacyPane {
+    InputMonitoring,
+    Accessibility,
+}
+
+const fn privacy_pane_url(pane: PrivacyPane) -> &'static str {
+    match pane {
+        PrivacyPane::InputMonitoring => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+        }
+        PrivacyPane::Accessibility => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        }
+    }
+}
+
+fn open_privacy_pane(pane: PrivacyPane) {
+    eprintln!("level=info event=privacy_pane_opened pane={pane:?}");
+    if let Err(error) = open_path(privacy_pane_url(pane)) {
+        eprintln!("cannot open {pane:?} settings: {error}");
+    }
+}
+
+fn launch_bindings_editor() -> Result<(), String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    Command::new(executable)
+        .arg("--bindings-editor")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn open_path(path: &str) -> Result<(), String> {
     let status = Command::new("/usr/bin/open")
         .arg(path)
@@ -860,6 +1288,48 @@ fn open_path(path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_permission_sends_the_user_to_the_pane_that_grants_it() {
+        // macOS shows no dialog once it has recorded a refusal, so the pane is
+        // the only remaining route, and each permission has its own.
+        assert_ne!(
+            privacy_pane_url(PrivacyPane::InputMonitoring),
+            privacy_pane_url(PrivacyPane::Accessibility),
+        );
+        for pane in [PrivacyPane::InputMonitoring, PrivacyPane::Accessibility] {
+            let url = privacy_pane_url(pane);
+            assert!(
+                url.starts_with("x-apple.systempreferences:"),
+                "{pane:?} must open System Settings, got {url}",
+            );
+        }
+    }
+
+    #[test]
+    fn permission_requests_never_skip_input_monitoring_or_post_event() {
+        assert_eq!(
+            permission_stage(false, false, false),
+            PermissionStage::InputMonitoring
+        );
+        assert_eq!(
+            permission_stage(false, true, true),
+            PermissionStage::InputMonitoring
+        );
+        assert_eq!(
+            permission_stage(true, false, false),
+            PermissionStage::PostEvent
+        );
+        assert_eq!(
+            permission_stage(true, false, true),
+            PermissionStage::PostEvent
+        );
+        assert_eq!(
+            permission_stage(true, true, false),
+            PermissionStage::Accessibility
+        );
+        assert_eq!(permission_stage(true, true, true), PermissionStage::Ready);
+    }
 
     fn temporary_settings_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -892,6 +1362,7 @@ mod tests {
             version: SETTINGS_VERSION,
             idle_shutdown_minutes: None,
             power_off_on_puck: true,
+            active_binding_profile: "gaming".to_owned(),
         };
         save_settings(&path, &settings).unwrap();
         assert_eq!(load_settings(&path), (settings, None));
@@ -907,12 +1378,30 @@ mod tests {
                 version: SETTINGS_VERSION + 1,
                 idle_shutdown_minutes: Some(1),
                 power_off_on_puck: true,
+                active_binding_profile: "default".to_owned(),
             },
         )
         .unwrap();
         let (fallback, warning) = load_settings(&path);
         assert_eq!(fallback, AppSettings::default());
         assert!(warning.is_some());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn version_one_settings_migrate_without_losing_shutdown_choices() {
+        let path = temporary_settings_path("migration");
+        fs::write(
+            &path,
+            br#"{"version":1,"idle_shutdown_minutes":30,"power_off_on_puck":true}"#,
+        )
+        .unwrap();
+        let (settings, warning) = load_settings(&path);
+        assert!(warning.is_none());
+        assert_eq!(settings.version, SETTINGS_VERSION);
+        assert_eq!(settings.idle_shutdown_minutes, Some(30));
+        assert!(settings.power_off_on_puck);
+        assert_eq!(settings.active_binding_profile, "default");
         let _ = fs::remove_file(path);
     }
 

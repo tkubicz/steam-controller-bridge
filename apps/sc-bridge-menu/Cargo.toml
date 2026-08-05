@@ -6,8 +6,13 @@ license.workspace = true
 # Not published to crates.io; distribution is GitHub releases only.
 publish = false
 
+[features]
+default = ["editor"]
+editor = ["dep:eframe"]
+
 [dependencies]
 bridge-runtime = { path = "../../crates/bridge-runtime" }
+desktop-bindings = { path = "../../crates/desktop-bindings" }
 serde.workspace = true
 serde_json.workspace = true
 
@@ -15,6 +20,7 @@ serde_json.workspace = true
 steam-controller-device = { path = "../../crates/steam-controller-device" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+eframe = { workspace = true, optional = true }
 tiny-skia.workspace = true
 tray-icon.workspace = true
 winit.workspace = true

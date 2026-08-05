@@ -11,6 +11,7 @@ bridge-core = { path = "../../crates/bridge-core" }
 bridge-output = { path = "../../crates/bridge-output" }
 bridge-runtime = { path = "../../crates/bridge-runtime" }
 ctrlc.workspace = true
+desktop-bindings = { path = "../../crates/desktop-bindings" }
 recording = { path = "../../crates/recording" }
 
 [lints]

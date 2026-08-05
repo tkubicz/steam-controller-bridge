@@ -15,6 +15,7 @@ use bridge_runtime::{
     BridgeRuntime, ControllerSelection, LizardMode, OutputSelection, PuckDockAction, RuntimeConfig,
     RuntimeState, SerialSelection, StatusLogTracker, MAX_IDLE_SHUTDOWN_TIMEOUT,
 };
+use desktop_bindings::load_store;
 use recording::{ReplayOptions, ReplaySession, ReplayTiming};
 
 fn main() {
@@ -29,9 +30,6 @@ fn run() -> Result<(), String> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
         return Ok(());
-    }
-    if value_after(&args, "--profile").is_some_and(|profile| profile != "default") {
-        return Err("only --profile default is currently supported".to_owned());
     }
     match value_after(&args, "--input").unwrap_or("live") {
         "live" => run_live(&args),
@@ -73,6 +71,7 @@ fn run_live(args: &[String]) -> Result<(), String> {
 }
 
 fn live_config(args: &[String]) -> Result<RuntimeConfig, String> {
+    let binding_profile = parse_binding_profile(args)?;
     if value_after(args, "--controller").is_some_and(|value| value != "auto") {
         return Err(
             "--controller accepts only auto; use --index N for an explicit collection".to_owned(),
@@ -138,6 +137,7 @@ fn live_config(args: &[String]) -> Result<RuntimeConfig, String> {
         recording_path: value_after(args, "--record").map(PathBuf::from),
         idle_shutdown_timeout,
         puck_dock_action,
+        binding_profile,
         ..RuntimeConfig::default()
     })
 }
@@ -158,6 +158,12 @@ fn parse_live_output(args: &[String]) -> Result<OutputSelection, String> {
 }
 
 fn run_replay(args: &[String]) -> Result<(), String> {
+    if has_flag(args, "--bindings") || has_flag(args, "--profile") {
+        return Err(
+            "--bindings and --profile are live-only; replay recordings never inject desktop input"
+                .to_owned(),
+        );
+    }
     if value_after(args, "--idle-shutdown").is_some()
         || value_after(args, "--puck-dock-action").is_some()
     {
@@ -190,6 +196,31 @@ fn run_replay(args: &[String]) -> Result<(), String> {
         stats.events_processed, stats.states_sent, stats.events_ignored
     );
     Ok(())
+}
+
+fn parse_binding_profile(
+    args: &[String],
+) -> Result<Option<desktop_bindings::BindingProfile>, String> {
+    let bindings_present = has_flag(args, "--bindings");
+    let profile_present = has_flag(args, "--profile");
+    if bindings_present != profile_present {
+        return Err("--bindings PATH and --profile NAME must be supplied together".to_owned());
+    }
+    if !bindings_present {
+        return Ok(None);
+    }
+    let path = value_after(args, "--bindings").ok_or("--bindings requires PATH")?;
+    let name = value_after(args, "--profile").ok_or("--profile requires NAME")?;
+    let store = load_store(PathBuf::from(path).as_path())?;
+    store
+        .profile_by_name(name)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| format!("binding profile '{name}' does not exist in '{path}'"))
+}
+
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
 }
 
 fn make_replay_output(args: &[String]) -> Result<Box<dyn GamepadOutput>, String> {
@@ -274,6 +305,8 @@ fn print_help() {
                                     Neutral idle timeout (default: 15; maximum: 1440)\n\
          --puck-dock-action <leave|power-off>\n\
                                     Optional immediate shutdown when placed on Puck\n\
+         --bindings PATH            Opt-in desktop binding profile store (live only)\n\
+         --profile NAME             Profile name; requires --bindings (live only)\n\
          --file PATH                Replay recording input\n\
          --output <dump|pretty|json|raw|file|mock|serial>\n\
                                     Live default: serial; replay default: dump\n\
@@ -352,5 +385,43 @@ mod tests {
     #[test]
     fn replay_serial_requires_an_explicit_port() {
         assert!(make_replay_output(&args(&["--input", "replay", "--output", "serial"])).is_err());
+    }
+
+    #[test]
+    fn desktop_binding_options_are_paired_and_live_only() {
+        assert!(live_config(&args(&["--bindings", "/tmp/missing"])).is_err());
+        assert!(live_config(&args(&["--profile", "Default"])).is_err());
+        assert!(run_replay(&args(&[
+            "--bindings",
+            "/tmp/ignored",
+            "--profile",
+            "Default"
+        ]))
+        .unwrap_err()
+        .contains("never inject desktop input"));
+    }
+
+    #[test]
+    fn live_binding_profile_loads_by_display_name() {
+        let path =
+            std::env::temp_dir().join(format!("sc-bridge-{}-bindings.json", std::process::id()));
+        let mut store = desktop_bindings::BindingStore::default();
+        store.profiles[0].bindings.r4 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F5,
+            modifiers: std::collections::BTreeSet::default(),
+        });
+        desktop_bindings::save_store(&path, &store).unwrap();
+        let config = live_config(&args(&[
+            "--bindings",
+            path.to_str().unwrap(),
+            "--profile",
+            "Default",
+        ]))
+        .unwrap();
+        assert_eq!(
+            config.binding_profile.unwrap().bindings.configured_count(),
+            1
+        );
+        let _ = std::fs::remove_file(path);
     }
 }

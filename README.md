@@ -153,6 +153,21 @@ the Puck does not immediately turn it off again; remove it long enough to emit a
 fresh `Discharging` report before the next placement can trigger another
 shutdown. The option defaults to `leave`.
 
+Extra L4/L5/R4/R5 and Quick Access controls can also drive opt-in desktop
+bindings without changing the XIAO firmware or serial protocol. The menu app
+requests Input Monitoring directly when macOS has not decided yet. Only after
+that grant is detected does it request Post Event and Accessibility access, so
+the TCC requests remain ordered even when no controller is attached.
+Open `Bindings -> Edit Bindings…` to save a profile. Settings shortcuts remain
+available for a previously denied request. CLI use is deliberately paired:
+
+```bash
+./sc-bridge --bindings "$HOME/Library/Application Support/Steam Controller Bridge/bindings.json" --profile Default
+```
+
+Replay rejects these options so a recording can never inject keyboard or mouse
+input. See [desktop bindings](docs/DESKTOP_BINDINGS.md).
+
 ## Simulator
 
 Generate one automated cycle as readable state changes:
@@ -266,7 +281,7 @@ error diagnostics; edits the mapping filters; and records raw, decoded, mapped,
 lifecycle, and marker events to JSONL. It supports mock and negotiated serial
 output.
 
-See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [serial transport](docs/SERIAL_TRANSPORT.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [recording format](docs/RECORDING_FORMAT.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
+See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [serial transport](docs/SERIAL_TRANSPORT.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [desktop bindings](docs/DESKTOP_BINDINGS.md), [recording format](docs/RECORDING_FORMAT.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
 
 Firmware setup, native tests, UF2/DFU builds, flashing, recovery, LED states,
 and hardware validation are documented in
@@ -303,12 +318,13 @@ open "dist/Steam Controller Bridge.app"
 ```
 
 The menu app embeds the same runtime, starts it automatically, and presents
-short, grouped bridge, readiness, hardware, battery, haptics, and problem
+short, grouped bridge, readiness, hardware, battery, haptics, bindings, and problem
 lines. `Idle Shutdown` offers Never/5/10/15/30-minute choices, and `Turn Off
 When Placed on Puck` controls the independent immediate-dock action. Both are
 applied live and saved under `~/Library/Application Support/Steam Controller
 Bridge/`. The menu-bar icon distinguishes Off, On but waiting, Controller ready,
-and Action required states. Friendly problem summaries stay bounded; use
+and Action required states. The dynamic `Bindings` submenu selects profiles,
+launches the editor, and opens Accessibility settings. Friendly problem summaries stay bounded; use
 `Copy Full Error`, `Copy Diagnostics`, or the rotated log folder for the
 complete technical detail. Start/Stop, Input Monitoring settings, and Quit are
 also available. Logs write concise `status_change` records immediately, full
@@ -341,10 +357,12 @@ work.
 - macOS access is intentionally shared at the native HID layer. The project
   lock excludes other project tools only; Steam's persistent
   `com.valvesoftware.steam.ipctool` LaunchAgent must be booted out before play.
-- Button and axis mapping is fixed. `sc-bridge` and the menu-bar app always use
-  the built-in profile; there is no configuration file and no remapping flag.
-  `sc-visualizer` can adjust mapping filters live, but nothing persists them.
-  Remapping is planned, not implemented.
+- Standard Xbox button and axis mapping remains fixed. Desktop bindings cover
+  only L4/L5/R4/R5/Quick Access; pads, trigger clicks, and stick clicks are not
+  configurable in this milestone. macOS has native function-key identities only
+  through F20, and Enigo does not expose macOS play/previous/next media events,
+  so those portable entries degrade bindings with an explicit error instead of
+  emitting a different key.
 - The macOS application is ad-hoc signed rather than notarized, and there is no
   DMG or Launch at Login.
 - The output uses the Xbox 360 compatibility USB identity described
