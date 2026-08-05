@@ -9,6 +9,7 @@ use steam_controller_protocol::{SteamButton, SteamButtons};
 
 pub const BINDINGS_VERSION: u32 = 1;
 pub const MAX_PROFILES: usize = 32;
+pub const MAX_PROFILE_NAME_CHARS: usize = 48;
 pub const DEFAULT_PROFILE_ID: &str = "default";
 pub const DEFAULT_PROFILE_NAME: &str = "Default";
 
@@ -473,7 +474,10 @@ impl BindingStore {
                 return Err(format!("invalid profile ID {:?}", profile.id));
             }
             let trimmed = profile.name.trim();
-            if trimmed.is_empty() || trimmed.chars().count() > 48 || trimmed != profile.name {
+            if trimmed.is_empty()
+                || trimmed.chars().count() > MAX_PROFILE_NAME_CHARS
+                || trimmed != profile.name
+            {
                 return Err(format!("invalid profile name {:?}", profile.name));
             }
             if !ids.insert(profile.id.to_ascii_lowercase()) {
@@ -488,7 +492,9 @@ impl BindingStore {
 
     #[must_use]
     pub fn profile_by_id(&self, id: &str) -> Option<&BindingProfile> {
-        self.profiles.iter().find(|profile| profile.id == id)
+        self.profiles
+            .iter()
+            .find(|profile| profile.id.eq_ignore_ascii_case(id))
     }
 
     #[must_use]
@@ -559,7 +565,7 @@ impl BindingStore {
         let profile = self
             .profiles
             .iter_mut()
-            .find(|profile| profile.id == id)
+            .find(|profile| profile.id.eq_ignore_ascii_case(id))
             .ok_or_else(|| format!("profile {id:?} does not exist"))?;
         profile.name = name;
         Ok(())
@@ -576,18 +582,22 @@ impl BindingStore {
         let index = self
             .profiles
             .iter()
-            .position(|profile| profile.id == id)
+            .position(|profile| profile.id.eq_ignore_ascii_case(id))
             .ok_or_else(|| format!("profile {id:?} does not exist"))?;
         Ok(self.profiles.remove(index))
     }
 
     fn available_name(&self, name: &str, excluding_id: Option<&str>) -> Result<String, String> {
         let trimmed = name.trim();
-        if trimmed.is_empty() || trimmed.chars().count() > 48 {
-            return Err("profile names must contain 1 to 48 characters".to_owned());
+        if trimmed.is_empty() || trimmed.chars().count() > MAX_PROFILE_NAME_CHARS {
+            return Err(format!(
+                "profile names must contain 1 to {MAX_PROFILE_NAME_CHARS} characters"
+            ));
         }
+        let folded = trimmed.to_lowercase();
         if self.profiles.iter().any(|profile| {
-            Some(profile.id.as_str()) != excluding_id && profile.name.eq_ignore_ascii_case(trimmed)
+            let excluded = excluding_id.is_some_and(|id| profile.id.eq_ignore_ascii_case(id));
+            !excluded && profile.name.to_lowercase() == folded
         }) {
             return Err(format!("duplicate profile name {trimmed:?}"));
         }
@@ -613,8 +623,16 @@ pub fn default_store_path() -> Result<PathBuf, String> {
 pub fn load_store(path: &Path) -> Result<BindingStore, String> {
     let bytes =
         fs::read(path).map_err(|error| format!("cannot read '{}': {error}", path.display()))?;
-    let store: BindingStore = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("invalid bindings JSON in '{}': {error}", path.display()))?;
+    parse_store(&bytes).map_err(|error| format!("{error} in '{}'", path.display()))
+}
+
+/// Decodes and validates a binding store from an in-memory JSON document.
+///
+/// # Errors
+/// Returns an error when the document cannot be decoded or validated.
+pub fn parse_store(bytes: &[u8]) -> Result<BindingStore, String> {
+    let store: BindingStore =
+        serde_json::from_slice(bytes).map_err(|error| format!("invalid bindings JSON: {error}"))?;
     store.validate()?;
     Ok(store)
 }
@@ -624,14 +642,16 @@ pub fn load_store(path: &Path) -> Result<BindingStore, String> {
 /// # Errors
 /// Returns an error for I/O, serialization, or validation failures.
 pub fn load_or_create_store(path: &Path) -> Result<BindingStore, String> {
-    match load_store(path) {
-        Ok(store) => Ok(store),
-        Err(_) if !path.exists() => {
+    match fs::read(path) {
+        Ok(bytes) => {
+            parse_store(&bytes).map_err(|error| format!("{error} in '{}'", path.display()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let store = BindingStore::default();
             save_store(path, &store)?;
             Ok(store)
         }
-        Err(error) => Err(error),
+        Err(error) => Err(format!("cannot read '{}': {error}", path.display())),
     }
 }
 
@@ -650,8 +670,15 @@ pub fn save_store(path: &Path, store: &BindingStore) -> Result<(), String> {
         .map_or(0, |duration| duration.as_nanos());
     let temporary = path.with_extension(format!("json.{}.{nonce}.tmp", std::process::id()));
     let bytes = serde_json::to_vec_pretty(store).map_err(|error| error.to_string())?;
-    fs::write(&temporary, bytes).map_err(|error| error.to_string())?;
-    fs::rename(&temporary, path).map_err(|error| error.to_string())
+    if let Err(error) = fs::write(&temporary, bytes) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -752,6 +779,12 @@ impl BindingEngine {
         profile: BindingProfile,
         sink: &mut dyn DesktopInputSink,
     ) -> Result<(), String> {
+        if self.profile.id.eq_ignore_ascii_case(&profile.id)
+            && self.profile.bindings == profile.bindings
+        {
+            self.profile = profile;
+            return Ok(());
+        }
         let held = self.previous_mask.unwrap_or_default();
         let release = self.release_all(sink);
         self.profile = profile;
@@ -1411,6 +1444,18 @@ mod tests {
     }
 
     #[test]
+    fn profile_identity_rules_match_validation_and_lookup() {
+        let mut store = BindingStore::default();
+        store.create_profile("Ä").unwrap();
+        assert!(store.create_profile("ä").is_err());
+
+        store.profiles[1].id = "PROFILE-1".to_owned();
+        store.validate().unwrap();
+        assert_eq!(store.profile_by_id("profile-1").unwrap().name, "Ä");
+        assert_eq!(store.next_profile_id(), "profile-2");
+    }
+
+    #[test]
     fn store_is_created_and_atomically_persisted() {
         let directory = std::env::temp_dir().join(format!(
             "desktop-bindings-{}-{}",
@@ -1425,6 +1470,26 @@ mod tests {
         assert_eq!(load_store(&path).unwrap(), store);
         let _ = fs::remove_file(path);
         let _ = fs::remove_dir(directory);
+    }
+
+    #[test]
+    fn failed_atomic_rename_cleans_up_the_temporary_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "desktop-bindings-rename-failure-{}",
+            std::process::id()
+        ));
+        let path = directory.join("bindings.json");
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&path).unwrap();
+
+        assert!(save_store(&path, &BindingStore::default()).is_err());
+        let leftovers = fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name() != "bindings.json")
+            .count();
+        assert_eq!(leftovers, 0);
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
@@ -1535,6 +1600,24 @@ mod tests {
             .observe(buttons(&[BindableControl::L4]), &mut sink)
             .unwrap();
         assert_eq!(sink.events, ["key:F5:true", "key:F5:false", "key:F9:true"]);
+    }
+
+    #[test]
+    fn metadata_only_profile_update_preserves_held_outputs() {
+        let mut profile = BindingProfile::default();
+        profile.bindings.r4 = Some(chord(KeyboardKey::F5, &[]));
+        let mut engine = BindingEngine::new(profile.clone());
+        let mut sink = MockSink::default();
+        engine.observe(buttons(&[]), &mut sink).unwrap();
+        engine
+            .observe(buttons(&[BindableControl::R4]), &mut sink)
+            .unwrap();
+
+        profile.name = "Renamed".to_owned();
+        engine.replace_profile(profile, &mut sink).unwrap();
+        assert_eq!(sink.events, ["key:F5:true"]);
+        engine.observe(buttons(&[]), &mut sink).unwrap();
+        assert_eq!(sink.events, ["key:F5:true", "key:F5:false"]);
     }
 
     #[test]

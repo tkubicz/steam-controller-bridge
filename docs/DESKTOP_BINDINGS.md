@@ -15,14 +15,13 @@ or invalid file appears.
 
 Selecting a profile applies it without restarting HID or serial. A switch
 releases every old held output and ignores physical controls already held until
-they are released. At launch, the controller runtime retains the original
-behavior: its first `IOHIDDeviceOpen` attempt causes macOS to present the Input
-Monitoring dialog. The bindings frontend does not make a competing ListenEvent
-request. Only after the IOHID grant is detected does it request Post Event and
-Accessibility access, before a profile needs any bindings. This adds the app to
-the Privacy & Security lists without using the manual `+` file picker; after the
-user grants access, the bridge detects it and enables bindings without a restart.
-`Request Accessibility Permission…` repeats the ordered checks, and `Open
+they are released. At launch, the menu app queries Input Monitoring directly
+and uses `IOHIDRequestAccess` when macOS has not decided yet. Only after that
+grant is detected does it request Post Event and Accessibility access, before a
+profile needs any bindings. This works even when no controller is attached and
+adds the app to the Privacy & Security lists without using the manual `+` file
+picker. After the user grants access, the bridge detects it and enables bindings
+without a restart. `Request Permissions…` repeats the ordered checks, and `Open
 Accessibility Settings` remains available for a previously denied request.
 
 Profiles live at:

@@ -10,7 +10,7 @@ use bridge_runtime::{
     RuntimeConfig, StatusLogRecord, StatusLogTracker,
 };
 use desktop_bindings::{
-    default_store_path, input_monitoring_access, load_or_create_store, load_store,
+    default_store_path, input_monitoring_access, load_or_create_store, parse_store,
     preflight_accessibility_access, preflight_post_event_access, request_accessibility_access,
     request_input_monitoring_access, request_post_event_access, BindingStore, PermissionState,
 };
@@ -82,6 +82,21 @@ struct AppSettings {
     power_off_on_puck: bool,
     #[serde(default = "default_binding_profile_id")]
     active_binding_profile: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BindingsFileFingerprint {
+    length: u64,
+    modified: SystemTime,
+}
+
+fn bindings_file_fingerprint(path: &Path) -> Result<BindingsFileFingerprint, String> {
+    let metadata = fs::metadata(path).map_err(|error| error.to_string())?;
+    let modified = metadata.modified().map_err(|error| error.to_string())?;
+    Ok(BindingsFileFingerprint {
+        length: metadata.len(),
+        modified,
+    })
 }
 
 fn default_binding_profile_id() -> String {
@@ -192,6 +207,28 @@ struct MenuItems {
     binding_profiles: Vec<(String, CheckMenuItem)>,
 }
 
+fn binding_profile_menu_items(
+    store: &BindingStore,
+    active_profile_id: &str,
+) -> Vec<(String, CheckMenuItem)> {
+    store
+        .profiles
+        .iter()
+        .map(|profile| {
+            (
+                profile.id.clone(),
+                CheckMenuItem::with_id(
+                    format!("{BINDING_PROFILE_PREFIX}{}", profile.id),
+                    &profile.name,
+                    true,
+                    profile.id.eq_ignore_ascii_case(active_profile_id),
+                    None,
+                ),
+            )
+        })
+        .collect()
+}
+
 struct MenuApp {
     runtime: BridgeHandle,
     tray: Option<TrayIcon>,
@@ -205,7 +242,7 @@ struct MenuApp {
     settings_path: PathBuf,
     bindings_path: PathBuf,
     binding_store: BindingStore,
-    bindings_file_bytes: Vec<u8>,
+    bindings_file_fingerprint: BindingsFileFingerprint,
     permission_request_pending: Option<PermissionStage>,
     shutting_down: bool,
 }
@@ -228,7 +265,7 @@ impl MenuApp {
             settings.active_binding_profile.clone_from(&profile.id);
         }
         save_settings(&settings_path, &settings)?;
-        let bindings_file_bytes = fs::read(&bindings_path).map_err(|error| error.to_string())?;
+        let bindings_file_fingerprint = bindings_file_fingerprint(&bindings_path)?;
         let config = RuntimeConfig {
             idle_shutdown_timeout: settings
                 .idle_shutdown_minutes
@@ -254,7 +291,7 @@ impl MenuApp {
             settings_path,
             bindings_path,
             binding_store,
-            bindings_file_bytes,
+            bindings_file_fingerprint,
             permission_request_pending: None,
             shutting_down: false,
         })
@@ -351,23 +388,8 @@ impl MenuApp {
             self.settings.power_off_on_puck,
             None,
         );
-        let binding_profiles = self
-            .binding_store
-            .profiles
-            .iter()
-            .map(|profile| {
-                (
-                    profile.id.clone(),
-                    CheckMenuItem::with_id(
-                        format!("{BINDING_PROFILE_PREFIX}{}", profile.id),
-                        &profile.name,
-                        true,
-                        profile.id == self.settings.active_binding_profile,
-                        None,
-                    ),
-                )
-            })
-            .collect::<Vec<_>>();
+        let binding_profiles =
+            binding_profile_menu_items(&self.binding_store, &self.settings.active_binding_profile);
         let bindings_submenu = Submenu::new("Bindings", true);
         for (_, item) in &binding_profiles {
             bindings_submenu
@@ -397,11 +419,9 @@ impl MenuApp {
         let separators: [PredefinedMenuItem; 6] =
             std::array::from_fn(|_| PredefinedMenuItem::separator());
         let menu = Menu::with_items(&[
-            // What the bridge is doing.
             &bridge,
             &status,
             &separators[0],
-            // What it is connected to.
             &controller,
             &input,
             &xiao,
@@ -409,19 +429,15 @@ impl MenuApp {
             &haptics,
             &bindings,
             &separators[1],
-            // What is wrong, if anything.
             &problem,
             &copy_error,
             &separators[2],
-            // Running the bridge.
             &run_toggle,
             &separators[3],
-            // Shutting it down again.
             &automatic_shutdown,
             &idle_submenu,
             &puck_dock,
             &separators[4],
-            // Configuration.
             &bindings_submenu,
             &permissions_submenu,
             &copy,
@@ -620,10 +636,20 @@ impl MenuApp {
     }
 
     fn select_binding_profile(&mut self, profile_id: &str) {
+        if self
+            .settings
+            .active_binding_profile
+            .eq_ignore_ascii_case(profile_id)
+        {
+            return;
+        }
         let Some(profile) = self.binding_store.profile_by_id(profile_id).cloned() else {
             return;
         };
-        if let Err(error) = self.runtime.set_binding_profile(Some(profile.clone())) {
+        if let Err(error) = self
+            .runtime
+            .request_set_binding_profile(Some(profile.clone()))
+        {
             eprintln!("cannot switch binding profile: {error}");
             return;
         }
@@ -636,6 +662,16 @@ impl MenuApp {
     }
 
     fn reload_bindings_if_changed(&mut self) {
+        let fingerprint = match bindings_file_fingerprint(&self.bindings_path) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                eprintln!("cannot inspect binding profiles: {error}");
+                return;
+            }
+        };
+        if fingerprint == self.bindings_file_fingerprint {
+            return;
+        }
         let bytes = match fs::read(&self.bindings_path) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -643,11 +679,7 @@ impl MenuApp {
                 return;
             }
         };
-        if bytes == self.bindings_file_bytes {
-            return;
-        }
-        self.bindings_file_bytes = bytes;
-        let store = match load_store(&self.bindings_path) {
+        let store = match parse_store(&bytes) {
             Ok(store) => store,
             Err(error) => {
                 eprintln!(
@@ -656,22 +688,31 @@ impl MenuApp {
                 return;
             }
         };
-        self.binding_store = store;
-        let profile = self
-            .binding_store
+        let profile = store
             .profile_by_id(&self.settings.active_binding_profile)
-            .or_else(|| self.binding_store.profiles.first())
+            .or_else(|| store.profiles.first())
             .cloned();
         if let Some(profile) = profile {
-            self.settings.active_binding_profile.clone_from(&profile.id);
-            if let Err(error) = self.runtime.set_binding_profile(Some(profile)) {
-                eprintln!("cannot apply reloaded binding profile: {error}");
+            let current = self
+                .binding_store
+                .profile_by_id(&self.settings.active_binding_profile);
+            if current != Some(&profile) {
+                if let Err(error) = self
+                    .runtime
+                    .request_set_binding_profile(Some(profile.clone()))
+                {
+                    eprintln!("cannot apply reloaded binding profile: {error}");
+                    return;
+                }
+                self.request_permissions_in_order(false);
             }
+            self.settings.active_binding_profile.clone_from(&profile.id);
             if let Err(error) = save_settings(&self.settings_path, &self.settings) {
                 eprintln!("cannot save active binding profile: {error}");
             }
-            self.request_permissions_in_order(false);
         }
+        self.binding_store = store;
+        self.bindings_file_fingerprint = fingerprint;
         if let Err(error) = self.rebuild_bindings_submenu() {
             eprintln!("cannot rebuild Bindings menu: {error}");
         }
@@ -682,23 +723,8 @@ impl MenuApp {
             return Ok(());
         };
         while items.bindings_submenu.remove_at(0).is_some() {}
-        items.binding_profiles = self
-            .binding_store
-            .profiles
-            .iter()
-            .map(|profile| {
-                (
-                    profile.id.clone(),
-                    CheckMenuItem::with_id(
-                        format!("{BINDING_PROFILE_PREFIX}{}", profile.id),
-                        &profile.name,
-                        true,
-                        profile.id == self.settings.active_binding_profile,
-                        None,
-                    ),
-                )
-            })
-            .collect();
+        items.binding_profiles =
+            binding_profile_menu_items(&self.binding_store, &self.settings.active_binding_profile);
         for (_, item) in &items.binding_profiles {
             items
                 .bindings_submenu
@@ -893,9 +919,6 @@ impl ApplicationHandler for MenuApp {
                 event_loop.exit();
                 return;
             }
-            // The already-running HID discovery path retains its original role
-            // of triggering the Input Monitoring dialog. This coordinator only
-            // waits for that grant before requesting desktop-output access.
             self.request_permissions_in_order(false);
         }
     }

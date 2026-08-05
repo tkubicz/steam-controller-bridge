@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use desktop_bindings::{
     default_store_path, load_or_create_store, save_store, BindableControl, BindingAction,
-    BindingProfile, BindingStore, ControlBindings, KeyboardKey, Modifier, MouseButton,
+    BindingStore, KeyboardKey, Modifier, MouseButton, MAX_PROFILE_NAME_CHARS,
 };
 use eframe::egui;
 
@@ -124,66 +124,72 @@ impl BindingsEditor {
     }
 
     fn unique_name(&self, base: &str) -> String {
-        if !self
-            .store
-            .profiles
-            .iter()
-            .any(|profile| profile.name.eq_ignore_ascii_case(base))
-        {
-            return base.to_owned();
-        }
-        (2..=desktop_bindings::MAX_PROFILES + 1)
-            .map(|number| format!("{base} {number}"))
-            .find(|name| {
-                !self
-                    .store
-                    .profiles
-                    .iter()
-                    .any(|profile| profile.name.eq_ignore_ascii_case(name))
+        (1..=desktop_bindings::MAX_PROFILES + 1)
+            .map(|number| {
+                let suffix = if number == 1 {
+                    String::new()
+                } else {
+                    format!(" {number}")
+                };
+                let available = MAX_PROFILE_NAME_CHARS.saturating_sub(suffix.chars().count());
+                let stem = base
+                    .trim()
+                    .chars()
+                    .take(available)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned();
+                format!("{stem}{suffix}")
             })
+            .find(|name| self.store.profile_by_name(name).is_none())
             .expect("an unused bounded profile name exists")
     }
 
     fn add_profile(&mut self) {
-        if self.store.profiles.len() >= desktop_bindings::MAX_PROFILES {
-            self.message = Some("At most 32 profiles are supported".to_owned());
-            return;
-        }
-        let id = self.store.next_profile_id();
         let name = self.unique_name("New Profile");
-        self.store.profiles.push(BindingProfile {
-            id,
-            name,
-            bindings: ControlBindings::default(),
-        });
-        self.selected = self.store.profiles.len() - 1;
-        self.capturing = None;
+        match self.store.create_profile(&name) {
+            Ok(_) => {
+                self.selected = self.store.profiles.len() - 1;
+                self.capturing = None;
+                self.message = None;
+            }
+            Err(error) => self.message = Some(error),
+        }
     }
 
     fn duplicate_profile(&mut self) {
-        if self.store.profiles.len() >= desktop_bindings::MAX_PROFILES {
-            self.message = Some("At most 32 profiles are supported".to_owned());
-            return;
-        }
-        let Some(source) = self.store.profiles.get(self.selected).cloned() else {
+        let Some(source) = self.store.profiles.get(self.selected) else {
             return;
         };
-        let mut duplicate = source;
-        duplicate.id = self.store.next_profile_id();
-        duplicate.name = self.unique_name(&format!("{} Copy", duplicate.name));
-        self.store.profiles.push(duplicate);
-        self.selected = self.store.profiles.len() - 1;
-        self.capturing = None;
+        let source_id = source.id.clone();
+        let name = self.unique_name(&format!("{} Copy", source.name));
+        match self.store.duplicate_profile(&source_id, &name) {
+            Ok(_) => {
+                self.selected = self.store.profiles.len() - 1;
+                self.capturing = None;
+                self.message = None;
+            }
+            Err(error) => self.message = Some(error),
+        }
     }
 
     fn delete_profile(&mut self) {
-        if self.store.profiles.len() == 1 {
-            self.message = Some("The last profile cannot be deleted".to_owned());
+        let Some(id) = self
+            .store
+            .profiles
+            .get(self.selected)
+            .map(|profile| profile.id.clone())
+        else {
             return;
+        };
+        match self.store.delete_profile(&id) {
+            Ok(_) => {
+                self.selected = self.selected.min(self.store.profiles.len() - 1);
+                self.capturing = None;
+                self.message = None;
+            }
+            Err(error) => self.message = Some(error),
         }
-        self.store.profiles.remove(self.selected);
-        self.selected = self.selected.min(self.store.profiles.len() - 1);
-        self.capturing = None;
     }
 
     fn select_control(&mut self, control: BindableControl) {
@@ -1553,6 +1559,20 @@ mod tests {
             "Middle Mouse"
         );
         assert_eq!(binding_summary(None), "Unbound");
+    }
+
+    #[test]
+    fn duplicating_a_maximum_length_profile_keeps_a_valid_name() {
+        let mut store = BindingStore::default();
+        store.profiles[0].name = "A".repeat(MAX_PROFILE_NAME_CHARS);
+        let mut editor = BindingsEditor::new(std::path::PathBuf::new(), store);
+
+        editor.duplicate_profile();
+
+        assert_eq!(editor.store.profiles.len(), 2);
+        assert!(editor.store.profiles[1].name.chars().count() <= MAX_PROFILE_NAME_CHARS);
+        editor.store.validate().unwrap();
+        assert!(editor.message.is_none());
     }
 
     #[test]

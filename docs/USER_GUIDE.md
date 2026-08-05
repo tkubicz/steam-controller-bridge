@@ -398,13 +398,13 @@ suitable for gameplay.
 The menu app can bind L4, L5, R4, R5, and Quick Access to keyboard chords or
 left/right/middle/back/forward mouse buttons. Choose `Bindings -> Edit
 Bindings…`, create or edit a profile, and Save. At launch the app automatically
-requests Input Monitoring through the original controller HID-open path. Once
-macOS reports that grant, it requests Accessibility before a profile needs any
-bindings, avoiding simultaneous system prompts. This adds the app under **System
-Settings -> Privacy & Security -> Accessibility**. Grant access there if macOS
-opens Settings; the bridge detects the change and enables bindings without a
-restart. The native request registers the app, so the manual `+` file picker is
-not part of the normal flow. `Request Accessibility Permission…` and `Open
+requests Input Monitoring directly, even when no controller is attached. Once
+macOS reports that grant, it requests Post Event and Accessibility access before
+a profile needs any bindings, avoiding simultaneous system prompts. This adds
+the app under **System Settings -> Privacy & Security -> Accessibility**. Grant
+access there if macOS opens Settings; the bridge detects the change and enables
+bindings without a restart. The native request registers the app, so the manual
+`+` file picker is not part of the normal flow. `Request Permissions…` and `Open
 Accessibility Settings` are available for a request that was previously denied.
 Accessibility is separate from Input Monitoring.
 

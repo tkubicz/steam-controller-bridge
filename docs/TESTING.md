@@ -172,9 +172,8 @@ transitions, disconnect cleanup, sink failure recovery, and explicit macOS key
 conversions. Menu tests cover settings-v1 migration plus Puck/Bluetooth source rendering, battery
 unknown/percentage, haptics state, error visibility, and Start/Stop enablement.
 macOS tests build the tray frontend, diagnostics renderer, and template icon.
-On a clean TCC state, launching the packaged menu app must retain the original
-Input Monitoring behavior: the controller runtime's `IOHIDDeviceOpen` attempt
-causes the system dialog, with no explicit Core Graphics `ListenEvent` request.
+On a clean TCC state, launching the packaged menu app must request Input
+Monitoring with `IOHIDRequestAccess`, including when no controller is attached.
 It must not issue `PostEvent` or Accessibility while Input Monitoring is still
 pending. After the IOHID grant is detected, it requests `PostEvent` and then the
 adapter's Accessibility trust, even when the Default profile is all-unbound.

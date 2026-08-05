@@ -62,7 +62,6 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const RUMBLE_REFRESH_INTERVAL: Duration = Duration::from_millis(40);
 const RUMBLE_LEASE_TIMEOUT: Duration = Duration::from_millis(100);
 const RUMBLE_RETRY_INTERVAL: Duration = Duration::from_millis(500);
-const DESKTOP_BINDINGS_PERMISSION_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_IDLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_mins(15);
 const AUTOMATIC_SHUTDOWN_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const POWER_OFF_COOLDOWN: Duration = Duration::from_millis(2_500);
@@ -383,7 +382,7 @@ impl BridgeRuntime {
                 phase: automatic_shutdown_phase(&config),
                 ..AutomaticShutdownStatus::default()
             },
-            bindings: DesktopBindingsRuntime::new(config.binding_profile.clone()).status(),
+            bindings: binding_status_for_profile(config.binding_profile.as_ref()),
             ..BridgeStatus::default()
         }));
         let worker_status = Arc::clone(&status);
@@ -768,23 +767,17 @@ struct DesktopBindingsRuntime {
     sink: Option<Box<dyn DesktopInputSink>>,
     last_buttons: Option<steam_controller_protocol::SteamButtons>,
     status: DesktopBindingsStatus,
-    next_permission_retry: Instant,
 }
 
 impl DesktopBindingsRuntime {
     fn new(profile: Option<BindingProfile>) -> Self {
         let status = binding_status_for_profile(profile.as_ref());
-        let mut runtime = Self {
+        Self {
             engine: profile.map(BindingEngine::new),
             sink: None,
             last_buttons: None,
             status,
-            next_permission_retry: Instant::now(),
-        };
-        if runtime.status.configured_binding_count > 0 {
-            runtime.initialize_sink();
         }
-        runtime
     }
 
     #[cfg(test)]
@@ -796,7 +789,6 @@ impl DesktopBindingsRuntime {
             sink: Some(sink),
             last_buttons: None,
             status,
-            next_permission_retry: Instant::now(),
         }
     }
 
@@ -811,33 +803,42 @@ impl DesktopBindingsRuntime {
 
     fn observe(&mut self, buttons: steam_controller_protocol::SteamButtons) {
         self.last_buttons = Some(buttons);
-        if self.sink.is_none()
-            && self.status.state == DesktopBindingsState::PermissionRequired
-            && Instant::now() >= self.next_permission_retry
-        {
-            // The native permission prompt is asynchronous. Once the user grants
-            // access, reconnect without prompting again and use this report as the
-            // engine's non-emitting baseline.
-            self.initialize_sink();
-        }
         let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut()) else {
             return;
         };
         if let Err(error) = engine.observe(buttons, sink.as_mut()) {
             self.fail(&error);
+        } else if self.status.state == DesktopBindingsState::Degraded {
+            self.status.state = DesktopBindingsState::Ready;
+            self.status.last_error = None;
         }
     }
 
     fn replace_profile(&mut self, profile: Option<BindingProfile>) -> Result<(), String> {
-        if let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut()) {
-            if let Err(error) = engine.disconnect(sink.as_mut()) {
-                self.fail(&error);
-                return Err(error);
-            }
-        }
         let status = binding_status_for_profile(profile.as_ref());
-        self.engine = profile.map(BindingEngine::new);
+        let result = if let Some(profile) = profile {
+            if let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut()) {
+                engine.replace_profile(profile, sink.as_mut())
+            } else {
+                self.engine = Some(BindingEngine::new(profile));
+                Ok(())
+            }
+        } else {
+            let result =
+                if let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut()) {
+                    engine.disconnect(sink.as_mut())
+                } else {
+                    Ok(())
+                };
+            self.engine = None;
+            self.sink = None;
+            result
+        };
         self.status = status;
+        if let Err(error) = result {
+            self.fail(&error);
+            return Err(error);
+        }
         if self.status.configured_binding_count == 0 {
             self.sink = None;
             return Ok(());
@@ -863,7 +864,9 @@ impl DesktopBindingsRuntime {
         if self.status.configured_binding_count == 0 {
             return Ok(());
         }
-        self.initialize_sink();
+        if self.sink.is_none() {
+            self.initialize_sink();
+        }
         if self.sink.is_none() {
             return Err(self
                 .status
@@ -912,8 +915,6 @@ impl DesktopBindingsRuntime {
                 self.sink = None;
                 self.status.state =
                     if error.contains("permission") || error.contains("Accessibility") {
-                        self.next_permission_retry =
-                            Instant::now() + DESKTOP_BINDINGS_PERMISSION_RETRY_INTERVAL;
                         DesktopBindingsState::PermissionRequired
                     } else {
                         DesktopBindingsState::Degraded
@@ -1488,6 +1489,7 @@ impl Supervisor {
         let mut last_charge_report = None;
         let mut pending_automatic_shutdown = None;
         let mut bindings = DesktopBindingsRuntime::new(self.config.binding_profile.clone());
+        let _ = bindings.enable();
         engine.connected();
         self.automatic_shutdown.phase = automatic_shutdown_phase(&self.config);
         self.automatic_shutdown.trigger = None;
@@ -1552,7 +1554,6 @@ impl Supervisor {
                     break ActiveExit::SourceLost;
                 }
             }
-            let mut reports = direct_report.into_iter().collect::<Vec<_>>();
             let batch = worker.take_report_batch();
             if batch.overflowed {
                 bindings.overflow();
@@ -1562,8 +1563,7 @@ impl Supervisor {
                     "level=warn event=desktop_binding_mailbox_overflow action=release_and_rebaseline"
                 );
             }
-            reports.extend(batch.reports);
-            for report in reports {
+            for report in direct_report.into_iter().chain(batch.reports) {
                 match process_report(
                     &report,
                     &mut engine,
@@ -1939,9 +1939,7 @@ impl Supervisor {
                 }
                 RuntimeCommand::SetBindingProfile(profile, ack) => {
                     let result = bindings.replace_profile(profile.clone());
-                    if result.is_ok() {
-                        self.config.binding_profile = profile;
-                    }
+                    self.config.binding_profile = profile;
                     let binding_status = bindings.status();
                     self.update_status(|status| status.bindings = binding_status);
                     let _ = ack.send(result);
@@ -3097,7 +3095,7 @@ struct TransitionReportMailbox {
 
 #[derive(Debug, Default)]
 struct TransitionReportBatch {
-    reports: Vec<RawHidReport>,
+    reports: VecDeque<RawHidReport>,
     overflowed: bool,
 }
 
@@ -3107,10 +3105,9 @@ impl TransitionReportMailbox {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let same_bindable_state = state.reports.back().is_some_and(|newest| {
-            raw_bindable_mask(newest).is_some()
-                && raw_bindable_mask(newest) == raw_bindable_mask(&report)
-        });
+        let report_mask = raw_bindable_mask(&report);
+        let same_bindable_state = report_mask.is_some()
+            && state.reports.back().and_then(raw_bindable_mask) == report_mask;
         if same_bindable_state {
             let _ = state.reports.pop_back();
             state.reports.push_back(report);
@@ -3135,7 +3132,7 @@ impl TransitionReportMailbox {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.notification_pending = false;
         TransitionReportBatch {
-            reports: state.reports.drain(..).collect(),
+            reports: std::mem::take(&mut state.reports),
             overflowed: std::mem::take(&mut state.overflowed),
         }
     }
@@ -3864,6 +3861,70 @@ mod tests {
         assert_eq!(status.configured_binding_count, 1);
         assert!(status.last_error.is_none());
         assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn enabling_an_already_ready_sink_preserves_held_output_state() {
+        let mut profile = BindingProfile::default();
+        profile.bindings.r4 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F5,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut bindings = DesktopBindingsRuntime::with_sink(
+            profile,
+            Box::new(SharedDesktopSink(Arc::clone(&events))),
+        );
+        let r4 = steam_controller_protocol::SteamButtons(
+            1_u32 << steam_controller_protocol::SteamButton::RightGrip4 as u8,
+        );
+        bindings.observe(steam_controller_protocol::SteamButtons::default());
+        bindings.observe(r4);
+
+        bindings.enable().unwrap();
+        bindings.observe(steam_controller_protocol::SteamButtons::default());
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["key:F5:true".to_owned(), "key:F5:false".to_owned()]
+        );
+    }
+
+    #[test]
+    fn mailbox_overflow_recovers_after_a_non_emitting_baseline() {
+        let mut profile = BindingProfile::default();
+        profile.bindings.r4 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F5,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut bindings = DesktopBindingsRuntime::with_sink(
+            profile,
+            Box::new(SharedDesktopSink(Arc::clone(&events))),
+        );
+        let neutral = steam_controller_protocol::SteamButtons::default();
+        let r4 = steam_controller_protocol::SteamButtons(
+            1_u32 << steam_controller_protocol::SteamButton::RightGrip4 as u8,
+        );
+        bindings.observe(neutral);
+        bindings.observe(r4);
+
+        bindings.overflow();
+        assert_eq!(bindings.status().state, DesktopBindingsState::Degraded);
+        bindings.observe(r4);
+        assert_eq!(bindings.status().state, DesktopBindingsState::Ready);
+        bindings.observe(neutral);
+        bindings.observe(r4);
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "key:F5:true".to_owned(),
+                "key:F5:false".to_owned(),
+                "key:F5:true".to_owned(),
+            ]
+        );
+        assert_eq!(bindings.status().failures, 1);
     }
 
     #[test]

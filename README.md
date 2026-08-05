@@ -155,9 +155,9 @@ shutdown. The option defaults to `leave`.
 
 Extra L4/L5/R4/R5 and Quick Access controls can also drive opt-in desktop
 bindings without changing the XIAO firmware or serial protocol. The menu app
-preserves the original Input Monitoring flow: its first controller HID-open
-attempt causes macOS to present the system dialog. Only after that grant is
-detected does it request Accessibility, so the two TCC flows cannot race.
+requests Input Monitoring directly when macOS has not decided yet. Only after
+that grant is detected does it request Post Event and Accessibility access, so
+the TCC requests remain ordered even when no controller is attached.
 Open `Bindings -> Edit Bindings…` to save a profile. Settings shortcuts remain
 available for a previously denied request. CLI use is deliberately paired:
 
