@@ -5,6 +5,26 @@ not edit release entries by hand; correct the originating pull-request metadata
 and let the release pull request regenerate them. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.2.0...v1.3.0) (2026-08-05)
+
+
+### Features
+
+* **bindings:** map grip paddles and Quick Access to keyboard and mouse actions ([54f52d1](https://github.com/tkubicz/steam-controller-bridge/commit/54f52d13751fde76a08421c4175b0fb4108aa285))
+* **ci:** fix release using github app ([#16](https://github.com/tkubicz/steam-controller-bridge/issues/16)) ([6334279](https://github.com/tkubicz/steam-controller-bridge/commit/6334279dc5ed1fb4f131b804166859427937f36b))
+
+
+### Bug Fixes
+
+* **ci:** commit message release gate ([#15](https://github.com/tkubicz/steam-controller-bridge/issues/15)) ([e9732b0](https://github.com/tkubicz/steam-controller-bridge/commit/e9732b0b5a0e618488b436f89d09df50b8365c5c))
+* **menu:** keep the tray menu open when a submenu is first opened ([54f52d1](https://github.com/tkubicz/steam-controller-bridge/commit/54f52d13751fde76a08421c4175b0fb4108aa285))
+* **menu:** request Input Monitoring and Accessibility from the menu ([54f52d1](https://github.com/tkubicz/steam-controller-bridge/commit/54f52d13751fde76a08421c4175b0fb4108aa285))
+
+
+### Performance Improvements
+
+* **app:** shrink the macOS app with link-time optimisation and stripped symbols ([54f52d1](https://github.com/tkubicz/steam-controller-bridge/commit/54f52d13751fde76a08421c4175b0fb4108aa285))
+
 ## [1.2.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.1.0...v1.2.0) (2026-08-04)
 
 
