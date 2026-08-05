@@ -1,10 +1,21 @@
 name: CI
 
 on:
+  # Branch pushes are already covered by `pull_request`, so listening to every
+  # push ran the whole matrix twice for one commit.
   push:
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
+
+# One run per pull request: a new push, or an edit to the title or description,
+# supersedes the run it replaces. Runs on `main` are never cancelled, and a
+# `workflow_dispatch` run groups by ref rather than pull request, so the release
+# branch's explicitly dispatched run stands on its own.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pr-title:
