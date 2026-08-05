@@ -12,6 +12,51 @@ concurrency:
 permissions: {}
 
 jobs:
+  commit-subjects:
+    # CI validates the pull-request title, but nothing validated the message
+    # that actually landed. A squash whose subject is not a Conventional Commit
+    # is invisible to Release Please: no changelog entry, no version bump, and
+    # no failure anywhere. Checking it here turns that silence into a red run.
+    #
+    # This deliberately does not gate the jobs below. Blocking them would stop
+    # Release Please from updating the release pull request, which is where an
+    # inaccurate entry gets corrected in the first place.
+    name: Commit subjects
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    permissions:
+      contents: read
+    steps:
+      - name: Check out enough history to inspect the push
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate every subject that landed on the branch
+        env:
+          PUSHED_BEFORE: ${{ github.event.before }}
+          PUSHED_AFTER: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${PUSHED_BEFORE}" =~ ^0+$ ]]; then
+            range="${PUSHED_AFTER}~1..${PUSHED_AFTER}"
+          else
+            range="${PUSHED_BEFORE}..${PUSHED_AFTER}"
+          fi
+          invalid=0
+          while read -r sha; do
+            # Merge commits carry GitHub's wording, not a contributor's.
+            if [[ "$(git rev-list --parents -n 1 "${sha}" | wc -w)" -gt 2 ]]; then
+              continue
+            fi
+            subject="$(git log -1 --format=%s "${sha}")"
+            if ! python3 tools/check-pr-title.py "${subject}"; then
+              echo "::error::${sha} landed as '${subject}', which Release Please cannot read. Correct the pull-request metadata and rerun the Release workflow."
+              invalid=1
+            fi
+          done < <(git rev-list "${range}")
+          exit "${invalid}"
+
   release_please:
     name: Release Please
     runs-on: ubuntu-latest
