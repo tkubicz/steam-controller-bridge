@@ -25,6 +25,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::window::WindowId;
 
 use crate::model::{MenuModel, TrayState};
@@ -155,7 +156,18 @@ fn save_settings(path: &Path, settings: &AppSettings) -> Result<(), String> {
 }
 
 pub fn run() -> Result<(), String> {
-    let event_loop = EventLoop::new().map_err(|error| error.to_string())?;
+    // A menu bar app has no windows and no Dock icon, and it must not take
+    // focus when it starts. Winit otherwise runs as a regular foreground app
+    // and calls `activateIgnoringOtherApps` at launch. In that state macOS
+    // tears down the status item's menu the first time a submenu is opened
+    // after launch, taking the whole menu with it; every later open is fine.
+    // Declaring the app an accessory and leaving the frontmost app alone keeps
+    // the menu up. Either one alone is enough, and both are correct here.
+    let event_loop = EventLoop::builder()
+        .with_activation_policy(ActivationPolicy::Accessory)
+        .with_activate_ignoring_other_apps(false)
+        .build()
+        .map_err(|error| error.to_string())?;
     let mut app = MenuApp::new()?;
     event_loop
         .run_app(&mut app)
