@@ -18,10 +18,13 @@
     <string>Steam Controller Bridge</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- Both are replaced from version.txt by tools/build-macos-app.sh. The
+         placeholder is deliberately obvious: a bundle reporting it was built
+         some other way. -->
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.0.0-dev</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>0.0.0-dev</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
