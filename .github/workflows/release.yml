@@ -61,7 +61,6 @@ jobs:
     name: Release Please
     runs-on: ubuntu-latest
     permissions:
-      actions: write
       contents: write
       pull-requests: write
     outputs:
@@ -70,23 +69,39 @@ jobs:
       release_sha: ${{ steps.release.outputs.sha }}
       release_body: ${{ steps.release.outputs.body }}
     steps:
+      # GitHub refuses to start workflows for events triggered by GITHUB_TOKEN,
+      # so a release pull request raised with it never runs CI. An app token is
+      # a real identity, so the release pull request behaves like any other:
+      # CI starts on push, with nothing to approve by hand.
+      - name: Mint a token for the release pull request
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      # The app token owns the checkout too: the lockfile commit below is
+      # pushed with these credentials, and a push made with GITHUB_TOKEN would
+      # be blocked from starting CI in the same way.
       - name: Check out the target branch
         uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Create or update the release pull request
         id: release
         uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
         with:
-          token: ${{ github.token }}
+          token: ${{ steps.app-token.outputs.token }}
           target-branch: main
 
-      # Pull requests created with GITHUB_TOKEN do not start ordinary CI
-      # automatically. workflow_dispatch is an explicit GitHub-supported
-      # exception, so validate the generated head without a PAT.
-      - name: Dispatch CI for the release pull request
+      # Release Please updates the workspace versions but not Cargo.lock, so
+      # the release branch would otherwise carry a lockfile that disagrees with
+      # them. CI starts by itself once this lands on the branch.
+      - name: Update Cargo.lock on the release branch
         if: steps.release.outputs.prs_created == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           RELEASE_PR: ${{ steps.release.outputs.pr }}
         run: |
           set -euo pipefail
@@ -99,13 +114,12 @@ jobs:
           git checkout --detach FETCH_HEAD
           cargo metadata --format-version 1 > /dev/null
           if ! git diff --quiet -- Cargo.lock; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git config user.name "${APP_SLUG}[bot]"
+            git config user.email "${APP_SLUG}[bot]@users.noreply.github.com"
             git add Cargo.lock
             git commit -m "chore: update Cargo.lock for release"
             git push origin "HEAD:${branch}"
           fi
-          gh workflow run ci.yml --repo "${GITHUB_REPOSITORY}" --ref "${branch}"
 
   validate:
     needs: release_please
