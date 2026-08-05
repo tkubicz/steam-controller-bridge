@@ -1,4 +1,4 @@
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "editor"))]
 mod bindings_editor;
 #[cfg(target_os = "macos")]
 mod macos;
@@ -11,7 +11,14 @@ mod model;
 fn main() {
     let editor = std::env::args().any(|argument| argument == "--bindings-editor");
     let result = if editor {
-        bindings_editor::run()
+        #[cfg(feature = "editor")]
+        {
+            bindings_editor::run()
+        }
+        #[cfg(not(feature = "editor"))]
+        {
+            Err("this build has no bindings editor".to_owned())
+        }
     } else {
         macos::run()
     };
