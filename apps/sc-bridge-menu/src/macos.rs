@@ -28,13 +28,12 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::window::WindowId;
 
-use crate::model::{MenuModel, TrayState};
+use crate::model::{MenuModel, RunAction, TrayState};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const LOG_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 const LOG_TRUNCATION_MARKER: &str = " log_truncated=true\n";
-const START_ID: &str = "start";
-const STOP_ID: &str = "stop";
+const RUN_TOGGLE_ID: &str = "run-toggle";
 const COPY_ERROR_ID: &str = "copy-error";
 const COPY_ID: &str = "copy-diagnostics";
 const SETTINGS_ID: &str = "input-monitoring";
@@ -185,8 +184,7 @@ struct MenuItems {
     bindings: MenuItem,
     automatic_shutdown: MenuItem,
     problem: MenuItem,
-    start: MenuItem,
-    stop: MenuItem,
+    run_toggle: MenuItem,
     copy_error: MenuItem,
     idle_shutdown: Vec<(Option<u64>, CheckMenuItem)>,
     puck_dock: CheckMenuItem,
@@ -274,8 +272,7 @@ impl MenuApp {
         let bindings = MenuItem::new("Bindings: Disabled", false, None);
         let automatic_shutdown = MenuItem::new("Auto shutdown: Idle 0:00 / 15:00", false, None);
         let problem = MenuItem::new("Problem: None", false, None);
-        let start = MenuItem::with_id(START_ID, "Start Bridge", false, None);
-        let stop = MenuItem::with_id(STOP_ID, "Stop Bridge", true, None);
+        let run_toggle = MenuItem::with_id(RUN_TOGGLE_ID, "Start Bridge", false, None);
         let copy_error = MenuItem::with_id(COPY_ERROR_ID, "Copy Full Error", false, None);
         let copy = MenuItem::with_id(COPY_ID, "Copy Diagnostics", true, None);
         let settings = MenuItem::with_id(SETTINGS_ID, "Open Input Monitoring Settings", true, None);
@@ -385,42 +382,55 @@ impl MenuApp {
             .append(&PredefinedMenuItem::separator())
             .map_err(|error| error.to_string())?;
         bindings_submenu
-            .append(&enable_bindings)
-            .map_err(|error| error.to_string())?;
-        bindings_submenu
             .append(&edit_bindings)
             .map_err(|error| error.to_string())?;
-        bindings_submenu
-            .append(&accessibility)
-            .map_err(|error| error.to_string())?;
-        let separator1 = PredefinedMenuItem::separator();
-        let separator2 = PredefinedMenuItem::separator();
-        let separator3 = PredefinedMenuItem::separator();
-        let separator4 = PredefinedMenuItem::separator();
+        // Everything that asks macOS for a permission, or sends you to the
+        // pane that grants it, lives together rather than being scattered
+        // through the menu.
+        let permissions_submenu = Submenu::with_items(
+            "Permissions",
+            true,
+            &[
+                &enable_bindings,
+                &PredefinedMenuItem::separator(),
+                &settings,
+                &accessibility,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        let separators: [PredefinedMenuItem; 6] =
+            std::array::from_fn(|_| PredefinedMenuItem::separator());
         let menu = Menu::with_items(&[
+            // What the bridge is doing.
             &bridge,
             &status,
-            &separator1,
+            &separators[0],
+            // What it is connected to.
             &controller,
             &input,
             &xiao,
             &battery,
             &haptics,
             &bindings,
-            &automatic_shutdown,
-            &separator2,
+            &separators[1],
+            // What is wrong, if anything.
             &problem,
             &copy_error,
-            &separator3,
-            &start,
-            &stop,
+            &separators[2],
+            // Running the bridge.
+            &run_toggle,
+            &separators[3],
+            // Shutting it down again.
+            &automatic_shutdown,
             &idle_submenu,
             &puck_dock,
+            &separators[4],
+            // Configuration.
             &bindings_submenu,
-            &separator4,
+            &permissions_submenu,
             &copy,
-            &settings,
             &logs,
+            &separators[5],
             &quit,
         ])
         .map_err(|error| error.to_string())?;
@@ -443,8 +453,7 @@ impl MenuApp {
             bindings,
             automatic_shutdown,
             problem,
-            start,
-            stop,
+            run_toggle,
             copy_error,
             idle_shutdown,
             puck_dock,
@@ -482,8 +491,8 @@ impl MenuApp {
                 items.bindings.set_text(&model.bindings);
                 items.automatic_shutdown.set_text(&model.automatic_shutdown);
                 items.problem.set_text(&model.problem);
-                items.start.set_enabled(model.start_enabled);
-                items.stop.set_enabled(model.stop_enabled);
+                items.run_toggle.set_text(model.run_action.label());
+                items.run_toggle.set_enabled(model.run_enabled);
                 items.copy_error.set_enabled(model.has_error);
             }
             if let Some(tray) = &self.tray {
@@ -501,14 +510,21 @@ impl MenuApp {
 
     fn handle_menu_event(&mut self, id: &str, event_loop: &ActiveEventLoop) {
         match id {
-            START_ID => {
-                if let Err(error) = self.runtime.request_start() {
-                    eprintln!("cannot start bridge: {error}");
-                }
-            }
-            STOP_ID => {
-                if let Err(error) = self.runtime.request_stop() {
-                    eprintln!("cannot stop bridge: {error}");
+            RUN_TOGGLE_ID => {
+                // One control: what it does depends on what the bridge is
+                // doing, which is what its label already says.
+                let starts = self
+                    .last_model
+                    .as_ref()
+                    .is_none_or(|model| model.run_action == RunAction::Start);
+                let result = if starts {
+                    self.runtime.request_start()
+                } else {
+                    self.runtime.request_stop()
+                };
+                if let Err(error) = result {
+                    let action = if starts { "start" } else { "stop" };
+                    eprintln!("cannot {action} bridge: {error}");
                 }
             }
             IDLE_NEVER_ID | IDLE_5_ID | IDLE_10_ID | IDLE_15_ID | IDLE_30_ID => {
@@ -705,22 +721,11 @@ impl MenuApp {
                 .append(item)
                 .map_err(|error| error.to_string())?;
         }
+        // The permission items live in their own submenu, so this one only
+        // carries the profiles and the editor.
         let separator = PredefinedMenuItem::separator();
-        let enable = MenuItem::with_id(
-            ENABLE_BINDINGS_ID,
-            "Request Accessibility Permission…",
-            true,
-            None,
-        );
         let edit = MenuItem::with_id(EDIT_BINDINGS_ID, "Edit Bindings…", true, None);
-        let accessibility =
-            MenuItem::with_id(ACCESSIBILITY_ID, "Open Accessibility Settings", true, None);
-        for item in [
-            &separator as &dyn tray_icon::menu::IsMenuItem,
-            &enable,
-            &edit,
-            &accessibility,
-        ] {
+        for item in [&separator as &dyn tray_icon::menu::IsMenuItem, &edit] {
             items
                 .bindings_submenu
                 .append(item)

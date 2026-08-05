@@ -24,6 +24,29 @@ impl TrayState {
     }
 }
 
+/// Marks the menu lines that need attention. A plain warning sign reads
+/// correctly in a menu on every macOS version; muda cannot colour an
+/// individual item's title.
+pub const WARNING: &str = "⚠";
+
+/// The bridge is either stopped, so the one run control starts it, or it is
+/// not, so that control stops it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunAction {
+    Start,
+    Stop,
+}
+
+impl RunAction {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Start => "Start Bridge",
+            Self::Stop => "Stop Bridge",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuModel {
     pub bridge: String,
@@ -38,14 +61,19 @@ pub struct MenuModel {
     pub problem: String,
     pub has_error: bool,
     pub tray_state: TrayState,
-    pub start_enabled: bool,
-    pub stop_enabled: bool,
+    /// What the single run control does, which is also what it is labelled.
+    pub run_action: RunAction,
+    pub run_enabled: bool,
+    /// Set when the bridge cannot type because macOS has not granted
+    /// Accessibility, which the menu calls out rather than burying.
+    pub permission_required: bool,
 }
 
 impl MenuModel {
     #[must_use]
     pub fn from_status(status: &BridgeStatus) -> Self {
         let tray_state = tray_state(status);
+        let starts = matches!(status.state, RuntimeState::Stopped | RuntimeState::Error);
         Self {
             bridge: bridge_label(status.state),
             status: status_label(status, tray_state),
@@ -77,12 +105,17 @@ impl MenuModel {
             automatic_shutdown: automatic_shutdown_label(status),
             problem: status.last_error.as_deref().map_or_else(
                 || "Problem: None".to_owned(),
-                |error| format!("Problem: {}", friendly_error(error)),
+                |error| format!("{WARNING} Problem: {}", friendly_error(error)),
             ),
             has_error: status.last_error.is_some(),
             tray_state,
-            start_enabled: matches!(status.state, RuntimeState::Stopped | RuntimeState::Error),
-            stop_enabled: !matches!(status.state, RuntimeState::Stopped | RuntimeState::Stopping),
+            run_action: if starts {
+                RunAction::Start
+            } else {
+                RunAction::Stop
+            },
+            run_enabled: starts || !matches!(status.state, RuntimeState::Stopping),
+            permission_required: status.bindings.state == DesktopBindingsState::PermissionRequired,
         }
     }
 }
@@ -99,6 +132,9 @@ fn bindings_label(status: &BridgeStatus) -> String {
         DesktopBindingsState::PermissionRequired => "Permission required",
         DesktopBindingsState::Degraded => "Degraded",
     };
+    if status.bindings.state == DesktopBindingsState::PermissionRequired {
+        return format!("{WARNING} Bindings: {profile} · {state}");
+    }
     format!("Bindings: {profile} · {state}")
 }
 
@@ -326,8 +362,9 @@ mod tests {
         assert_eq!(stopped.bridge, "Bridge: Off");
         assert_eq!(stopped.status, "Status: Not running");
         assert_eq!(stopped.tray_state, TrayState::Off);
-        assert!(stopped.start_enabled);
-        assert!(!stopped.stop_enabled);
+        assert_eq!(stopped.run_action, RunAction::Start);
+        assert_eq!(stopped.run_action.label(), "Start Bridge");
+        assert!(stopped.run_enabled);
 
         let mut status = ready_status(ControllerTransport::Bluetooth);
         status.battery_percent = Some(87);
@@ -339,12 +376,79 @@ mod tests {
         assert_eq!(running.bridge, "Bridge: On");
         assert_eq!(running.status, "Status: Ready");
         assert_eq!(running.tray_state, TrayState::Ready);
-        assert!(!running.start_enabled);
-        assert!(running.stop_enabled);
+        assert_eq!(running.run_action, RunAction::Stop);
+        assert_eq!(running.run_action.label(), "Stop Bridge");
+        assert!(running.run_enabled);
         assert_eq!(running.battery, "Battery: 87%");
         assert_eq!(running.haptics, "Haptics: Active");
         assert_eq!(running.bindings, "Bindings: None · Disabled");
         assert_eq!(running.automatic_shutdown, "Auto shutdown: Off");
+    }
+
+    #[test]
+    fn the_run_control_reads_as_the_action_it_performs() {
+        let state_of = |state| {
+            let mut status = ready_status(ControllerTransport::Bluetooth);
+            status.state = state;
+            MenuModel::from_status(&status)
+        };
+        // Stopped or broken: the control offers to start, and can be used.
+        for state in [RuntimeState::Stopped, RuntimeState::Error] {
+            let model = state_of(state);
+            assert_eq!(model.run_action, RunAction::Start, "{state:?}");
+            assert!(model.run_enabled, "{state:?}");
+        }
+        // Already doing something: the control offers to stop.
+        for state in [RuntimeState::Running, RuntimeState::Starting] {
+            let model = state_of(state);
+            assert_eq!(model.run_action, RunAction::Stop, "{state:?}");
+            assert!(model.run_enabled, "{state:?}");
+        }
+        // Mid-stop there is nothing useful to ask for.
+        let stopping = state_of(RuntimeState::Stopping);
+        assert_eq!(stopping.run_action, RunAction::Stop);
+        assert!(!stopping.run_enabled);
+    }
+
+    #[test]
+    fn a_problem_carries_the_warning_mark_and_no_problem_does_not() {
+        let healthy = MenuModel::from_status(&ready_status(ControllerTransport::Bluetooth));
+        assert_eq!(healthy.problem, "Problem: None");
+        assert!(!healthy.problem.starts_with(WARNING));
+        assert!(!healthy.has_error);
+
+        let mut status = ready_status(ControllerTransport::Bluetooth);
+        status.last_error = Some("something went wrong: internal detail".to_owned());
+        let broken = MenuModel::from_status(&status);
+        assert!(
+            broken.problem.starts_with(WARNING),
+            "a reported problem should be marked: {}",
+            broken.problem,
+        );
+        assert!(broken.has_error);
+    }
+
+    #[test]
+    fn a_missing_permission_is_called_out_rather_than_buried() {
+        let mut status = ready_status(ControllerTransport::Bluetooth);
+        for (state, flagged) in [
+            (DesktopBindingsState::Ready, false),
+            (DesktopBindingsState::Disabled, false),
+            (DesktopBindingsState::Degraded, false),
+            (DesktopBindingsState::PermissionRequired, true),
+        ] {
+            status.bindings = bridge_runtime::DesktopBindingsStatus {
+                state,
+                ..bridge_runtime::DesktopBindingsStatus::default()
+            };
+            let model = MenuModel::from_status(&status);
+            assert_eq!(model.permission_required, flagged, "{state:?}");
+            assert_eq!(
+                model.bindings.starts_with(WARNING),
+                flagged,
+                "the warning mark should appear only when a permission is missing: {state:?}",
+            );
+        }
     }
 
     #[test]
@@ -359,7 +463,8 @@ mod tests {
             ..bridge_runtime::DesktopBindingsStatus::default()
         };
         let model = MenuModel::from_status(&status);
-        assert_eq!(model.bindings, "Bindings: Gaming · Permission required");
+        assert_eq!(model.bindings, "⚠ Bindings: Gaming · Permission required");
+        assert!(model.permission_required);
         assert_eq!(model.tray_state, TrayState::Ready);
         assert!(!model.has_error);
     }
@@ -389,7 +494,7 @@ mod tests {
         });
         assert_eq!(
             model.problem,
-            "Problem: Input Monitoring permission required"
+            "⚠ Problem: Input Monitoring permission required"
         );
         assert_eq!(model.status, "Status: Action required");
         assert_eq!(model.tray_state, TrayState::Error);
@@ -428,7 +533,7 @@ mod tests {
         assert_eq!(degraded.automatic_shutdown, "Auto shutdown: Degraded");
         assert_eq!(
             degraded.problem,
-            "Problem: Controller could not be powered off"
+            "⚠ Problem: Controller could not be powered off"
         );
     }
 
