@@ -187,6 +187,30 @@ and its
 OpenPuck remains an architectural and safety reference only; no AGPL source is
 copied.
 
+## Finite pad-feedback ticks
+
+The same exact Puck-or-Bluetooth allowlist permits the finite Triton tick used
+for optional trackpad movement feedback:
+
+```text
+82 SIDE 01 GAIN_DB
+```
+
+- `0x82`: Triton side/command/gain output report.
+- `SIDE`: `0x01` left, `0x02` right, or `0x03` both.
+- `0x01`: the discrete tick command.
+- `GAIN_DB`: signed two's-complement gain; profiles expose only `-15`, `-9`,
+  and `-3` dB.
+
+`HidSession::pad_haptic_tick()` builds this exact four-byte packet; no arbitrary
+output-report API is exposed. Each packet is a complete finite effect. The
+runtime never sends a synthetic stop, coalesces pending sides, and applies a
+separate 500 ms write-failure backoff so pad feedback cannot disable ordinary
+rumble or desktop pointer/scroll output. The layout follows
+[SDL's Triton output structure](https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/steam/controller_structs.h),
+and the finite no-stop lifecycle follows
+[OpenPuck's movement ticks](https://github.com/safijari/openpuck/blob/main/OpenPuck/haptics.cpp).
+
 ## Still requiring local captures
 
 - Direct USB-C collection identity and report compatibility; it remains

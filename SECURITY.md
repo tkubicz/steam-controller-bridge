@@ -28,9 +28,10 @@ are the areas most worth scrutiny.
 
 **In scope**
 
-- Any path that writes to a controller outside the two permitted operations: the
-  fixed SDL-compatible lizard-off feature report and the exact standard
-  dual-rumble output report. Both are gated on an exact vendor, product, usage,
+- Any path that writes to a controller outside the four permitted operations:
+  the fixed SDL-compatible lizard-off feature report, fixed power-off feature
+  report, exact standard dual-rumble output report, and finite SDL Triton
+  `0x82` pad tick. Every write is gated on an exact vendor, product, usage,
   interface, and transport match.
 - A way to leave an actuator running after the effect stops, the client closes,
   the bridge exits, or either endpoint disconnects.

@@ -19,6 +19,8 @@ pub const LIZARD_KEYBOARD_REPORT_SIZE: usize = 9;
 pub const FEATURE_REPORT_SIZE: usize = 64;
 pub const RUMBLE_OUTPUT_REPORT_SIZE: usize = 10;
 pub const RUMBLE_OUTPUT_REPORT_ID: u8 = 0x80;
+pub const PAD_HAPTIC_OUTPUT_REPORT_SIZE: usize = 4;
+pub const PAD_HAPTIC_OUTPUT_REPORT_ID: u8 = 0x82;
 pub const POWER_OFF_COMMAND: u8 = 0x9f;
 
 const FEATURE_REPORT_ID: u8 = 0x01;
@@ -82,6 +84,32 @@ pub const fn rumble_output_report(
     report[6] = high[0];
     report[7] = high[1];
     report
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PadHapticSide {
+    Left = 0x01,
+    Right = 0x02,
+    Both = 0x03,
+}
+
+/// Builds the SDL Triton discrete trackpad-tick output report.
+///
+/// The returned packet includes report ID `0x82`, the selected side mask,
+/// command `0x01` (tick), and a signed dB gain. A tick is finite and must not
+/// be followed by an artificial stop report.
+#[must_use]
+pub const fn pad_haptic_tick_output_report(
+    side: PadHapticSide,
+    gain_db: i8,
+) -> [u8; PAD_HAPTIC_OUTPUT_REPORT_SIZE] {
+    [
+        PAD_HAPTIC_OUTPUT_REPORT_ID,
+        side as u8,
+        0x01,
+        gain_db.cast_unsigned(),
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -425,6 +453,22 @@ mod tests {
             rumble_output_report(u16::MAX, u16::MAX),
             [0x80, 0, 0, 0xff, 0xff, 0, 0xff, 0xff, 0, 0]
         );
+    }
+
+    #[test]
+    fn pad_haptic_tick_output_report_matches_sdl_golden_vectors() {
+        for (gain_db, gain_byte) in [(-15, 0xf1), (-9, 0xf7), (-3, 0xfd)] {
+            for (side, side_byte) in [
+                (PadHapticSide::Left, 0x01),
+                (PadHapticSide::Right, 0x02),
+                (PadHapticSide::Both, 0x03),
+            ] {
+                assert_eq!(
+                    pad_haptic_tick_output_report(side, gain_db),
+                    [0x82, side_byte, 0x01, gain_byte]
+                );
+            }
+        }
     }
 
     #[test]

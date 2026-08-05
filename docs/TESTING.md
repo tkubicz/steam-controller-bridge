@@ -166,10 +166,14 @@ overrides, exact XIAO metadata filtering, callout-versus-tty filtering,
 battery-range handling, transition-preserving report coalescing and overflow,
 paired live binding-profile flags, replay injection rejection, and replay's
 unchanged dump default. Desktop-binding tests cover schema/profile validation,
-atomic default creation and persistence, baseline suppression, edge ordering,
-overlapping reference counts, profile-switch suppression, rapid mouse
-transitions, disconnect cleanup, sink failure recovery, and explicit macOS key
-conversions. Menu tests cover settings-v1 migration plus Puck/Bluetooth source rendering, battery
+version-1 migration, atomic default creation and persistence, baseline
+suppression, edge ordering, overlapping reference counts, profile-switch
+suppression, pad direction/scaling/residuals, feedback travel/rate limiting,
+rapid transitions, disconnect cleanup, sink failure recovery, and explicit
+macOS key, pointer, and smooth-scroll conversions. Protocol and runtime tests
+cover all nine side/strength `0x82` tick vectors, side coalescing, separate
+feedback backoff, mailbox touch-edge retention, and unchanged Xbox output.
+Menu tests cover settings-v1 migration plus Puck/Bluetooth source rendering, battery
 unknown/percentage, haptics state, error visibility, and Start/Stop enablement.
 macOS tests build the tray frontend, diagnostics renderer, and template icon.
 On a clean TCC state, launching the packaged menu app must request Input
@@ -244,7 +248,12 @@ Desktop bindings also require hardware acceptance on both Puck `0x42` and
 Bluetooth `0x45`: capture each of L4/L5/R4/R5/Quick Access individually, verify
 rapid taps and held outputs, F5/F9 in a foreground test app, all five mouse
 buttons where recognized, and no stuck input across Stop, disconnect, profile
-switch, and Accessibility revocation.
+switch, and Accessibility revocation. Enable the right-pad mouse and left-pad
+scroll functions one at a time, verify both axes and touch baselines, then
+compare Low/Medium/High feedback on the correct physical pad. Stationary touch
+must not tick; disabling feedback must leave motion active; rapid motion must
+not become a continuous buzz. Finally combine pad feedback with game rumble and
+verify that neither effect sticks or interrupts lizard-suppression refreshes.
 
 Bridge-core tests cover changed-state suppression, timeout neutralization,
 disconnect/reset/shutdown neutralization, repeated decode failures, and HID

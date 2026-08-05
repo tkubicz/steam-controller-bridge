@@ -157,6 +157,12 @@ impl HidDeviceInfo {
         self.is_supported_controller_source()
     }
 
+    /// Returns whether the narrow Triton pad-tick output may be sent.
+    #[must_use]
+    pub fn supports_pad_haptics(&self) -> bool {
+        self.is_supported_controller_source()
+    }
+
     /// Returns whether the narrow controller power-off command may be sent.
     #[must_use]
     pub fn supports_power_off(&self) -> bool {
@@ -247,6 +253,13 @@ pub enum DeviceError {
         usage: u16,
         interface_number: i32,
     },
+    UnsupportedPadHapticsTarget {
+        vendor_id: u16,
+        product_id: u16,
+        usage_page: u16,
+        usage: u16,
+        interface_number: i32,
+    },
     UnsupportedPowerOffTarget {
         vendor_id: u16,
         product_id: u16,
@@ -293,6 +306,21 @@ impl std::fmt::Display for DeviceError {
             } => write!(
                 f,
                 "refusing rumble write to unsupported collection \
+                 {vendor_id:04x}:{product_id:04x} usage \
+                 {usage_page:04x}:{usage:04x} interface {interface_number}; \
+                 select either an active 28de:1304 ff00:0001 USB Puck slot on \
+                 interface 2-5 or the 28de:1303 ff00:0001 Bluetooth collection \
+                 on interface -1"
+            ),
+            Self::UnsupportedPadHapticsTarget {
+                vendor_id,
+                product_id,
+                usage_page,
+                usage,
+                interface_number,
+            } => write!(
+                f,
+                "refusing pad-haptic write to unsupported collection \
                  {vendor_id:04x}:{product_id:04x} usage \
                  {usage_page:04x}:{usage:04x} interface {interface_number}; \
                  select either an active 28de:1304 ff00:0001 USB Puck slot on \
@@ -433,6 +461,19 @@ impl HidSession {
         Err(DeviceError::UnsupportedPlatform)
     }
 
+    /// Returns an unsupported-platform error without attempting an output write.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`DeviceError::UnsupportedPlatform`].
+    pub fn pad_haptic_tick(
+        &self,
+        _side: steam_controller_protocol::PadHapticSide,
+        _gain_db: i8,
+    ) -> Result<(), DeviceError> {
+        Err(DeviceError::UnsupportedPlatform)
+    }
+
     /// Returns an unsupported-platform error without attempting a feature write.
     ///
     /// # Errors
@@ -498,6 +539,7 @@ mod tests {
         assert!(target.is_supported_controller_source());
         assert!(target.supports_lizard_mode_suppression());
         assert!(target.supports_rumble());
+        assert!(target.supports_pad_haptics());
         assert!(target.supports_power_off());
 
         for mutate in [
@@ -515,6 +557,7 @@ mod tests {
             assert!(!other.is_supported_controller_source());
             assert!(!other.supports_lizard_mode_suppression());
             assert!(!other.supports_rumble());
+            assert!(!other.supports_pad_haptics());
             assert!(!other.supports_power_off());
         }
     }
@@ -540,6 +583,7 @@ mod tests {
         );
         assert!(target.supports_lizard_mode_suppression());
         assert!(target.supports_rumble());
+        assert!(target.supports_pad_haptics());
         assert!(target.supports_power_off());
 
         target.product_id = PROTEUS_PRODUCT_ID;

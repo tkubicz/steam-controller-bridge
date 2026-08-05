@@ -1,9 +1,11 @@
 # Desktop bindings
 
 The macOS bridge can map L4, L5, R4, R5, and Quick Access to held keyboard
-chords or left/right/middle/back/forward mouse buttons. Stick clicks remain
-ordinary Xbox controls; trigger clicks and both pads are outside this milestone.
-The feature is host-side and requires no protocol-v1 or XIAO firmware change.
+chords or left/right/middle/back/forward mouse buttons. It can also use the
+right pad for relative pointer movement and the left pad for two-axis smooth
+scrolling. Stick clicks remain ordinary Xbox controls; trigger clicks, pad
+clicks, pressure actions, and gestures are not mapped. The feature is host-side
+and requires no protocol-v1 or XIAO firmware change.
 
 ## Menu app
 
@@ -30,7 +32,10 @@ Profiles live at:
 ~/Library/Application Support/Steam Controller Bridge/bindings.json
 ```
 
-Fresh stores contain one all-unbound `Default` profile. The version-1 schema
+Fresh stores contain one all-unbound `Default` profile. Both pad functions are
+off by default. Enabling a pad also enables Medium feedback by default; each
+pad's feedback can be disabled or set to Low, Medium, or High independently.
+The version-2 schema
 supports 1-32 profiles, trimmed unique names, letters, digits, F1-F24,
 navigation/editing keys, punctuation, numpad keys, common media keys, the four
 standard modifiers, and five mouse buttons. Modifier-only and raw-keycode
@@ -38,6 +43,22 @@ bindings are not representable. Enigo/macOS exposes native F1-F20 and volume
 keys but no F21-F24 or play/previous/next media identities; using those portable
 entries reports a binding-only degraded error rather than substituting another
 key.
+
+Version-1 stores are migrated atomically without changing profile IDs, names,
+or button bindings. The new profile section is:
+
+```json
+"pads": {
+  "right_mouse": {
+    "enabled": false,
+    "feedback": { "enabled": true, "strength": "medium" }
+  },
+  "left_scroll": {
+    "enabled": false,
+    "feedback": { "enabled": true, "strength": "medium" }
+  }
+}
+```
 
 ## CLI
 
@@ -66,3 +87,9 @@ binding sink. Standard Xbox output, rumble, lizard suppression, recording,
 automatic shutdown, and reconnect continue independently. Logs record profile,
 state, held-output count in snapshots, bounded last error, and failure changes;
 they never log each injected key.
+
+Pad movement establishes a fresh baseline on touch, reconnect, profile change,
+or recovery, so it cannot jump the pointer. Pad feedback uses finite SDL Triton
+`0x82` tick commands and never sends an artificial stop. Failed tick writes use
+their own 500 ms backoff: pointer/scroll output and ordinary game rumble remain
+operational.

@@ -373,6 +373,16 @@ fn safety_status_changes(
         &previous.lizard.failures,
         &current.lizard.failures,
     );
+    haptics_status_changes(changes, previous, current);
+    bindings_status_changes(changes, previous, current);
+    shutdown_status_changes(changes, previous, current);
+}
+
+fn haptics_status_changes(
+    changes: &mut Vec<StatusLogChange>,
+    previous: &BridgeStatus,
+    current: &BridgeStatus,
+) {
     push_change(
         changes,
         "haptics_state",
@@ -385,6 +395,25 @@ fn safety_status_changes(
         &previous.haptics.failures,
         &current.haptics.failures,
     );
+    push_change(
+        changes,
+        "pad_feedback_failures",
+        &previous.haptics.pad_feedback_failures,
+        &current.haptics.pad_feedback_failures,
+    );
+    push_change(
+        changes,
+        "pad_feedback_error",
+        &previous.haptics.pad_feedback_last_error,
+        &current.haptics.pad_feedback_last_error,
+    );
+}
+
+fn bindings_status_changes(
+    changes: &mut Vec<StatusLogChange>,
+    previous: &BridgeStatus,
+    current: &BridgeStatus,
+) {
     push_change(
         changes,
         "bindings_state",
@@ -415,6 +444,13 @@ fn safety_status_changes(
         &previous.bindings.last_error,
         &current.bindings.last_error,
     );
+}
+
+fn shutdown_status_changes(
+    changes: &mut Vec<StatusLogChange>,
+    previous: &BridgeStatus,
+    current: &BridgeStatus,
+) {
     push_change(
         changes,
         "idle_timeout",
@@ -520,6 +556,8 @@ fn tracked_status_changed(previous: &BridgeStatus, current: &BridgeStatus) -> bo
         || previous.lizard.failures != current.lizard.failures
         || previous.haptics.state != current.haptics.state
         || previous.haptics.failures != current.haptics.failures
+        || previous.haptics.pad_feedback_failures != current.haptics.pad_feedback_failures
+        || previous.haptics.pad_feedback_last_error != current.haptics.pad_feedback_last_error
         || previous.bindings.state != current.bindings.state
         || previous.bindings.active_profile_id != current.bindings.active_profile_id
         || previous.bindings.active_profile_name != current.bindings.active_profile_name
@@ -549,6 +587,7 @@ fn has_failures(status: &BridgeStatus) -> bool {
         || status.output_diagnostics.checksum_failures > 0
         || status.lizard.failures > 0
         || status.haptics.failures > 0
+        || status.haptics.pad_feedback_failures > 0
         || status.bindings.failures > 0
         || status.automatic_shutdown.failures > 0
 }
@@ -561,6 +600,7 @@ fn failures_increased(previous: &BridgeStatus, current: &BridgeStatus) -> bool {
             > previous.output_diagnostics.checksum_failures
         || current.lizard.failures > previous.lizard.failures
         || current.haptics.failures > previous.haptics.failures
+        || current.haptics.pad_feedback_failures > previous.haptics.pad_feedback_failures
         || current.bindings.failures > previous.bindings.failures
         || current.automatic_shutdown.failures > previous.automatic_shutdown.failures
 }

@@ -3,7 +3,8 @@ use std::sync::OnceLock;
 
 use desktop_bindings::{
     default_store_path, load_or_create_store, save_store, BindableControl, BindingAction,
-    BindingStore, KeyboardKey, Modifier, MouseButton, MAX_PROFILE_NAME_CHARS,
+    BindingStore, KeyboardKey, Modifier, MouseButton, PadFeedbackStrength, PadFunctionConfig,
+    MAX_PROFILE_NAME_CHARS,
 };
 use eframe::egui;
 
@@ -26,6 +27,23 @@ const MUTED_TEXT: egui::Color32 = egui::Color32::from_rgb(157, 166, 177);
 enum ControllerView {
     Front,
     Rear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum EditorSelection {
+    Button(BindableControl),
+    LeftPad,
+    RightPad,
+}
+
+impl EditorSelection {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Button(control) => control.label(),
+            Self::LeftPad => "Left Pad",
+            Self::RightPad => "Right Pad",
+        }
+    }
 }
 
 /// Where a control's label sits relative to the controller drawing it belongs to.
@@ -104,9 +122,10 @@ pub fn run() -> Result<(), String> {
 
 struct BindingsEditor {
     path: std::path::PathBuf,
+    original_store: BindingStore,
     store: BindingStore,
     selected: usize,
-    selected_control: BindableControl,
+    selection: EditorSelection,
     capturing: Option<BindableControl>,
     message: Option<String>,
 }
@@ -115,12 +134,17 @@ impl BindingsEditor {
     fn new(path: std::path::PathBuf, store: BindingStore) -> Self {
         Self {
             path,
+            original_store: store.clone(),
             store,
             selected: 0,
-            selected_control: BindableControl::QuickAccess,
+            selection: EditorSelection::Button(BindableControl::QuickAccess),
             capturing: None,
             message: None,
         }
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.store != self.original_store
     }
 
     fn unique_name(&self, base: &str) -> String {
@@ -193,7 +217,12 @@ impl BindingsEditor {
     }
 
     fn select_control(&mut self, control: BindableControl) {
-        self.selected_control = control;
+        self.selection = EditorSelection::Button(control);
+        self.capturing = None;
+    }
+
+    fn select_pad(&mut self, selection: EditorSelection) {
+        self.selection = selection;
         self.capturing = None;
     }
 
@@ -308,8 +337,15 @@ impl BindingsEditor {
         controller_body(&painter, layout.front);
         controller_body(&painter, layout.rear);
         self.draw_leaders(&painter, &layout);
-        draw_front_face(&painter, layout.front, self.selected_control, hovered);
-        draw_rear_face(&painter, layout.rear, self.selected_control, hovered);
+        draw_front_face(&painter, layout.front, self.selection, hovered);
+        draw_rear_face(&painter, layout.rear, self.selection, hovered);
+        draw_pad_labels(
+            &painter,
+            layout.front,
+            self.store.profiles[self.selected].pads.left_scroll,
+            self.store.profiles[self.selected].pads.right_mouse,
+            self.selection,
+        );
         self.draw_labels(ui, &layout);
 
         painter.text(
@@ -327,7 +363,7 @@ impl BindingsEditor {
         &mut self,
         ui: &mut egui::Ui,
         layout: &CanvasLayout,
-    ) -> Option<BindableControl> {
+    ) -> Option<EditorSelection> {
         let mut hovered = None;
         let mut clicked = None;
         for callout in CONTROL_CALLOUTS {
@@ -340,14 +376,37 @@ impl BindingsEditor {
                 )
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if response.hovered() {
-                hovered = Some(callout.control);
+                hovered = Some(EditorSelection::Button(callout.control));
             }
             if response.clicked() {
-                clicked = Some(callout.control);
+                clicked = Some(EditorSelection::Button(callout.control));
             }
         }
-        if let Some(control) = clicked {
-            self.select_control(control);
+        for (index, selection) in [EditorSelection::LeftPad, EditorSelection::RightPad]
+            .into_iter()
+            .enumerate()
+        {
+            let response = ui
+                .interact(
+                    trackpad_rect(layout.front, index).expand(4.0),
+                    ui.id().with(("pad-hotspot", selection)),
+                    egui::Sense::click(),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            if response.hovered() {
+                hovered = Some(selection);
+            }
+            if response.clicked() {
+                clicked = Some(selection);
+            }
+        }
+        if let Some(selection) = clicked {
+            match selection {
+                EditorSelection::Button(control) => self.select_control(control),
+                EditorSelection::LeftPad | EditorSelection::RightPad => {
+                    self.select_pad(selection);
+                }
+            }
         }
         hovered
     }
@@ -356,7 +415,7 @@ impl BindingsEditor {
         for callout in CONTROL_CALLOUTS {
             let target = control_rect(layout.view(callout.view), callout.control).center();
             let label = layout.label(callout);
-            let selected = self.selected_control == callout.control;
+            let selected = self.selection == EditorSelection::Button(callout.control);
             // The leader runs from the label's edge to the middle of the
             // control. Its tail is hidden because the control is painted over
             // it, so it lands on the control's own edge whatever shape it is.
@@ -373,7 +432,7 @@ impl BindingsEditor {
     fn draw_labels(&mut self, ui: &mut egui::Ui, layout: &CanvasLayout) {
         let mut clicked = None;
         for callout in CONTROL_CALLOUTS {
-            let selected = self.selected_control == callout.control;
+            let selected = self.selection == EditorSelection::Button(callout.control);
             let summary = binding_summary(
                 self.store.profiles[self.selected]
                     .bindings
@@ -404,7 +463,7 @@ impl BindingsEditor {
     }
 
     fn binding_inspector(&mut self, ui: &mut egui::Ui) {
-        let control = self.selected_control;
+        let selection = self.selection;
         // The card matches the canvas height so the two panes read as one row.
         let card_height = ui.available_height() - 32.0;
         egui::Frame::new()
@@ -423,16 +482,67 @@ impl BindingsEditor {
                             .small()
                             .color(MUTED_TEXT),
                     );
-                    ui.heading(control.label());
+                    ui.heading(selection.label());
                     ui.label(
-                        egui::RichText::new(control_description(control))
+                        egui::RichText::new(selection_description(selection))
                             .size(12.0)
                             .color(MUTED_TEXT),
                     );
                     ui.add_space(18.0);
-                    self.binding_editor(ui, control);
+                    match selection {
+                        EditorSelection::Button(control) => self.binding_editor(ui, control),
+                        EditorSelection::LeftPad => self.pad_editor(ui, true),
+                        EditorSelection::RightPad => self.pad_editor(ui, false),
+                    }
                 });
             });
+    }
+
+    fn pad_editor(&mut self, ui: &mut egui::Ui, left: bool) {
+        let config = if left {
+            &mut self.store.profiles[self.selected].pads.left_scroll
+        } else {
+            &mut self.store.profiles[self.selected].pads.right_mouse
+        };
+        let role = if left {
+            "Smooth scroll"
+        } else {
+            "Relative mouse"
+        };
+        ui.label("Desktop action");
+        ui.label(egui::RichText::new(role).strong());
+        ui.add_space(12.0);
+        ui.checkbox(&mut config.enabled, "Enable this pad");
+        ui.add_space(16.0);
+        ui.add_enabled_ui(config.enabled, |ui| {
+            ui.checkbox(&mut config.feedback.enabled, "Pad feedback");
+            ui.label(
+                egui::RichText::new("Emit a subtle controller tick while your finger moves.")
+                    .small()
+                    .color(MUTED_TEXT),
+            );
+            ui.add_space(12.0);
+            ui.add_enabled_ui(config.feedback.enabled, |ui| {
+                ui.label("Feedback strength");
+                ui.horizontal(|ui| {
+                    for strength in PadFeedbackStrength::ALL {
+                        ui.selectable_value(
+                            &mut config.feedback.strength,
+                            strength,
+                            strength.label(),
+                        );
+                    }
+                });
+            });
+        });
+        ui.add_space(16.0);
+        ui.label(
+            egui::RichText::new(
+                "Pad clicks, pressure actions, gestures, and momentum are not used.",
+            )
+            .small()
+            .color(MUTED_TEXT),
+        );
     }
 
     fn binding_editor(&mut self, ui: &mut egui::Ui, control: BindableControl) {
@@ -568,7 +678,7 @@ impl BindingsEditor {
                 ui.heading("Controller bindings");
                 ui.label(
                     egui::RichText::new(
-                        "Select an extra controller button, then choose its keyboard or mouse action.",
+                        "Select an extra button or pad, then configure its desktop action.",
                     )
                     .color(MUTED_TEXT),
                 );
@@ -607,15 +717,18 @@ impl BindingsEditor {
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| {
                         if ui
-                            .add_sized(
-                                [84.0, 32.0],
-                                egui::Button::new(
-                                    egui::RichText::new("Save")
-                                        .strong()
-                                        .color(egui::Color32::from_rgb(7, 31, 35)),
+                            .add_enabled_ui(self.is_dirty(), |ui| {
+                                ui.add_sized(
+                                    [84.0, 32.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("Save")
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(7, 31, 35)),
+                                    )
+                                    .fill(ACCENT),
                                 )
-                                .fill(ACCENT),
-                            )
+                            })
+                            .inner
                             .clicked()
                         {
                             self.save_and_close(ui.ctx());
@@ -628,13 +741,16 @@ impl BindingsEditor {
                         }
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             if let Some(message) = &self.message {
-                                ui.colored_label(
-                                    egui::Color32::from_rgb(255, 115, 115),
-                                    message,
+                                ui.colored_label(egui::Color32::from_rgb(255, 115, 115), message);
+                            } else if self.is_dirty() {
+                                ui.label(
+                                    egui::RichText::new("Unsaved changes take effect after Save.")
+                                        .small()
+                                        .color(MUTED_TEXT),
                                 );
                             } else {
                                 ui.label(
-                                    egui::RichText::new("Changes take effect after Save.")
+                                    egui::RichText::new("No unsaved changes.")
                                         .small()
                                         .color(MUTED_TEXT),
                                 );
@@ -702,13 +818,15 @@ fn configure_visuals(ctx: &egui::Context) {
     ctx.set_visuals(visuals);
 }
 
-fn control_description(control: BindableControl) -> &'static str {
-    match control {
-        BindableControl::L4 => "Upper left rear grip",
-        BindableControl::L5 => "Lower left rear grip",
-        BindableControl::R4 => "Upper right rear grip",
-        BindableControl::R5 => "Lower right rear grip",
-        BindableControl::QuickAccess => "Front Quick Access button",
+fn selection_description(selection: EditorSelection) -> &'static str {
+    match selection {
+        EditorSelection::Button(BindableControl::L4) => "Upper left rear grip",
+        EditorSelection::Button(BindableControl::L5) => "Lower left rear grip",
+        EditorSelection::Button(BindableControl::R4) => "Upper right rear grip",
+        EditorSelection::Button(BindableControl::R5) => "Lower right rear grip",
+        EditorSelection::Button(BindableControl::QuickAccess) => "Front Quick Access button",
+        EditorSelection::LeftPad => "Two-axis smooth desktop scrolling",
+        EditorSelection::RightPad => "Relative desktop pointer movement",
     }
 }
 
@@ -845,6 +963,14 @@ fn unit_rect(view: egui::Rect, center: [f32; 2], size: [f32; 2]) -> egui::Rect {
         normalized_point(view, center),
         egui::vec2(size[0] * view.width(), size[1] * view.height()),
     )
+}
+
+fn trackpad_rect(view: egui::Rect, index: usize) -> egui::Rect {
+    let mut bounds = egui::Rect::NOTHING;
+    for point in &trackpad_shapes()[index].0.points {
+        bounds.extend_with(normalized_point(view, *point));
+    }
+    bounds
 }
 
 /// Where a ray from the middle of `rect` towards `toward` leaves the rectangle.
@@ -1166,15 +1292,15 @@ fn controller_body(painter: &egui::Painter, view: egui::Rect) {
 /// Stroke and fill for a bindable control, given how the pointer relates to it.
 fn control_style(
     control: BindableControl,
-    selected: BindableControl,
-    hovered: Option<BindableControl>,
+    selected: EditorSelection,
+    hovered: Option<EditorSelection>,
 ) -> (egui::Color32, egui::Stroke) {
-    if selected == control {
+    if selected == EditorSelection::Button(control) {
         (
             egui::Color32::from_rgb(34, 67, 73),
             egui::Stroke::new(2.4, ACCENT),
         )
-    } else if hovered == Some(control) {
+    } else if hovered == Some(EditorSelection::Button(control)) {
         (INSET, egui::Stroke::new(1.8, ACCENT.gamma_multiply(0.6)))
     } else {
         (INSET, egui::Stroke::new(1.5, OUTLINE))
@@ -1184,8 +1310,8 @@ fn control_style(
 fn draw_front_face(
     painter: &egui::Painter,
     view: egui::Rect,
-    selected: BindableControl,
-    hovered: Option<BindableControl>,
+    selected: EditorSelection,
+    hovered: Option<EditorSelection>,
 ) {
     let scale = view.width();
     let detail = egui::Stroke::new(1.3, DETAIL);
@@ -1203,9 +1329,28 @@ fn draw_front_face(
         );
     }
 
-    for (pad, inset) in trackpad_shapes() {
-        pad.paint(painter, view, INSET, outline);
-        inset.outline(painter, view, detail);
+    for (index, (pad, inset)) in trackpad_shapes().iter().enumerate() {
+        let selection = if index == 0 {
+            EditorSelection::LeftPad
+        } else {
+            EditorSelection::RightPad
+        };
+        let (fill, stroke) = if selected == selection {
+            (
+                egui::Color32::from_rgb(34, 67, 73),
+                egui::Stroke::new(2.4, ACCENT),
+            )
+        } else if hovered == Some(selection) {
+            (INSET, egui::Stroke::new(1.8, ACCENT.gamma_multiply(0.6)))
+        } else {
+            (INSET, outline)
+        };
+        pad.paint(painter, view, fill, stroke);
+        inset.outline(
+            painter,
+            view,
+            egui::Stroke::new(detail.width, stroke.color.gamma_multiply(0.75)),
+        );
     }
 
     for center in STICKS {
@@ -1256,11 +1401,38 @@ fn draw_front_face(
     }
 }
 
+fn draw_pad_labels(
+    painter: &egui::Painter,
+    view: egui::Rect,
+    left: PadFunctionConfig,
+    right: PadFunctionConfig,
+    selected: EditorSelection,
+) {
+    for (index, selection, title, config) in [
+        (0, EditorSelection::LeftPad, "SCROLL", left),
+        (1, EditorSelection::RightPad, "MOUSE", right),
+    ] {
+        let rect = trackpad_rect(view, index);
+        let color = if selected == selection {
+            ACCENT
+        } else {
+            MUTED_TEXT
+        };
+        painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            format!("{title}\n{}", if config.enabled { "ON" } else { "OFF" }),
+            egui::FontId::proportional(9.5),
+            color,
+        );
+    }
+}
+
 fn draw_rear_face(
     painter: &egui::Painter,
     view: egui::Rect,
-    selected: BindableControl,
-    hovered: Option<BindableControl>,
+    selected: EditorSelection,
+    hovered: Option<EditorSelection>,
 ) {
     let scale = view.width();
     let detail = egui::Stroke::new(1.3, DETAIL);
@@ -1573,6 +1745,53 @@ mod tests {
         assert!(editor.store.profiles[1].name.chars().count() <= MAX_PROFILE_NAME_CHARS);
         editor.store.validate().unwrap();
         assert!(editor.message.is_none());
+    }
+
+    #[test]
+    fn duplicated_profiles_preserve_independent_pad_settings() {
+        let mut store = BindingStore::default();
+        store.profiles[0].pads.right_mouse.enabled = true;
+        store.profiles[0].pads.right_mouse.feedback.enabled = false;
+        store.profiles[0].pads.left_scroll.feedback.strength = PadFeedbackStrength::High;
+        let mut editor = BindingsEditor::new(std::path::PathBuf::new(), store);
+
+        editor.duplicate_profile();
+
+        assert_eq!(editor.store.profiles[1].pads, editor.store.profiles[0].pads);
+        assert_eq!(
+            editor.selection,
+            EditorSelection::Button(BindableControl::QuickAccess)
+        );
+    }
+
+    #[test]
+    fn pad_edits_participate_in_dirty_state_detection() {
+        let mut editor = BindingsEditor::new(std::path::PathBuf::new(), BindingStore::default());
+        assert!(!editor.is_dirty());
+        editor.store.profiles[0].pads.right_mouse.enabled = true;
+        assert!(editor.is_dirty());
+        editor.store.profiles[0].pads.right_mouse.enabled = false;
+        assert!(!editor.is_dirty());
+    }
+
+    #[test]
+    fn pad_selections_have_fixed_roles_and_default_feedback() {
+        assert_eq!(
+            selection_description(EditorSelection::LeftPad),
+            "Two-axis smooth desktop scrolling"
+        );
+        assert_eq!(
+            selection_description(EditorSelection::RightPad),
+            "Relative desktop pointer movement"
+        );
+        let pads = desktop_bindings::PadBindings::default();
+        assert!(!pads.left_scroll.enabled);
+        assert!(!pads.right_mouse.enabled);
+        assert!(pads.left_scroll.feedback.enabled);
+        assert_eq!(
+            pads.right_mouse.feedback.strength,
+            PadFeedbackStrength::Medium
+        );
     }
 
     #[test]

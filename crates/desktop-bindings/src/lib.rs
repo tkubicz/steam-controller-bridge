@@ -3,15 +3,142 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use steam_controller_protocol::{SteamButton, SteamButtons};
 
-pub const BINDINGS_VERSION: u32 = 1;
+pub const BINDINGS_VERSION: u32 = 2;
 pub const MAX_PROFILES: usize = 32;
 pub const MAX_PROFILE_NAME_CHARS: usize = 48;
 pub const DEFAULT_PROFILE_ID: &str = "default";
 pub const DEFAULT_PROFILE_NAME: &str = "Default";
+
+const PAD_JITTER_COUNTS: i32 = 32;
+const PAD_MAX_DELTA_COUNTS: i32 = 32_768;
+const MOUSE_COUNTS_PER_PIXEL: i32 = 64;
+const SCROLL_COUNTS_PER_PIXEL: i32 = 192;
+const FEEDBACK_TRAVEL_COUNTS: f64 = 768.0;
+const FEEDBACK_MIN_INTERVAL: Duration = Duration::from_millis(16);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PadFeedbackStrength {
+    Low,
+    Medium,
+    High,
+}
+
+impl PadFeedbackStrength {
+    pub const ALL: [Self; 3] = [Self::Low, Self::Medium, Self::High];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        }
+    }
+
+    #[must_use]
+    pub const fn gain_db(self) -> i8 {
+        match self {
+            Self::Low => -15,
+            Self::Medium => -9,
+            Self::High => -3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PadFeedbackConfig {
+    pub enabled: bool,
+    pub strength: PadFeedbackStrength,
+}
+
+impl Default for PadFeedbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            strength: PadFeedbackStrength::Medium,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PadFunctionConfig {
+    pub enabled: bool,
+    pub feedback: PadFeedbackConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PadBindings {
+    pub right_mouse: PadFunctionConfig,
+    pub left_scroll: PadFunctionConfig,
+}
+
+impl PadBindings {
+    #[must_use]
+    pub const fn configured_count(self) -> usize {
+        self.right_mouse.enabled as usize + self.left_scroll.enabled as usize
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PadSample {
+    pub x: i16,
+    pub y: i16,
+    pub pressure: i16,
+    pub touched: bool,
+    pub pressed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DesktopInputSnapshot {
+    pub buttons: SteamButtons,
+    pub left_pad: PadSample,
+    pub right_pad: PadSample,
+}
+
+impl DesktopInputSnapshot {
+    #[must_use]
+    pub const fn buttons_only(buttons: SteamButtons) -> Self {
+        Self {
+            buttons,
+            left_pad: PadSample {
+                x: 0,
+                y: 0,
+                pressure: 0,
+                touched: false,
+                pressed: false,
+            },
+            right_pad: PadSample {
+                x: 0,
+                y: 0,
+                pressure: 0,
+                touched: false,
+                pressed: false,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PadFeedbackRequest {
+    pub left: Option<PadFeedbackStrength>,
+    pub right: Option<PadFeedbackStrength>,
+}
+
+impl PadFeedbackRequest {
+    pub const NONE: Self = Self {
+        left: None,
+        right: None,
+    };
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -418,6 +545,8 @@ pub struct BindingProfile {
     pub name: String,
     #[serde(default)]
     pub bindings: ControlBindings,
+    #[serde(default)]
+    pub pads: PadBindings,
 }
 
 impl Default for BindingProfile {
@@ -426,7 +555,15 @@ impl Default for BindingProfile {
             id: DEFAULT_PROFILE_ID.to_owned(),
             name: DEFAULT_PROFILE_NAME.to_owned(),
             bindings: ControlBindings::default(),
+            pads: PadBindings::default(),
         }
+    }
+}
+
+impl BindingProfile {
+    #[must_use]
+    pub fn configured_output_count(&self) -> usize {
+        self.bindings.configured_count() + self.pads.configured_count()
     }
 }
 
@@ -530,6 +667,7 @@ impl BindingStore {
             id: id.clone(),
             name,
             bindings: ControlBindings::default(),
+            pads: PadBindings::default(),
         });
         Ok(id)
     }
@@ -552,6 +690,7 @@ impl BindingStore {
             id: id.clone(),
             name,
             bindings: source.bindings,
+            pads: source.pads,
         });
         Ok(id)
     }
@@ -623,7 +762,12 @@ pub fn default_store_path() -> Result<PathBuf, String> {
 pub fn load_store(path: &Path) -> Result<BindingStore, String> {
     let bytes =
         fs::read(path).map_err(|error| format!("cannot read '{}': {error}", path.display()))?;
-    parse_store(&bytes).map_err(|error| format!("{error} in '{}'", path.display()))
+    let (store, migrated) = parse_store_with_migration(&bytes)
+        .map_err(|error| format!("{error} in '{}'", path.display()))?;
+    if migrated {
+        save_store(path, &store)?;
+    }
+    Ok(store)
 }
 
 /// Decodes and validates a binding store from an in-memory JSON document.
@@ -631,10 +775,18 @@ pub fn load_store(path: &Path) -> Result<BindingStore, String> {
 /// # Errors
 /// Returns an error when the document cannot be decoded or validated.
 pub fn parse_store(bytes: &[u8]) -> Result<BindingStore, String> {
-    let store: BindingStore =
+    parse_store_with_migration(bytes).map(|(store, _)| store)
+}
+
+fn parse_store_with_migration(bytes: &[u8]) -> Result<(BindingStore, bool), String> {
+    let mut store: BindingStore =
         serde_json::from_slice(bytes).map_err(|error| format!("invalid bindings JSON: {error}"))?;
+    let migrated = store.version == 1;
+    if migrated {
+        store.version = BINDINGS_VERSION;
+    }
     store.validate()?;
-    Ok(store)
+    Ok((store, migrated))
 }
 
 /// Loads a store or atomically creates the all-unbound default when missing.
@@ -644,7 +796,12 @@ pub fn parse_store(bytes: &[u8]) -> Result<BindingStore, String> {
 pub fn load_or_create_store(path: &Path) -> Result<BindingStore, String> {
     match fs::read(path) {
         Ok(bytes) => {
-            parse_store(&bytes).map_err(|error| format!("{error} in '{}'", path.display()))
+            let (store, migrated) = parse_store_with_migration(&bytes)
+                .map_err(|error| format!("{error} in '{}'", path.display()))?;
+            if migrated {
+                save_store(path, &store)?;
+            }
+            Ok(store)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let store = BindingStore::default();
@@ -705,6 +862,46 @@ pub trait DesktopInputSink {
     /// # Errors
     /// Returns an error if the platform cannot inject the transition.
     fn mouse_button(&mut self, button: MouseButton, pressed: bool) -> Result<(), String>;
+
+    /// Moves the pointer by a relative number of pixels.
+    ///
+    /// # Errors
+    /// Returns an error if the platform cannot inject the movement.
+    fn mouse_move(&mut self, x: i32, y: i32) -> Result<(), String>;
+
+    /// Smooth-scrolls by a relative number of pixels.
+    ///
+    /// Positive X moves content right and positive Y moves content down.
+    ///
+    /// # Errors
+    /// Returns an error if the platform cannot inject the scroll.
+    fn scroll(&mut self, x: i32, y: i32) -> Result<(), String>;
+}
+
+#[derive(Debug, Default)]
+struct PadMotionState {
+    previous: Option<(i16, i16)>,
+    touched: bool,
+    blocked: bool,
+    x_residual: i32,
+    y_residual: i32,
+    feedback_travel: f64,
+    last_feedback: Option<Duration>,
+}
+
+impl PadMotionState {
+    fn reset_motion(&mut self) {
+        self.previous = None;
+        self.x_residual = 0;
+        self.y_residual = 0;
+        self.feedback_travel = 0.0;
+        self.last_feedback = None;
+    }
+
+    fn block_if_touched(&mut self) {
+        self.blocked = self.touched;
+        self.reset_motion();
+    }
 }
 
 pub struct BindingEngine {
@@ -714,6 +911,8 @@ pub struct BindingEngine {
     active: BTreeMap<BindableControl, BindingAction>,
     key_counts: BTreeMap<OutputKey, u16>,
     mouse_counts: BTreeMap<MouseButton, u16>,
+    left_pad: PadMotionState,
+    right_pad: PadMotionState,
 }
 
 impl BindingEngine {
@@ -726,6 +925,8 @@ impl BindingEngine {
             active: BTreeMap::new(),
             key_counts: BTreeMap::new(),
             mouse_counts: BTreeMap::new(),
+            left_pad: PadMotionState::default(),
+            right_pad: PadMotionState::default(),
         }
     }
 
@@ -739,7 +940,7 @@ impl BindingEngine {
         self.key_counts.len() + self.mouse_counts.len()
     }
 
-    /// Observes a full controller button snapshot and emits its binding edges.
+    /// Observes a button-only snapshot and emits its binding edges.
     ///
     /// The first snapshot is a non-emitting baseline. Any sink error triggers a
     /// best-effort release and blocks held controls until they are released.
@@ -751,22 +952,69 @@ impl BindingEngine {
         buttons: SteamButtons,
         sink: &mut dyn DesktopInputSink,
     ) -> Result<(), String> {
-        let mask = bindable_mask(buttons);
+        self.observe_snapshot(
+            DesktopInputSnapshot::buttons_only(buttons),
+            Duration::ZERO,
+            sink,
+        )
+        .map(|_| ())
+    }
+
+    /// Observes buttons and pads, emitting desktop actions and returning any
+    /// finite pad-feedback ticks requested by movement.
+    ///
+    /// The first snapshot is a non-emitting baseline. Any sink error releases
+    /// held outputs and blocks controls and pads until their physical release.
+    ///
+    /// # Errors
+    /// Returns the first desktop-input injection failure.
+    pub fn observe_snapshot(
+        &mut self,
+        snapshot: DesktopInputSnapshot,
+        now: Duration,
+        sink: &mut dyn DesktopInputSink,
+    ) -> Result<PadFeedbackRequest, String> {
+        let mask = bindable_mask(snapshot.buttons);
         let Some(previous) = self.previous_mask else {
             self.previous_mask = Some(mask);
             self.blocked_mask = mask;
-            return Ok(());
+            baseline_pad(&mut self.left_pad, snapshot.left_pad);
+            baseline_pad(&mut self.right_pad, snapshot.right_pad);
+            return Ok(PadFeedbackRequest::NONE);
         };
         self.blocked_mask &= mask;
         let changed = previous ^ mask;
-        let result = self.apply_changes(changed, mask, sink);
+        let pads = self.profile.pads;
+        let result = self.apply_changes(changed, mask, sink).and_then(|()| {
+            let left = process_pad(
+                &mut self.left_pad,
+                snapshot.left_pad,
+                pads.left_scroll,
+                PadOutput::Scroll,
+                now,
+                sink,
+            )?;
+            let right = process_pad(
+                &mut self.right_pad,
+                snapshot.right_pad,
+                pads.right_mouse,
+                PadOutput::Mouse,
+                now,
+                sink,
+            )?;
+            Ok(PadFeedbackRequest { left, right })
+        });
         self.previous_mask = Some(mask);
-        if let Err(error) = result {
-            let _ = self.release_all(sink);
-            self.blocked_mask = mask;
-            return Err(error);
+        match result {
+            Ok(feedback) => Ok(feedback),
+            Err(error) => {
+                let _ = self.release_all(sink);
+                self.blocked_mask = mask;
+                self.left_pad.block_if_touched();
+                self.right_pad.block_if_touched();
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     /// Releases the old profile and installs a replacement without synthesizing
@@ -781,6 +1029,7 @@ impl BindingEngine {
     ) -> Result<(), String> {
         if self.profile.id.eq_ignore_ascii_case(&profile.id)
             && self.profile.bindings == profile.bindings
+            && self.profile.pads == profile.pads
         {
             self.profile = profile;
             return Ok(());
@@ -789,6 +1038,8 @@ impl BindingEngine {
         let release = self.release_all(sink);
         self.profile = profile;
         self.blocked_mask = held;
+        self.left_pad.block_if_touched();
+        self.right_pad.block_if_touched();
         release
     }
 
@@ -800,6 +1051,8 @@ impl BindingEngine {
         let result = self.release_all(sink);
         self.previous_mask = None;
         self.blocked_mask = 0;
+        self.left_pad = PadMotionState::default();
+        self.right_pad = PadMotionState::default();
         result
     }
 
@@ -944,6 +1197,102 @@ impl BindingEngine {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PadOutput {
+    Mouse,
+    Scroll,
+}
+
+fn baseline_pad(state: &mut PadMotionState, sample: PadSample) {
+    state.touched = sample.touched;
+    state.blocked = sample.touched;
+    state.reset_motion();
+}
+
+fn process_pad(
+    state: &mut PadMotionState,
+    sample: PadSample,
+    config: PadFunctionConfig,
+    output: PadOutput,
+    now: Duration,
+    sink: &mut dyn DesktopInputSink,
+) -> Result<Option<PadFeedbackStrength>, String> {
+    state.touched = sample.touched;
+    if !sample.touched {
+        state.blocked = false;
+        state.reset_motion();
+        return Ok(None);
+    }
+    if state.blocked || !config.enabled {
+        state.reset_motion();
+        return Ok(None);
+    }
+
+    let Some((previous_x, previous_y)) = state.previous.replace((sample.x, sample.y)) else {
+        return Ok(None);
+    };
+    let raw_x = i32::from(sample.x) - i32::from(previous_x);
+    let raw_y = i32::from(sample.y) - i32::from(previous_y);
+    if raw_x.abs() > PAD_MAX_DELTA_COUNTS || raw_y.abs() > PAD_MAX_DELTA_COUNTS {
+        state.x_residual = 0;
+        state.y_residual = 0;
+        state.feedback_travel = 0.0;
+        return Ok(None);
+    }
+
+    let delta_x = filter_jitter(raw_x);
+    let delta_y = filter_jitter(raw_y);
+    if delta_x == 0 && delta_y == 0 {
+        return Ok(None);
+    }
+
+    let counts_per_pixel = match output {
+        PadOutput::Mouse => MOUSE_COUNTS_PER_PIXEL,
+        PadOutput::Scroll => SCROLL_COUNTS_PER_PIXEL,
+    };
+    state.x_residual += delta_x;
+    state.y_residual -= delta_y;
+    let pixels_x = take_pixels(&mut state.x_residual, counts_per_pixel);
+    let pixels_y = take_pixels(&mut state.y_residual, counts_per_pixel);
+    if pixels_x != 0 || pixels_y != 0 {
+        match output {
+            PadOutput::Mouse => sink.mouse_move(pixels_x, pixels_y)?,
+            PadOutput::Scroll => sink.scroll(pixels_x, pixels_y)?,
+        }
+    }
+
+    if !config.feedback.enabled {
+        state.feedback_travel = 0.0;
+        return Ok(None);
+    }
+    state.feedback_travel += f64::from(delta_x).hypot(f64::from(delta_y));
+    let interval_ready = state
+        .last_feedback
+        .is_none_or(|last| now.saturating_sub(last) >= FEEDBACK_MIN_INTERVAL);
+    if state.feedback_travel >= FEEDBACK_TRAVEL_COUNTS && interval_ready {
+        state.feedback_travel = 0.0;
+        state.last_feedback = Some(now);
+        Ok(Some(config.feedback.strength))
+    } else {
+        state.feedback_travel = state.feedback_travel.min(FEEDBACK_TRAVEL_COUNTS);
+        Ok(None)
+    }
+}
+
+const fn filter_jitter(delta: i32) -> i32 {
+    if delta.abs() < PAD_JITTER_COUNTS {
+        0
+    } else {
+        delta
+    }
+}
+
+fn take_pixels(residual: &mut i32, counts_per_pixel: i32) -> i32 {
+    let pixels = *residual / counts_per_pixel;
+    *residual -= pixels * counts_per_pixel;
+    pixels
+}
+
 fn emit_key(
     sink: &mut dyn DesktopInputSink,
     output: OutputKey,
@@ -970,7 +1319,9 @@ pub fn bindable_mask(buttons: SteamButtons) -> u8 {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use enigo::{Button as EnigoButton, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+    use enigo::{
+        Axis, Button as EnigoButton, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
+    };
     use objc2_core_graphics::{CGPreflightPostEventAccess, CGRequestPostEventAccess};
     use objc2_io_kit::{IOHIDAccessType, IOHIDCheckAccess, IOHIDRequestAccess, IOHIDRequestType};
 
@@ -1092,6 +1443,26 @@ mod macos {
             self.enigo
                 .button(button, direction(pressed))
                 .map_err(|error| error.to_string())
+        }
+
+        fn mouse_move(&mut self, x: i32, y: i32) -> Result<(), String> {
+            self.enigo
+                .move_mouse(x, y, Coordinate::Rel)
+                .map_err(|error| error.to_string())
+        }
+
+        fn scroll(&mut self, x: i32, y: i32) -> Result<(), String> {
+            if x != 0 {
+                self.enigo
+                    .smooth_scroll(x, Axis::Horizontal)
+                    .map_err(|error| error.to_string())?;
+            }
+            if y != 0 {
+                self.enigo
+                    .smooth_scroll(y, Axis::Vertical)
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(())
         }
     }
 
@@ -1312,6 +1683,14 @@ mod tests {
         fn mouse_button(&mut self, button: MouseButton, pressed: bool) -> Result<(), String> {
             self.push(format!("mouse:{button:?}:{pressed}"))
         }
+
+        fn mouse_move(&mut self, x: i32, y: i32) -> Result<(), String> {
+            self.push(format!("move:{x}:{y}"))
+        }
+
+        fn scroll(&mut self, x: i32, y: i32) -> Result<(), String> {
+            self.push(format!("scroll:{x}:{y}"))
+        }
     }
 
     impl MockSink {
@@ -1339,14 +1718,63 @@ mod tests {
         }
     }
 
+    fn pad_snapshot(
+        buttons: SteamButtons,
+        left: Option<(i16, i16)>,
+        right: Option<(i16, i16)>,
+    ) -> DesktopInputSnapshot {
+        DesktopInputSnapshot {
+            buttons,
+            left_pad: left.map_or_else(PadSample::default, |(x, y)| PadSample {
+                x,
+                y,
+                touched: true,
+                ..PadSample::default()
+            }),
+            right_pad: right.map_or_else(PadSample::default, |(x, y)| PadSample {
+                x,
+                y,
+                touched: true,
+                ..PadSample::default()
+            }),
+        }
+    }
+
     #[test]
     fn store_round_trips_and_defaults_are_unbound() {
         let store = BindingStore::default();
         assert_eq!(store.profiles[0].bindings.configured_count(), 0);
+        assert_eq!(store.profiles[0].configured_output_count(), 0);
+        assert!(!store.profiles[0].pads.left_scroll.enabled);
+        assert!(!store.profiles[0].pads.right_mouse.enabled);
+        assert!(store.profiles[0].pads.left_scroll.feedback.enabled);
+        assert_eq!(
+            store.profiles[0].pads.right_mouse.feedback.strength,
+            PadFeedbackStrength::Medium
+        );
         let bytes = serde_json::to_vec(&store).unwrap();
         let decoded: BindingStore = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded, store);
         decoded.validate().unwrap();
+    }
+
+    #[test]
+    fn store_rejects_unknown_pad_feedback_strength() {
+        let json = br#"{
+          "version": 2,
+          "profiles": [{
+            "id": "default",
+            "name": "Default",
+            "bindings": {},
+            "pads": {
+              "right_mouse": {
+                "enabled": true,
+                "feedback": {"enabled": true, "strength": "extreme"}
+              }
+            }
+          }]
+        }"#;
+        assert!(parse_store(json).is_err());
     }
 
     #[test]
@@ -1365,8 +1793,9 @@ mod tests {
             }
           }]
         }"#;
-        let store: BindingStore = serde_json::from_str(json).unwrap();
-        store.validate().unwrap();
+        let store = parse_store(json.as_bytes()).unwrap();
+        assert_eq!(store.version, BINDINGS_VERSION);
+        assert_eq!(store.profiles[0].pads, PadBindings::default());
         assert_eq!(store.profiles[0].bindings.configured_count(), 3);
         assert_eq!(
             store.profiles[0].bindings.r4.as_ref().unwrap().label(),
@@ -1399,6 +1828,7 @@ mod tests {
             id: "other".to_owned(),
             name: "default".to_owned(),
             bindings: ControlBindings::default(),
+            pads: PadBindings::default(),
         });
         assert!(store
             .validate()
@@ -1413,6 +1843,7 @@ mod tests {
                 id: format!("profile-{index}"),
                 name: format!("Profile {index}"),
                 bindings: ControlBindings::default(),
+                pads: PadBindings::default(),
             });
         }
         assert!(oversized.validate().is_err());
@@ -1468,6 +1899,34 @@ mod tests {
         store.create_profile("Second").unwrap();
         save_store(&path, &store).unwrap();
         assert_eq!(load_store(&path).unwrap(), store);
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir(directory);
+    }
+
+    #[test]
+    fn loading_version_one_atomically_migrates_to_version_two() {
+        let directory =
+            std::env::temp_dir().join(format!("desktop-bindings-migration-{}", std::process::id()));
+        let path = directory.join("bindings.json");
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            &path,
+            br#"{"version":1,"profiles":[{"id":"default","name":"Default","bindings":{"r4":{"kind":"key_chord","key":"F5","modifiers":[]}}}]}"#,
+        )
+        .unwrap();
+
+        let store = load_store(&path).unwrap();
+        assert_eq!(store.version, BINDINGS_VERSION);
+        assert_eq!(
+            store.profiles[0].bindings.r4.as_ref().unwrap().label(),
+            "F5"
+        );
+        assert_eq!(store.profiles[0].pads, PadBindings::default());
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted["version"], BINDINGS_VERSION);
+        assert!(persisted["profiles"][0]["pads"].is_object());
         let _ = fs::remove_file(path);
         let _ = fs::remove_dir(directory);
     }
@@ -1640,6 +2099,188 @@ mod tests {
             .is_err());
         assert_eq!(engine.held_output_count(), 0);
         assert!(sink.events.contains(&"key:F5:false".to_owned()));
+    }
+
+    #[test]
+    fn right_pad_moves_relative_pointer_and_emits_rate_limited_feedback() {
+        let mut profile = BindingProfile::default();
+        profile.pads.right_mouse.enabled = true;
+        assert_eq!(profile.configured_output_count(), 1);
+        let mut engine = BindingEngine::new(profile);
+        let mut sink = MockSink::default();
+        let neutral = SteamButtons::default();
+
+        engine
+            .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
+            .unwrap();
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((100, 100))),
+                Duration::from_millis(1),
+                &mut sink,
+            )
+            .unwrap();
+        let first = engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((164, 164))),
+                Duration::from_millis(2),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(first, PadFeedbackRequest::NONE);
+        let tick = engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((932, 164))),
+                Duration::from_millis(20),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(tick.right, Some(PadFeedbackStrength::Medium));
+        assert_eq!(tick.left, None);
+        let limited = engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((1700, 164))),
+                Duration::from_millis(25),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(limited, PadFeedbackRequest::NONE);
+        let stationary = engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((1700, 164))),
+                Duration::from_millis(45),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(stationary, PadFeedbackRequest::NONE);
+        assert_eq!(sink.events, ["move:1:-1", "move:12:0", "move:12:0"]);
+    }
+
+    #[test]
+    fn left_pad_scrolls_both_axes_and_can_disable_feedback() {
+        let mut profile = BindingProfile::default();
+        profile.pads.left_scroll.enabled = true;
+        profile.pads.left_scroll.feedback.enabled = false;
+        let mut engine = BindingEngine::new(profile);
+        let mut sink = MockSink::default();
+        let neutral = SteamButtons::default();
+        engine
+            .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
+            .unwrap();
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, Some((0, 0)), None),
+                Duration::from_millis(1),
+                &mut sink,
+            )
+            .unwrap();
+        let feedback = engine
+            .observe_snapshot(
+                pad_snapshot(neutral, Some((384, 192)), None),
+                Duration::from_millis(20),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(feedback, PadFeedbackRequest::NONE);
+        assert_eq!(sink.events, ["scroll:2:-1"]);
+    }
+
+    #[test]
+    fn pad_motion_filters_jitter_accumulates_residuals_and_rebaselines_large_jumps() {
+        let mut profile = BindingProfile::default();
+        profile.pads.right_mouse.enabled = true;
+        profile.pads.right_mouse.feedback.enabled = false;
+        let mut engine = BindingEngine::new(profile);
+        let mut sink = MockSink::default();
+        let neutral = SteamButtons::default();
+
+        engine
+            .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
+            .unwrap();
+        for (time_ms, x) in [(1, 0), (2, 31), (3, 71), (4, 111)] {
+            engine
+                .observe_snapshot(
+                    pad_snapshot(neutral, None, Some((x, 0))),
+                    Duration::from_millis(time_ms),
+                    &mut sink,
+                )
+                .unwrap();
+        }
+        assert_eq!(sink.events, ["move:1:0"]);
+
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((-32_700, 0))),
+                Duration::from_millis(5),
+                &mut sink,
+            )
+            .unwrap();
+        engine
+            .observe_snapshot(
+                DesktopInputSnapshot {
+                    right_pad: PadSample {
+                        x: -32_636,
+                        pressure: i16::MAX,
+                        touched: true,
+                        pressed: true,
+                        ..PadSample::default()
+                    },
+                    ..pad_snapshot(neutral, None, None)
+                },
+                Duration::from_millis(6),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(sink.events, ["move:1:0", "move:1:0"]);
+    }
+
+    #[test]
+    fn pad_touched_during_startup_or_profile_switch_waits_for_release() {
+        let mut profile = BindingProfile::default();
+        profile.pads.right_mouse.enabled = true;
+        let mut engine = BindingEngine::new(profile.clone());
+        let mut sink = MockSink::default();
+        let neutral = SteamButtons::default();
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((0, 0))),
+                Duration::ZERO,
+                &mut sink,
+            )
+            .unwrap();
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((640, 0))),
+                Duration::from_millis(20),
+                &mut sink,
+            )
+            .unwrap();
+        assert!(sink.events.is_empty());
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, None),
+                Duration::from_millis(21),
+                &mut sink,
+            )
+            .unwrap();
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((0, 0))),
+                Duration::from_millis(22),
+                &mut sink,
+            )
+            .unwrap();
+        let mut replacement = profile;
+        replacement.pads.right_mouse.feedback.strength = PadFeedbackStrength::High;
+        engine.replace_profile(replacement, &mut sink).unwrap();
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((640, 0))),
+                Duration::from_millis(40),
+                &mut sink,
+            )
+            .unwrap();
+        assert!(sink.events.is_empty());
     }
 
     #[test]

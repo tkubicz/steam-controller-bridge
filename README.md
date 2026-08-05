@@ -154,7 +154,10 @@ fresh `Discharging` report before the next placement can trigger another
 shutdown. The option defaults to `leave`.
 
 Extra L4/L5/R4/R5 and Quick Access controls can also drive opt-in desktop
-bindings without changing the XIAO firmware or serial protocol. The menu app
+bindings without changing the XIAO firmware or serial protocol. Profiles can
+independently enable the right pad as a relative pointer and the left pad as
+smooth two-axis scrolling; both are off by default and offer configurable
+movement feedback. The menu app
 requests Input Monitoring directly when macOS has not decided yet. Only after
 that grant is detected does it request Post Event and Accessibility access, so
 the TCC requests remain ordered even when no controller is attached.

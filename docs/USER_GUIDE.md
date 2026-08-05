@@ -424,8 +424,11 @@ For opt-in CLI use, both arguments are required:
   --profile Default
 ```
 
-Replay rejects these arguments. Pads-as-pointer/scroll, trigger clicks, and
-configurable stick clicks are not part of this milestone. See
+Replay rejects these arguments. Profiles can independently enable the right pad
+as a relative pointer and the left pad as two-axis smooth scrolling. Both are
+off by default. Each pad also has optional Low/Medium/High movement feedback.
+Pad clicks, pressure actions, gestures, trigger clicks, and configurable stick
+clicks are not part of this milestone. See
 [Desktop bindings](DESKTOP_BINDINGS.md) for schema and edge behavior.
 
 ### Automatic controller shutdown
@@ -652,9 +655,9 @@ iTerm, or the application launching the command—then quit and reopen it.
   attaching it to a public issue. Status output, logs, and `Copy Diagnostics` show
   only the last four characters and are safe to paste as-is.
 
-Do not send guessed feature/output reports. Only the fixed lizard-off setting
-and exact standard rumble output used by `sc-probe` and `sc-bridge` are
-permitted.
+Do not send guessed feature/output reports. Only the fixed lizard-off and
+power-off feature commands, exact standard rumble output, and narrow SDL Triton
+`0x82` pad-tick output used by the bridge are permitted.
 
 ### Ownership or HID open fails
 
