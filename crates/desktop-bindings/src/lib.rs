@@ -939,6 +939,7 @@ pub fn bindable_mask(buttons: SteamButtons) -> u8 {
 mod macos {
     use enigo::{Button as EnigoButton, Direction, Enigo, Key, Keyboard, Mouse, Settings};
     use objc2_core_graphics::{CGPreflightPostEventAccess, CGRequestPostEventAccess};
+    use objc2_io_kit::{IOHIDAccessType, IOHIDCheckAccess, IOHIDRequestAccess, IOHIDRequestType};
 
     use super::{DesktopInputSink, KeyboardKey, Modifier, MouseButton};
 
@@ -973,6 +974,38 @@ mod macos {
                     other => format!("cannot initialize desktop input: {other}"),
                 })
         }
+    }
+
+    /// Whether macOS has decided about a permission yet, and how.
+    ///
+    /// The distinction matters: an undecided permission can still be asked for
+    /// and macOS will show its dialog, while a refused one cannot -- asking
+    /// again does nothing at all, and the only way forward is System Settings.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum PermissionState {
+        Granted,
+        Denied,
+        Undecided,
+    }
+
+    /// Reports whether this process may observe input, i.e. Input Monitoring.
+    #[must_use]
+    pub fn input_monitoring_access() -> PermissionState {
+        match IOHIDCheckAccess(IOHIDRequestType::ListenEvent) {
+            IOHIDAccessType::Granted => PermissionState::Granted,
+            IOHIDAccessType::Denied => PermissionState::Denied,
+            _ => PermissionState::Undecided,
+        }
+    }
+
+    /// Asks macOS for Input Monitoring, showing its dialog when undecided.
+    ///
+    /// Returns whether the permission is granted afterwards. A refusal that
+    /// macOS already recorded produces no dialog, so callers should send the
+    /// user to System Settings in that case.
+    #[must_use]
+    pub fn request_input_monitoring_access() -> bool {
+        IOHIDRequestAccess(IOHIDRequestType::ListenEvent)
     }
 
     /// Returns whether macOS currently permits this process to post input events.
@@ -1219,8 +1252,9 @@ mod macos {
 
 #[cfg(target_os = "macos")]
 pub use macos::{
-    preflight_accessibility_access, preflight_post_event_access, request_accessibility_access,
-    request_post_event_access, MacOsDesktopInput,
+    input_monitoring_access, preflight_accessibility_access, preflight_post_event_access,
+    request_accessibility_access, request_input_monitoring_access, request_post_event_access,
+    MacOsDesktopInput, PermissionState,
 };
 
 #[cfg(test)]

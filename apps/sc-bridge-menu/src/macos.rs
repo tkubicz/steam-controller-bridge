@@ -10,9 +10,9 @@ use bridge_runtime::{
     RuntimeConfig, StatusLogRecord, StatusLogTracker,
 };
 use desktop_bindings::{
-    default_store_path, load_or_create_store, load_store, preflight_accessibility_access,
-    preflight_post_event_access, request_accessibility_access, request_post_event_access,
-    BindingStore,
+    default_store_path, input_monitoring_access, load_or_create_store, load_store,
+    preflight_accessibility_access, preflight_post_event_access, request_accessibility_access,
+    request_input_monitoring_access, request_post_event_access, BindingStore, PermissionState,
 };
 use objc2::{rc::Retained, MainThreadMarker};
 use objc2_app_kit::{NSImage, NSStatusBarButton};
@@ -278,12 +278,8 @@ impl MenuApp {
         let settings = MenuItem::with_id(SETTINGS_ID, "Open Input Monitoring Settings", true, None);
         let accessibility =
             MenuItem::with_id(ACCESSIBILITY_ID, "Open Accessibility Settings", true, None);
-        let enable_bindings = MenuItem::with_id(
-            ENABLE_BINDINGS_ID,
-            "Request Accessibility Permission…",
-            true,
-            None,
-        );
+        let enable_bindings =
+            MenuItem::with_id(ENABLE_BINDINGS_ID, "Request Permissions…", true, None);
         let edit_bindings = MenuItem::with_id(EDIT_BINDINGS_ID, "Edit Bindings…", true, None);
         let logs = MenuItem::with_id(LOGS_ID, "Open Log Folder", true, None);
         let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
@@ -574,22 +570,10 @@ impl MenuApp {
                     eprintln!("cannot copy diagnostics: {error}");
                 }
             }
-            SETTINGS_ID => {
-                if let Err(error) = open_path(
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
-                ) {
-                    eprintln!("cannot open Input Monitoring settings: {error}");
-                }
-            }
-            ACCESSIBILITY_ID => {
-                if let Err(error) = open_path(
-                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
-                ) {
-                    eprintln!("cannot open Accessibility settings: {error}");
-                }
-            }
+            SETTINGS_ID => open_privacy_pane(PrivacyPane::InputMonitoring),
+            ACCESSIBILITY_ID => open_privacy_pane(PrivacyPane::Accessibility),
             ENABLE_BINDINGS_ID => {
-                self.request_permissions_in_order();
+                self.request_permissions_in_order(true);
             }
             EDIT_BINDINGS_ID => {
                 if let Err(error) = launch_bindings_editor() {
@@ -648,7 +632,7 @@ impl MenuApp {
         if let Err(error) = save_settings(&self.settings_path, &self.settings) {
             eprintln!("cannot save active binding profile: {error}");
         }
-        self.request_permissions_in_order();
+        self.request_permissions_in_order(false);
     }
 
     fn reload_bindings_if_changed(&mut self) {
@@ -686,7 +670,7 @@ impl MenuApp {
             if let Err(error) = save_settings(&self.settings_path, &self.settings) {
                 eprintln!("cannot save active binding profile: {error}");
             }
-            self.request_permissions_in_order();
+            self.request_permissions_in_order(false);
         }
         if let Err(error) = self.rebuild_bindings_submenu() {
             eprintln!("cannot rebuild Bindings menu: {error}");
@@ -734,31 +718,45 @@ impl MenuApp {
         Ok(())
     }
 
-    fn request_permissions_in_order(&mut self) {
-        // A successfully opened controller is the permission signal. Do not
-        // preflight or request ListenEvent here: the original IOHIDDeviceOpen
-        // path must be the first and only Input Monitoring trigger.
-        let input_monitoring = self.runtime.status().source.connected;
+    /// Walks the permission chain, asking macOS for whatever is missing.
+    ///
+    /// `interactive` marks the run as something the user just asked for. Only
+    /// then may this open a System Settings pane: macOS shows no dialog for a
+    /// permission it has already recorded a refusal for, so the pane is the
+    /// only way forward -- but opening it on every launch would be obnoxious.
+    fn request_permissions_in_order(&mut self, interactive: bool) {
+        // Ask macOS directly rather than inferring the grant from a controller
+        // having opened: the two are different questions, and inferring it left
+        // this doing nothing at all whenever no controller was attached.
+        let input_monitoring = input_monitoring_access() == PermissionState::Granted;
         // Do not even query later TCC services until the preceding service is
         // granted. macOS can otherwise register simultaneous requests as
         // denied without presenting the original Input Monitoring prompt.
         let mut post_event = input_monitoring && preflight_post_event_access();
         let mut accessibility = post_event && preflight_accessibility_access();
+        let mut input_monitoring_granted = input_monitoring;
 
         loop {
-            match permission_stage(input_monitoring, post_event, accessibility) {
+            match permission_stage(input_monitoring_granted, post_event, accessibility) {
                 PermissionStage::InputMonitoring => {
-                    // Preserve the original behavior: the bridge runtime's
-                    // IOHIDDeviceOpen attempt causes macOS to present the
-                    // Input Monitoring dialog. An explicit CoreGraphics
-                    // ListenEvent request here can consume the TCC decision
-                    // first and suppress that dialog.
-                    self.permission_request_pending = Some(PermissionStage::InputMonitoring);
+                    // An undecided permission produces macOS's dialog. A
+                    // refusal it already recorded produces nothing, so the
+                    // only way forward is the settings pane.
+                    let undecided = input_monitoring_access() == PermissionState::Undecided;
+                    let granted = undecided && request_input_monitoring_access();
+                    self.permission_request_pending =
+                        (!granted).then_some(PermissionStage::InputMonitoring);
                     eprintln!(
-                        "level=info event=input_monitoring_permission_waiting \
-                         request_source=IOHIDDeviceOpen"
+                        "level=info event=input_monitoring_permission_requested \
+                         granted={granted} undecided={undecided} api=IOHIDRequestAccess"
                     );
-                    return;
+                    if !granted {
+                        if interactive && !undecided {
+                            open_privacy_pane(PrivacyPane::InputMonitoring);
+                        }
+                        return;
+                    }
+                    input_monitoring_granted = true;
                 }
                 PermissionStage::PostEvent => {
                     let granted = request_post_event_access();
@@ -769,6 +767,9 @@ impl MenuApp {
                          api=CGRequestPostEventAccess"
                     );
                     if !granted {
+                        if interactive {
+                            open_privacy_pane(PrivacyPane::Accessibility);
+                        }
                         return;
                     }
                     post_event = true;
@@ -783,6 +784,9 @@ impl MenuApp {
                          api=AXIsProcessTrustedWithOptions"
                     );
                     if !granted {
+                        if interactive {
+                            open_privacy_pane(PrivacyPane::Accessibility);
+                        }
                         return;
                     }
                     accessibility = true;
@@ -798,15 +802,17 @@ impl MenuApp {
 
     fn observe_permission_grants(&mut self) {
         match self.permission_request_pending {
-            Some(PermissionStage::InputMonitoring) if self.runtime.status().source.connected => {
+            Some(PermissionStage::InputMonitoring)
+                if input_monitoring_access() == PermissionState::Granted =>
+            {
                 self.permission_request_pending = None;
                 eprintln!("level=info event=input_monitoring_permission_granted");
-                self.request_permissions_in_order();
+                self.request_permissions_in_order(false);
             }
             Some(PermissionStage::PostEvent) if preflight_post_event_access() => {
                 self.permission_request_pending = None;
                 eprintln!("level=info event=post_event_permission_granted");
-                self.request_permissions_in_order();
+                self.request_permissions_in_order(false);
             }
             Some(PermissionStage::Accessibility) if preflight_accessibility_access() => {
                 self.permission_request_pending = None;
@@ -890,7 +896,7 @@ impl ApplicationHandler for MenuApp {
             // The already-running HID discovery path retains its original role
             // of triggering the Input Monitoring dialog. This coordinator only
             // waits for that grant before requesting desktop-output access.
-            self.request_permissions_in_order();
+            self.request_permissions_in_order(false);
         }
     }
 
@@ -1206,6 +1212,32 @@ fn copy_text(value: &str) -> Result<(), String> {
     }
 }
 
+/// The System Settings panes a user has to visit when macOS has already
+/// recorded a refusal, since nothing can re-prompt after that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivacyPane {
+    InputMonitoring,
+    Accessibility,
+}
+
+const fn privacy_pane_url(pane: PrivacyPane) -> &'static str {
+    match pane {
+        PrivacyPane::InputMonitoring => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+        }
+        PrivacyPane::Accessibility => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        }
+    }
+}
+
+fn open_privacy_pane(pane: PrivacyPane) {
+    eprintln!("level=info event=privacy_pane_opened pane={pane:?}");
+    if let Err(error) = open_path(privacy_pane_url(pane)) {
+        eprintln!("cannot open {pane:?} settings: {error}");
+    }
+}
+
 fn launch_bindings_editor() -> Result<(), String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     Command::new(executable)
@@ -1233,6 +1265,23 @@ fn open_path(path: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_permission_sends_the_user_to_the_pane_that_grants_it() {
+        // macOS shows no dialog once it has recorded a refusal, so the pane is
+        // the only remaining route, and each permission has its own.
+        assert_ne!(
+            privacy_pane_url(PrivacyPane::InputMonitoring),
+            privacy_pane_url(PrivacyPane::Accessibility),
+        );
+        for pane in [PrivacyPane::InputMonitoring, PrivacyPane::Accessibility] {
+            let url = privacy_pane_url(pane);
+            assert!(
+                url.starts_with("x-apple.systempreferences:"),
+                "{pane:?} must open System Settings, got {url}",
+            );
+        }
+    }
 
     #[test]
     fn permission_requests_never_skip_input_monitoring_or_post_event() {

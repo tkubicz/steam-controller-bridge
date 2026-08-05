@@ -45,6 +45,7 @@ ctrlc = "3.5.2"
 enigo = "0.6.1"
 objc2 = "0.6.4"
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGEvent"] }
+objc2-io-kit = { version = "0.3.2", default-features = false, features = ["std", "hidsystem"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSButton",
