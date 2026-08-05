@@ -7,12 +7,30 @@ APP_DIR="$PROJECT_DIR/dist/Steam Controller Bridge.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 
 cd "$PROJECT_DIR"
+
+# Release Please maintains version.txt; the bundle takes its version from there
+# rather than carrying a second copy that silently goes stale. Refuse to build
+# something mislabelled instead of shipping the wrong version.
+VERSION=$(tr -d '[:space:]' < "$PROJECT_DIR/version.txt")
+case "$VERSION" in
+  [0-9]*.[0-9]*.[0-9]*) ;;
+  *)
+    echo "version.txt does not contain a release version: '$VERSION'" >&2
+    exit 1
+    ;;
+esac
+
 cargo build --release -p sc-bridge-menu
 
 rm -rf "$APP_DIR"
 mkdir -p "$CONTENTS_DIR/MacOS" "$CONTENTS_DIR/Resources"
 cp "$PROJECT_DIR/target/release/sc-bridge-menu" "$CONTENTS_DIR/MacOS/sc-bridge-menu"
 cp "$PROJECT_DIR/packaging/macos/Info.plist" "$CONTENTS_DIR/Info.plist"
+# Stamp the copy, so the checked-in template holds no version to keep in sync.
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" \
+  "$CONTENTS_DIR/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" \
+  "$CONTENTS_DIR/Info.plist"
 cp "$PROJECT_DIR/packaging/macos/MenuBarTemplate.svg" \
   "$CONTENTS_DIR/Resources/MenuBarTemplate.svg"
 # Referenced by CFBundleIconFile. Regenerate with tools/make-app-icon.py.
