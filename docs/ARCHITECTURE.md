@@ -7,9 +7,12 @@ Steam Controller HID -> protocol decoder -> SteamControllerState
                                              |              |
                                              v              v
                                    mapping and filters  desktop-bindings
-                                             |              |
-                                             v              v
-keyboard/automated simulator ----------> GamepadState   macOS keyboard/mouse
+                                             |           |          |
+                                             v           v          v
+keyboard/automated simulator ----------> GamepadState  macOS   finite pad tick
+                                                       input         |
+                                                                     v
+                                                            SC2 pad actuators
                                              |
                                              v
                                 explicit wire conversion and framing
@@ -36,7 +39,7 @@ game/browser -> Xbox OUT -> XIAO -> CDC Rumble -> bridge-runtime
 - `steam-controller-device` owns HID collection metadata, raw reports, lifecycle events, stable enumeration ordering, and reconnecting sessions. Only its private `platform` module depends on `hidapi`; non-macOS builds expose an explicit unsupported-platform stub.
 - `steam-controller-protocol` owns the Steam Controller 2 host-facing `0x45`/`0x42` state layouts, status reports, button masks, motion fields, and structured decode errors. It has no HID or transport dependency and preserves each complete validated report.
 - `controller-mapper` owns the validated default mapping profile and allocation-free filter pipeline. Its only inputs are decoded controller state, elapsed time, and explicit configuration; disconnect handling resets its optional smoothing history.
-- `desktop-bindings` owns the versioned profile schema, validation and atomic persistence, bindable-control edge engine, shared-output reference counts, and platform-neutral `DesktopInputSink`. Its target-gated macOS adapter is the only layer that exposes Enigo types.
+- `desktop-bindings` owns the versioned profile schema, validation and atomic persistence, bindable-control edge engine, pad motion/feedback policy, shared-output reference counts, and platform-neutral `DesktopInputSink`. Its target-gated macOS adapter is the only layer that exposes Enigo types.
 - `bridge-core` owns the hardware-independent integrated state machine: decode/map timing, changed-state suppression, reconnect counters, repeated-failure and timeout safety, mapper reset, and neutral output.
 - `bridge-runtime` owns reusable live discovery and orchestration: uniquely active Puck-or-Bluetooth source selection, metadata/Hello-verified XIAO selection, HID/serial ownership, lizard suppression, bounded rumble leasing, typed battery/charge state, meaningful-idle tracking, one-shot Puck-dock detection, automatic power-off, status snapshots, reconnect recovery, and neutral/rumble-zero-before-release cleanup. Its shared status-log tracker converts snapshots into immediate semantic deltas, five-minute full snapshots, and error-context snapshots for both frontends.
 - `gamepad-simulator` owns deterministic and keyboard-driven sources. It depends on output interfaces but not protocol internals.
@@ -52,7 +55,7 @@ HID, mapping, and serial layers remain separate components.
 
 ## Lifecycle and safety
 
-Simulator modes send a neutral state before normal exit. Outputs reject non-finite and out-of-range values instead of silently emitting invalid packets. The integrated bridge additionally sends neutral on input timeout, controller disconnect, repeated decode failure, reset, and shutdown. Serial output refreshes unchanged active states while its firmware watchdog is armed. Reverse feedback is also latest-only: a 100 ms host lease and the controller's own actuator watchdog prevent stale rumble, while write failures degrade haptics without disabling input.
+Simulator modes send a neutral state before normal exit. Outputs reject non-finite and out-of-range values instead of silently emitting invalid packets. The integrated bridge additionally sends neutral on input timeout, controller disconnect, repeated decode failure, reset, and shutdown. Serial output refreshes unchanged active states while its firmware watchdog is armed. Rumble feedback is latest-only: a 100 ms host lease and the controller's own actuator watchdog prevent stale rumble. Pad feedback consists of finite ticks, coalesced to the latest pending strength per side and discarded on failure or lifecycle reset. Either write path degrades haptics without disabling input.
 
 Automatic shutdown is host policy rather than part of the CDC protocol. A
 portable tracker derives meaningful activity from decoded physical controls and
@@ -92,10 +95,10 @@ stability behavior, but whether a continuously open macOS IOHIDDevice changes
 controller sleep or long-idle battery behavior remains a hardware observation
 item. The integrated runtime runs the selected session behind a 64-entry
 transition mailbox. Analog-only reports replace the newest queued report only
-when the five bindable bits are unchanged; each L4/L5/R4/R5/Quick Access edge
-remains ordered. Overflow releases desktop outputs, discards stale transitions,
-and retains the newest state as a non-emitting recovery baseline. Lifecycle
-events remain ordered. A lost source returns to discovery instead of
+when the five bindable bits and two pad-touch bits are unchanged; each button or
+touch edge remains ordered. Overflow releases desktop outputs, discards stale
+transitions, and retains the newest state as a non-emitting recovery baseline.
+Lifecycle events remain ordered. A lost source returns to discovery instead of
 trusting a stale numeric index.
 
 Serial discovery retains USB metadata, rejects non-XIAO `usbmodem` ports, and

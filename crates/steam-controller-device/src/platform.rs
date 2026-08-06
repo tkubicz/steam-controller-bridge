@@ -257,8 +257,7 @@ impl HidSession {
             })
     }
 
-    /// Sends the sole Steam Controller 2 output report permitted by this
-    /// project: SDL-compatible standard dual rumble.
+    /// Sends the SDL-compatible standard dual-rumble output report.
     ///
     /// # Errors
     ///
@@ -284,6 +283,44 @@ impl HidSession {
             .map_err(|error| {
                 DeviceError::Backend(format!(
                     "rumble output write failed; ensure Steam Controller 2 is \
+                     awake on the selected transport and its vendor collection is active: {error}"
+                ))
+            })
+    }
+
+    /// Sends one finite SDL Triton trackpad tick.
+    ///
+    /// The operation is rejected unless the selected collection is an exact
+    /// supported Puck or direct Bluetooth collection. No arbitrary output API
+    /// is exposed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceError`] for an unsupported collection, disconnected
+    /// session, or native HID output failure.
+    pub fn pad_haptic_tick(
+        &self,
+        side: steam_controller_protocol::PadHapticSide,
+        gain: steam_controller_protocol::PadHapticGain,
+    ) -> Result<(), DeviceError> {
+        if !self.selected.supports_pad_haptics() {
+            return Err(DeviceError::UnsupportedPadHapticsTarget {
+                vendor_id: self.selected.vendor_id,
+                product_id: self.selected.product_id,
+                usage_page: self.selected.usage_page,
+                usage: self.selected.usage,
+                interface_number: self.selected.interface_number,
+            });
+        }
+        let device = self.device.as_ref().ok_or(DeviceError::NotConnected)?;
+        device
+            .write(&steam_controller_protocol::pad_haptic_tick_output_report(
+                side, gain,
+            ))
+            .map(|_| ())
+            .map_err(|error| {
+                DeviceError::Backend(format!(
+                    "pad-haptic output write failed; ensure Steam Controller 2 is \
                      awake on the selected transport and its vendor collection is active: {error}"
                 ))
             })

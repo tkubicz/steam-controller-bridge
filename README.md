@@ -154,7 +154,11 @@ fresh `Discharging` report before the next placement can trigger another
 shutdown. The option defaults to `leave`.
 
 Extra L4/L5/R4/R5 and Quick Access controls can also drive opt-in desktop
-bindings without changing the XIAO firmware or serial protocol. The menu app
+bindings without changing the XIAO firmware or serial protocol. Profiles can
+independently enable the right pad as a relative pointer and the left pad as
+accelerated smooth two-axis scrolling with configurable speed and optional
+release momentum; both pads are off by default and offer configurable movement
+feedback. The menu app
 requests Input Monitoring directly when macOS has not decided yet. Only after
 that grant is detected does it request Post Event and Accessibility access, so
 the TCC requests remain ordered even when no controller is attached.
@@ -341,7 +345,8 @@ work.
 - Only the exact official Proteus Puck `28de:1304` active slots and the direct
   Bluetooth `28de:1303` vendor collection are permitted to receive the
   SDL-compatible lizard-off feature report and exact standard dual-rumble
-  output, plus the fixed `0x9f` power-off command. Arbitrary controller
+  output, the finite SDL Triton pad tick, plus the fixed `0x9f` power-off
+  command. Arbitrary controller
   initialization, settings, mappings, custom
   haptics, and feature/output writes remain intentionally unavailable.
 - Automatic-shutdown protocol, scheduling, and recovery are covered by native
@@ -358,11 +363,12 @@ work.
   lock excludes other project tools only; Steam's persistent
   `com.valvesoftware.steam.ipctool` LaunchAgent must be booted out before play.
 - Standard Xbox button and axis mapping remains fixed. Desktop bindings cover
-  only L4/L5/R4/R5/Quick Access; pads, trigger clicks, and stick clicks are not
-  configurable in this milestone. macOS has native function-key identities only
-  through F20, and Enigo does not expose macOS play/previous/next media events,
-  so those portable entries degrade bindings with an explicit error instead of
-  emitting a different key.
+  L4/L5/R4/R5/Quick Access plus fixed right-pad pointer and left-pad scroll
+  roles; pad clicks, pressure actions, gestures, trigger clicks, and stick
+  clicks are not configurable in this milestone. macOS has native function-key
+  identities only through F20, and Enigo does not expose macOS
+  play/previous/next media events, so those portable entries degrade bindings
+  with an explicit error instead of emitting a different key.
 - The macOS application is ad-hoc signed rather than notarized, and there is no
   DMG or Launch at Login.
 - The output uses the Xbox 360 compatibility USB identity described

@@ -23,7 +23,10 @@ use bridge_output::{
     OutputDiagnostics, OutputFeedback, SerialConfig, SerialDeviceInfo, SerialOutput,
 };
 use controller_mapper::MapperConfig;
-use desktop_bindings::{bindable_mask, BindingEngine, BindingProfile, DesktopInputSink};
+use desktop_bindings::{
+    bindable_mask, BindingEngine, BindingProfile, DesktopInputSink, DesktopInputSnapshot,
+    PadFeedbackRequest, PadSample,
+};
 use recording::{
     RecordingError, RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED,
     KIND_DEVICE_DISCONNECTED,
@@ -37,8 +40,9 @@ use steam_controller_device::{
 // Frontends render status without depending on the device crate directly.
 pub use steam_controller_device::masked_serial as mask_serial_for_display;
 use steam_controller_protocol::{
-    ConnectionState, DecodedReport, SteamControllerDecoder, EXTENDED_INPUT_REPORT_ID,
-    EXTENDED_INPUT_REPORT_SIZE, INPUT_REPORT_ID, INPUT_REPORT_SIZE,
+    ConnectionState, DecodedReport, PadHapticGain, PadHapticSide, SteamButton,
+    SteamControllerDecoder, EXTENDED_INPUT_REPORT_ID, EXTENDED_INPUT_REPORT_SIZE, INPUT_REPORT_ID,
+    INPUT_REPORT_SIZE,
 };
 
 mod status_log;
@@ -62,6 +66,7 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const RUMBLE_REFRESH_INTERVAL: Duration = Duration::from_millis(40);
 const RUMBLE_LEASE_TIMEOUT: Duration = Duration::from_millis(100);
 const RUMBLE_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+const PAD_FEEDBACK_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_IDLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_mins(15);
 const AUTOMATIC_SHUTDOWN_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 const POWER_OFF_COOLDOWN: Duration = Duration::from_millis(2_500);
@@ -226,7 +231,7 @@ pub enum HapticsState {
     Degraded,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HapticsStatus {
     pub state: HapticsState,
     pub commands_received: u64,
@@ -235,6 +240,11 @@ pub struct HapticsStatus {
     pub coalesced_commands: u64,
     pub failures: u64,
     pub last_command_age: Option<Duration>,
+    pub pad_feedback_ticks: u64,
+    pub pad_feedback_coalesced: u64,
+    pub pad_feedback_failures: u64,
+    pub last_pad_feedback_age: Option<Duration>,
+    pub pad_feedback_last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -364,7 +374,7 @@ enum RuntimeCommand {
     Shutdown(CommandAck),
     SetIdleShutdown(Option<Duration>, CommandAck),
     SetPuckDockAction(PuckDockAction, CommandAck),
-    SetBindingProfile(Option<BindingProfile>, CommandAck),
+    SetBindingProfile(Box<Option<BindingProfile>>, CommandAck),
     EnableDesktopBindings(CommandAck),
 }
 
@@ -449,7 +459,7 @@ impl BridgeHandle {
         &self,
         profile: Option<BindingProfile>,
     ) -> Result<(), RuntimeError> {
-        self.request(|ack| RuntimeCommand::SetBindingProfile(profile, ack))
+        self.request(|ack| RuntimeCommand::SetBindingProfile(Box::new(profile), ack))
     }
 
     /// Explicitly asks macOS to enable desktop bindings, allowing a permission prompt.
@@ -498,7 +508,7 @@ impl BridgeHandle {
     /// # Errors
     /// Returns an error when profile cleanup fails or the runtime has stopped.
     pub fn set_binding_profile(&self, profile: Option<BindingProfile>) -> Result<(), RuntimeError> {
-        self.command(|ack| RuntimeCommand::SetBindingProfile(profile, ack))
+        self.command(|ack| RuntimeCommand::SetBindingProfile(Box::new(profile), ack))
     }
 
     /// Explicitly retries desktop-input initialization and may show macOS's prompt.
@@ -749,15 +759,16 @@ fn binding_status_for_profile(profile: Option<&BindingProfile>) -> DesktopBindin
     let Some(profile) = profile else {
         return DesktopBindingsStatus::default();
     };
+    let configured_count = profile.configured_output_count();
     DesktopBindingsStatus {
-        state: if profile.bindings.configured_count() == 0 {
+        state: if configured_count == 0 {
             DesktopBindingsState::Disabled
         } else {
             DesktopBindingsState::PermissionRequired
         },
         active_profile_id: Some(profile.id.clone()),
         active_profile_name: Some(profile.name.clone()),
-        configured_binding_count: profile.bindings.configured_count(),
+        configured_binding_count: configured_count,
         ..DesktopBindingsStatus::default()
     }
 }
@@ -765,7 +776,8 @@ fn binding_status_for_profile(profile: Option<&BindingProfile>) -> DesktopBindin
 struct DesktopBindingsRuntime {
     engine: Option<BindingEngine>,
     sink: Option<Box<dyn DesktopInputSink>>,
-    last_buttons: Option<steam_controller_protocol::SteamButtons>,
+    last_snapshot: Option<DesktopInputSnapshot>,
+    discard_pending_feedback: bool,
     status: DesktopBindingsStatus,
 }
 
@@ -775,7 +787,8 @@ impl DesktopBindingsRuntime {
         Self {
             engine: profile.map(BindingEngine::new),
             sink: None,
-            last_buttons: None,
+            last_snapshot: None,
+            discard_pending_feedback: false,
             status,
         }
     }
@@ -787,7 +800,8 @@ impl DesktopBindingsRuntime {
         Self {
             engine: Some(BindingEngine::new(profile)),
             sink: Some(sink),
-            last_buttons: None,
+            last_snapshot: None,
+            discard_pending_feedback: false,
             status,
         }
     }
@@ -801,17 +815,37 @@ impl DesktopBindingsRuntime {
         status
     }
 
-    fn observe(&mut self, buttons: steam_controller_protocol::SteamButtons) {
-        self.last_buttons = Some(buttons);
+    fn observe(&mut self, snapshot: DesktopInputSnapshot, now: Duration) -> PadFeedbackRequest {
+        self.last_snapshot = Some(snapshot);
+        let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut()) else {
+            return PadFeedbackRequest::NONE;
+        };
+        match engine.observe_snapshot(snapshot, now, sink.as_mut()) {
+            Ok(feedback) => {
+                if self.status.state == DesktopBindingsState::Degraded {
+                    self.status.state = DesktopBindingsState::Ready;
+                    self.status.last_error = None;
+                }
+                feedback
+            }
+            Err(error) => {
+                self.fail(&error);
+                PadFeedbackRequest::NONE
+            }
+        }
+    }
+
+    fn tick(&mut self, now: Duration) {
         let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut()) else {
             return;
         };
-        if let Err(error) = engine.observe(buttons, sink.as_mut()) {
+        if let Err(error) = engine.tick(now, sink.as_mut()) {
             self.fail(&error);
-        } else if self.status.state == DesktopBindingsState::Degraded {
-            self.status.state = DesktopBindingsState::Ready;
-            self.status.last_error = None;
         }
+    }
+
+    fn take_discard_pending_feedback(&mut self) -> bool {
+        std::mem::take(&mut self.discard_pending_feedback)
     }
 
     fn replace_profile(&mut self, profile: Option<BindingProfile>) -> Result<(), String> {
@@ -849,10 +883,10 @@ impl DesktopBindingsRuntime {
             self.status.state = DesktopBindingsState::Ready;
             self.status.last_error = None;
         }
-        if let (Some(buttons), Some(engine), Some(sink)) =
-            (self.last_buttons, self.engine.as_mut(), self.sink.as_mut())
+        if let (Some(snapshot), Some(engine), Some(sink)) =
+            (self.last_snapshot, self.engine.as_mut(), self.sink.as_mut())
         {
-            if let Err(error) = engine.observe(buttons, sink.as_mut()) {
+            if let Err(error) = engine.observe_snapshot(snapshot, Duration::ZERO, sink.as_mut()) {
                 self.fail(&error);
                 return Err(error);
             }
@@ -874,10 +908,10 @@ impl DesktopBindingsRuntime {
                 .clone()
                 .unwrap_or_else(|| "desktop bindings are unavailable".to_owned()));
         }
-        if let (Some(buttons), Some(engine), Some(sink)) =
-            (self.last_buttons, self.engine.as_mut(), self.sink.as_mut())
+        if let (Some(snapshot), Some(engine), Some(sink)) =
+            (self.last_snapshot, self.engine.as_mut(), self.sink.as_mut())
         {
-            if let Err(error) = engine.observe(buttons, sink.as_mut()) {
+            if let Err(error) = engine.observe_snapshot(snapshot, Duration::ZERO, sink.as_mut()) {
                 self.fail(&error);
                 return Err(error);
             }
@@ -891,7 +925,8 @@ impl DesktopBindingsRuntime {
                 self.fail(&error);
             }
         }
-        self.last_buttons = None;
+        self.last_snapshot = None;
+        self.discard_pending_feedback = true;
     }
 
     fn overflow(&mut self) {
@@ -929,6 +964,7 @@ impl DesktopBindingsRuntime {
         self.status.failures = self.status.failures.saturating_add(1);
         self.status.last_error = Some(bounded_error(error));
         self.sink = None;
+        self.discard_pending_feedback = true;
     }
 }
 
@@ -1525,9 +1561,12 @@ impl Supervisor {
         )?;
 
         let exit = 'active: loop {
-            if let Some(command_exit) =
-                self.service_active_commands(started.elapsed(), &mut idle_activity, &mut bindings)
-            {
+            if let Some(command_exit) = self.service_active_commands(
+                started.elapsed(),
+                &mut idle_activity,
+                &mut bindings,
+                &worker,
+            ) {
                 break command_exit;
             }
             if let Some(error) = worker.take_failure() {
@@ -1557,6 +1596,7 @@ impl Supervisor {
             let batch = worker.take_report_batch();
             if batch.overflowed {
                 bindings.overflow();
+                worker.clear_pad_feedback();
                 let binding_status = bindings.status();
                 self.update_status(|status| status.bindings = binding_status);
                 eprintln!(
@@ -1574,9 +1614,13 @@ impl Supervisor {
                 ) {
                     Ok(ReportEffect::ControllerState {
                         meaningful_activity,
-                        buttons,
+                        desktop_input,
                     }) => {
-                        bindings.observe(buttons);
+                        let feedback = bindings.observe(desktop_input, started.elapsed());
+                        if bindings.take_discard_pending_feedback() {
+                            worker.clear_pad_feedback();
+                        }
+                        worker.request_pad_feedback(feedback);
                         last_controller_state = Instant::now();
                         controller_connected = true;
                         if meaningful_activity {
@@ -1645,6 +1689,10 @@ impl Supervisor {
                         eprintln!("level=warn event=report_processing_failed error={error:?}");
                     }
                 }
+            }
+            bindings.tick(started.elapsed());
+            if bindings.take_discard_pending_feedback() {
+                worker.clear_pad_feedback();
             }
             let lost = dropped.swap(0, Ordering::AcqRel);
             if lost > 0 {
@@ -1879,7 +1927,7 @@ impl Supervisor {
                 let _ = ack.send(Ok(()));
             }
             RuntimeCommand::SetBindingProfile(profile, ack) => {
-                self.config.binding_profile = profile;
+                self.config.binding_profile = *profile;
                 let binding_status =
                     DesktopBindingsRuntime::new(self.config.binding_profile.clone()).status();
                 self.update_status(|status| status.bindings = binding_status);
@@ -1900,6 +1948,7 @@ impl Supervisor {
         now: Duration,
         idle_activity: &mut IdleActivityTracker,
         bindings: &mut DesktopBindingsRuntime,
+        worker: &HidWorker,
     ) -> Option<ActiveExit> {
         while let Ok(command) = self.commands.try_recv() {
             match command {
@@ -1938,6 +1987,8 @@ impl Supervisor {
                     let _ = ack.send(Ok(()));
                 }
                 RuntimeCommand::SetBindingProfile(profile, ack) => {
+                    worker.clear_pad_feedback();
+                    let profile = *profile;
                     let result = bindings.replace_profile(profile.clone());
                     self.config.binding_profile = profile;
                     let binding_status = bindings.status();
@@ -2531,7 +2582,7 @@ fn is_latest_state_report(report_id: u8) -> bool {
 enum ReportEffect {
     ControllerState {
         meaningful_activity: bool,
-        buttons: steam_controller_protocol::SteamButtons,
+        desktop_input: DesktopInputSnapshot,
     },
     Connected,
     Battery {
@@ -2572,7 +2623,23 @@ fn process_report(
             })?;
             Ok(ReportEffect::ControllerState {
                 meaningful_activity,
-                buttons: source.buttons,
+                desktop_input: DesktopInputSnapshot {
+                    buttons: source.buttons,
+                    left_pad: PadSample {
+                        x: source.left_pad_x,
+                        y: source.left_pad_y,
+                        pressure: source.left_pad_pressure,
+                        touched: source.left_pad_touched,
+                        pressed: source.left_pad_pressed,
+                    },
+                    right_pad: PadSample {
+                        x: source.right_pad_x,
+                        y: source.right_pad_y,
+                        pressure: source.right_pad_pressure,
+                        touched: source.right_pad_touched,
+                        pressed: source.right_pad_pressed,
+                    },
+                },
             })
         }
         Ok(ProcessOutcome::Status(DecodedReport::Battery { status, .. })) => {
@@ -2743,12 +2810,18 @@ impl LizardSupervisor {
 struct SharedHapticsMetrics {
     active: AtomicBool,
     degraded: AtomicBool,
+    pad_degraded: AtomicBool,
     commands_received: AtomicU64,
     writes: AtomicU64,
     refreshes: AtomicU64,
     coalesced_commands: AtomicU64,
     failures: AtomicU64,
     last_command_millis: AtomicU64,
+    pad_feedback_ticks: AtomicU64,
+    pad_feedback_coalesced: AtomicU64,
+    pad_feedback_failures: AtomicU64,
+    last_pad_feedback_millis: AtomicU64,
+    pad_feedback_last_error: Mutex<Option<String>>,
 }
 
 impl SharedHapticsMetrics {
@@ -2781,18 +2854,56 @@ impl SharedHapticsMetrics {
     fn record_disconnected(&self) {
         self.active.store(false, Ordering::Release);
         self.degraded.store(false, Ordering::Release);
+        self.pad_degraded.store(false, Ordering::Release);
         self.last_command_millis.store(0, Ordering::Release);
+        self.last_pad_feedback_millis.store(0, Ordering::Release);
+        *self
+            .pad_feedback_last_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    fn record_pad_coalesced(&self, count: u64) {
+        if count > 0 {
+            self.pad_feedback_coalesced
+                .fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
+    fn record_pad_success(&self, now: Duration) {
+        self.pad_degraded.store(false, Ordering::Release);
+        self.pad_feedback_ticks.fetch_add(1, Ordering::Relaxed);
+        let millis = u64::try_from(now.as_millis())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        self.last_pad_feedback_millis
+            .store(millis, Ordering::Release);
+        *self
+            .pad_feedback_last_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    fn record_pad_failure(&self, error: &str) {
+        self.pad_degraded.store(true, Ordering::Release);
+        self.pad_feedback_failures.fetch_add(1, Ordering::Relaxed);
+        *self
+            .pad_feedback_last_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bounded_error(error));
     }
 
     fn snapshot(&self, now: Duration) -> HapticsStatus {
         let last_command_millis = self.last_command_millis.load(Ordering::Acquire);
-        let state = if self.degraded.load(Ordering::Acquire) {
-            HapticsState::Degraded
-        } else if self.active.load(Ordering::Acquire) {
-            HapticsState::Active
-        } else {
-            HapticsState::Idle
-        };
+        let last_pad_feedback_millis = self.last_pad_feedback_millis.load(Ordering::Acquire);
+        let state =
+            if self.degraded.load(Ordering::Acquire) || self.pad_degraded.load(Ordering::Acquire) {
+                HapticsState::Degraded
+            } else if self.active.load(Ordering::Acquire) {
+                HapticsState::Active
+            } else {
+                HapticsState::Idle
+            };
         HapticsStatus {
             state,
             commands_received: self.commands_received.load(Ordering::Relaxed),
@@ -2802,6 +2913,16 @@ impl SharedHapticsMetrics {
             failures: self.failures.load(Ordering::Relaxed),
             last_command_age: (last_command_millis > 0)
                 .then(|| now.saturating_sub(Duration::from_millis(last_command_millis - 1))),
+            pad_feedback_ticks: self.pad_feedback_ticks.load(Ordering::Relaxed),
+            pad_feedback_coalesced: self.pad_feedback_coalesced.load(Ordering::Relaxed),
+            pad_feedback_failures: self.pad_feedback_failures.load(Ordering::Relaxed),
+            last_pad_feedback_age: (last_pad_feedback_millis > 0)
+                .then(|| now.saturating_sub(Duration::from_millis(last_pad_feedback_millis - 1))),
+            pad_feedback_last_error: self
+                .pad_feedback_last_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
         }
     }
 }
@@ -2847,6 +2968,82 @@ impl LatestRumbleSlot {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PadFeedbackCommand {
+    side: PadHapticSide,
+    gain: PadHapticGain,
+}
+
+#[derive(Debug, Default)]
+struct PendingPadFeedbackState {
+    left_gain: Option<PadHapticGain>,
+    right_gain: Option<PadHapticGain>,
+}
+
+#[derive(Debug, Default)]
+struct PendingPadFeedback {
+    state: Mutex<PendingPadFeedbackState>,
+}
+
+impl PendingPadFeedback {
+    fn publish(&self, request: PadFeedbackRequest) -> u64 {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut coalesced = 0;
+        if let Some(strength) = request.left {
+            coalesced += u64::from(state.left_gain.replace(strength.haptic_gain()).is_some());
+        }
+        if let Some(strength) = request.right {
+            coalesced += u64::from(state.right_gain.replace(strength.haptic_gain()).is_some());
+        }
+        coalesced
+    }
+
+    fn take(&self) -> Vec<PadFeedbackCommand> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let left = state.left_gain.take();
+        let right = state.right_gain.take();
+        match (left, right) {
+            (Some(left), Some(right)) if left == right => vec![PadFeedbackCommand {
+                side: PadHapticSide::Both,
+                gain: left,
+            }],
+            (Some(left), Some(right)) => vec![
+                PadFeedbackCommand {
+                    side: PadHapticSide::Left,
+                    gain: left,
+                },
+                PadFeedbackCommand {
+                    side: PadHapticSide::Right,
+                    gain: right,
+                },
+            ],
+            (Some(gain), None) => vec![PadFeedbackCommand {
+                side: PadHapticSide::Left,
+                gain,
+            }],
+            (None, Some(gain)) => vec![PadFeedbackCommand {
+                side: PadHapticSide::Right,
+                gain,
+            }],
+            (None, None) => Vec::new(),
+        }
+    }
+
+    fn clear(&self) {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            PendingPadFeedbackState::default();
+    }
+}
+
 trait RumbleWriter {
     fn write_rumble(&self, low_frequency: u16, high_frequency: u16) -> Result<(), String>;
 }
@@ -2855,6 +3052,72 @@ impl RumbleWriter for HidSession {
     fn write_rumble(&self, low_frequency: u16, high_frequency: u16) -> Result<(), String> {
         self.set_rumble(low_frequency, high_frequency)
             .map_err(|error| error.to_string())
+    }
+}
+
+trait PadFeedbackWriter {
+    fn write_pad_feedback(&self, side: PadHapticSide, gain: PadHapticGain) -> Result<(), String>;
+}
+
+impl PadFeedbackWriter for HidSession {
+    fn write_pad_feedback(&self, side: PadHapticSide, gain: PadHapticGain) -> Result<(), String> {
+        self.pad_haptic_tick(side, gain)
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct PadFeedbackSupervisor {
+    connected: bool,
+    retry_after: Option<Duration>,
+    metrics: Arc<SharedHapticsMetrics>,
+}
+
+impl PadFeedbackSupervisor {
+    fn new(metrics: Arc<SharedHapticsMetrics>) -> Self {
+        Self {
+            connected: false,
+            retry_after: None,
+            metrics,
+        }
+    }
+
+    fn connected(&mut self) {
+        self.connected = true;
+        self.retry_after = None;
+    }
+
+    fn disconnected(&mut self) {
+        self.connected = false;
+        self.retry_after = None;
+    }
+
+    fn service(
+        &mut self,
+        now: Duration,
+        session: &impl PadFeedbackWriter,
+        commands: Vec<PadFeedbackCommand>,
+    ) {
+        if !self.connected
+            || self
+                .retry_after
+                .is_some_and(|retry_after| now < retry_after)
+        {
+            return;
+        }
+        for command in commands {
+            match session.write_pad_feedback(command.side, command.gain) {
+                Ok(()) => self.metrics.record_pad_success(now),
+                Err(error) => {
+                    self.retry_after = Some(now.saturating_add(PAD_FEEDBACK_RETRY_INTERVAL));
+                    self.metrics.record_pad_failure(&error);
+                    eprintln!(
+                        "level=warn event=pad_feedback_write_failed error={error:?} retry_ms={}",
+                        PAD_FEEDBACK_RETRY_INTERVAL.as_millis()
+                    );
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -3084,6 +3347,8 @@ impl PowerOffSequence {
 #[derive(Debug, Default)]
 struct TransitionMailboxState {
     reports: VecDeque<RawHidReport>,
+    previous_transition_mask: Option<u8>,
+    latest_transition_mask: Option<u8>,
     notification_pending: bool,
     overflowed: bool,
 }
@@ -3105,10 +3370,12 @@ impl TransitionReportMailbox {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let report_mask = raw_bindable_mask(&report);
-        let same_bindable_state = report_mask.is_some()
-            && state.reports.back().and_then(raw_bindable_mask) == report_mask;
-        if same_bindable_state {
+        let transition_mask = raw_desktop_transition_mask(&report);
+        let same_transition_state =
+            transition_mask.is_some() && state.latest_transition_mask == transition_mask;
+        let stable_run_has_baseline =
+            same_transition_state && state.previous_transition_mask == transition_mask;
+        if stable_run_has_baseline {
             let _ = state.reports.pop_back();
             state.reports.push_back(report);
             dropped.fetch_add(1, Ordering::Relaxed);
@@ -3116,9 +3383,13 @@ impl TransitionReportMailbox {
             dropped.fetch_add(state.reports.len() as u64, Ordering::Relaxed);
             state.reports.clear();
             state.reports.push_back(report);
+            state.previous_transition_mask = None;
+            state.latest_transition_mask = transition_mask;
             state.overflowed = true;
         } else {
             state.reports.push_back(report);
+            state.previous_transition_mask = state.latest_transition_mask;
+            state.latest_transition_mask = transition_mask;
         }
         let needs_notification = !state.notification_pending;
         state.notification_pending = true;
@@ -3131,6 +3402,8 @@ impl TransitionReportMailbox {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.notification_pending = false;
+        state.previous_transition_mask = None;
+        state.latest_transition_mask = None;
         TransitionReportBatch {
             reports: std::mem::take(&mut state.reports),
             overflowed: std::mem::take(&mut state.overflowed),
@@ -3157,10 +3430,12 @@ impl TransitionReportMailbox {
         }
         state.notification_pending = false;
         state.overflowed = false;
+        state.previous_transition_mask = None;
+        state.latest_transition_mask = None;
     }
 }
 
-fn raw_bindable_mask(report: &RawHidReport) -> Option<u8> {
+fn raw_desktop_transition_mask(report: &RawHidReport) -> Option<u8> {
     let valid_size = match report.report_id {
         INPUT_REPORT_ID => report.data.len() == INPUT_REPORT_SIZE,
         EXTENDED_INPUT_REPORT_ID => report.data.len() == EXTENDED_INPUT_REPORT_SIZE,
@@ -3175,7 +3450,14 @@ fn raw_bindable_mask(report: &RawHidReport) -> Option<u8> {
         report.data[4],
         report.data[5],
     ]));
-    Some(bindable_mask(buttons))
+    let mut mask = bindable_mask(buttons);
+    if buttons.contains(SteamButton::LeftPadTouch) {
+        mask |= 1 << 5;
+    }
+    if buttons.contains(SteamButton::RightPadTouch) {
+        mask |= 1 << 6;
+    }
+    Some(mask)
 }
 
 struct HidWorker {
@@ -3183,6 +3465,7 @@ struct HidWorker {
     failure_receiver: Receiver<String>,
     report_mailbox: Arc<TransitionReportMailbox>,
     latest_rumble: Arc<LatestRumbleSlot>,
+    pending_pad_feedback: Arc<PendingPadFeedback>,
     control_sender: mpsc::Sender<HidWorkerControl>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
@@ -3208,6 +3491,8 @@ impl HidWorker {
         let worker_latest_report = Arc::clone(&report_mailbox);
         let latest_rumble = Arc::new(LatestRumbleSlot::default());
         let worker_latest_rumble = Arc::clone(&latest_rumble);
+        let pending_pad_feedback = Arc::new(PendingPadFeedback::default());
+        let worker_pending_pad_feedback = Arc::clone(&pending_pad_feedback);
         let (control_sender, control_receiver) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
@@ -3233,6 +3518,8 @@ impl HidWorker {
             let mut lizard = initial_lizard;
             let mut haptics = HapticsSupervisor::new(worker_haptics_metrics);
             haptics.connected(worker_started.elapsed(), &session);
+            let mut pad_feedback = PadFeedbackSupervisor::new(Arc::clone(&haptics.metrics));
+            pad_feedback.connected();
             let mut accepting_input = true;
             let mut power_off_sequence: Option<PowerOffSequence> = None;
             while !worker_stop.load(Ordering::Acquire) {
@@ -3241,7 +3528,9 @@ impl HidWorker {
                         accepting_input = false;
                         worker_latest_report.clear(&dropped);
                         worker_latest_rumble.clear();
+                        worker_pending_pad_feedback.clear();
                         haptics.shutdown(worker_started.elapsed(), &session);
+                        pad_feedback.disconnected();
                         lizard.disconnected();
                         power_off_sequence =
                             Some(PowerOffSequence::new(ack, worker_started.elapsed()));
@@ -3255,6 +3544,7 @@ impl HidWorker {
                         if failed {
                             accepting_input = true;
                             haptics.connected(worker_started.elapsed(), &session);
+                            pad_feedback.connected();
                             if let Err(error) = lizard.connected(worker_started.elapsed(), &session)
                             {
                                 worker_latest_report.clear(&dropped);
@@ -3283,6 +3573,11 @@ impl HidWorker {
                 }
                 if accepting_input {
                     haptics.service(worker_started.elapsed(), &session);
+                    pad_feedback.service(
+                        worker_started.elapsed(),
+                        &session,
+                        worker_pending_pad_feedback.take(),
+                    );
                 }
                 match session.poll(RUNTIME_POLL_INTERVAL) {
                     Ok(Some(DeviceEvent::Connected(info))) => {
@@ -3297,6 +3592,8 @@ impl HidWorker {
                             break;
                         }
                         haptics.connected(worker_started.elapsed(), &session);
+                        worker_pending_pad_feedback.clear();
+                        pad_feedback.connected();
                         if !send_worker_event(
                             &sender,
                             HidWorkerEvent::Connected(info),
@@ -3314,7 +3611,9 @@ impl HidWorker {
                             continue;
                         }
                         haptics.disconnected();
+                        pad_feedback.disconnected();
                         worker_latest_rumble.clear();
+                        worker_pending_pad_feedback.clear();
                         lizard.disconnected();
                         worker_latest_report.clear(&dropped);
                         if !send_worker_event(&sender, HidWorkerEvent::Disconnected, &worker_stop) {
@@ -3341,7 +3640,9 @@ impl HidWorker {
                     Ok(None) => {}
                     Err(error) => {
                         haptics.disconnected();
+                        pad_feedback.disconnected();
                         worker_latest_rumble.clear();
+                        worker_pending_pad_feedback.clear();
                         lizard.disconnected();
                         worker_latest_report.clear(&dropped);
                         let _ = failure_sender.send(format!("HID worker failed: {error}"));
@@ -3354,6 +3655,8 @@ impl HidWorker {
             }
             worker_latest_report.clear(&dropped);
             worker_latest_rumble.clear();
+            worker_pending_pad_feedback.clear();
+            pad_feedback.disconnected();
             haptics.shutdown(worker_started.elapsed(), &session);
             lizard.disconnected();
         });
@@ -3362,6 +3665,7 @@ impl HidWorker {
             failure_receiver,
             report_mailbox,
             latest_rumble,
+            pending_pad_feedback,
             control_sender,
             stop,
             handle: Some(handle),
@@ -3396,6 +3700,18 @@ impl HidWorker {
         let coalesced = self.latest_rumble.publish(command);
         self.haptics_metrics
             .record_command(self.started.elapsed(), coalesced);
+    }
+
+    fn request_pad_feedback(&self, request: PadFeedbackRequest) {
+        if request == PadFeedbackRequest::NONE {
+            return;
+        }
+        let coalesced = self.pending_pad_feedback.publish(request);
+        self.haptics_metrics.record_pad_coalesced(coalesced);
+    }
+
+    fn clear_pad_feedback(&self) {
+        self.pending_pad_feedback.clear();
     }
 
     fn power_off(&self) -> Result<(), String> {
@@ -3539,6 +3855,29 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FakePadFeedbackWriter {
+        fail: AtomicBool,
+        writes: Mutex<Vec<(PadHapticSide, PadHapticGain)>>,
+    }
+
+    impl PadFeedbackWriter for FakePadFeedbackWriter {
+        fn write_pad_feedback(
+            &self,
+            side: PadHapticSide,
+            gain: PadHapticGain,
+        ) -> Result<(), String> {
+            if self.fail.load(Ordering::Acquire) {
+                return Err("injected pad feedback failure".to_owned());
+            }
+            self.writes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((side, gain));
+            Ok(())
+        }
+    }
+
     struct FakePowerOffWriter {
         results: Mutex<std::collections::VecDeque<Result<(), String>>>,
         writes: AtomicU64,
@@ -3673,8 +4012,10 @@ mod tests {
         let r4 = 1_u32 << steam_controller_protocol::SteamButton::RightGrip4 as u8;
         assert!(mailbox.publish(report(1, 0), &dropped));
         assert!(!mailbox.publish(report(2, 0), &dropped));
+        assert!(!mailbox.publish(report(6, 0), &dropped));
         assert!(!mailbox.publish(report(3, r4), &dropped));
         assert!(!mailbox.publish(report(4, r4), &dropped));
+        assert!(!mailbox.publish(report(7, r4), &dropped));
         assert!(!mailbox.publish(report(5, 0), &dropped));
         let batch = mailbox.take_all();
         assert!(!batch.overflowed);
@@ -3684,9 +4025,50 @@ mod tests {
                 .iter()
                 .map(|report| report.data[1])
                 .collect::<Vec<_>>(),
-            vec![2, 4, 5]
+            vec![1, 6, 3, 7, 5]
         );
         assert_eq!(dropped.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn transition_mailbox_preserves_pad_touch_baseline_and_latest_coordinates() {
+        let mailbox = TransitionReportMailbox::default();
+        let dropped = AtomicU64::new(0);
+        let report = |sequence: u8, touched: bool, x: i16| {
+            let mut data = vec![0; INPUT_REPORT_SIZE];
+            data[0] = INPUT_REPORT_ID;
+            data[1] = sequence;
+            let buttons = if touched {
+                1_u32 << SteamButton::RightPadTouch as u8
+            } else {
+                0
+            };
+            data[2..6].copy_from_slice(&buttons.to_le_bytes());
+            data[24..26].copy_from_slice(&x.to_le_bytes());
+            RawHidReport {
+                timestamp: Duration::ZERO,
+                report_id: INPUT_REPORT_ID,
+                data,
+                source_device_id: "mailbox".to_owned(),
+                transport: "USB".to_owned(),
+                dropped_reports: 0,
+            }
+        };
+        assert!(mailbox.publish(report(1, false, 0), &dropped));
+        assert!(!mailbox.publish(report(2, true, 100), &dropped));
+        assert!(!mailbox.publish(report(3, true, 200), &dropped));
+        assert!(!mailbox.publish(report(4, true, 300), &dropped));
+        assert!(!mailbox.publish(report(5, false, 0), &dropped));
+        let batch = mailbox.take_all();
+        assert_eq!(
+            batch
+                .reports
+                .iter()
+                .map(|report| report.data[1])
+                .collect::<Vec<_>>(),
+            vec![1, 2, 4, 5]
+        );
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -3761,6 +4143,56 @@ mod tests {
                 .push(format!("mouse:{button:?}:{pressed}"));
             Ok(())
         }
+
+        fn mouse_move(&mut self, x: i32, y: i32) -> Result<(), String> {
+            self.0.lock().unwrap().push(format!("move:{x}:{y}"));
+            Ok(())
+        }
+
+        fn scroll(&mut self, x: i32, y: i32) -> Result<(), String> {
+            self.0.lock().unwrap().push(format!("scroll:{x}:{y}"));
+            Ok(())
+        }
+    }
+
+    struct FailingMotionSink;
+
+    impl DesktopInputSink for FailingMotionSink {
+        fn key(
+            &mut self,
+            _key: desktop_bindings::KeyboardKey,
+            _pressed: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn modifier(
+            &mut self,
+            _modifier: desktop_bindings::Modifier,
+            _pressed: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn mouse_button(
+            &mut self,
+            _button: desktop_bindings::MouseButton,
+            _pressed: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn mouse_move(&mut self, _x: i32, _y: i32) -> Result<(), String> {
+            Err("desktop permission revoked".to_owned())
+        }
+
+        fn scroll(&mut self, _x: i32, _y: i32) -> Result<(), String> {
+            Err("desktop permission revoked".to_owned())
+        }
+    }
+
+    fn desktop_snapshot(buttons: steam_controller_protocol::SteamButtons) -> DesktopInputSnapshot {
+        DesktopInputSnapshot::buttons_only(buttons)
     }
 
     #[test]
@@ -3813,8 +4245,8 @@ mod tests {
                 &mut bound_idle,
             )
             .unwrap();
-            if let ReportEffect::ControllerState { buttons, .. } = effect {
-                bindings.observe(buttons);
+            if let ReportEffect::ControllerState { desktop_input, .. } = effect {
+                let _ = bindings.observe(desktop_input, started.elapsed());
             }
             let _ = process_report(
                 report,
@@ -3831,6 +4263,142 @@ mod tests {
             *events.lock().unwrap(),
             ["key:F5:true".to_owned(), "key:F5:false".to_owned()]
         );
+    }
+
+    #[test]
+    fn runtime_pad_observation_emits_mouse_and_feedback_without_changing_gamepad_output() {
+        let report = |sequence: u8, touched: bool, x: i16| {
+            let mut data = vec![0; INPUT_REPORT_SIZE];
+            data[0] = INPUT_REPORT_ID;
+            data[1] = sequence;
+            let buttons = if touched {
+                1_u32 << SteamButton::RightPadTouch as u8
+            } else {
+                0
+            };
+            data[2..6].copy_from_slice(&buttons.to_le_bytes());
+            data[24..26].copy_from_slice(&x.to_le_bytes());
+            RawHidReport {
+                timestamp: Duration::ZERO,
+                report_id: INPUT_REPORT_ID,
+                data,
+                source_device_id: "runtime-pad-test".to_owned(),
+                transport: "USB".to_owned(),
+                dropped_reports: 0,
+            }
+        };
+        let reports = [
+            report(1, false, 0),
+            report(2, true, 0),
+            report(3, true, 768),
+        ];
+        let mut profile = BindingProfile::default();
+        profile.pads.right_mouse.enabled = true;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut bindings = DesktopBindingsRuntime::with_sink(
+            profile,
+            Box::new(SharedDesktopSink(Arc::clone(&events))),
+        );
+        let mut bound_engine =
+            BridgeEngine::new(BridgeConfig::default(), MapperConfig::default()).unwrap();
+        let mut control_engine =
+            BridgeEngine::new(BridgeConfig::default(), MapperConfig::default()).unwrap();
+        bound_engine.connected();
+        control_engine.connected();
+        let mut bound_output = MockOutput::default();
+        let mut control_output = MockOutput::default();
+        let mut bound_idle = IdleActivityTracker::new(None);
+        let mut control_idle = IdleActivityTracker::new(None);
+        let started = Instant::now();
+        let mut feedback = PadFeedbackRequest::NONE;
+        for (index, report) in reports.iter().enumerate() {
+            let effect = process_report(
+                report,
+                &mut bound_engine,
+                &mut bound_output,
+                &mut None,
+                started,
+                &mut bound_idle,
+            )
+            .unwrap();
+            if let ReportEffect::ControllerState { desktop_input, .. } = effect {
+                feedback = bindings.observe(
+                    desktop_input,
+                    Duration::from_millis(u64::try_from(index * 20).unwrap()),
+                );
+            }
+            let _ = process_report(
+                report,
+                &mut control_engine,
+                &mut control_output,
+                &mut None,
+                started,
+                &mut control_idle,
+            )
+            .unwrap();
+        }
+        assert_eq!(bound_output.states, control_output.states);
+        assert_eq!(*events.lock().unwrap(), ["move:12:0".to_owned()]);
+        assert_eq!(
+            feedback.right,
+            Some(desktop_bindings::PadFeedbackStrength::Medium)
+        );
+    }
+
+    #[test]
+    fn runtime_tick_advances_scroll_momentum_without_more_hid_reports() {
+        let mut profile = BindingProfile::default();
+        profile.pads.left_scroll.enabled = true;
+        profile.pads.left_scroll.feedback.enabled = false;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut bindings = DesktopBindingsRuntime::with_sink(
+            profile,
+            Box::new(SharedDesktopSink(Arc::clone(&events))),
+        );
+        let snapshot = |x, touched| DesktopInputSnapshot {
+            left_pad: PadSample {
+                x,
+                touched,
+                ..PadSample::default()
+            },
+            ..desktop_snapshot(steam_controller_protocol::SteamButtons::default())
+        };
+
+        let _ = bindings.observe(snapshot(0, false), Duration::ZERO);
+        let _ = bindings.observe(snapshot(0, true), Duration::from_millis(1));
+        let _ = bindings.observe(snapshot(768, true), Duration::from_millis(21));
+        let _ = bindings.observe(snapshot(0, false), Duration::from_millis(22));
+        bindings.tick(Duration::from_millis(72));
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["scroll:12:0".to_owned(), "scroll:10:0".to_owned()]
+        );
+    }
+
+    #[test]
+    fn desktop_motion_failure_requests_pending_feedback_discard() {
+        let mut profile = BindingProfile::default();
+        profile.pads.right_mouse.enabled = true;
+        let mut bindings = DesktopBindingsRuntime::with_sink(profile, Box::new(FailingMotionSink));
+        let snapshot = |x, touched| DesktopInputSnapshot {
+            right_pad: PadSample {
+                x,
+                touched,
+                ..PadSample::default()
+            },
+            ..desktop_snapshot(steam_controller_protocol::SteamButtons::default())
+        };
+
+        let _ = bindings.observe(snapshot(0, false), Duration::ZERO);
+        let _ = bindings.observe(snapshot(0, true), Duration::from_millis(1));
+        assert_eq!(
+            bindings.observe(snapshot(224, true), Duration::from_millis(20)),
+            PadFeedbackRequest::NONE
+        );
+        assert_eq!(bindings.status().state, DesktopBindingsState::Degraded);
+        assert!(bindings.take_discard_pending_feedback());
+        assert!(!bindings.take_discard_pending_feedback());
     }
 
     #[test]
@@ -3878,11 +4446,17 @@ mod tests {
         let r4 = steam_controller_protocol::SteamButtons(
             1_u32 << steam_controller_protocol::SteamButton::RightGrip4 as u8,
         );
-        bindings.observe(steam_controller_protocol::SteamButtons::default());
-        bindings.observe(r4);
+        let _ = bindings.observe(
+            desktop_snapshot(steam_controller_protocol::SteamButtons::default()),
+            Duration::ZERO,
+        );
+        let _ = bindings.observe(desktop_snapshot(r4), Duration::from_millis(1));
 
         bindings.enable().unwrap();
-        bindings.observe(steam_controller_protocol::SteamButtons::default());
+        let _ = bindings.observe(
+            desktop_snapshot(steam_controller_protocol::SteamButtons::default()),
+            Duration::from_millis(2),
+        );
 
         assert_eq!(
             *events.lock().unwrap(),
@@ -3906,15 +4480,15 @@ mod tests {
         let r4 = steam_controller_protocol::SteamButtons(
             1_u32 << steam_controller_protocol::SteamButton::RightGrip4 as u8,
         );
-        bindings.observe(neutral);
-        bindings.observe(r4);
+        let _ = bindings.observe(desktop_snapshot(neutral), Duration::ZERO);
+        let _ = bindings.observe(desktop_snapshot(r4), Duration::from_millis(1));
 
         bindings.overflow();
         assert_eq!(bindings.status().state, DesktopBindingsState::Degraded);
-        bindings.observe(r4);
+        let _ = bindings.observe(desktop_snapshot(r4), Duration::from_millis(2));
         assert_eq!(bindings.status().state, DesktopBindingsState::Ready);
-        bindings.observe(neutral);
-        bindings.observe(r4);
+        let _ = bindings.observe(desktop_snapshot(neutral), Duration::from_millis(3));
+        let _ = bindings.observe(desktop_snapshot(r4), Duration::from_millis(4));
 
         assert_eq!(
             *events.lock().unwrap(),
@@ -3946,6 +4520,96 @@ mod tests {
             })
         );
         assert_eq!(slot.take(), None);
+    }
+
+    #[test]
+    fn pending_pad_feedback_coalesces_sides_and_preserves_strength() {
+        let pending = PendingPadFeedback::default();
+        assert_eq!(
+            pending.publish(PadFeedbackRequest {
+                left: Some(desktop_bindings::PadFeedbackStrength::Medium),
+                right: None,
+            }),
+            0
+        );
+        assert_eq!(
+            pending.publish(PadFeedbackRequest {
+                left: Some(desktop_bindings::PadFeedbackStrength::Medium),
+                right: Some(desktop_bindings::PadFeedbackStrength::Medium),
+            }),
+            1
+        );
+        assert_eq!(
+            pending.take(),
+            vec![PadFeedbackCommand {
+                side: PadHapticSide::Both,
+                gain: PadHapticGain::Medium,
+            }]
+        );
+
+        let _ = pending.publish(PadFeedbackRequest {
+            left: Some(desktop_bindings::PadFeedbackStrength::Low),
+            right: Some(desktop_bindings::PadFeedbackStrength::High),
+        });
+        assert_eq!(
+            pending.take(),
+            vec![
+                PadFeedbackCommand {
+                    side: PadHapticSide::Left,
+                    gain: PadHapticGain::Low,
+                },
+                PadFeedbackCommand {
+                    side: PadHapticSide::Right,
+                    gain: PadHapticGain::High,
+                },
+            ]
+        );
+        pending.clear();
+        assert!(pending.take().is_empty());
+    }
+
+    #[test]
+    fn pad_feedback_failure_backs_off_without_changing_rumble_state() {
+        let metrics = Arc::new(SharedHapticsMetrics::default());
+        let writer = FakePadFeedbackWriter::default();
+        let mut feedback = PadFeedbackSupervisor::new(Arc::clone(&metrics));
+        feedback.connected();
+        writer.fail.store(true, Ordering::Release);
+        feedback.service(
+            Duration::from_millis(10),
+            &writer,
+            vec![PadFeedbackCommand {
+                side: PadHapticSide::Right,
+                gain: PadHapticGain::Medium,
+            }],
+        );
+        let failed = metrics.snapshot(Duration::from_millis(10));
+        assert_eq!(failed.state, HapticsState::Degraded);
+        assert_eq!(failed.pad_feedback_failures, 1);
+        assert!(failed.pad_feedback_last_error.is_some());
+
+        writer.fail.store(false, Ordering::Release);
+        feedback.service(
+            Duration::from_millis(509),
+            &writer,
+            vec![PadFeedbackCommand {
+                side: PadHapticSide::Right,
+                gain: PadHapticGain::Medium,
+            }],
+        );
+        assert!(writer.writes.lock().unwrap().is_empty());
+        feedback.service(
+            Duration::from_millis(510),
+            &writer,
+            vec![PadFeedbackCommand {
+                side: PadHapticSide::Right,
+                gain: PadHapticGain::Medium,
+            }],
+        );
+        let recovered = metrics.snapshot(Duration::from_millis(510));
+        assert_eq!(recovered.state, HapticsState::Idle);
+        assert_eq!(recovered.pad_feedback_ticks, 1);
+        assert!(recovered.pad_feedback_last_error.is_none());
     }
 
     #[test]

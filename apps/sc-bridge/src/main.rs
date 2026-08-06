@@ -418,10 +418,7 @@ mod tests {
             "Default",
         ]))
         .unwrap();
-        assert_eq!(
-            config.binding_profile.unwrap().bindings.configured_count(),
-            1
-        );
+        assert_eq!(config.binding_profile.unwrap().configured_output_count(), 1);
         let _ = std::fs::remove_file(path);
     }
 }
