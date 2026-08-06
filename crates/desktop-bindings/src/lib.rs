@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use steam_controller_protocol::{SteamButton, SteamButtons};
+use steam_controller_protocol::{PadHapticGain, SteamButton, SteamButtons};
 
 pub const BINDINGS_VERSION: u32 = 3;
 pub const MAX_PROFILES: usize = 32;
@@ -57,11 +57,11 @@ impl PadFeedbackStrength {
     }
 
     #[must_use]
-    pub const fn gain_db(self) -> i8 {
+    pub const fn haptic_gain(self) -> PadHapticGain {
         match self {
-            Self::Low => -36,
-            Self::Medium => -30,
-            Self::High => -24,
+            Self::Low => PadHapticGain::Low,
+            Self::Medium => PadHapticGain::Medium,
+            Self::High => PadHapticGain::High,
         }
     }
 }
@@ -804,12 +804,7 @@ pub fn default_store_path() -> Result<PathBuf, String> {
 pub fn load_store(path: &Path) -> Result<BindingStore, String> {
     let bytes =
         fs::read(path).map_err(|error| format!("cannot read '{}': {error}", path.display()))?;
-    let (store, migrated) = parse_store_with_migration(&bytes)
-        .map_err(|error| format!("{error} in '{}'", path.display()))?;
-    if migrated {
-        save_store(path, &store)?;
-    }
-    Ok(store)
+    parse_store_at_path(path, &bytes)
 }
 
 /// Decodes and validates a binding store from an in-memory JSON document.
@@ -837,14 +832,7 @@ fn parse_store_with_migration(bytes: &[u8]) -> Result<(BindingStore, bool), Stri
 /// Returns an error for I/O, serialization, or validation failures.
 pub fn load_or_create_store(path: &Path) -> Result<BindingStore, String> {
     match fs::read(path) {
-        Ok(bytes) => {
-            let (store, migrated) = parse_store_with_migration(&bytes)
-                .map_err(|error| format!("{error} in '{}'", path.display()))?;
-            if migrated {
-                save_store(path, &store)?;
-            }
-            Ok(store)
-        }
+        Ok(bytes) => parse_store_at_path(path, &bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let store = BindingStore::default();
             save_store(path, &store)?;
@@ -852,6 +840,15 @@ pub fn load_or_create_store(path: &Path) -> Result<BindingStore, String> {
         }
         Err(error) => Err(format!("cannot read '{}': {error}", path.display())),
     }
+}
+
+fn parse_store_at_path(path: &Path, bytes: &[u8]) -> Result<BindingStore, String> {
+    let (store, migrated) = parse_store_with_migration(bytes)
+        .map_err(|error| format!("{error} in '{}'", path.display()))?;
+    if migrated {
+        save_store(path, &store)?;
+    }
+    Ok(store)
 }
 
 /// Validates and atomically saves a binding store.
@@ -955,11 +952,7 @@ impl PadMotionState {
 
     fn reset_motion(&mut self) {
         self.reset_contact();
-        self.scroll_fraction_x = 0.0;
-        self.scroll_fraction_y = 0.0;
-        self.scroll_velocity_x = 0.0;
-        self.scroll_velocity_y = 0.0;
-        self.scroll_last_update = None;
+        clear_scroll_momentum(self);
     }
 
     fn block_if_touched(&mut self) {

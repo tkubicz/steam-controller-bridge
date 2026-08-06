@@ -469,7 +469,7 @@ impl HidSession {
     pub fn pad_haptic_tick(
         &self,
         _side: steam_controller_protocol::PadHapticSide,
-        _gain_db: i8,
+        _gain: steam_controller_protocol::PadHapticGain,
     ) -> Result<(), DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }

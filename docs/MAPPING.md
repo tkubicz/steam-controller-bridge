@@ -24,8 +24,9 @@ Protocol v1 preserves all five extra output bits, but the standard Xbox report
 has no corresponding controls and therefore cannot expose them to games. On
 macOS, the live bridge independently observes the decoded source bits and may
 map L4/L5/R4/R5/Quick Access to opt-in desktop keyboard chords or mouse buttons.
-This path does not change `GamepadState`, serial frames, or firmware behavior.
-See [Desktop bindings](DESKTOP_BINDINGS.md).
+It may also use the right pad as a relative pointer and the left pad for smooth
+two-axis scrolling. These host-side paths do not change `GamepadState`, serial
+frames, or firmware behavior. See [Desktop bindings](DESKTOP_BINDINGS.md).
 
 An alternate diagnostic profile can map a touched right trackpad to the generic
 right stick with `RightAxisSource::RightPad`; in that profile, releasing the pad

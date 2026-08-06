@@ -301,7 +301,7 @@ impl HidSession {
     pub fn pad_haptic_tick(
         &self,
         side: steam_controller_protocol::PadHapticSide,
-        gain_db: i8,
+        gain: steam_controller_protocol::PadHapticGain,
     ) -> Result<(), DeviceError> {
         if !self.selected.supports_pad_haptics() {
             return Err(DeviceError::UnsupportedPadHapticsTarget {
@@ -315,7 +315,7 @@ impl HidSession {
         let device = self.device.as_ref().ok_or(DeviceError::NotConnected)?;
         device
             .write(&steam_controller_protocol::pad_haptic_tick_output_report(
-                side, gain_db,
+                side, gain,
             ))
             .map(|_| ())
             .map_err(|error| {

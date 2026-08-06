@@ -393,7 +393,7 @@ The diagnostic option
 `--lizard-mode leave` retains the old native keyboard/mouse behavior and is not
 suitable for gameplay.
 
-### Extra-button desktop bindings
+### Extra-button and pad desktop bindings
 
 The menu app can bind L4, L5, R4, R5, and Quick Access to keyboard chords or
 left/right/middle/back/forward mouse buttons. Choose `Bindings -> Edit

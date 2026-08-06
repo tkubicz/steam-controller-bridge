@@ -40,8 +40,9 @@ use steam_controller_device::{
 // Frontends render status without depending on the device crate directly.
 pub use steam_controller_device::masked_serial as mask_serial_for_display;
 use steam_controller_protocol::{
-    ConnectionState, DecodedReport, PadHapticSide, SteamButton, SteamControllerDecoder,
-    EXTENDED_INPUT_REPORT_ID, EXTENDED_INPUT_REPORT_SIZE, INPUT_REPORT_ID, INPUT_REPORT_SIZE,
+    ConnectionState, DecodedReport, PadHapticGain, PadHapticSide, SteamButton,
+    SteamControllerDecoder, EXTENDED_INPUT_REPORT_ID, EXTENDED_INPUT_REPORT_SIZE, INPUT_REPORT_ID,
+    INPUT_REPORT_SIZE,
 };
 
 mod status_log;
@@ -2969,13 +2970,13 @@ impl LatestRumbleSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PadFeedbackCommand {
     side: PadHapticSide,
-    gain_db: i8,
+    gain: PadHapticGain,
 }
 
 #[derive(Debug, Default)]
 struct PendingPadFeedbackState {
-    left_gain_db: Option<i8>,
-    right_gain_db: Option<i8>,
+    left_gain: Option<PadHapticGain>,
+    right_gain: Option<PadHapticGain>,
 }
 
 #[derive(Debug, Default)]
@@ -2991,10 +2992,10 @@ impl PendingPadFeedback {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut coalesced = 0;
         if let Some(strength) = request.left {
-            coalesced += u64::from(state.left_gain_db.replace(strength.gain_db()).is_some());
+            coalesced += u64::from(state.left_gain.replace(strength.haptic_gain()).is_some());
         }
         if let Some(strength) = request.right {
-            coalesced += u64::from(state.right_gain_db.replace(strength.gain_db()).is_some());
+            coalesced += u64::from(state.right_gain.replace(strength.haptic_gain()).is_some());
         }
         coalesced
     }
@@ -3004,30 +3005,30 @@ impl PendingPadFeedback {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let left = state.left_gain_db.take();
-        let right = state.right_gain_db.take();
+        let left = state.left_gain.take();
+        let right = state.right_gain.take();
         match (left, right) {
             (Some(left), Some(right)) if left == right => vec![PadFeedbackCommand {
                 side: PadHapticSide::Both,
-                gain_db: left,
+                gain: left,
             }],
             (Some(left), Some(right)) => vec![
                 PadFeedbackCommand {
                     side: PadHapticSide::Left,
-                    gain_db: left,
+                    gain: left,
                 },
                 PadFeedbackCommand {
                     side: PadHapticSide::Right,
-                    gain_db: right,
+                    gain: right,
                 },
             ],
-            (Some(gain_db), None) => vec![PadFeedbackCommand {
+            (Some(gain), None) => vec![PadFeedbackCommand {
                 side: PadHapticSide::Left,
-                gain_db,
+                gain,
             }],
-            (None, Some(gain_db)) => vec![PadFeedbackCommand {
+            (None, Some(gain)) => vec![PadFeedbackCommand {
                 side: PadHapticSide::Right,
-                gain_db,
+                gain,
             }],
             (None, None) => Vec::new(),
         }
@@ -3054,12 +3055,12 @@ impl RumbleWriter for HidSession {
 }
 
 trait PadFeedbackWriter {
-    fn write_pad_feedback(&self, side: PadHapticSide, gain_db: i8) -> Result<(), String>;
+    fn write_pad_feedback(&self, side: PadHapticSide, gain: PadHapticGain) -> Result<(), String>;
 }
 
 impl PadFeedbackWriter for HidSession {
-    fn write_pad_feedback(&self, side: PadHapticSide, gain_db: i8) -> Result<(), String> {
-        self.pad_haptic_tick(side, gain_db)
+    fn write_pad_feedback(&self, side: PadHapticSide, gain: PadHapticGain) -> Result<(), String> {
+        self.pad_haptic_tick(side, gain)
             .map_err(|error| error.to_string())
     }
 }
@@ -3103,7 +3104,7 @@ impl PadFeedbackSupervisor {
             return;
         }
         for command in commands {
-            match session.write_pad_feedback(command.side, command.gain_db) {
+            match session.write_pad_feedback(command.side, command.gain) {
                 Ok(()) => self.metrics.record_pad_success(now),
                 Err(error) => {
                     self.retry_after = Some(now.saturating_add(PAD_FEEDBACK_RETRY_INTERVAL));
@@ -3345,6 +3346,8 @@ impl PowerOffSequence {
 #[derive(Debug, Default)]
 struct TransitionMailboxState {
     reports: VecDeque<RawHidReport>,
+    previous_transition_mask: Option<u8>,
+    latest_transition_mask: Option<u8>,
     notification_pending: bool,
     overflowed: bool,
 }
@@ -3367,16 +3370,10 @@ impl TransitionReportMailbox {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let transition_mask = raw_desktop_transition_mask(&report);
-        let same_transition_state = transition_mask.is_some()
-            && state.reports.back().and_then(raw_desktop_transition_mask) == transition_mask;
-        let stable_run_has_baseline = same_transition_state
-            && state
-                .reports
-                .iter()
-                .rev()
-                .nth(1)
-                .and_then(raw_desktop_transition_mask)
-                == transition_mask;
+        let same_transition_state =
+            transition_mask.is_some() && state.latest_transition_mask == transition_mask;
+        let stable_run_has_baseline =
+            same_transition_state && state.previous_transition_mask == transition_mask;
         if stable_run_has_baseline {
             let _ = state.reports.pop_back();
             state.reports.push_back(report);
@@ -3385,9 +3382,13 @@ impl TransitionReportMailbox {
             dropped.fetch_add(state.reports.len() as u64, Ordering::Relaxed);
             state.reports.clear();
             state.reports.push_back(report);
+            state.previous_transition_mask = None;
+            state.latest_transition_mask = transition_mask;
             state.overflowed = true;
         } else {
             state.reports.push_back(report);
+            state.previous_transition_mask = state.latest_transition_mask;
+            state.latest_transition_mask = transition_mask;
         }
         let needs_notification = !state.notification_pending;
         state.notification_pending = true;
@@ -3400,6 +3401,8 @@ impl TransitionReportMailbox {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.notification_pending = false;
+        state.previous_transition_mask = None;
+        state.latest_transition_mask = None;
         TransitionReportBatch {
             reports: std::mem::take(&mut state.reports),
             overflowed: std::mem::take(&mut state.overflowed),
@@ -3426,6 +3429,8 @@ impl TransitionReportMailbox {
         }
         state.notification_pending = false;
         state.overflowed = false;
+        state.previous_transition_mask = None;
+        state.latest_transition_mask = None;
     }
 }
 
@@ -3859,18 +3864,22 @@ mod tests {
     #[derive(Default)]
     struct FakePadFeedbackWriter {
         fail: AtomicBool,
-        writes: Mutex<Vec<(PadHapticSide, i8)>>,
+        writes: Mutex<Vec<(PadHapticSide, PadHapticGain)>>,
     }
 
     impl PadFeedbackWriter for FakePadFeedbackWriter {
-        fn write_pad_feedback(&self, side: PadHapticSide, gain_db: i8) -> Result<(), String> {
+        fn write_pad_feedback(
+            &self,
+            side: PadHapticSide,
+            gain: PadHapticGain,
+        ) -> Result<(), String> {
             if self.fail.load(Ordering::Acquire) {
                 return Err("injected pad feedback failure".to_owned());
             }
             self.writes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((side, gain_db));
+                .push((side, gain));
             Ok(())
         }
     }
@@ -4540,7 +4549,7 @@ mod tests {
             pending.take(),
             vec![PadFeedbackCommand {
                 side: PadHapticSide::Both,
-                gain_db: -30,
+                gain: PadHapticGain::Medium,
             }]
         );
 
@@ -4553,11 +4562,11 @@ mod tests {
             vec![
                 PadFeedbackCommand {
                     side: PadHapticSide::Left,
-                    gain_db: -36,
+                    gain: PadHapticGain::Low,
                 },
                 PadFeedbackCommand {
                     side: PadHapticSide::Right,
-                    gain_db: -24,
+                    gain: PadHapticGain::High,
                 },
             ]
         );
@@ -4577,7 +4586,7 @@ mod tests {
             &writer,
             vec![PadFeedbackCommand {
                 side: PadHapticSide::Right,
-                gain_db: -30,
+                gain: PadHapticGain::Medium,
             }],
         );
         let failed = metrics.snapshot(Duration::from_millis(10));
@@ -4591,7 +4600,7 @@ mod tests {
             &writer,
             vec![PadFeedbackCommand {
                 side: PadHapticSide::Right,
-                gain_db: -30,
+                gain: PadHapticGain::Medium,
             }],
         );
         assert!(writer.writes.lock().unwrap().is_empty());
@@ -4600,7 +4609,7 @@ mod tests {
             &writer,
             vec![PadFeedbackCommand {
                 side: PadHapticSide::Right,
-                gain_db: -30,
+                gain: PadHapticGain::Medium,
             }],
         );
         let recovered = metrics.snapshot(Duration::from_millis(510));

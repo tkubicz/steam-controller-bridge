@@ -94,6 +94,22 @@ pub enum PadHapticSide {
     Both = 0x03,
 }
 
+/// The deliberately narrow gain levels accepted by pad-feedback output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i8)]
+pub enum PadHapticGain {
+    Low = -36,
+    Medium = -30,
+    High = -24,
+}
+
+impl PadHapticGain {
+    #[must_use]
+    pub const fn gain_db(self) -> i8 {
+        self as i8
+    }
+}
+
 /// Builds the SDL Triton discrete trackpad-tick output report.
 ///
 /// The returned packet includes report ID `0x82`, the selected side mask,
@@ -102,13 +118,13 @@ pub enum PadHapticSide {
 #[must_use]
 pub const fn pad_haptic_tick_output_report(
     side: PadHapticSide,
-    gain_db: i8,
+    gain: PadHapticGain,
 ) -> [u8; PAD_HAPTIC_OUTPUT_REPORT_SIZE] {
     [
         PAD_HAPTIC_OUTPUT_REPORT_ID,
         side as u8,
         0x01,
-        gain_db.cast_unsigned(),
+        gain.gain_db().cast_unsigned(),
     ]
 }
 
@@ -457,14 +473,18 @@ mod tests {
 
     #[test]
     fn pad_haptic_tick_output_report_matches_sdl_golden_vectors() {
-        for (gain_db, gain_byte) in [(-36, 0xdc), (-30, 0xe2), (-24, 0xe8)] {
+        for (gain, gain_byte) in [
+            (PadHapticGain::Low, 0xdc),
+            (PadHapticGain::Medium, 0xe2),
+            (PadHapticGain::High, 0xe8),
+        ] {
             for (side, side_byte) in [
                 (PadHapticSide::Left, 0x01),
                 (PadHapticSide::Right, 0x02),
                 (PadHapticSide::Both, 0x03),
             ] {
                 assert_eq!(
-                    pad_haptic_tick_output_report(side, gain_db),
+                    pad_haptic_tick_output_report(side, gain),
                     [0x82, side_byte, 0x01, gain_byte]
                 );
             }
