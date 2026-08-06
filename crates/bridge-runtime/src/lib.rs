@@ -2863,9 +2863,10 @@ impl SharedHapticsMetrics {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
-    fn record_pad_request(&self, coalesced: bool) {
-        if coalesced {
-            self.pad_feedback_coalesced.fetch_add(1, Ordering::Relaxed);
+    fn record_pad_coalesced(&self, count: u64) {
+        if count > 0 {
+            self.pad_feedback_coalesced
+                .fetch_add(count, Ordering::Relaxed);
         }
     }
 
@@ -3572,8 +3573,6 @@ impl HidWorker {
                 }
                 if accepting_input {
                     haptics.service(worker_started.elapsed(), &session);
-                }
-                if accepting_input {
                     pad_feedback.service(
                         worker_started.elapsed(),
                         &session,
@@ -3708,12 +3707,7 @@ impl HidWorker {
             return;
         }
         let coalesced = self.pending_pad_feedback.publish(request);
-        self.haptics_metrics.record_pad_request(coalesced > 0);
-        if coalesced > 1 {
-            self.haptics_metrics
-                .pad_feedback_coalesced
-                .fetch_add(coalesced - 1, Ordering::Relaxed);
-        }
+        self.haptics_metrics.record_pad_coalesced(coalesced);
     }
 
     fn clear_pad_feedback(&self) {

@@ -132,6 +132,16 @@ pub struct PadSample {
     pub pressed: bool,
 }
 
+impl PadSample {
+    pub const NEUTRAL: Self = Self {
+        x: 0,
+        y: 0,
+        pressure: 0,
+        touched: false,
+        pressed: false,
+    };
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DesktopInputSnapshot {
     pub buttons: SteamButtons,
@@ -144,20 +154,8 @@ impl DesktopInputSnapshot {
     pub const fn buttons_only(buttons: SteamButtons) -> Self {
         Self {
             buttons,
-            left_pad: PadSample {
-                x: 0,
-                y: 0,
-                pressure: 0,
-                touched: false,
-                pressed: false,
-            },
-            right_pad: PadSample {
-                x: 0,
-                y: 0,
-                pressure: 0,
-                touched: false,
-                pressed: false,
-            },
+            left_pad: PadSample::NEUTRAL,
+            right_pad: PadSample::NEUTRAL,
         }
     }
 }
@@ -1308,12 +1306,7 @@ fn process_mouse_pad(
     let raw_x = i32::from(sample.x) - i32::from(previous_x);
     let raw_y = i32::from(sample.y) - i32::from(previous_y);
     if raw_x.abs() > PAD_MAX_DELTA_COUNTS || raw_y.abs() > PAD_MAX_DELTA_COUNTS {
-        state.deadzone_x = 0;
-        state.deadzone_y = 0;
-        state.x_residual = 0;
-        state.y_residual = 0;
-        state.feedback_x = 0;
-        state.feedback_y = 0;
+        rebaseline_placement(state, sample);
         return Ok(None);
     }
 
@@ -1384,8 +1377,7 @@ fn process_scroll_pad(
     let raw_x = i32::from(sample.x) - i32::from(previous_x);
     let raw_y = i32::from(sample.y) - i32::from(previous_y);
     if raw_x.abs() > PAD_MAX_DELTA_COUNTS || raw_y.abs() > PAD_MAX_DELTA_COUNTS {
-        state.reset_motion();
-        state.previous = Some((sample.x, sample.y));
+        rebaseline_placement(state, sample);
         return Ok(None);
     }
     let Some((delta_x, delta_y)) = accumulate_deadzone_motion(state, raw_x, raw_y) else {
@@ -1568,6 +1560,13 @@ fn process_feedback(
     } else {
         None
     }
+}
+
+/// Treats an impossibly large per-report delta as a lift-and-replace: motion,
+/// deadzone, feedback, and momentum restart from the new contact point.
+fn rebaseline_placement(state: &mut PadMotionState, sample: PadSample) {
+    state.reset_motion();
+    state.previous = Some((sample.x, sample.y));
 }
 
 fn accumulate_deadzone_motion(

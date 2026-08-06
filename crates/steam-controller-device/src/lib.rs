@@ -288,14 +288,14 @@ impl std::fmt::Display for DeviceError {
                 usage_page,
                 usage,
                 interface_number,
-            } => write!(
+            } => write_unsupported_target(
                 f,
-                "refusing lizard-mode write to unsupported collection \
-                 {vendor_id:04x}:{product_id:04x} usage \
-                 {usage_page:04x}:{usage:04x} interface {interface_number}; \
-                 select either an active 28de:1304 ff00:0001 USB Puck slot on \
-                 interface 2-5 or the 28de:1303 ff00:0001 Bluetooth collection \
-                 on interface -1"
+                "lizard-mode",
+                *vendor_id,
+                *product_id,
+                *usage_page,
+                *usage,
+                *interface_number,
             ),
             Self::UnsupportedRumbleTarget {
                 vendor_id,
@@ -303,14 +303,14 @@ impl std::fmt::Display for DeviceError {
                 usage_page,
                 usage,
                 interface_number,
-            } => write!(
+            } => write_unsupported_target(
                 f,
-                "refusing rumble write to unsupported collection \
-                 {vendor_id:04x}:{product_id:04x} usage \
-                 {usage_page:04x}:{usage:04x} interface {interface_number}; \
-                 select either an active 28de:1304 ff00:0001 USB Puck slot on \
-                 interface 2-5 or the 28de:1303 ff00:0001 Bluetooth collection \
-                 on interface -1"
+                "rumble",
+                *vendor_id,
+                *product_id,
+                *usage_page,
+                *usage,
+                *interface_number,
             ),
             Self::UnsupportedPadHapticsTarget {
                 vendor_id,
@@ -318,14 +318,14 @@ impl std::fmt::Display for DeviceError {
                 usage_page,
                 usage,
                 interface_number,
-            } => write!(
+            } => write_unsupported_target(
                 f,
-                "refusing pad-haptic write to unsupported collection \
-                 {vendor_id:04x}:{product_id:04x} usage \
-                 {usage_page:04x}:{usage:04x} interface {interface_number}; \
-                 select either an active 28de:1304 ff00:0001 USB Puck slot on \
-                 interface 2-5 or the 28de:1303 ff00:0001 Bluetooth collection \
-                 on interface -1"
+                "pad-haptic",
+                *vendor_id,
+                *product_id,
+                *usage_page,
+                *usage,
+                *interface_number,
             ),
             Self::UnsupportedPowerOffTarget {
                 vendor_id,
@@ -333,20 +333,40 @@ impl std::fmt::Display for DeviceError {
                 usage_page,
                 usage,
                 interface_number,
-            } => write!(
+            } => write_unsupported_target(
                 f,
-                "refusing power-off write to unsupported collection \
-                 {vendor_id:04x}:{product_id:04x} usage \
-                 {usage_page:04x}:{usage:04x} interface {interface_number}; \
-                 select either an active 28de:1304 ff00:0001 USB Puck slot on \
-                 interface 2-5 or the 28de:1303 ff00:0001 Bluetooth collection \
-                 on interface -1"
+                "power-off",
+                *vendor_id,
+                *product_id,
+                *usage_page,
+                *usage,
+                *interface_number,
             ),
             Self::UnsupportedPlatform => {
                 write!(f, "live HID access is currently implemented only on macOS")
             }
         }
     }
+}
+
+fn write_unsupported_target(
+    f: &mut std::fmt::Formatter<'_>,
+    operation: &str,
+    vendor_id: u16,
+    product_id: u16,
+    usage_page: u16,
+    usage: u16,
+    interface_number: i32,
+) -> std::fmt::Result {
+    write!(
+        f,
+        "refusing {operation} write to unsupported collection \
+         {vendor_id:04x}:{product_id:04x} usage \
+         {usage_page:04x}:{usage:04x} interface {interface_number}; \
+         select either an active 28de:1304 ff00:0001 USB Puck slot on \
+         interface 2-5 or the 28de:1303 ff00:0001 Bluetooth collection \
+         on interface -1"
+    )
 }
 
 impl std::error::Error for DeviceError {}
