@@ -13,7 +13,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -65,6 +65,7 @@ const MAX_STABLE_CONTROLLER_SCAN_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_DISCOVERY_REPORTS_PER_CANDIDATE: usize = 4;
 const ACTIVE_SLOT_TIMEOUT: Duration = Duration::from_secs(1);
 const INPUT_MAILBOX_CAPACITY: usize = 64;
+const DESKTOP_INPUT_MAILBOX_CAPACITY: usize = 64;
 const STATUS_INTERVAL: Duration = Duration::from_millis(250);
 const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1010,6 +1011,9 @@ struct DesktopBindingsRuntime {
     // changes may release outputs or remove the engine, but must not destroy
     // the sink: Enigo's macOS `Drop` can sleep for seconds after pad traffic.
     sink: Option<Box<dyn DesktopInputSink>>,
+    // Status-only profile changes are allowed before the frontend has completed
+    // the ordered macOS permission flow. Only Enable latches runtime activation.
+    activation_requested: bool,
     last_snapshot: Option<DesktopInputSnapshot>,
     discard_pending_feedback: bool,
     status: DesktopBindingsStatus,
@@ -1021,6 +1025,7 @@ impl DesktopBindingsRuntime {
         Self {
             engine: profile.map(BindingEngine::new),
             sink: None,
+            activation_requested: false,
             last_snapshot: None,
             discard_pending_feedback: false,
             status,
@@ -1034,6 +1039,7 @@ impl DesktopBindingsRuntime {
         Self {
             engine: Some(BindingEngine::new(profile)),
             sink: Some(sink),
+            activation_requested: true,
             last_snapshot: None,
             discard_pending_feedback: false,
             status,
@@ -1124,9 +1130,9 @@ impl DesktopBindingsRuntime {
         if self.status.configured_binding_count == 0 {
             return Ok(());
         }
-        if self.sink.is_none() {
+        if self.sink.is_none() && self.activation_requested {
             self.initialize_sink();
-        } else {
+        } else if self.sink.is_some() {
             self.status.state = DesktopBindingsState::Ready;
             self.status.last_error = None;
         }
@@ -1142,6 +1148,7 @@ impl DesktopBindingsRuntime {
     }
 
     fn enable(&mut self) -> Result<(), String> {
+        self.activation_requested = true;
         if self.status.configured_binding_count == 0 {
             return Ok(());
         }
@@ -1166,18 +1173,23 @@ impl DesktopBindingsRuntime {
         Ok(())
     }
 
-    fn disconnect(&mut self) {
-        if let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut()) {
-            if let Err(error) = engine.disconnect(sink.as_mut()) {
-                self.fail(&error);
-            }
+    fn disconnect(&mut self) -> Result<(), String> {
+        let result = if let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut())
+        {
+            engine.disconnect(sink.as_mut())
+        } else {
+            Ok(())
+        };
+        if let Err(error) = &result {
+            self.fail(error);
         }
         self.last_snapshot = None;
         self.discard_pending_feedback = true;
+        result
     }
 
     fn overflow(&mut self) {
-        self.disconnect();
+        let _ = self.disconnect();
         self.status.state = DesktopBindingsState::Degraded;
         self.status.failures = self.status.failures.saturating_add(1);
         self.status.last_error = Some(
@@ -1217,8 +1229,614 @@ impl DesktopBindingsRuntime {
 
 impl Drop for DesktopBindingsRuntime {
     fn drop(&mut self) {
-        self.drop_sink("active_session_end");
+        self.drop_sink("desktop_worker_exit");
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DesktopWorkerSnapshot {
+    snapshot: DesktopInputSnapshot,
+    now: Duration,
+    generation: u64,
+    feedback_epoch: u64,
+}
+
+enum DesktopWorkerMessage {
+    Snapshot(DesktopWorkerSnapshot),
+    Overflow,
+    ReplaceProfile {
+        profile: Option<BindingProfile>,
+        ack: Option<CommandAck>,
+    },
+    Enable {
+        ack: Option<CommandAck>,
+    },
+    Disconnect(CommandAck),
+    Shutdown(CommandAck),
+}
+
+impl DesktopWorkerMessage {
+    fn reject(self, error: &str) {
+        let ack = match self {
+            Self::ReplaceProfile { ack, .. } | Self::Enable { ack } => ack,
+            Self::Disconnect(ack) | Self::Shutdown(ack) => Some(ack),
+            Self::Snapshot(_) | Self::Overflow => None,
+        };
+        if let Some(ack) = ack {
+            let _ = ack.send(Err(error.to_owned()));
+        }
+    }
+
+    const fn is_snapshot_or_overflow(&self) -> bool {
+        matches!(self, Self::Snapshot(_) | Self::Overflow)
+    }
+}
+
+#[derive(Default)]
+struct DesktopWorkerMailboxState {
+    messages: VecDeque<DesktopWorkerMessage>,
+    snapshot_count: usize,
+    previous_transition_mask: Option<u8>,
+    latest_transition_mask: Option<u8>,
+    generation: u64,
+    feedback_epoch: u64,
+    accepting: bool,
+}
+
+struct DesktopWorkerMailbox {
+    state: Mutex<DesktopWorkerMailboxState>,
+    wake: Condvar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopSnapshotPublish {
+    Published,
+    Overflowed,
+    Closed,
+}
+
+impl Default for DesktopWorkerMailbox {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(DesktopWorkerMailboxState {
+                accepting: true,
+                ..DesktopWorkerMailboxState::default()
+            }),
+            wake: Condvar::new(),
+        }
+    }
+}
+
+impl DesktopWorkerMailbox {
+    // The supervisor is the sole producer. Snapshot runs may coalesce only
+    // after preserving a baseline; controls reset that run and remain ordered
+    // barriers. Overflow keeps controls, releases worker state, and retains the
+    // newest snapshot as a non-emitting recovery baseline.
+    fn publish_snapshot(
+        &self,
+        outputs: &DesktopWorkerOutputs,
+        snapshot: DesktopInputSnapshot,
+        now: Duration,
+    ) -> DesktopSnapshotPublish {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting {
+            return DesktopSnapshotPublish::Closed;
+        }
+        let transition_mask = desktop_snapshot_transition_mask(snapshot);
+        let same_transition_state = state.latest_transition_mask == Some(transition_mask);
+        let stable_run_has_baseline =
+            same_transition_state && state.previous_transition_mask == Some(transition_mask);
+        let result = if stable_run_has_baseline {
+            let generation = state.generation;
+            let feedback_epoch = state.feedback_epoch;
+            let Some(DesktopWorkerMessage::Snapshot(latest)) = state.messages.back_mut() else {
+                unreachable!("desktop snapshot coalescing state must describe the queue tail");
+            };
+            *latest = DesktopWorkerSnapshot {
+                snapshot,
+                now,
+                generation,
+                feedback_epoch,
+            };
+            DesktopSnapshotPublish::Published
+        } else if state.snapshot_count == DESKTOP_INPUT_MAILBOX_CAPACITY {
+            Self::reset_snapshots_for_overflow(&mut state);
+            outputs.invalidate_feedback(state.feedback_epoch);
+            state.messages.push_back(DesktopWorkerMessage::Overflow);
+            Self::push_snapshot(&mut state, snapshot, now, transition_mask);
+            DesktopSnapshotPublish::Overflowed
+        } else {
+            Self::push_snapshot(&mut state, snapshot, now, transition_mask);
+            DesktopSnapshotPublish::Published
+        };
+        drop(state);
+        self.wake.notify_one();
+        result
+    }
+
+    fn publish_overflow(&self, outputs: &DesktopWorkerOutputs) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting {
+            return false;
+        }
+        Self::reset_snapshots_for_overflow(&mut state);
+        outputs.invalidate_feedback(state.feedback_epoch);
+        state.messages.push_back(DesktopWorkerMessage::Overflow);
+        drop(state);
+        self.wake.notify_one();
+        true
+    }
+
+    fn push_control(
+        &self,
+        outputs: &DesktopWorkerOutputs,
+        message: DesktopWorkerMessage,
+        feedback_barrier: bool,
+    ) -> Result<(), Box<DesktopWorkerMessage>> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting {
+            return Err(Box::new(message));
+        }
+        if feedback_barrier {
+            state.feedback_epoch = state.feedback_epoch.wrapping_add(1);
+            outputs.invalidate_feedback(state.feedback_epoch);
+        }
+        state.previous_transition_mask = None;
+        state.latest_transition_mask = None;
+        state.messages.push_back(message);
+        drop(state);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    fn take_batch(&self, timeout: Duration) -> VecDeque<DesktopWorkerMessage> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.messages.is_empty() && state.accepting {
+            let (returned, _) = self
+                .wake
+                .wait_timeout(state, timeout)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = returned;
+        }
+        state.snapshot_count = 0;
+        state.previous_transition_mask = None;
+        state.latest_transition_mask = None;
+        std::mem::take(&mut state.messages)
+    }
+
+    fn close(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.accepting = false;
+        let pending = std::mem::take(&mut state.messages);
+        state.snapshot_count = 0;
+        state.previous_transition_mask = None;
+        state.latest_transition_mask = None;
+        drop(state);
+        for message in pending {
+            message.reject("desktop-input worker stopped before processing the command");
+        }
+        self.wake.notify_all();
+    }
+
+    fn generation(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .generation
+    }
+
+    fn push_snapshot(
+        state: &mut DesktopWorkerMailboxState,
+        snapshot: DesktopInputSnapshot,
+        now: Duration,
+        transition_mask: u8,
+    ) {
+        state
+            .messages
+            .push_back(DesktopWorkerMessage::Snapshot(DesktopWorkerSnapshot {
+                snapshot,
+                now,
+                generation: state.generation,
+                feedback_epoch: state.feedback_epoch,
+            }));
+        state.snapshot_count += 1;
+        state.previous_transition_mask = state.latest_transition_mask;
+        state.latest_transition_mask = Some(transition_mask);
+    }
+
+    fn reset_snapshots_for_overflow(state: &mut DesktopWorkerMailboxState) {
+        state
+            .messages
+            .retain(|message| !message.is_snapshot_or_overflow());
+        state.snapshot_count = 0;
+        state.previous_transition_mask = None;
+        state.latest_transition_mask = None;
+        state.generation = state.generation.wrapping_add(1);
+        state.feedback_epoch = state.feedback_epoch.wrapping_add(1);
+    }
+}
+
+fn desktop_snapshot_transition_mask(snapshot: DesktopInputSnapshot) -> u8 {
+    let mut mask = bindable_mask(snapshot.buttons);
+    if snapshot.left_pad.touched {
+        mask |= 1 << 5;
+    }
+    if snapshot.right_pad.touched {
+        mask |= 1 << 6;
+    }
+    mask
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DesktopWorkerOutput {
+    feedback: PadFeedbackRequest,
+    discard_pending_feedback: bool,
+}
+
+impl Default for DesktopWorkerOutput {
+    fn default() -> Self {
+        Self {
+            feedback: PadFeedbackRequest::NONE,
+            discard_pending_feedback: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DesktopWorkerOutputState {
+    output: DesktopWorkerOutput,
+    feedback_epoch: u64,
+}
+
+#[derive(Default)]
+struct DesktopWorkerOutputs {
+    state: Mutex<DesktopWorkerOutputState>,
+}
+
+impl DesktopWorkerOutputs {
+    fn publish_feedback(&self, feedback_epoch: u64, feedback: PadFeedbackRequest) {
+        if feedback == PadFeedbackRequest::NONE {
+            return;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if feedback_epoch != state.feedback_epoch {
+            return;
+        }
+        if feedback.left.is_some() {
+            state.output.feedback.left = feedback.left;
+        }
+        if feedback.right.is_some() {
+            state.output.feedback.right = feedback.right;
+        }
+    }
+
+    fn discard_feedback(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.output.feedback = PadFeedbackRequest::NONE;
+        state.output.discard_pending_feedback = true;
+    }
+
+    fn invalidate_feedback(&self, feedback_epoch: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.output.feedback = PadFeedbackRequest::NONE;
+        state.output.discard_pending_feedback = true;
+        state.feedback_epoch = feedback_epoch;
+    }
+
+    fn take(&self) -> DesktopWorkerOutput {
+        std::mem::take(
+            &mut self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .output,
+        )
+    }
+}
+
+// Owns BindingEngine and the non-Send desktop sink on one dedicated thread.
+// Supervisor-facing snapshot publication never waits for desktop injection;
+// disconnect and shutdown are acknowledged only after held outputs are released.
+struct DesktopBindingsWorker {
+    mailbox: Arc<DesktopWorkerMailbox>,
+    outputs: Arc<DesktopWorkerOutputs>,
+    status: Arc<Mutex<BridgeStatus>>,
+    alive: Arc<AtomicBool>,
+    started: Instant,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl DesktopBindingsWorker {
+    fn spawn(profile: Option<BindingProfile>, status: Arc<Mutex<BridgeStatus>>) -> Self {
+        Self::spawn_with_runtime(status, move || DesktopBindingsRuntime::new(profile))
+    }
+
+    fn spawn_with_runtime(
+        status: Arc<Mutex<BridgeStatus>>,
+        make_runtime: impl FnOnce() -> DesktopBindingsRuntime + Send + 'static,
+    ) -> Self {
+        let mailbox = Arc::new(DesktopWorkerMailbox::default());
+        let worker_mailbox = Arc::clone(&mailbox);
+        let outputs = Arc::new(DesktopWorkerOutputs::default());
+        let worker_outputs = Arc::clone(&outputs);
+        let worker_status = Arc::clone(&status);
+        let alive = Arc::new(AtomicBool::new(true));
+        let worker_alive = Arc::clone(&alive);
+        let started = Instant::now();
+        let handle = thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let runtime = make_runtime();
+                run_desktop_bindings_worker(
+                    runtime,
+                    &worker_mailbox,
+                    &worker_outputs,
+                    &worker_status,
+                    started,
+                );
+            }));
+            if result.is_err() {
+                publish_desktop_worker_failure(&worker_status, "desktop-input worker panicked");
+                eprintln!("level=error event=desktop_input_worker_panicked");
+            }
+            worker_alive.store(false, Ordering::Release);
+            worker_mailbox.close();
+        });
+        Self {
+            mailbox,
+            outputs,
+            status,
+            alive,
+            started,
+            handle: Some(handle),
+        }
+    }
+
+    fn observe(&self, snapshot: DesktopInputSnapshot) {
+        match self
+            .mailbox
+            .publish_snapshot(&self.outputs, snapshot, self.started.elapsed())
+        {
+            DesktopSnapshotPublish::Published | DesktopSnapshotPublish::Overflowed => {}
+            DesktopSnapshotPublish::Closed => {
+                self.outputs.discard_feedback();
+                publish_desktop_worker_failure(&self.status, "desktop-input worker is unavailable");
+            }
+        }
+    }
+
+    fn overflow(&self) {
+        if !self.mailbox.publish_overflow(&self.outputs) {
+            self.outputs.discard_feedback();
+            publish_desktop_worker_failure(&self.status, "desktop-input worker is unavailable");
+        }
+    }
+
+    fn replace_profile(&self, profile: Option<BindingProfile>, ack: CommandAck) {
+        self.enqueue_control(
+            DesktopWorkerMessage::ReplaceProfile {
+                profile,
+                ack: Some(ack),
+            },
+            true,
+        );
+    }
+
+    fn enable(&self, ack: CommandAck) {
+        self.enqueue_control(DesktopWorkerMessage::Enable { ack: Some(ack) }, false);
+    }
+
+    fn enable_async(&self) {
+        self.enqueue_control(DesktopWorkerMessage::Enable { ack: None }, false);
+    }
+
+    fn disconnect(&self) -> Result<(), String> {
+        let (ack, receiver) = mpsc::channel();
+        self.enqueue_control(DesktopWorkerMessage::Disconnect(ack), true);
+        receiver
+            .recv_timeout(COMMAND_TIMEOUT)
+            .map_err(|_| "desktop-input worker disconnect timed out".to_owned())?
+    }
+
+    fn take_output(&self) -> DesktopWorkerOutput {
+        self.outputs.take()
+    }
+
+    fn status(&self) -> DesktopBindingsStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bindings
+            .clone()
+    }
+
+    fn shutdown(&mut self) -> Result<(), String> {
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        let command_result = if self.alive.load(Ordering::Acquire) {
+            let (ack, receiver) = mpsc::channel();
+            self.enqueue_control(DesktopWorkerMessage::Shutdown(ack), true);
+            receiver
+                .recv_timeout(COMMAND_TIMEOUT)
+                .map_err(|_| "desktop-input worker shutdown timed out".to_owned())
+                .and_then(std::convert::identity)
+        } else {
+            Err("desktop-input worker stopped unexpectedly".to_owned())
+        };
+        let join_result = handle
+            .join()
+            .map_err(|_| "desktop-input worker panicked".to_owned());
+        command_result.and(join_result)
+    }
+
+    fn enqueue_control(&self, message: DesktopWorkerMessage, feedback_barrier: bool) {
+        if let Err(message) = self
+            .mailbox
+            .push_control(&self.outputs, message, feedback_barrier)
+        {
+            self.outputs.discard_feedback();
+            publish_desktop_worker_failure(&self.status, "desktop-input worker is unavailable");
+            (*message).reject("desktop-input worker is unavailable");
+        }
+    }
+}
+
+impl Drop for DesktopBindingsWorker {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+fn run_desktop_bindings_worker(
+    mut runtime: DesktopBindingsRuntime,
+    mailbox: &DesktopWorkerMailbox,
+    outputs: &DesktopWorkerOutputs,
+    status: &Arc<Mutex<BridgeStatus>>,
+    started: Instant,
+) {
+    publish_desktop_binding_status(status, runtime.status());
+    let mut shutdown = false;
+    let mut applied_generation = mailbox.generation();
+    while !shutdown {
+        let messages = mailbox.take_batch(RUNTIME_POLL_INTERVAL);
+        for message in messages {
+            match message {
+                DesktopWorkerMessage::Snapshot(snapshot) => {
+                    let current_generation = mailbox.generation();
+                    if snapshot.generation == current_generation {
+                        let feedback = runtime.observe(snapshot.snapshot, snapshot.now);
+                        outputs.publish_feedback(snapshot.feedback_epoch, feedback);
+                    }
+                    let current_generation = mailbox.generation();
+                    apply_desktop_mailbox_overflow(
+                        &mut runtime,
+                        outputs,
+                        &mut applied_generation,
+                        current_generation,
+                    );
+                }
+                DesktopWorkerMessage::Overflow => {
+                    apply_desktop_mailbox_overflow(
+                        &mut runtime,
+                        outputs,
+                        &mut applied_generation,
+                        mailbox.generation(),
+                    );
+                }
+                DesktopWorkerMessage::ReplaceProfile { profile, ack } => {
+                    let result = runtime.replace_profile(profile);
+                    publish_desktop_binding_status(status, runtime.status());
+                    if let Some(ack) = ack {
+                        let _ = ack.send(result);
+                    }
+                }
+                DesktopWorkerMessage::Enable { ack } => {
+                    let result = runtime.enable();
+                    publish_desktop_binding_status(status, runtime.status());
+                    if let Some(ack) = ack {
+                        let _ = ack.send(result);
+                    }
+                }
+                DesktopWorkerMessage::Disconnect(ack) => {
+                    let result = runtime.disconnect();
+                    publish_desktop_binding_status(status, runtime.status());
+                    let _ = ack.send(result);
+                }
+                DesktopWorkerMessage::Shutdown(ack) => {
+                    let result = runtime.disconnect();
+                    publish_desktop_binding_status(status, runtime.status());
+                    let _ = ack.send(result);
+                    shutdown = true;
+                }
+            }
+            if runtime.take_discard_pending_feedback() {
+                outputs.discard_feedback();
+            }
+            publish_desktop_binding_status(status, runtime.status());
+            if shutdown {
+                break;
+            }
+        }
+        if !shutdown {
+            runtime.tick(started.elapsed());
+            if runtime.take_discard_pending_feedback() {
+                outputs.discard_feedback();
+            }
+            publish_desktop_binding_status(status, runtime.status());
+        }
+    }
+}
+
+fn apply_desktop_mailbox_overflow(
+    runtime: &mut DesktopBindingsRuntime,
+    outputs: &DesktopWorkerOutputs,
+    applied_generation: &mut u64,
+    current_generation: u64,
+) {
+    if *applied_generation == current_generation {
+        return;
+    }
+    runtime.overflow();
+    outputs.discard_feedback();
+    *applied_generation = current_generation;
+    eprintln!(
+        "level=warn event=desktop_input_worker_mailbox_overflow action=release_and_rebaseline"
+    );
+}
+
+fn publish_desktop_binding_status(
+    shared: &Arc<Mutex<BridgeStatus>>,
+    bindings: DesktopBindingsStatus,
+) {
+    let mut status = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if status.bindings != bindings {
+        status.bindings = bindings;
+        status.revision = status.revision.wrapping_add(1);
+    }
+}
+
+fn publish_desktop_worker_failure(shared: &Arc<Mutex<BridgeStatus>>, error: &str) {
+    let mut bindings = shared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .bindings
+        .clone();
+    if bindings.state == DesktopBindingsState::Degraded
+        && bindings.last_error.as_deref() == Some(error)
+    {
+        return;
+    }
+    bindings.state = DesktopBindingsState::Degraded;
+    bindings.failures = bindings.failures.saturating_add(1);
+    bindings.held_output_count = 0;
+    bindings.last_error = Some(bounded_error(error));
+    publish_desktop_binding_status(shared, bindings);
 }
 
 #[cfg(target_os = "macos")]
@@ -1240,6 +1858,7 @@ fn bounded_error(error: &str) -> String {
 struct Supervisor {
     config: RuntimeConfig,
     status: Arc<Mutex<BridgeStatus>>,
+    desktop_bindings: DesktopBindingsWorker,
     commands: Receiver<RuntimeCommand>,
     desired_running: bool,
     shutdown_requested: bool,
@@ -1262,10 +1881,13 @@ impl Supervisor {
         picker_events: PickerEventSink,
     ) -> Self {
         let automatic_shutdown = AutomaticShutdownRuntime::new(&config);
+        let desktop_bindings =
+            DesktopBindingsWorker::spawn(config.binding_profile.clone(), Arc::clone(&status));
         Self {
             picker_events,
             config,
             status,
+            desktop_bindings,
             commands,
             desired_running: true,
             shutdown_requested: false,
@@ -1289,8 +1911,17 @@ impl Supervisor {
                 drop(retained_output.take());
                 self.clear_controller_discovery();
                 self.clear_hardware_status();
-                self.transition(RuntimeState::Stopped, "Bridge stopped", None);
-                acknowledge_all(&mut self.pending_shutdown_acks);
+                let desktop_result = self.desktop_bindings.shutdown();
+                if let Err(error) = &desktop_result {
+                    self.transition(
+                        RuntimeState::Error,
+                        "Desktop-input worker shutdown failed",
+                        Some(error),
+                    );
+                } else {
+                    self.transition(RuntimeState::Stopped, "Bridge stopped", None);
+                }
+                acknowledge_all_with_result(&mut self.pending_shutdown_acks, &desktop_result);
                 acknowledge_all(&mut self.pending_stop_acks);
                 break;
             }
@@ -1433,7 +2064,9 @@ impl Supervisor {
                 }
             }
         }
-        self.transition(RuntimeState::Stopped, "Bridge stopped", None);
+        if self.current_state() != RuntimeState::Error {
+            self.transition(RuntimeState::Stopped, "Bridge stopped", None);
+        }
     }
 
     fn discover_output(&mut self) -> Discovery<OutputSession> {
@@ -1780,8 +2413,7 @@ impl Supervisor {
         let mut latest_charge_state: Option<ControllerChargeState> = None;
         let mut last_charge_report = None;
         let mut pending_automatic_shutdown = None;
-        let mut bindings = DesktopBindingsRuntime::new(self.config.binding_profile.clone());
-        let _ = bindings.enable();
+        self.desktop_bindings.enable_async();
         let mut picker = PickerRuntime::new(self.config.profile_picker);
         engine.connected();
         self.automatic_shutdown.phase = automatic_shutdown_phase(&self.config);
@@ -1790,6 +2422,7 @@ impl Supervisor {
         let automatic_status = self
             .automatic_shutdown
             .status(&self.config, None, Instant::now());
+        let binding_status = self.desktop_bindings.status();
         self.update_status(|status| {
             status.source.connected = true;
             status.source.active = initial_controller_seen;
@@ -1797,7 +2430,7 @@ impl Supervisor {
             status.controller.last_state_age = initial_controller_seen.then_some(Duration::ZERO);
             status.lizard = worker.lizard_diagnostics();
             status.haptics = worker.haptics_diagnostics();
-            status.bindings = bindings.status();
+            status.bindings = binding_status;
             status.profile_picker = picker_status(&self.config, false);
             status.automatic_shutdown = automatic_status;
         });
@@ -1823,7 +2456,6 @@ impl Supervisor {
             let command_exit = self.service_active_commands(
                 started.elapsed(),
                 &mut idle_activity,
-                &mut bindings,
                 &mut picker,
                 &mut engine,
                 &mut output,
@@ -1834,9 +2466,9 @@ impl Supervisor {
                 break command_exit;
             }
             if let Some(error) = worker.take_failure() {
-                bindings.disconnect();
                 self.dismiss_picker(&mut picker);
                 let _ = engine.shutdown(&mut *output.output);
+                let _ = self.desktop_bindings.disconnect();
                 worker.shutdown()?;
                 self.clear_controller_status();
                 return Err(error);
@@ -1862,10 +2494,8 @@ impl Supervisor {
             iteration_timer.enter("mailbox");
             let batch = worker.take_report_batch();
             if batch.overflowed {
-                bindings.overflow();
+                self.desktop_bindings.overflow();
                 worker.clear_pad_feedback();
-                let binding_status = bindings.status();
-                self.update_status(|status| status.bindings = binding_status);
                 eprintln!(
                     "level=warn event=desktop_binding_mailbox_overflow action=release_and_rebaseline"
                 );
@@ -1905,23 +2535,16 @@ impl Supervisor {
                             // an ordinary press, so deliver it now as a tap:
                             // this synthesizes the down edge, and the real
                             // snapshot below is already the matching up edge.
-                            let _ = bindings.observe(
-                                DesktopInputSnapshot {
-                                    buttons: profile_picker::with_trigger(desktop_input.buttons),
-                                    ..desktop_input
-                                },
-                                now,
-                            );
+                            self.desktop_bindings.observe(DesktopInputSnapshot {
+                                buttons: profile_picker::with_trigger(desktop_input.buttons),
+                                ..desktop_input
+                            });
                         }
                         let desktop_input = DesktopInputSnapshot {
                             buttons: picker.mask_trigger(desktop_input.buttons),
                             ..desktop_input
                         };
-                        let feedback = bindings.observe(desktop_input, started.elapsed());
-                        if bindings.take_discard_pending_feedback() {
-                            worker.clear_pad_feedback();
-                        }
-                        worker.request_pad_feedback(feedback);
+                        self.desktop_bindings.observe(desktop_input);
                         last_controller_state = Instant::now();
                         controller_connected = true;
                         if meaningful_activity {
@@ -1991,11 +2614,12 @@ impl Supervisor {
                     }
                 }
             }
-            iteration_timer.enter("desktop_binding_tick");
-            bindings.tick(started.elapsed());
-            if bindings.take_discard_pending_feedback() {
+            iteration_timer.enter("desktop_worker_output");
+            let desktop_output = self.desktop_bindings.take_output();
+            if desktop_output.discard_pending_feedback {
                 worker.clear_pad_feedback();
             }
+            worker.request_pad_feedback(desktop_output.feedback);
             let lost = dropped.swap(0, Ordering::AcqRel);
             if lost > 0 {
                 engine.note_dropped_reports(lost);
@@ -2110,12 +2734,13 @@ impl Supervisor {
                     idle_activity.idle_age(started.elapsed()),
                     Instant::now(),
                 );
+                let binding_status = self.desktop_bindings.status();
                 self.update_status(|status| {
                     status.bridge_metrics = engine.metrics();
                     status.output_diagnostics = output.output.diagnostics();
                     status.lizard = worker.lizard_diagnostics();
                     status.haptics = worker.haptics_diagnostics();
-                    status.bindings = bindings.status();
+                    status.bindings = binding_status;
                     status.profile_picker = picker_status(&self.config, picker.is_open());
                     status.source.active =
                         controller_state_seen && controller_age < ACTIVE_SLOT_TIMEOUT;
@@ -2130,33 +2755,35 @@ impl Supervisor {
         };
 
         self.transition(RuntimeState::Stopping, "Neutralizing output", None);
-        bindings.disconnect();
         self.dismiss_picker(&mut picker);
         let neutral_result = engine.shutdown(&mut *output.output);
         let worker_result = worker.shutdown();
+        let desktop_result = self.desktop_bindings.disconnect();
         idle_activity.pause();
         let automatic = self
             .automatic_shutdown
             .status(&self.config, None, Instant::now());
+        let binding_status = self.desktop_bindings.status();
         self.update_status(|status| {
             status.bridge_metrics = engine.metrics();
             status.output_diagnostics = output.output.diagnostics();
             status.lizard = worker.lizard_diagnostics();
             status.haptics = worker.haptics_diagnostics();
-            status.bindings = bindings.status();
+            status.bindings = binding_status;
             status.automatic_shutdown = automatic;
         });
         self.clear_controller_status();
         record_device_event(&mut recording, started, KIND_DEVICE_DISCONNECTED, None)?;
         worker_result?;
+        let acknowledged_exit = exit.acknowledge(desktop_result);
         if let Err(error) = neutral_result {
-            if !matches!(exit, ActiveExit::OutputLost(_)) {
+            if !matches!(acknowledged_exit, ActiveExit::OutputLost(_)) {
                 return Err(format!(
                     "cannot neutralize XIAO before HID release: {error}"
                 ));
             }
         }
-        Ok((exit.acknowledge(), output))
+        Ok((acknowledged_exit, output))
     }
 
     fn open_recording(&self) -> Result<Option<RecordingWriter<File>>, String> {
@@ -2235,18 +2862,12 @@ impl Supervisor {
                 let _ = ack.send(Ok(()));
             }
             RuntimeCommand::SetBindingProfile(profile, ack) => {
-                self.config.binding_profile = *profile;
-                let binding_status =
-                    DesktopBindingsRuntime::new(self.config.binding_profile.clone()).status();
-                self.update_status(|status| status.bindings = binding_status);
-                let _ = ack.send(Ok(()));
+                let profile = *profile;
+                self.config.binding_profile.clone_from(&profile);
+                self.desktop_bindings.replace_profile(profile, ack);
             }
             RuntimeCommand::EnableDesktopBindings(ack) => {
-                let mut bindings = DesktopBindingsRuntime::new(self.config.binding_profile.clone());
-                let result = bindings.enable();
-                let binding_status = bindings.status();
-                self.update_status(|status| status.bindings = binding_status);
-                let _ = ack.send(result);
+                self.desktop_bindings.enable(ack);
             }
             RuntimeCommand::SetPickerConfig(config, ack) => {
                 self.config.profile_picker = config.map(PickerConfig::sanitized);
@@ -2271,7 +2892,6 @@ impl Supervisor {
         &mut self,
         now: Duration,
         idle_activity: &mut IdleActivityTracker,
-        bindings: &mut DesktopBindingsRuntime,
         picker: &mut PickerRuntime,
         engine: &mut BridgeEngine,
         output: &mut OutputSession,
@@ -2317,18 +2937,12 @@ impl Supervisor {
                     neutralize_before_desktop_work(engine, output);
                     worker.clear_pad_feedback();
                     let profile = *profile;
-                    let result = bindings.replace_profile(profile.clone());
-                    self.config.binding_profile = profile;
-                    let binding_status = bindings.status();
-                    self.update_status(|status| status.bindings = binding_status);
-                    let _ = ack.send(result);
+                    self.config.binding_profile.clone_from(&profile);
+                    self.desktop_bindings.replace_profile(profile, ack);
                 }
                 RuntimeCommand::EnableDesktopBindings(ack) => {
                     neutralize_before_desktop_work(engine, output);
-                    let result = bindings.enable();
-                    let binding_status = bindings.status();
-                    self.update_status(|status| status.bindings = binding_status);
-                    let _ = ack.send(result);
+                    self.desktop_bindings.enable(ack);
                 }
                 RuntimeCommand::SetPickerConfig(config, ack) => {
                     self.config.profile_picker = config.map(PickerConfig::sanitized);
@@ -2803,19 +3417,16 @@ struct OutputSession {
     xiao: Option<SerialDeviceInfo>,
 }
 
-/// Parks the gamepad output at neutral before a slow desktop-input operation.
+/// Parks the gamepad output at neutral before desktop-input reconfiguration.
 ///
 /// Constructing the desktop-input sink is synchronous, and Enigo's macOS
-/// destructor can deliberately sleep after sustained event traffic. Both run
-/// on the thread that also feeds the XIAO and can outlast the firmware's 100 ms
-/// controller-data watchdog. Healthy profile switches retain their sink to
-/// avoid that destructor, but initialization and failure cleanup still need a
-/// safety boundary.
+/// destructor can deliberately sleep after sustained event traffic. Those
+/// operations now run on the dedicated desktop-input worker, so they cannot
+/// block the supervisor's XIAO deadline. Retaining this neutral transition also
+/// makes reconfiguration safe if worker ownership changes again later.
 ///
-/// Sending neutral first makes the length irrelevant: firmware disarms that
-/// watchdog for a neutral report, so no stall can fault it. The next controller
-/// report restores the real state, and `reset` keeps the unchanged-output
-/// dedupe consistent so that restore is not skipped.
+/// The next controller report restores the real state, and `reset` keeps the
+/// unchanged-output dedupe consistent so that restore is not skipped.
 fn neutralize_before_desktop_work(engine: &mut BridgeEngine, output: &mut OutputSession) {
     if let Err(error) = engine.reset(&mut *output.output) {
         // Worth knowing about, but not worth failing the command over: the
@@ -2851,17 +3462,24 @@ enum ActiveExit {
 }
 
 impl ActiveExit {
-    fn acknowledge(self) -> Self {
+    fn acknowledge(self, desktop_result: Result<(), String>) -> Self {
         match self {
             Self::StoppedWithAck(ack) => {
-                let _ = ack.send(Ok(()));
+                let _ = ack.send(desktop_result);
                 Self::Stopped
             }
             Self::ShutdownWithAck(ack) => {
-                let _ = ack.send(Ok(()));
+                let _ = ack.send(desktop_result);
                 Self::Shutdown
             }
-            other => other,
+            other => {
+                if let Err(error) = desktop_result {
+                    eprintln!(
+                        "level=warn event=desktop_input_worker_disconnect_failed error={error:?}"
+                    );
+                }
+                other
+            }
         }
     }
 }
@@ -2943,6 +3561,12 @@ fn controller_source_identity(info: &HidDeviceInfo) -> String {
 fn acknowledge_all(acks: &mut Vec<CommandAck>) {
     for ack in acks.drain(..) {
         let _ = ack.send(Ok(()));
+    }
+}
+
+fn acknowledge_all_with_result(acks: &mut Vec<CommandAck>, result: &Result<(), String>) {
+    for ack in acks.drain(..) {
+        let _ = ack.send(result.clone());
     }
 }
 
@@ -4209,6 +4833,162 @@ mod tests {
         assert!(timer.take_stall_at(started + below_threshold).is_none());
     }
 
+    #[test]
+    fn desktop_worker_mailbox_coalesces_motion_without_dropping_edges() {
+        let mailbox = DesktopWorkerMailbox::default();
+        let outputs = DesktopWorkerOutputs::default();
+        let neutral = DesktopInputSnapshot::buttons_only(SteamButtons::default());
+        let touched = |x| DesktopInputSnapshot {
+            right_pad: PadSample {
+                x,
+                touched: true,
+                ..PadSample::NEUTRAL
+            },
+            ..neutral
+        };
+        let r4 = SteamButtons(1_u32 << SteamButton::RightGrip4 as u8);
+
+        assert_eq!(
+            mailbox.publish_snapshot(&outputs, neutral, Duration::ZERO),
+            DesktopSnapshotPublish::Published
+        );
+        assert_eq!(
+            mailbox.publish_snapshot(&outputs, touched(0), Duration::from_millis(1)),
+            DesktopSnapshotPublish::Published
+        );
+        assert_eq!(
+            mailbox.publish_snapshot(&outputs, touched(10), Duration::from_millis(2)),
+            DesktopSnapshotPublish::Published
+        );
+        assert_eq!(
+            mailbox.publish_snapshot(&outputs, touched(20), Duration::from_millis(3)),
+            DesktopSnapshotPublish::Published
+        );
+        assert_eq!(
+            mailbox.publish_snapshot(
+                &outputs,
+                DesktopInputSnapshot {
+                    buttons: r4,
+                    ..touched(20)
+                },
+                Duration::from_millis(4),
+            ),
+            DesktopSnapshotPublish::Published
+        );
+        assert_eq!(
+            mailbox.publish_snapshot(&outputs, touched(20), Duration::from_millis(5)),
+            DesktopSnapshotPublish::Published
+        );
+
+        let messages = mailbox.take_batch(Duration::ZERO);
+        let snapshots = messages
+            .into_iter()
+            .map(|message| match message {
+                DesktopWorkerMessage::Snapshot(snapshot) => snapshot,
+                _ => panic!("expected only desktop snapshots"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(snapshots.len(), 5);
+        assert_eq!(snapshots[0].snapshot, neutral);
+        assert_eq!(snapshots[1].snapshot, touched(0));
+        assert_eq!(snapshots[2].snapshot, touched(20));
+        assert_eq!(snapshots[2].now, Duration::from_millis(3));
+        assert_eq!(snapshots[3].snapshot.buttons, r4);
+        assert_eq!(snapshots[4].snapshot.buttons, SteamButtons::default());
+    }
+
+    #[test]
+    fn desktop_worker_mailbox_overflow_keeps_control_barriers_and_latest_state() {
+        let mailbox = DesktopWorkerMailbox::default();
+        let outputs = DesktopWorkerOutputs::default();
+        let r4 = SteamButtons(1_u32 << SteamButton::RightGrip4 as u8);
+        for index in 0..DESKTOP_INPUT_MAILBOX_CAPACITY {
+            let buttons = if index % 2 == 0 {
+                SteamButtons::default()
+            } else {
+                r4
+            };
+            assert_eq!(
+                mailbox.publish_snapshot(
+                    &outputs,
+                    DesktopInputSnapshot::buttons_only(buttons),
+                    Duration::from_millis(index as u64),
+                ),
+                DesktopSnapshotPublish::Published
+            );
+        }
+        assert!(mailbox
+            .push_control(
+                &outputs,
+                DesktopWorkerMessage::ReplaceProfile {
+                    profile: None,
+                    ack: None,
+                },
+                true,
+            )
+            .is_ok());
+        let latest = DesktopInputSnapshot::buttons_only(r4);
+        assert_eq!(
+            mailbox.publish_snapshot(&outputs, latest, Duration::from_secs(1)),
+            DesktopSnapshotPublish::Overflowed
+        );
+
+        let mut messages = mailbox.take_batch(Duration::ZERO);
+        assert!(matches!(
+            messages.pop_front(),
+            Some(DesktopWorkerMessage::ReplaceProfile { .. })
+        ));
+        assert!(matches!(
+            messages.pop_front(),
+            Some(DesktopWorkerMessage::Overflow)
+        ));
+        let Some(DesktopWorkerMessage::Snapshot(snapshot)) = messages.pop_front() else {
+            panic!("overflow must retain the latest desktop snapshot");
+        };
+        assert_eq!(snapshot.snapshot, latest);
+        assert_eq!(snapshot.generation, 1);
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn desktop_worker_barriers_discard_staged_pad_feedback() {
+        let outputs = DesktopWorkerOutputs::default();
+        outputs.publish_feedback(
+            0,
+            PadFeedbackRequest {
+                left: Some(desktop_bindings::PadFeedbackStrength::Low),
+                right: Some(desktop_bindings::PadFeedbackStrength::High),
+            },
+        );
+
+        outputs.invalidate_feedback(1);
+        outputs.publish_feedback(
+            0,
+            PadFeedbackRequest {
+                left: Some(desktop_bindings::PadFeedbackStrength::Medium),
+                right: None,
+            },
+        );
+
+        let output = outputs.take();
+        assert_eq!(output.feedback, PadFeedbackRequest::NONE);
+        assert!(output.discard_pending_feedback);
+        outputs.publish_feedback(
+            1,
+            PadFeedbackRequest {
+                left: Some(desktop_bindings::PadFeedbackStrength::Medium),
+                right: None,
+            },
+        );
+        let recovered = outputs.take();
+        assert_eq!(
+            recovered.feedback.left,
+            Some(desktop_bindings::PadFeedbackStrength::Medium)
+        );
+        assert!(!recovered.discard_pending_feedback);
+        assert_eq!(outputs.take().feedback, PadFeedbackRequest::NONE);
+    }
+
     struct FakeDiscoverySession {
         events: std::collections::VecDeque<Result<Option<DeviceEvent>, String>>,
         timeouts: Arc<Mutex<Vec<Duration>>>,
@@ -4626,6 +5406,102 @@ mod tests {
         }
     }
 
+    struct BlockingMotionSink {
+        inner: SharedDesktopSink,
+        entered: Option<mpsc::Sender<()>>,
+        gate: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl DesktopInputSink for BlockingMotionSink {
+        fn key(&mut self, key: desktop_bindings::KeyboardKey, pressed: bool) -> Result<(), String> {
+            self.inner.key(key, pressed)
+        }
+
+        fn modifier(
+            &mut self,
+            modifier: desktop_bindings::Modifier,
+            pressed: bool,
+        ) -> Result<(), String> {
+            self.inner.modifier(modifier, pressed)
+        }
+
+        fn mouse_button(
+            &mut self,
+            button: desktop_bindings::MouseButton,
+            pressed: bool,
+        ) -> Result<(), String> {
+            self.inner.mouse_button(button, pressed)
+        }
+
+        fn mouse_move(&mut self, x: i32, y: i32) -> Result<(), String> {
+            self.inner.mouse_move(x, y)?;
+            if let Some(entered) = self.entered.take() {
+                let _ = entered.send(());
+                let (released, wake) = &*self.gate;
+                let mut released = released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*released {
+                    released = wake
+                        .wait(released)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            }
+            Ok(())
+        }
+
+        fn scroll(&mut self, x: i32, y: i32) -> Result<(), String> {
+            self.inner.scroll(x, y)
+        }
+    }
+
+    struct LatencyProbeSink {
+        starts: Arc<Mutex<VecDeque<Instant>>>,
+        samples: SyncSender<Duration>,
+    }
+
+    impl DesktopInputSink for LatencyProbeSink {
+        fn key(
+            &mut self,
+            _key: desktop_bindings::KeyboardKey,
+            _pressed: bool,
+        ) -> Result<(), String> {
+            let started = self
+                .starts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+                .ok_or_else(|| "latency probe received an unexpected key event".to_owned())?;
+            self.samples
+                .send(started.elapsed())
+                .map_err(|_| "latency probe receiver disconnected".to_owned())
+        }
+
+        fn modifier(
+            &mut self,
+            _modifier: desktop_bindings::Modifier,
+            _pressed: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn mouse_button(
+            &mut self,
+            _button: desktop_bindings::MouseButton,
+            _pressed: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn mouse_move(&mut self, _x: i32, _y: i32) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn scroll(&mut self, _x: i32, _y: i32) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
     struct FailingMotionSink;
 
     impl DesktopInputSink for FailingMotionSink {
@@ -4664,6 +5540,274 @@ mod tests {
 
     fn desktop_snapshot(buttons: steam_controller_protocol::SteamButtons) -> DesktopInputSnapshot {
         DesktopInputSnapshot::buttons_only(buttons)
+    }
+
+    #[test]
+    fn blocked_desktop_sink_does_not_block_the_supervisor_facing_publisher() {
+        let mut profile = BindingProfile::default();
+        profile.pads.right_mouse.enabled = true;
+        let status = Arc::new(Mutex::new(BridgeStatus::default()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let worker_events = Arc::clone(&events);
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let worker_gate = Arc::clone(&gate);
+        let (entered, entered_receiver) = mpsc::channel();
+        let worker_profile = profile.clone();
+        let mut worker =
+            DesktopBindingsWorker::spawn_with_runtime(Arc::clone(&status), move || {
+                DesktopBindingsRuntime::with_sink(
+                    worker_profile,
+                    Box::new(BlockingMotionSink {
+                        inner: SharedDesktopSink(worker_events),
+                        entered: Some(entered),
+                        gate: worker_gate,
+                    }),
+                )
+            });
+        let right_pad = |x| DesktopInputSnapshot {
+            right_pad: PadSample {
+                x,
+                touched: true,
+                ..PadSample::NEUTRAL
+            },
+            ..DesktopInputSnapshot::buttons_only(SteamButtons::default())
+        };
+        worker.observe(DesktopInputSnapshot::buttons_only(SteamButtons::default()));
+        worker.observe(right_pad(0));
+        worker.observe(right_pad(512));
+        entered_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        let (ack, ack_receiver) = mpsc::channel();
+        let publish_started = Instant::now();
+        for x in 513..=768 {
+            worker.observe(right_pad(x));
+        }
+        worker.replace_profile(Some(profile), ack);
+        let publish_elapsed = publish_started.elapsed();
+        assert!(matches!(
+            ack_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        let (released, wake) = &*gate;
+        *released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        wake.notify_all();
+        let command_result = ack_receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        let shutdown_result = worker.shutdown();
+
+        assert!(
+            publish_elapsed < SUPERVISOR_STALL_THRESHOLD,
+            "desktop publisher took {publish_elapsed:?} while the sink was blocked"
+        );
+        command_result.unwrap();
+        shutdown_result.unwrap();
+        assert!(!events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn desktop_worker_input_latency_stays_within_budget() {
+        const SAMPLE_COUNT: usize = 64;
+
+        fn latency_profile() -> BindingProfile {
+            let mut profile = BindingProfile::default();
+            profile.bindings.r4 = Some(desktop_bindings::BindingAction::KeyChord {
+                key: desktop_bindings::KeyboardKey::F5,
+                modifiers: std::collections::BTreeSet::new(),
+            });
+            profile
+        }
+
+        fn percentile(samples: &mut [Duration], percentile: usize) -> Duration {
+            samples.sort_unstable();
+            samples[(samples.len() - 1) * percentile / 100]
+        }
+
+        fn push_start(starts: &Mutex<VecDeque<Instant>>) {
+            starts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(Instant::now());
+        }
+
+        let direct_starts = Arc::new(Mutex::new(VecDeque::new()));
+        let (direct_sender, direct_receiver) = mpsc::sync_channel(1);
+        let mut direct = DesktopBindingsRuntime::with_sink(
+            latency_profile(),
+            Box::new(LatencyProbeSink {
+                starts: Arc::clone(&direct_starts),
+                samples: direct_sender,
+            }),
+        );
+        let neutral = SteamButtons::default();
+        let r4 = SteamButtons(1_u32 << SteamButton::RightGrip4 as u8);
+        let _ = direct.observe(desktop_snapshot(neutral), Duration::ZERO);
+        let mut direct_samples = Vec::with_capacity(SAMPLE_COUNT);
+        for index in 0..SAMPLE_COUNT {
+            push_start(&direct_starts);
+            let buttons = if index % 2 == 0 { r4 } else { neutral };
+            let _ = direct.observe(
+                desktop_snapshot(buttons),
+                Duration::from_micros(u64::try_from(index + 1).unwrap()),
+            );
+            direct_samples.push(direct_receiver.recv().unwrap());
+        }
+
+        let status = Arc::new(Mutex::new(BridgeStatus::default()));
+        let worker_starts = Arc::new(Mutex::new(VecDeque::new()));
+        let worker_sink_starts = Arc::clone(&worker_starts);
+        let (worker_sender, worker_receiver) = mpsc::sync_channel(1);
+        let mut worker =
+            DesktopBindingsWorker::spawn_with_runtime(Arc::clone(&status), move || {
+                DesktopBindingsRuntime::with_sink(
+                    latency_profile(),
+                    Box::new(LatencyProbeSink {
+                        starts: worker_sink_starts,
+                        samples: worker_sender,
+                    }),
+                )
+            });
+        worker.observe(desktop_snapshot(neutral));
+        let (barrier, barrier_receiver) = mpsc::channel();
+        worker.replace_profile(Some(latency_profile()), barrier);
+        barrier_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+
+        let mut worker_samples = Vec::with_capacity(SAMPLE_COUNT);
+        for index in 0..SAMPLE_COUNT {
+            // Give the worker time to return to its Condvar wait so this covers
+            // the wake-up path instead of measuring only an already-running loop.
+            thread::sleep(Duration::from_millis(1));
+            push_start(&worker_starts);
+            let buttons = if index % 2 == 0 { r4 } else { neutral };
+            worker.observe(desktop_snapshot(buttons));
+            worker_samples.push(
+                worker_receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap(),
+            );
+        }
+        worker.shutdown().unwrap();
+
+        let direct_p50 = percentile(&mut direct_samples, 50);
+        let worker_p50 = percentile(&mut worker_samples, 50);
+        let worker_p95 = percentile(&mut worker_samples, 95);
+        let worker_max = *worker_samples.last().unwrap();
+        eprintln!(
+            "desktop worker input latency: direct_p50_us={} worker_p50_us={} worker_p95_us={} worker_max_us={}",
+            direct_p50.as_micros(),
+            worker_p50.as_micros(),
+            worker_p95.as_micros(),
+            worker_max.as_micros()
+        );
+
+        assert!(
+            worker_p95 < RUNTIME_POLL_INTERVAL,
+            "desktop worker p95 input latency {worker_p95:?} exceeded the {RUNTIME_POLL_INTERVAL:?} runtime tick; direct p50 was {direct_p50:?} and worker p50 was {worker_p50:?}"
+        );
+        assert!(
+            worker_max < SUPERVISOR_STALL_THRESHOLD,
+            "desktop worker max input latency {worker_max:?} exceeded the {SUPERVISOR_STALL_THRESHOLD:?} stall threshold"
+        );
+    }
+
+    #[test]
+    fn desktop_worker_disconnect_acknowledges_held_output_release() {
+        let mut profile = BindingProfile::default();
+        profile.bindings.r4 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F5,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+        let status = Arc::new(Mutex::new(BridgeStatus::default()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let worker_events = Arc::clone(&events);
+        let worker_profile = profile.clone();
+        let mut worker =
+            DesktopBindingsWorker::spawn_with_runtime(Arc::clone(&status), move || {
+                DesktopBindingsRuntime::with_sink(
+                    worker_profile,
+                    Box::new(SharedDesktopSink(worker_events)),
+                )
+            });
+        let r4 = SteamButtons(1_u32 << SteamButton::RightGrip4 as u8);
+        worker.observe(desktop_snapshot(SteamButtons::default()));
+        worker.observe(desktop_snapshot(r4));
+
+        // An identical replacement is an ordered no-op and therefore a useful
+        // barrier proving that both snapshots were processed first.
+        let (ack, receiver) = mpsc::channel();
+        worker.replace_profile(Some(profile), ack);
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert_eq!(*events.lock().unwrap(), ["key:F5:true".to_owned()]);
+        assert_eq!(worker.status().held_output_count, 1);
+
+        worker.disconnect().unwrap();
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["key:F5:true".to_owned(), "key:F5:false".to_owned()]
+        );
+        assert_eq!(worker.status().held_output_count, 0);
+        worker.shutdown().unwrap();
+    }
+
+    #[test]
+    fn desktop_worker_overflow_releases_and_rebaselines_before_recovery() {
+        let mut profile = BindingProfile::default();
+        profile.bindings.r4 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F5,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+        let status = Arc::new(Mutex::new(BridgeStatus::default()));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let worker_events = Arc::clone(&events);
+        let worker_profile = profile.clone();
+        let mut worker =
+            DesktopBindingsWorker::spawn_with_runtime(Arc::clone(&status), move || {
+                DesktopBindingsRuntime::with_sink(
+                    worker_profile,
+                    Box::new(SharedDesktopSink(worker_events)),
+                )
+            });
+        let r4 = SteamButtons(1_u32 << SteamButton::RightGrip4 as u8);
+        worker.observe(desktop_snapshot(SteamButtons::default()));
+        worker.observe(desktop_snapshot(r4));
+        let (first_ack, first_receiver) = mpsc::channel();
+        worker.replace_profile(Some(profile.clone()), first_ack);
+        first_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+
+        worker.overflow();
+        worker.observe(desktop_snapshot(r4));
+        worker.observe(desktop_snapshot(SteamButtons::default()));
+        worker.observe(desktop_snapshot(r4));
+        let (second_ack, second_receiver) = mpsc::channel();
+        worker.replace_profile(Some(profile), second_ack);
+        second_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "key:F5:true".to_owned(),
+                "key:F5:false".to_owned(),
+                "key:F5:true".to_owned(),
+            ]
+        );
+        assert_eq!(worker.status().held_output_count, 1);
+        worker.shutdown().unwrap();
+        assert_eq!(events.lock().unwrap().last().unwrap(), "key:F5:false");
     }
 
     /// Replays the glue `run_active` puts between a report and the profile
@@ -5348,6 +6492,25 @@ mod tests {
 
         drop(bindings);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn idle_profile_replacement_does_not_initialize_desktop_input() {
+        let mut profile = BindingProfile::default();
+        profile.bindings.r4 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F5,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+        let mut bindings = DesktopBindingsRuntime::new(None);
+
+        bindings.replace_profile(Some(profile)).unwrap();
+
+        assert!(!bindings.activation_requested);
+        assert!(bindings.sink.is_none());
+        assert_eq!(
+            bindings.status().state,
+            DesktopBindingsState::PermissionRequired
+        );
     }
 
     #[test]
