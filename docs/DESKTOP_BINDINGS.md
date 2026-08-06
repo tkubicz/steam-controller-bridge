@@ -34,8 +34,23 @@ Profiles live at:
 
 Fresh stores contain one all-unbound `Default` profile. Both pad functions are
 off by default. Enabling a pad also enables Medium feedback by default; each
-pad's feedback can be disabled or set to Low, Medium, or High independently.
-The version-2 schema
+pad's feedback can be disabled or set to Low (-36 dB), Medium (-30 dB), or
+High (-24 dB) independently. Pad motion first crosses a recentered 192-count
+radial deadzone, preventing stationary coordinate drift from moving the cursor
+or scrolling. Feedback uses side-specific `0x82` microticks after 768 counts of
+net two-dimensional displacement. Its minimum interval scales from 450 ms for
+slow travel to 80 ms for fast travel, so faster movement produces a denser
+texture without allowing a stationary finger to tick. Reversing stationary
+coordinate noise cancels instead of creating feedback, and rate-limited ticks
+are discarded rather than delayed.
+
+Left-pad scrolling uses pixel-level smooth scroll events. Swipe velocity adds
+up to 3x acceleration, the profile's 25%-300% speed setting scales the result,
+and optional momentum decays after touch release. Speed defaults to 100% and
+momentum defaults on; neither setting has any effect until left-pad scrolling
+itself is enabled.
+
+The version-3 schema
 supports 1-32 profiles, trimmed unique names, letters, digits, F1-F24,
 navigation/editing keys, punctuation, numpad keys, common media keys, the four
 standard modifiers, and five mouse buttons. Modifier-only and raw-keycode
@@ -44,8 +59,9 @@ keys but no F21-F24 or play/previous/next media identities; using those portable
 entries reports a binding-only degraded error rather than substituting another
 key.
 
-Version-1 stores are migrated atomically without changing profile IDs, names,
-or button bindings. The new profile section is:
+Version-1 and version-2 stores are migrated atomically without changing profile
+IDs, names, button bindings, or existing pad enablement and feedback. The pad
+section is:
 
 ```json
 "pads": {
@@ -55,7 +71,9 @@ or button bindings. The new profile section is:
   },
   "left_scroll": {
     "enabled": false,
-    "feedback": { "enabled": true, "strength": "medium" }
+    "feedback": { "enabled": true, "strength": "medium" },
+    "speed_percent": 100,
+    "momentum": true
   }
 }
 ```

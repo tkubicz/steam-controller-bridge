@@ -427,6 +427,11 @@ For opt-in CLI use, both arguments are required:
 Replay rejects these arguments. Profiles can independently enable the right pad
 as a relative pointer and the left pad as two-axis smooth scrolling. Both are
 off by default. Each pad also has optional Low/Medium/High movement feedback.
+The three strengths are deliberately subtle at -36/-30/-24 dB and use sparse
+movement-only texture ticks rather than coarse vibration pulses. Their cadence
+increases with finger speed. Left-pad scrolling accelerates with swipe speed,
+has a configurable 25%-300% base speed, and offers momentum after release;
+speed defaults to 100% and momentum defaults on.
 Pad clicks, pressure actions, gestures, trigger clicks, and configurable stick
 clicks are not part of this milestone. See
 [Desktop bindings](DESKTOP_BINDINGS.md) for schema and edge behavior.

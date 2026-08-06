@@ -166,10 +166,13 @@ overrides, exact XIAO metadata filtering, callout-versus-tty filtering,
 battery-range handling, transition-preserving report coalescing and overflow,
 paired live binding-profile flags, replay injection rejection, and replay's
 unchanged dump default. Desktop-binding tests cover schema/profile validation,
-version-1 migration, atomic default creation and persistence, baseline
+version-1/version-2 migration, atomic default creation and persistence, baseline
 suppression, edge ordering, overlapping reference counts, profile-switch
-suppression, pad direction/scaling/residuals, feedback travel/rate limiting,
-rapid transitions, disconnect cleanup, sink failure recovery, and explicit
+suppression, pad direction/scaling/residuals, the recentered two-dimensional
+motion deadzone, stationary-noise rejection for cursor and feedback, net
+feedback displacement, velocity-dependent tick cadence without a delayed
+backlog, swipe acceleration, configurable scroll speed, optional decaying
+momentum, rapid transitions, disconnect cleanup, sink failure recovery, and explicit
 macOS key, pointer, and smooth-scroll conversions. Protocol and runtime tests
 cover all nine side/strength `0x82` tick vectors, side coalescing, separate
 feedback backoff, mailbox touch-edge retention, and unchanged Xbox output.

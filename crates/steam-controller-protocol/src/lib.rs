@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn pad_haptic_tick_output_report_matches_sdl_golden_vectors() {
-        for (gain_db, gain_byte) in [(-15, 0xf1), (-9, 0xf7), (-3, 0xfd)] {
+        for (gain_db, gain_byte) in [(-36, 0xdc), (-30, 0xe2), (-24, 0xe8)] {
             for (side, side_byte) in [
                 (PadHapticSide::Left, 0x01),
                 (PadHapticSide::Right, 0x02),

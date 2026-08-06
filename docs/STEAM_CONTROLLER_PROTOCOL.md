@@ -199,14 +199,19 @@ for optional trackpad movement feedback:
 - `0x82`: Triton side/command/gain output report.
 - `SIDE`: `0x01` left, `0x02` right, or `0x03` both.
 - `0x01`: the discrete tick command.
-- `GAIN_DB`: signed two's-complement gain; profiles expose only `-15`, `-9`,
-  and `-3` dB.
+- `GAIN_DB`: signed two's-complement gain; profiles expose only `-36`, `-30`,
+  and `-24` dB.
 
 `HidSession::pad_haptic_tick()` builds this exact four-byte packet; no arbitrary
 output-report API is exposed. Each packet is a complete finite effect. The
-runtime never sends a synthetic stop, coalesces pending sides, and applies a
-separate 500 ms write-failure backoff so pad feedback cannot disable ordinary
-rumble or desktop pointer/scroll output. The layout follows
+runtime emits movement-texture microticks after 768 counts of net
+two-dimensional displacement with a velocity-dependent 450-80 ms minimum
+interval. Net displacement
+prevents stationary back-and-forth coordinate noise from producing feedback.
+The runtime never sends a synthetic stop, discards rate-limited opportunities
+instead of building a backlog, coalesces pending sides, and applies a separate
+500 ms write-failure backoff so pad feedback cannot disable ordinary rumble or
+desktop pointer/scroll output. The layout follows
 [SDL's Triton output structure](https://github.com/libsdl-org/SDL/blob/main/src/joystick/hidapi/steam/controller_structs.h),
 and the finite no-stop lifecycle follows
 [OpenPuck's movement ticks](https://github.com/safijari/openpuck/blob/main/OpenPuck/haptics.cpp).

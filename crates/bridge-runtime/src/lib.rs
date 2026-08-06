@@ -373,7 +373,7 @@ enum RuntimeCommand {
     Shutdown(CommandAck),
     SetIdleShutdown(Option<Duration>, CommandAck),
     SetPuckDockAction(PuckDockAction, CommandAck),
-    SetBindingProfile(Option<BindingProfile>, CommandAck),
+    SetBindingProfile(Box<Option<BindingProfile>>, CommandAck),
     EnableDesktopBindings(CommandAck),
 }
 
@@ -458,7 +458,7 @@ impl BridgeHandle {
         &self,
         profile: Option<BindingProfile>,
     ) -> Result<(), RuntimeError> {
-        self.request(|ack| RuntimeCommand::SetBindingProfile(profile, ack))
+        self.request(|ack| RuntimeCommand::SetBindingProfile(Box::new(profile), ack))
     }
 
     /// Explicitly asks macOS to enable desktop bindings, allowing a permission prompt.
@@ -507,7 +507,7 @@ impl BridgeHandle {
     /// # Errors
     /// Returns an error when profile cleanup fails or the runtime has stopped.
     pub fn set_binding_profile(&self, profile: Option<BindingProfile>) -> Result<(), RuntimeError> {
-        self.command(|ack| RuntimeCommand::SetBindingProfile(profile, ack))
+        self.command(|ack| RuntimeCommand::SetBindingProfile(Box::new(profile), ack))
     }
 
     /// Explicitly retries desktop-input initialization and may show macOS's prompt.
@@ -831,6 +831,15 @@ impl DesktopBindingsRuntime {
                 self.fail(&error);
                 PadFeedbackRequest::NONE
             }
+        }
+    }
+
+    fn tick(&mut self, now: Duration) {
+        let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut()) else {
+            return;
+        };
+        if let Err(error) = engine.tick(now, sink.as_mut()) {
+            self.fail(&error);
         }
     }
 
@@ -1680,6 +1689,10 @@ impl Supervisor {
                     }
                 }
             }
+            bindings.tick(started.elapsed());
+            if bindings.take_discard_pending_feedback() {
+                worker.clear_pad_feedback();
+            }
             let lost = dropped.swap(0, Ordering::AcqRel);
             if lost > 0 {
                 engine.note_dropped_reports(lost);
@@ -1913,7 +1926,7 @@ impl Supervisor {
                 let _ = ack.send(Ok(()));
             }
             RuntimeCommand::SetBindingProfile(profile, ack) => {
-                self.config.binding_profile = profile;
+                self.config.binding_profile = *profile;
                 let binding_status =
                     DesktopBindingsRuntime::new(self.config.binding_profile.clone()).status();
                 self.update_status(|status| status.bindings = binding_status);
@@ -1974,6 +1987,7 @@ impl Supervisor {
                 }
                 RuntimeCommand::SetBindingProfile(profile, ack) => {
                     worker.clear_pad_feedback();
+                    let profile = *profile;
                     let result = bindings.replace_profile(profile.clone());
                     self.config.binding_profile = profile;
                     let binding_status = bindings.status();
@@ -4329,6 +4343,37 @@ mod tests {
     }
 
     #[test]
+    fn runtime_tick_advances_scroll_momentum_without_more_hid_reports() {
+        let mut profile = BindingProfile::default();
+        profile.pads.left_scroll.enabled = true;
+        profile.pads.left_scroll.feedback.enabled = false;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut bindings = DesktopBindingsRuntime::with_sink(
+            profile,
+            Box::new(SharedDesktopSink(Arc::clone(&events))),
+        );
+        let snapshot = |x, touched| DesktopInputSnapshot {
+            left_pad: PadSample {
+                x,
+                touched,
+                ..PadSample::default()
+            },
+            ..desktop_snapshot(steam_controller_protocol::SteamButtons::default())
+        };
+
+        let _ = bindings.observe(snapshot(0, false), Duration::ZERO);
+        let _ = bindings.observe(snapshot(0, true), Duration::from_millis(1));
+        let _ = bindings.observe(snapshot(768, true), Duration::from_millis(21));
+        let _ = bindings.observe(snapshot(0, false), Duration::from_millis(22));
+        bindings.tick(Duration::from_millis(72));
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["scroll:12:0".to_owned(), "scroll:10:0".to_owned()]
+        );
+    }
+
+    #[test]
     fn desktop_motion_failure_requests_pending_feedback_discard() {
         let mut profile = BindingProfile::default();
         profile.pads.right_mouse.enabled = true;
@@ -4345,7 +4390,7 @@ mod tests {
         let _ = bindings.observe(snapshot(0, false), Duration::ZERO);
         let _ = bindings.observe(snapshot(0, true), Duration::from_millis(1));
         assert_eq!(
-            bindings.observe(snapshot(768, true), Duration::from_millis(20)),
+            bindings.observe(snapshot(224, true), Duration::from_millis(20)),
             PadFeedbackRequest::NONE
         );
         assert_eq!(bindings.status().state, DesktopBindingsState::Degraded);
@@ -4495,7 +4540,7 @@ mod tests {
             pending.take(),
             vec![PadFeedbackCommand {
                 side: PadHapticSide::Both,
-                gain_db: -9,
+                gain_db: -30,
             }]
         );
 
@@ -4508,11 +4553,11 @@ mod tests {
             vec![
                 PadFeedbackCommand {
                     side: PadHapticSide::Left,
-                    gain_db: -15,
+                    gain_db: -36,
                 },
                 PadFeedbackCommand {
                     side: PadHapticSide::Right,
-                    gain_db: -3,
+                    gain_db: -24,
                 },
             ]
         );
@@ -4532,7 +4577,7 @@ mod tests {
             &writer,
             vec![PadFeedbackCommand {
                 side: PadHapticSide::Right,
-                gain_db: -9,
+                gain_db: -30,
             }],
         );
         let failed = metrics.snapshot(Duration::from_millis(10));
@@ -4546,7 +4591,7 @@ mod tests {
             &writer,
             vec![PadFeedbackCommand {
                 side: PadHapticSide::Right,
-                gain_db: -9,
+                gain_db: -30,
             }],
         );
         assert!(writer.writes.lock().unwrap().is_empty());
@@ -4555,7 +4600,7 @@ mod tests {
             &writer,
             vec![PadFeedbackCommand {
                 side: PadHapticSide::Right,
-                gain_db: -9,
+                gain_db: -30,
             }],
         );
         let recovered = metrics.snapshot(Duration::from_millis(510));

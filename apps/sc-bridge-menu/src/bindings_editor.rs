@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 
 use desktop_bindings::{
     default_store_path, load_or_create_store, save_store, BindableControl, BindingAction,
-    BindingStore, KeyboardKey, Modifier, MouseButton, PadFeedbackStrength, PadFunctionConfig,
-    MAX_PROFILE_NAME_CHARS,
+    BindingStore, KeyboardKey, Modifier, MouseButton, PadFeedbackConfig, PadFeedbackStrength,
+    MAX_PROFILE_NAME_CHARS, MAX_SCROLL_SPEED_PERCENT, MIN_SCROLL_SPEED_PERCENT,
 };
 use eframe::egui;
 
@@ -342,8 +342,8 @@ impl BindingsEditor {
         draw_pad_labels(
             &painter,
             layout.front,
-            self.store.profiles[self.selected].pads.left_scroll,
-            self.store.profiles[self.selected].pads.right_mouse,
+            self.store.profiles[self.selected].pads.left_scroll.enabled,
+            self.store.profiles[self.selected].pads.right_mouse.enabled,
             self.selection,
         );
         self.draw_labels(ui, &layout);
@@ -499,49 +499,52 @@ impl BindingsEditor {
     }
 
     fn pad_editor(&mut self, ui: &mut egui::Ui, left: bool) {
-        let config = if left {
-            &mut self.store.profiles[self.selected].pads.left_scroll
-        } else {
-            &mut self.store.profiles[self.selected].pads.right_mouse
-        };
-        let role = if left {
-            "Smooth scroll"
-        } else {
-            "Relative mouse"
-        };
         ui.label("Desktop action");
-        ui.label(egui::RichText::new(role).strong());
+        ui.label(
+            egui::RichText::new(if left {
+                "Accelerated smooth scroll"
+            } else {
+                "Relative mouse"
+            })
+            .strong(),
+        );
         ui.add_space(12.0);
-        ui.checkbox(&mut config.enabled, "Enable this pad");
-        ui.add_space(16.0);
-        ui.add_enabled_ui(config.enabled, |ui| {
-            ui.checkbox(&mut config.feedback.enabled, "Pad feedback");
-            ui.label(
-                egui::RichText::new("Emit a subtle controller tick while your finger moves.")
-                    .small()
-                    .color(MUTED_TEXT),
-            );
-            ui.add_space(12.0);
-            ui.add_enabled_ui(config.feedback.enabled, |ui| {
-                ui.label("Feedback strength");
-                ui.horizontal(|ui| {
-                    for strength in PadFeedbackStrength::ALL {
-                        ui.selectable_value(
-                            &mut config.feedback.strength,
-                            strength,
-                            strength.label(),
-                        );
-                    }
-                });
+        if left {
+            let config = &mut self.store.profiles[self.selected].pads.left_scroll;
+            ui.checkbox(&mut config.enabled, "Enable this pad");
+            ui.add_space(16.0);
+            ui.add_enabled_ui(config.enabled, |ui| {
+                ui.label("Scroll speed");
+                ui.add(
+                    egui::Slider::new(
+                        &mut config.speed_percent,
+                        MIN_SCROLL_SPEED_PERCENT..=MAX_SCROLL_SPEED_PERCENT,
+                    )
+                    .suffix("%"),
+                );
+                ui.label(
+                    egui::RichText::new("Faster swipes accelerate above this base speed.")
+                        .small()
+                        .color(MUTED_TEXT),
+                );
+                ui.add_space(12.0);
+                ui.checkbox(&mut config.momentum, "Momentum after release");
+                ui.add_space(16.0);
+                pad_feedback_editor(ui, &mut config.feedback);
             });
-        });
+        } else {
+            let config = &mut self.store.profiles[self.selected].pads.right_mouse;
+            ui.checkbox(&mut config.enabled, "Enable this pad");
+            ui.add_space(16.0);
+            ui.add_enabled_ui(config.enabled, |ui| {
+                pad_feedback_editor(ui, &mut config.feedback);
+            });
+        }
         ui.add_space(16.0);
         ui.label(
-            egui::RichText::new(
-                "Pad clicks, pressure actions, gestures, and momentum are not used.",
-            )
-            .small()
-            .color(MUTED_TEXT),
+            egui::RichText::new("Pad clicks, pressure actions, and gestures are not used.")
+                .small()
+                .color(MUTED_TEXT),
         );
     }
 
@@ -1404,13 +1407,13 @@ fn draw_front_face(
 fn draw_pad_labels(
     painter: &egui::Painter,
     view: egui::Rect,
-    left: PadFunctionConfig,
-    right: PadFunctionConfig,
+    left_enabled: bool,
+    right_enabled: bool,
     selected: EditorSelection,
 ) {
-    for (index, selection, title, config) in [
-        (0, EditorSelection::LeftPad, "SCROLL", left),
-        (1, EditorSelection::RightPad, "MOUSE", right),
+    for (index, selection, title, enabled) in [
+        (0, EditorSelection::LeftPad, "SCROLL", left_enabled),
+        (1, EditorSelection::RightPad, "MOUSE", right_enabled),
     ] {
         let rect = trackpad_rect(view, index);
         let color = if selected == selection {
@@ -1421,11 +1424,29 @@ fn draw_pad_labels(
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            format!("{title}\n{}", if config.enabled { "ON" } else { "OFF" }),
+            format!("{title}\n{}", if enabled { "ON" } else { "OFF" }),
             egui::FontId::proportional(9.5),
             color,
         );
     }
+}
+
+fn pad_feedback_editor(ui: &mut egui::Ui, feedback: &mut PadFeedbackConfig) {
+    ui.checkbox(&mut feedback.enabled, "Pad feedback");
+    ui.label(
+        egui::RichText::new("Emit subtle ticks that become faster as your finger moves faster.")
+            .small()
+            .color(MUTED_TEXT),
+    );
+    ui.add_space(12.0);
+    ui.add_enabled_ui(feedback.enabled, |ui| {
+        ui.label("Feedback strength");
+        ui.horizontal(|ui| {
+            for strength in PadFeedbackStrength::ALL {
+                ui.selectable_value(&mut feedback.strength, strength, strength.label());
+            }
+        });
+    });
 }
 
 fn draw_rear_face(
@@ -1753,6 +1774,8 @@ mod tests {
         store.profiles[0].pads.right_mouse.enabled = true;
         store.profiles[0].pads.right_mouse.feedback.enabled = false;
         store.profiles[0].pads.left_scroll.feedback.strength = PadFeedbackStrength::High;
+        store.profiles[0].pads.left_scroll.speed_percent = 175;
+        store.profiles[0].pads.left_scroll.momentum = false;
         let mut editor = BindingsEditor::new(std::path::PathBuf::new(), store);
 
         editor.duplicate_profile();
@@ -1788,6 +1811,8 @@ mod tests {
         assert!(!pads.left_scroll.enabled);
         assert!(!pads.right_mouse.enabled);
         assert!(pads.left_scroll.feedback.enabled);
+        assert_eq!(pads.left_scroll.speed_percent, 100);
+        assert!(pads.left_scroll.momentum);
         assert_eq!(
             pads.right_mouse.feedback.strength,
             PadFeedbackStrength::Medium

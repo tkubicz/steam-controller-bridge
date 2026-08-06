@@ -8,18 +8,33 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use steam_controller_protocol::{SteamButton, SteamButtons};
 
-pub const BINDINGS_VERSION: u32 = 2;
+pub const BINDINGS_VERSION: u32 = 3;
 pub const MAX_PROFILES: usize = 32;
 pub const MAX_PROFILE_NAME_CHARS: usize = 48;
 pub const DEFAULT_PROFILE_ID: &str = "default";
 pub const DEFAULT_PROFILE_NAME: &str = "Default";
+pub const MIN_SCROLL_SPEED_PERCENT: u16 = 25;
+pub const MAX_SCROLL_SPEED_PERCENT: u16 = 300;
+pub const DEFAULT_SCROLL_SPEED_PERCENT: u16 = 100;
 
-const PAD_JITTER_COUNTS: i32 = 32;
+const PAD_MOTION_DEADZONE_COUNTS: i32 = 192;
 const PAD_MAX_DELTA_COUNTS: i32 = 32_768;
 const MOUSE_COUNTS_PER_PIXEL: i32 = 64;
 const SCROLL_COUNTS_PER_PIXEL: i32 = 192;
-const FEEDBACK_TRAVEL_COUNTS: f64 = 768.0;
-const FEEDBACK_MIN_INTERVAL: Duration = Duration::from_millis(16);
+const FEEDBACK_DISPLACEMENT_COUNTS: i32 = 768;
+const FEEDBACK_SLOW_INTERVAL: Duration = Duration::from_millis(450);
+const FEEDBACK_FAST_INTERVAL: Duration = Duration::from_millis(80);
+const MOTION_SPEED_START_COUNTS_PER_SECOND: f64 = 1_500.0;
+const MOTION_SPEED_FULL_COUNTS_PER_SECOND: f64 = 12_000.0;
+const SCROLL_MAX_ACCELERATION: f64 = 3.0;
+const SCROLL_VELOCITY_BLEND: f64 = 0.35;
+const SCROLL_MOMENTUM_DECAY_PER_SECOND: f64 = 7.0;
+const SCROLL_MOMENTUM_STOP_PIXELS_PER_SECOND: f64 = 5.0;
+const SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND: f64 = 2_400.0;
+const MOTION_DEFAULT_SECONDS: f64 = 1.0 / 120.0;
+const MOTION_MIN_SECONDS: f64 = 1.0 / 240.0;
+const MOTION_SPEED_MAX_SECONDS: f64 = 0.5;
+const MOMENTUM_FRAME_MAX_SECONDS: f64 = 0.05;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,18 +50,18 @@ impl PadFeedbackStrength {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Low => "Low",
-            Self::Medium => "Medium",
-            Self::High => "High",
+            Self::Low => "Low (-36 dB)",
+            Self::Medium => "Medium (-30 dB)",
+            Self::High => "High (-24 dB)",
         }
     }
 
     #[must_use]
     pub const fn gain_db(self) -> i8 {
         match self {
-            Self::Low => -15,
-            Self::Medium => -9,
-            Self::High => -3,
+            Self::Low => -36,
+            Self::Medium => -30,
+            Self::High => -24,
         }
     }
 }
@@ -74,11 +89,31 @@ pub struct PadFunctionConfig {
     pub feedback: PadFeedbackConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScrollPadConfig {
+    pub enabled: bool,
+    pub feedback: PadFeedbackConfig,
+    pub speed_percent: u16,
+    pub momentum: bool,
+}
+
+impl Default for ScrollPadConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            feedback: PadFeedbackConfig::default(),
+            speed_percent: DEFAULT_SCROLL_SPEED_PERCENT,
+            momentum: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PadBindings {
     pub right_mouse: PadFunctionConfig,
-    pub left_scroll: PadFunctionConfig,
+    pub left_scroll: ScrollPadConfig,
 }
 
 impl PadBindings {
@@ -623,6 +658,13 @@ impl BindingStore {
             if !names.insert(profile.name.to_lowercase()) {
                 return Err(format!("duplicate profile name {:?}", profile.name));
             }
+            let scroll_speed = profile.pads.left_scroll.speed_percent;
+            if !(MIN_SCROLL_SPEED_PERCENT..=MAX_SCROLL_SPEED_PERCENT).contains(&scroll_speed) {
+                return Err(format!(
+                    "profile {:?} scroll speed must be between {MIN_SCROLL_SPEED_PERCENT}% and {MAX_SCROLL_SPEED_PERCENT}%",
+                    profile.name
+                ));
+            }
         }
         Ok(())
     }
@@ -781,7 +823,7 @@ pub fn parse_store(bytes: &[u8]) -> Result<BindingStore, String> {
 fn parse_store_with_migration(bytes: &[u8]) -> Result<(BindingStore, bool), String> {
     let mut store: BindingStore =
         serde_json::from_slice(bytes).map_err(|error| format!("invalid bindings JSON: {error}"))?;
-    let migrated = store.version == 1;
+    let migrated = matches!(store.version, 1 | 2);
     if migrated {
         store.version = BINDINGS_VERSION;
     }
@@ -883,19 +925,41 @@ struct PadMotionState {
     previous: Option<(i16, i16)>,
     touched: bool,
     blocked: bool,
+    deadzone_x: i32,
+    deadzone_y: i32,
     x_residual: i32,
     y_residual: i32,
-    feedback_travel: f64,
+    feedback_x: i32,
+    feedback_y: i32,
     last_feedback: Option<Duration>,
+    last_motion: Option<Duration>,
+    scroll_fraction_x: f64,
+    scroll_fraction_y: f64,
+    scroll_velocity_x: f64,
+    scroll_velocity_y: f64,
+    scroll_last_update: Option<Duration>,
 }
 
 impl PadMotionState {
-    fn reset_motion(&mut self) {
+    fn reset_contact(&mut self) {
         self.previous = None;
+        self.deadzone_x = 0;
+        self.deadzone_y = 0;
         self.x_residual = 0;
         self.y_residual = 0;
-        self.feedback_travel = 0.0;
+        self.feedback_x = 0;
+        self.feedback_y = 0;
         self.last_feedback = None;
+        self.last_motion = None;
+    }
+
+    fn reset_motion(&mut self) {
+        self.reset_contact();
+        self.scroll_fraction_x = 0.0;
+        self.scroll_fraction_y = 0.0;
+        self.scroll_velocity_x = 0.0;
+        self.scroll_velocity_y = 0.0;
+        self.scroll_last_update = None;
     }
 
     fn block_if_touched(&mut self) {
@@ -986,19 +1050,17 @@ impl BindingEngine {
         let changed = previous ^ mask;
         let pads = self.profile.pads;
         let result = self.apply_changes(changed, mask, sink).and_then(|()| {
-            let left = process_pad(
+            let left = process_scroll_pad(
                 &mut self.left_pad,
                 snapshot.left_pad,
                 pads.left_scroll,
-                PadOutput::Scroll,
                 now,
                 sink,
             )?;
-            let right = process_pad(
+            let right = process_mouse_pad(
                 &mut self.right_pad,
                 snapshot.right_pad,
                 pads.right_mouse,
-                PadOutput::Mouse,
                 now,
                 sink,
             )?;
@@ -1015,6 +1077,31 @@ impl BindingEngine {
                 Err(error)
             }
         }
+    }
+
+    /// Advances time-based desktop output such as left-pad scroll momentum.
+    ///
+    /// This is intentionally independent of controller reports so inertia can
+    /// finish even when the HID transport becomes quiet after touch release.
+    ///
+    /// # Errors
+    /// Returns a desktop-input injection failure after clearing pending motion.
+    pub fn tick(&mut self, now: Duration, sink: &mut dyn DesktopInputSink) -> Result<(), String> {
+        if self.previous_mask.is_none()
+            || self.left_pad.touched
+            || self.left_pad.blocked
+            || !self.profile.pads.left_scroll.enabled
+            || !self.profile.pads.left_scroll.momentum
+        {
+            return Ok(());
+        }
+        if let Err(error) = advance_scroll_momentum(&mut self.left_pad, now, sink) {
+            let _ = self.release_all(sink);
+            self.left_pad.reset_motion();
+            self.right_pad.block_if_touched();
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Releases the old profile and installs a replacement without synthesizing
@@ -1197,23 +1284,16 @@ impl BindingEngine {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum PadOutput {
-    Mouse,
-    Scroll,
-}
-
 fn baseline_pad(state: &mut PadMotionState, sample: PadSample) {
     state.touched = sample.touched;
     state.blocked = sample.touched;
     state.reset_motion();
 }
 
-fn process_pad(
+fn process_mouse_pad(
     state: &mut PadMotionState,
     sample: PadSample,
     config: PadFunctionConfig,
-    output: PadOutput,
     now: Duration,
     sink: &mut dyn DesktopInputSink,
 ) -> Result<Option<PadFeedbackStrength>, String> {
@@ -1229,61 +1309,293 @@ fn process_pad(
     }
 
     let Some((previous_x, previous_y)) = state.previous.replace((sample.x, sample.y)) else {
+        state.last_motion = Some(now);
         return Ok(None);
     };
     let raw_x = i32::from(sample.x) - i32::from(previous_x);
     let raw_y = i32::from(sample.y) - i32::from(previous_y);
     if raw_x.abs() > PAD_MAX_DELTA_COUNTS || raw_y.abs() > PAD_MAX_DELTA_COUNTS {
+        state.deadzone_x = 0;
+        state.deadzone_y = 0;
         state.x_residual = 0;
         state.y_residual = 0;
-        state.feedback_travel = 0.0;
+        state.feedback_x = 0;
+        state.feedback_y = 0;
         return Ok(None);
     }
 
-    let delta_x = filter_jitter(raw_x);
-    let delta_y = filter_jitter(raw_y);
-    if delta_x == 0 && delta_y == 0 {
+    let Some((delta_x, delta_y)) = accumulate_deadzone_motion(state, raw_x, raw_y) else {
         return Ok(None);
-    }
-
-    let counts_per_pixel = match output {
-        PadOutput::Mouse => MOUSE_COUNTS_PER_PIXEL,
-        PadOutput::Scroll => SCROLL_COUNTS_PER_PIXEL,
     };
+
     state.x_residual += delta_x;
     state.y_residual -= delta_y;
-    let pixels_x = take_pixels(&mut state.x_residual, counts_per_pixel);
-    let pixels_y = take_pixels(&mut state.y_residual, counts_per_pixel);
+    let pixels_x = take_pixels(&mut state.x_residual, MOUSE_COUNTS_PER_PIXEL);
+    let pixels_y = take_pixels(&mut state.y_residual, MOUSE_COUNTS_PER_PIXEL);
     if pixels_x != 0 || pixels_y != 0 {
-        match output {
-            PadOutput::Mouse => sink.mouse_move(pixels_x, pixels_y)?,
-            PadOutput::Scroll => sink.scroll(pixels_x, pixels_y)?,
-        }
+        sink.mouse_move(pixels_x, pixels_y)?;
     }
 
-    if !config.feedback.enabled {
-        state.feedback_travel = 0.0;
+    let speed = update_motion_speed(state, delta_x, delta_y, now);
+    Ok(process_feedback(
+        state,
+        config.feedback,
+        delta_x,
+        delta_y,
+        speed,
+        now,
+    ))
+}
+
+fn process_scroll_pad(
+    state: &mut PadMotionState,
+    sample: PadSample,
+    config: ScrollPadConfig,
+    now: Duration,
+    sink: &mut dyn DesktopInputSink,
+) -> Result<Option<PadFeedbackStrength>, String> {
+    let was_touched = state.touched;
+    state.touched = sample.touched;
+    if !config.enabled || state.blocked {
+        if !sample.touched {
+            state.blocked = false;
+        }
+        state.reset_motion();
         return Ok(None);
     }
-    state.feedback_travel += f64::from(delta_x).hypot(f64::from(delta_y));
+    if !sample.touched {
+        if was_touched {
+            state.reset_contact();
+            state.scroll_last_update = Some(now);
+            if !config.momentum {
+                clear_scroll_momentum(state);
+            }
+            return Ok(None);
+        }
+        if config.momentum {
+            advance_scroll_momentum(state, now, sink)?;
+        } else {
+            clear_scroll_momentum(state);
+        }
+        return Ok(None);
+    }
+
+    if !was_touched {
+        clear_scroll_momentum(state);
+    }
+    let Some((previous_x, previous_y)) = state.previous.replace((sample.x, sample.y)) else {
+        state.last_motion = Some(now);
+        state.scroll_last_update = Some(now);
+        return Ok(None);
+    };
+    let raw_x = i32::from(sample.x) - i32::from(previous_x);
+    let raw_y = i32::from(sample.y) - i32::from(previous_y);
+    if raw_x.abs() > PAD_MAX_DELTA_COUNTS || raw_y.abs() > PAD_MAX_DELTA_COUNTS {
+        state.reset_motion();
+        state.previous = Some((sample.x, sample.y));
+        return Ok(None);
+    }
+    let Some((delta_x, delta_y)) = accumulate_deadzone_motion(state, raw_x, raw_y) else {
+        return Ok(None);
+    };
+
+    let speed = update_motion_speed(state, delta_x, delta_y, now);
+    let acceleration = scroll_acceleration(speed);
+    let profile_scale = f64::from(config.speed_percent) / 100.0;
+    let scale = profile_scale * acceleration / f64::from(SCROLL_COUNTS_PER_PIXEL);
+    let scroll_x = f64::from(delta_x) * scale;
+    let scroll_y = -f64::from(delta_y) * scale;
+    emit_fractional_scroll(state, scroll_x, scroll_y, sink)?;
+
+    let seconds = motion_seconds(state.scroll_last_update, now);
+    state.scroll_last_update = Some(now);
+    let instantaneous_x = (scroll_x / seconds).clamp(
+        -SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+        SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+    );
+    let instantaneous_y = (scroll_y / seconds).clamp(
+        -SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+        SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+    );
+    state.scroll_velocity_x = blend_velocity(state.scroll_velocity_x, instantaneous_x);
+    state.scroll_velocity_y = blend_velocity(state.scroll_velocity_y, instantaneous_y);
+
+    Ok(process_feedback(
+        state,
+        config.feedback,
+        delta_x,
+        delta_y,
+        speed,
+        now,
+    ))
+}
+
+fn update_motion_speed(
+    state: &mut PadMotionState,
+    delta_x: i32,
+    delta_y: i32,
+    now: Duration,
+) -> f64 {
+    let seconds = motion_seconds(state.last_motion, now);
+    state.last_motion = Some(now);
+    f64::from(delta_x).hypot(f64::from(delta_y)) / seconds
+}
+
+fn motion_seconds(previous: Option<Duration>, now: Duration) -> f64 {
+    previous.map_or(MOTION_DEFAULT_SECONDS, |last| {
+        now.saturating_sub(last)
+            .as_secs_f64()
+            .clamp(MOTION_MIN_SECONDS, MOTION_SPEED_MAX_SECONDS)
+    })
+}
+
+fn normalized_motion_speed(speed: f64) -> f64 {
+    ((speed - MOTION_SPEED_START_COUNTS_PER_SECOND)
+        / (MOTION_SPEED_FULL_COUNTS_PER_SECOND - MOTION_SPEED_START_COUNTS_PER_SECOND))
+        .clamp(0.0, 1.0)
+}
+
+fn scroll_acceleration(speed: f64) -> f64 {
+    1.0 + normalized_motion_speed(speed) * (SCROLL_MAX_ACCELERATION - 1.0)
+}
+
+fn blend_velocity(previous: f64, instantaneous: f64) -> f64 {
+    previous * (1.0 - SCROLL_VELOCITY_BLEND) + instantaneous * SCROLL_VELOCITY_BLEND
+}
+
+fn emit_fractional_scroll(
+    state: &mut PadMotionState,
+    x: f64,
+    y: f64,
+    sink: &mut dyn DesktopInputSink,
+) -> Result<(), String> {
+    state.scroll_fraction_x += x;
+    state.scroll_fraction_y += y;
+    let pixels_x = take_fractional_pixels(&mut state.scroll_fraction_x);
+    let pixels_y = take_fractional_pixels(&mut state.scroll_fraction_y);
+    if pixels_x != 0 || pixels_y != 0 {
+        sink.scroll(pixels_x, pixels_y)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn take_fractional_pixels(residual: &mut f64) -> i32 {
+    // Direct motion and momentum are bounded far below i32 limits. Truncation
+    // deliberately retains the sub-pixel remainder for the next update.
+    let whole = residual
+        .trunc()
+        .clamp(f64::from(i32::MIN), f64::from(i32::MAX));
+    let pixels = whole as i32;
+    *residual -= f64::from(pixels);
+    pixels
+}
+
+fn advance_scroll_momentum(
+    state: &mut PadMotionState,
+    now: Duration,
+    sink: &mut dyn DesktopInputSink,
+) -> Result<(), String> {
+    let Some(last) = state.scroll_last_update else {
+        return Ok(());
+    };
+    let seconds = now
+        .saturating_sub(last)
+        .as_secs_f64()
+        .min(MOMENTUM_FRAME_MAX_SECONDS);
+    state.scroll_last_update = Some(now);
+    if seconds == 0.0 {
+        return Ok(());
+    }
+    emit_fractional_scroll(
+        state,
+        state.scroll_velocity_x * seconds,
+        state.scroll_velocity_y * seconds,
+        sink,
+    )?;
+    let decay = (-SCROLL_MOMENTUM_DECAY_PER_SECOND * seconds).exp();
+    state.scroll_velocity_x *= decay;
+    state.scroll_velocity_y *= decay;
+    if state.scroll_velocity_x.hypot(state.scroll_velocity_y)
+        < SCROLL_MOMENTUM_STOP_PIXELS_PER_SECOND
+    {
+        clear_scroll_momentum(state);
+    }
+    Ok(())
+}
+
+fn clear_scroll_momentum(state: &mut PadMotionState) {
+    state.scroll_fraction_x = 0.0;
+    state.scroll_fraction_y = 0.0;
+    state.scroll_velocity_x = 0.0;
+    state.scroll_velocity_y = 0.0;
+    state.scroll_last_update = None;
+}
+
+fn process_feedback(
+    state: &mut PadMotionState,
+    config: PadFeedbackConfig,
+    delta_x: i32,
+    delta_y: i32,
+    speed: f64,
+    now: Duration,
+) -> Option<PadFeedbackStrength> {
+    if !config.enabled {
+        state.feedback_x = 0;
+        state.feedback_y = 0;
+        return None;
+    }
+    // Measure displacement from the last consumed texture point, not total
+    // path length. Back-and-forth coordinate noise therefore cancels instead
+    // of eventually producing feedback while a finger is stationary.
+    state.feedback_x += delta_x;
+    state.feedback_y += delta_y;
+    let feedback_x = i64::from(state.feedback_x);
+    let feedback_y = i64::from(state.feedback_y);
+    let feedback_threshold = i64::from(FEEDBACK_DISPLACEMENT_COUNTS);
+    if feedback_x * feedback_x + feedback_y * feedback_y < feedback_threshold * feedback_threshold {
+        return None;
+    }
+
+    let speed_factor = normalized_motion_speed(speed);
+    let slow_ms = FEEDBACK_SLOW_INTERVAL.as_secs_f64() * 1_000.0;
+    let fast_ms = FEEDBACK_FAST_INTERVAL.as_secs_f64() * 1_000.0;
+    let interval =
+        Duration::from_secs_f64((slow_ms + (fast_ms - slow_ms) * speed_factor) / 1_000.0);
     let interval_ready = state
         .last_feedback
-        .is_none_or(|last| now.saturating_sub(last) >= FEEDBACK_MIN_INTERVAL);
-    if state.feedback_travel >= FEEDBACK_TRAVEL_COUNTS && interval_ready {
-        state.feedback_travel = 0.0;
+        .is_none_or(|last| now.saturating_sub(last) >= interval);
+    // Each threshold crossing is a complete microtick opportunity. When the
+    // rate limiter is closed, drop it instead of retaining a delayed backlog.
+    state.feedback_x = 0;
+    state.feedback_y = 0;
+    if interval_ready {
         state.last_feedback = Some(now);
-        Ok(Some(config.feedback.strength))
+        Some(config.strength)
     } else {
-        state.feedback_travel = state.feedback_travel.min(FEEDBACK_TRAVEL_COUNTS);
-        Ok(None)
+        None
     }
 }
 
-const fn filter_jitter(delta: i32) -> i32 {
-    if delta.abs() < PAD_JITTER_COUNTS {
-        0
+fn accumulate_deadzone_motion(
+    state: &mut PadMotionState,
+    delta_x: i32,
+    delta_y: i32,
+) -> Option<(i32, i32)> {
+    // Accumulate slow intentional motion, but require its radial displacement
+    // to leave the stationary-noise region before forwarding it. Recenter
+    // after every accepted vector so a stopped finger gets a fresh deadzone.
+    state.deadzone_x += delta_x;
+    state.deadzone_y += delta_y;
+    let x = i64::from(state.deadzone_x);
+    let y = i64::from(state.deadzone_y);
+    if x * x + y * y < i64::from(PAD_MOTION_DEADZONE_COUNTS).pow(2) {
+        None
     } else {
-        delta
+        let filtered = (state.deadzone_x, state.deadzone_y);
+        state.deadzone_x = 0;
+        state.deadzone_y = 0;
+        Some(filtered)
     }
 }
 
@@ -1749,6 +2061,11 @@ mod tests {
         assert!(!store.profiles[0].pads.right_mouse.enabled);
         assert!(store.profiles[0].pads.left_scroll.feedback.enabled);
         assert_eq!(
+            store.profiles[0].pads.left_scroll.speed_percent,
+            DEFAULT_SCROLL_SPEED_PERCENT
+        );
+        assert!(store.profiles[0].pads.left_scroll.momentum);
+        assert_eq!(
             store.profiles[0].pads.right_mouse.feedback.strength,
             PadFeedbackStrength::Medium
         );
@@ -1761,7 +2078,7 @@ mod tests {
     #[test]
     fn store_rejects_unknown_pad_feedback_strength() {
         let json = br#"{
-          "version": 2,
+          "version": 3,
           "profiles": [{
             "id": "default",
             "name": "Default",
@@ -1904,7 +2221,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_version_one_atomically_migrates_to_version_two() {
+    fn loading_version_one_atomically_migrates_to_version_three() {
         let directory =
             std::env::temp_dir().join(format!("desktop-bindings-migration-{}", std::process::id()));
         let path = directory.join("bindings.json");
@@ -1929,6 +2246,46 @@ mod tests {
         assert!(persisted["profiles"][0]["pads"].is_object());
         let _ = fs::remove_file(path);
         let _ = fs::remove_dir(directory);
+    }
+
+    #[test]
+    fn loading_version_two_preserves_pads_and_adds_scroll_defaults() {
+        let json = br#"{
+          "version": 2,
+          "profiles": [{
+            "id": "default",
+            "name": "Default",
+            "bindings": {},
+            "pads": {
+              "right_mouse": {
+                "enabled": true,
+                "feedback": {"enabled": false, "strength": "low"}
+              },
+              "left_scroll": {
+                "enabled": true,
+                "feedback": {"enabled": true, "strength": "high"}
+              }
+            }
+          }]
+        }"#;
+        let store = parse_store(json).unwrap();
+        assert_eq!(store.version, BINDINGS_VERSION);
+        assert!(store.profiles[0].pads.right_mouse.enabled);
+        assert!(!store.profiles[0].pads.right_mouse.feedback.enabled);
+        let scroll = store.profiles[0].pads.left_scroll;
+        assert!(scroll.enabled);
+        assert_eq!(scroll.feedback.strength, PadFeedbackStrength::High);
+        assert_eq!(scroll.speed_percent, DEFAULT_SCROLL_SPEED_PERCENT);
+        assert!(scroll.momentum);
+    }
+
+    #[test]
+    fn store_rejects_scroll_speed_outside_supported_range() {
+        let mut store = BindingStore::default();
+        store.profiles[0].pads.left_scroll.speed_percent = MIN_SCROLL_SPEED_PERCENT - 1;
+        assert!(store.validate().is_err());
+        store.profiles[0].pads.left_scroll.speed_percent = MAX_SCROLL_SPEED_PERCENT + 1;
+        assert!(store.validate().is_err());
     }
 
     #[test]
@@ -2102,7 +2459,7 @@ mod tests {
     }
 
     #[test]
-    fn right_pad_moves_relative_pointer_and_emits_rate_limited_feedback() {
+    fn right_pad_feedback_cadence_increases_with_motion_speed_without_a_backlog() {
         let mut profile = BindingProfile::default();
         profile.pads.right_mouse.enabled = true;
         assert_eq!(profile.configured_output_count(), 1);
@@ -2122,38 +2479,108 @@ mod tests {
             .unwrap();
         let first = engine
             .observe_snapshot(
-                pad_snapshot(neutral, None, Some((164, 164))),
-                Duration::from_millis(2),
+                pad_snapshot(neutral, None, Some((868, 100))),
+                Duration::from_millis(500),
                 &mut sink,
             )
             .unwrap();
-        assert_eq!(first, PadFeedbackRequest::NONE);
-        let tick = engine
+        assert_eq!(first.right, Some(PadFeedbackStrength::Medium));
+        let slow_limited = engine
             .observe_snapshot(
-                pad_snapshot(neutral, None, Some((932, 164))),
-                Duration::from_millis(20),
+                pad_snapshot(neutral, None, Some((1636, 100))),
+                Duration::from_millis(800),
                 &mut sink,
             )
             .unwrap();
-        assert_eq!(tick.right, Some(PadFeedbackStrength::Medium));
-        assert_eq!(tick.left, None);
-        let limited = engine
+        assert_eq!(slow_limited, PadFeedbackRequest::NONE);
+        let slow_ready = engine
             .observe_snapshot(
-                pad_snapshot(neutral, None, Some((1700, 164))),
-                Duration::from_millis(25),
+                pad_snapshot(neutral, None, Some((2404, 100))),
+                Duration::from_millis(1_200),
                 &mut sink,
             )
             .unwrap();
-        assert_eq!(limited, PadFeedbackRequest::NONE);
-        let stationary = engine
+        assert_eq!(slow_ready.right, Some(PadFeedbackStrength::Medium));
+
+        let mut fast_engine = BindingEngine::new(engine.profile().clone());
+        let mut fast_sink = MockSink::default();
+        fast_engine
             .observe_snapshot(
-                pad_snapshot(neutral, None, Some((1700, 164))),
-                Duration::from_millis(45),
-                &mut sink,
+                pad_snapshot(neutral, None, None),
+                Duration::ZERO,
+                &mut fast_sink,
             )
             .unwrap();
-        assert_eq!(stationary, PadFeedbackRequest::NONE);
-        assert_eq!(sink.events, ["move:1:-1", "move:12:0", "move:12:0"]);
+        fast_engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((100, 100))),
+                Duration::from_millis(1),
+                &mut fast_sink,
+            )
+            .unwrap();
+        let fast_first = fast_engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((868, 100))),
+                Duration::from_millis(10),
+                &mut fast_sink,
+            )
+            .unwrap();
+        assert_eq!(fast_first.right, Some(PadFeedbackStrength::Medium));
+        let fast_limited = fast_engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((1636, 100))),
+                Duration::from_millis(60),
+                &mut fast_sink,
+            )
+            .unwrap();
+        assert_eq!(fast_limited, PadFeedbackRequest::NONE);
+        let fast_ready = fast_engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, Some((2404, 100))),
+                Duration::from_millis(110),
+                &mut fast_sink,
+            )
+            .unwrap();
+        assert_eq!(fast_ready.right, Some(PadFeedbackStrength::Medium));
+    }
+
+    #[test]
+    fn stationary_pressed_pad_noise_does_not_emit_feedback() {
+        let mut profile = BindingProfile::default();
+        profile.pads.right_mouse.enabled = true;
+        let mut engine = BindingEngine::new(profile);
+        let mut sink = MockSink::default();
+        let neutral = SteamButtons::default();
+
+        engine
+            .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
+            .unwrap();
+        for (index, (x, y)) in [
+            (0, 0),
+            (0, 160),
+            (0, -160),
+            (96, 128),
+            (-96, -128),
+            (128, -96),
+            (-128, 96),
+            (0, 160),
+            (0, -160),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut snapshot = pad_snapshot(neutral, None, Some((x, y)));
+            snapshot.right_pad.pressed = true;
+            let feedback = engine
+                .observe_snapshot(
+                    snapshot,
+                    Duration::from_millis(u64::try_from(index * 250).unwrap()),
+                    &mut sink,
+                )
+                .unwrap();
+            assert_eq!(feedback, PadFeedbackRequest::NONE);
+        }
+        assert!(sink.events.is_empty());
     }
 
     #[test]
@@ -2182,11 +2609,100 @@ mod tests {
             )
             .unwrap();
         assert_eq!(feedback, PadFeedbackRequest::NONE);
-        assert_eq!(sink.events, ["scroll:2:-1"]);
+        assert_eq!(sink.events, ["scroll:6:-3"]);
     }
 
     #[test]
-    fn pad_motion_filters_jitter_accumulates_residuals_and_rebaselines_large_jumps() {
+    fn left_pad_scroll_acceleration_and_profile_speed_scale_output() {
+        fn scroll_once(duration_ms: u64, speed_percent: u16) -> Vec<String> {
+            let mut profile = BindingProfile::default();
+            profile.pads.left_scroll.enabled = true;
+            profile.pads.left_scroll.feedback.enabled = false;
+            profile.pads.left_scroll.speed_percent = speed_percent;
+            let mut engine = BindingEngine::new(profile);
+            let mut sink = MockSink::default();
+            let neutral = SteamButtons::default();
+            engine
+                .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
+                .unwrap();
+            engine
+                .observe_snapshot(
+                    pad_snapshot(neutral, Some((0, 0)), None),
+                    Duration::from_millis(1),
+                    &mut sink,
+                )
+                .unwrap();
+            engine
+                .observe_snapshot(
+                    pad_snapshot(neutral, Some((384, 0)), None),
+                    Duration::from_millis(duration_ms),
+                    &mut sink,
+                )
+                .unwrap();
+            sink.events
+        }
+
+        assert_eq!(scroll_once(501, 100), ["scroll:2:0"]);
+        assert_eq!(scroll_once(20, 100), ["scroll:6:0"]);
+        assert_eq!(scroll_once(20, 50), ["scroll:3:0"]);
+        assert_eq!(scroll_once(20, 200), ["scroll:12:0"]);
+    }
+
+    #[test]
+    fn left_pad_momentum_decays_after_release_and_can_be_disabled() {
+        fn run(momentum: bool) -> Vec<String> {
+            let mut profile = BindingProfile::default();
+            profile.pads.left_scroll.enabled = true;
+            profile.pads.left_scroll.feedback.enabled = false;
+            profile.pads.left_scroll.momentum = momentum;
+            let mut engine = BindingEngine::new(profile);
+            let mut sink = MockSink::default();
+            let neutral = SteamButtons::default();
+            engine
+                .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
+                .unwrap();
+            engine
+                .observe_snapshot(
+                    pad_snapshot(neutral, Some((0, 0)), None),
+                    Duration::from_millis(1),
+                    &mut sink,
+                )
+                .unwrap();
+            engine
+                .observe_snapshot(
+                    pad_snapshot(neutral, Some((768, 0)), None),
+                    Duration::from_millis(21),
+                    &mut sink,
+                )
+                .unwrap();
+            engine
+                .observe_snapshot(
+                    pad_snapshot(neutral, None, None),
+                    Duration::from_millis(22),
+                    &mut sink,
+                )
+                .unwrap();
+            for time_ms in (32..=2_032).step_by(10) {
+                engine
+                    .tick(Duration::from_millis(time_ms), &mut sink)
+                    .unwrap();
+            }
+            sink.events
+        }
+
+        let with_momentum = run(true);
+        let without_momentum = run(false);
+        assert_eq!(without_momentum, ["scroll:12:0"]);
+        assert!(with_momentum.len() > without_momentum.len());
+        assert!(with_momentum
+            .iter()
+            .skip(1)
+            .all(|event| event.starts_with("scroll:")));
+        assert_eq!(with_momentum.last(), Some(&"scroll:1:0".to_owned()));
+    }
+
+    #[test]
+    fn pad_motion_deadzone_rejects_noise_and_recenters_after_large_jumps() {
         let mut profile = BindingProfile::default();
         profile.pads.right_mouse.enabled = true;
         profile.pads.right_mouse.feedback.enabled = false;
@@ -2197,7 +2713,16 @@ mod tests {
         engine
             .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
             .unwrap();
-        for (time_ms, x) in [(1, 0), (2, 31), (3, 71), (4, 111)] {
+        for (time_ms, x) in [
+            (1, 0),
+            (2, 64),
+            (3, -64),
+            (4, 64),
+            (5, -64),
+            (6, 128),
+            (7, -128),
+            (8, 128),
+        ] {
             engine
                 .observe_snapshot(
                     pad_snapshot(neutral, None, Some((x, 0))),
@@ -2206,12 +2731,23 @@ mod tests {
                 )
                 .unwrap();
         }
-        assert_eq!(sink.events, ["move:1:0"]);
+        assert!(sink.events.is_empty());
+
+        for (time_ms, x) in [(9, 192), (10, 384), (11, 448)] {
+            engine
+                .observe_snapshot(
+                    pad_snapshot(neutral, None, Some((x, 0))),
+                    Duration::from_millis(time_ms),
+                    &mut sink,
+                )
+                .unwrap();
+        }
+        assert_eq!(sink.events, ["move:3:0", "move:3:0"]);
 
         engine
             .observe_snapshot(
                 pad_snapshot(neutral, None, Some((-32_700, 0))),
-                Duration::from_millis(5),
+                Duration::from_millis(12),
                 &mut sink,
             )
             .unwrap();
@@ -2219,7 +2755,7 @@ mod tests {
             .observe_snapshot(
                 DesktopInputSnapshot {
                     right_pad: PadSample {
-                        x: -32_636,
+                        x: -32_508,
                         pressure: i16::MAX,
                         touched: true,
                         pressed: true,
@@ -2227,11 +2763,11 @@ mod tests {
                     },
                     ..pad_snapshot(neutral, None, None)
                 },
-                Duration::from_millis(6),
+                Duration::from_millis(13),
                 &mut sink,
             )
             .unwrap();
-        assert_eq!(sink.events, ["move:1:0", "move:1:0"]);
+        assert_eq!(sink.events, ["move:3:0", "move:3:0", "move:3:0"]);
     }
 
     #[test]
