@@ -13,6 +13,7 @@ bridge-output = { path = "../bridge-output" }
 controller-mapper = { path = "../controller-mapper" }
 desktop-bindings = { path = "../desktop-bindings" }
 gamepad-state = { path = "../gamepad-state" }
+profile-picker = { path = "../profile-picker" }
 recording = { path = "../recording" }
 serde_json.workspace = true
 steam-controller-device = { path = "../steam-controller-device" }

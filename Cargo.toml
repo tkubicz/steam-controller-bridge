@@ -8,6 +8,7 @@ members = [
     "crates/bridge-runtime",
     "crates/controller-mapper",
     "crates/desktop-bindings",
+    "crates/profile-picker",
     "crates/recording",
     "crates/steam-controller-device",
     "crates/steam-controller-protocol",
@@ -48,6 +49,7 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 objc2-io-kit = { version = "0.3.2", default-features = false, features = ["std", "hidsystem"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
+    "NSApplication",
     "NSButton",
     "NSControl",
     "NSImage",
@@ -56,6 +58,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSStatusBarButton",
     "NSStatusItem",
     "NSView",
+    "NSWindow",
 ] }
 
 [profile.release]

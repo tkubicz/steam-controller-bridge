@@ -27,6 +27,11 @@ use desktop_bindings::{
     bindable_mask, BindingEngine, BindingProfile, DesktopInputSink, DesktopInputSnapshot,
     PadFeedbackRequest, PadSample,
 };
+use gamepad_state::OutputSuppression;
+use profile_picker::{Picker, PickerEvents, PickerInput};
+// Frontends drive the wheel and render it, so its vocabulary is part of the
+// runtime's public surface.
+pub use profile_picker::{PickerConfig, PickerEvent, PickerRoster};
 use recording::{
     RecordingError, RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED,
     KIND_DEVICE_DISCONNECTED,
@@ -40,7 +45,7 @@ use steam_controller_device::{
 // Frontends render status without depending on the device crate directly.
 pub use steam_controller_device::masked_serial as mask_serial_for_display;
 use steam_controller_protocol::{
-    ConnectionState, DecodedReport, PadHapticGain, PadHapticSide, SteamButton,
+    ConnectionState, DecodedReport, PadHapticGain, PadHapticSide, SteamButton, SteamButtons,
     SteamControllerDecoder, EXTENDED_INPUT_REPORT_ID, EXTENDED_INPUT_REPORT_SIZE, INPUT_REPORT_ID,
     INPUT_REPORT_SIZE,
 };
@@ -149,6 +154,13 @@ pub struct RuntimeConfig {
     pub puck_dock_action: PuckDockAction,
     /// Optional desktop-input profile. `None` keeps injection completely disabled.
     pub binding_profile: Option<BindingProfile>,
+    /// Optional in-game profile wheel. `None` leaves Quick Access alone entirely.
+    pub profile_picker: Option<PickerConfig>,
+    /// How many profiles the wheel can choose between, and which is active.
+    ///
+    /// The runtime never learns their names: it reports the chosen index and
+    /// the frontend, which owns the profile store, resolves it.
+    pub picker_roster: PickerRoster,
 }
 
 impl Default for RuntimeConfig {
@@ -166,6 +178,8 @@ impl Default for RuntimeConfig {
             idle_shutdown_timeout: Some(DEFAULT_IDLE_SHUTDOWN_TIMEOUT),
             puck_dock_action: PuckDockAction::LeaveOn,
             binding_profile: None,
+            profile_picker: None,
+            picker_roster: PickerRoster::new(0, None),
         }
     }
 }
@@ -267,6 +281,17 @@ pub struct DesktopBindingsStatus {
     pub last_error: Option<String>,
 }
 
+/// What the in-game profile wheel is doing right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProfilePickerStatus {
+    /// Whether a hold on Quick Access can open the wheel at all.
+    pub enabled: bool,
+    /// Whether the wheel is on screen and consuming controls.
+    pub open: bool,
+    /// Profiles the wheel can currently choose between.
+    pub roster_len: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AutomaticShutdownPhase {
     #[default]
@@ -327,6 +352,7 @@ pub struct BridgeStatus {
     pub lizard: LizardStatus,
     pub haptics: HapticsStatus,
     pub bindings: DesktopBindingsStatus,
+    pub profile_picker: ProfilePickerStatus,
     pub automatic_shutdown: AutomaticShutdownStatus,
     pub bridge_metrics: BridgeMetrics,
     pub output_diagnostics: OutputDiagnostics,
@@ -347,6 +373,7 @@ impl Default for BridgeStatus {
             lizard: LizardStatus::default(),
             haptics: HapticsStatus::default(),
             bindings: DesktopBindingsStatus::default(),
+            profile_picker: ProfilePickerStatus::default(),
             automatic_shutdown: AutomaticShutdownStatus::default(),
             bridge_metrics: BridgeMetrics::default(),
             output_diagnostics: OutputDiagnostics::default(),
@@ -376,13 +403,32 @@ enum RuntimeCommand {
     SetPuckDockAction(PuckDockAction, CommandAck),
     SetBindingProfile(Box<Option<BindingProfile>>, CommandAck),
     EnableDesktopBindings(CommandAck),
+    SetPickerConfig(Option<PickerConfig>, CommandAck),
+    SetPickerRoster(PickerRoster, CommandAck),
 }
+
+/// Where picker events go. Called on the runtime thread, so it must not block.
+pub type PickerEventSink = Box<dyn Fn(PickerEvent) + Send>;
 
 pub struct BridgeRuntime;
 
 impl BridgeRuntime {
     #[must_use]
     pub fn spawn(config: RuntimeConfig) -> BridgeHandle {
+        Self::spawn_with_picker(config, Box::new(|_| {}))
+    }
+
+    /// Spawns the runtime and streams profile-wheel events to `picker_events`.
+    ///
+    /// The sink runs on the runtime thread between controller reports, so it
+    /// must return promptly; hand the event to a channel and wake the UI rather
+    /// than doing work inside it. The sink is separate from [`RuntimeConfig`]
+    /// because that stays plain, cloneable data.
+    #[must_use]
+    pub fn spawn_with_picker(
+        config: RuntimeConfig,
+        picker_events: PickerEventSink,
+    ) -> BridgeHandle {
         let status = Arc::new(Mutex::new(BridgeStatus {
             state: RuntimeState::Discovering,
             detail: "Starting bridge runtime".to_owned(),
@@ -393,12 +439,14 @@ impl BridgeRuntime {
                 ..AutomaticShutdownStatus::default()
             },
             bindings: binding_status_for_profile(config.binding_profile.as_ref()),
+            profile_picker: picker_status(&config, false),
             ..BridgeStatus::default()
         }));
         let worker_status = Arc::clone(&status);
         let (command_sender, command_receiver) = mpsc::channel();
         let join = thread::spawn(move || {
-            let mut supervisor = Supervisor::new(config, worker_status, command_receiver);
+            let mut supervisor =
+                Supervisor::new(config, worker_status, command_receiver, picker_events);
             supervisor.run();
         });
         BridgeHandle {
@@ -406,6 +454,14 @@ impl BridgeRuntime {
             status,
             join: Mutex::new(Some(join)),
         }
+    }
+}
+
+fn picker_status(config: &RuntimeConfig, open: bool) -> ProfilePickerStatus {
+    ProfilePickerStatus {
+        enabled: config.profile_picker.is_some(),
+        open,
+        roster_len: config.picker_roster.len,
     }
 }
 
@@ -468,6 +524,44 @@ impl BridgeHandle {
     /// Returns an error if the runtime thread has stopped.
     pub fn request_enable_desktop_bindings(&self) -> Result<(), RuntimeError> {
         self.request(RuntimeCommand::EnableDesktopBindings)
+    }
+
+    /// Enables, reconfigures, or disables the in-game profile wheel.
+    ///
+    /// `None` disables it and hands Quick Access back to the desktop bindings.
+    /// An open wheel is closed, so the caller should hide the overlay too.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has stopped.
+    pub fn request_set_picker_config(
+        &self,
+        config: Option<PickerConfig>,
+    ) -> Result<(), RuntimeError> {
+        self.request(|ack| RuntimeCommand::SetPickerConfig(config, ack))
+    }
+
+    /// Tells the wheel how many profiles there are and which one is active.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has stopped.
+    pub fn request_set_picker_roster(&self, roster: PickerRoster) -> Result<(), RuntimeError> {
+        self.request(|ack| RuntimeCommand::SetPickerRoster(roster, ack))
+    }
+
+    /// Updates the profile wheel and waits until the runtime has accepted it.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has stopped.
+    pub fn set_picker_config(&self, config: Option<PickerConfig>) -> Result<(), RuntimeError> {
+        self.command(|ack| RuntimeCommand::SetPickerConfig(config, ack))
+    }
+
+    /// Updates the wheel's roster and waits until the runtime has accepted it.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has stopped.
+    pub fn set_picker_roster(&self, roster: PickerRoster) -> Result<(), RuntimeError> {
+        self.command(|ack| RuntimeCommand::SetPickerRoster(roster, ack))
     }
 
     /// Requests an idempotent runtime start and waits until the request is accepted.
@@ -773,6 +867,64 @@ fn binding_status_for_profile(profile: Option<&BindingProfile>) -> DesktopBindin
     }
 }
 
+/// The profile wheel as the active loop sees it.
+///
+/// Wraps the pure state machine so the loop can ask one object every question
+/// it has: what to hide from the game, what to hide from the desktop bindings,
+/// and what the user just chose. A `None` picker is the feature switched off,
+/// and every method then behaves as if the wheel does not exist.
+struct PickerRuntime {
+    picker: Option<Picker>,
+}
+
+impl PickerRuntime {
+    fn new(config: Option<PickerConfig>) -> Self {
+        Self {
+            picker: config.map(Picker::new),
+        }
+    }
+
+    /// Replaces the configuration. Returns whether an open wheel was closed,
+    /// which the caller must answer by clearing suppression and the overlay.
+    fn set_config(&mut self, config: Option<PickerConfig>) -> bool {
+        let was_open = self.is_open();
+        self.picker = config.map(Picker::new);
+        was_open
+    }
+
+    fn is_open(&self) -> bool {
+        self.picker.as_ref().is_some_and(Picker::is_open)
+    }
+
+    fn suppression(&self) -> Option<OutputSuppression> {
+        self.picker.as_ref().and_then(Picker::suppression)
+    }
+
+    fn mask_trigger(&self, buttons: SteamButtons) -> SteamButtons {
+        self.picker
+            .as_ref()
+            .map_or(buttons, |picker| picker.mask_trigger(buttons))
+    }
+
+    fn observe(
+        &mut self,
+        now: Duration,
+        input: &PickerInput,
+        roster: PickerRoster,
+    ) -> PickerEvents {
+        self.picker
+            .as_mut()
+            .map_or_else(PickerEvents::default, |picker| {
+                picker.update(now, input, roster)
+            })
+    }
+
+    /// Forces the wheel shut. Returns whether it had anything to close.
+    fn close(&mut self) -> bool {
+        self.picker.as_mut().is_some_and(Picker::close)
+    }
+}
+
 struct DesktopBindingsRuntime {
     engine: Option<BindingEngine>,
     sink: Option<Box<dyn DesktopInputSink>>,
@@ -998,6 +1150,7 @@ struct Supervisor {
     indexed_controller_discovery: IndexedControllerDiscoveryState,
     automatic_shutdown: AutomaticShutdownRuntime,
     controller_cooldown: Option<ControllerCooldown>,
+    picker_events: PickerEventSink,
 }
 
 impl Supervisor {
@@ -1005,9 +1158,11 @@ impl Supervisor {
         config: RuntimeConfig,
         status: Arc<Mutex<BridgeStatus>>,
         commands: Receiver<RuntimeCommand>,
+        picker_events: PickerEventSink,
     ) -> Self {
         let automatic_shutdown = AutomaticShutdownRuntime::new(&config);
         Self {
+            picker_events,
             config,
             status,
             commands,
@@ -1526,6 +1681,7 @@ impl Supervisor {
         let mut pending_automatic_shutdown = None;
         let mut bindings = DesktopBindingsRuntime::new(self.config.binding_profile.clone());
         let _ = bindings.enable();
+        let mut picker = PickerRuntime::new(self.config.profile_picker);
         engine.connected();
         self.automatic_shutdown.phase = automatic_shutdown_phase(&self.config);
         self.automatic_shutdown.trigger = None;
@@ -1541,6 +1697,7 @@ impl Supervisor {
             status.lizard = worker.lizard_diagnostics();
             status.haptics = worker.haptics_diagnostics();
             status.bindings = bindings.status();
+            status.profile_picker = picker_status(&self.config, false);
             status.automatic_shutdown = automatic_status;
         });
         eprintln!(
@@ -1565,12 +1722,16 @@ impl Supervisor {
                 started.elapsed(),
                 &mut idle_activity,
                 &mut bindings,
+                &mut picker,
+                &mut engine,
+                &mut output,
                 &worker,
             ) {
                 break command_exit;
             }
             if let Some(error) = worker.take_failure() {
                 bindings.disconnect();
+                self.dismiss_picker(&mut picker);
                 let _ = engine.shutdown(&mut *output.output);
                 worker.shutdown()?;
                 self.clear_controller_status();
@@ -1615,7 +1776,40 @@ impl Supervisor {
                     Ok(ReportEffect::ControllerState {
                         meaningful_activity,
                         desktop_input,
+                        picker_input,
                     }) => {
+                        let now = started.elapsed();
+                        let was_open = picker.is_open();
+                        let events = picker.observe(now, &picker_input, self.config.picker_roster);
+                        let tapped = events
+                            .iter()
+                            .any(|event| matches!(event, PickerEvent::TriggerTapped));
+                        for event in events {
+                            self.emit_picker_event(event);
+                        }
+                        if picker.is_open() != was_open {
+                            engine.set_output_suppression(picker.suppression());
+                            let picker_status = picker_status(&self.config, picker.is_open());
+                            self.update_status(|status| status.profile_picker = picker_status);
+                        }
+                        if tapped {
+                            // The hold swallowed the press to keep a Quick
+                            // Access binding from firing. It turned out to be
+                            // an ordinary press, so deliver it now as a tap:
+                            // this synthesizes the down edge, and the real
+                            // snapshot below is already the matching up edge.
+                            let _ = bindings.observe(
+                                DesktopInputSnapshot {
+                                    buttons: profile_picker::with_trigger(desktop_input.buttons),
+                                    ..desktop_input
+                                },
+                                now,
+                            );
+                        }
+                        let desktop_input = DesktopInputSnapshot {
+                            buttons: picker.mask_trigger(desktop_input.buttons),
+                            ..desktop_input
+                        };
                         let feedback = bindings.observe(desktop_input, started.elapsed());
                         if bindings.take_discard_pending_feedback() {
                             worker.clear_pad_feedback();
@@ -1810,6 +2004,7 @@ impl Supervisor {
                     status.lizard = worker.lizard_diagnostics();
                     status.haptics = worker.haptics_diagnostics();
                     status.bindings = bindings.status();
+                    status.profile_picker = picker_status(&self.config, picker.is_open());
                     status.source.active =
                         controller_state_seen && controller_age < ACTIVE_SLOT_TIMEOUT;
                     status.controller.connected =
@@ -1824,6 +2019,7 @@ impl Supervisor {
 
         self.transition(RuntimeState::Stopping, "Neutralizing output", None);
         bindings.disconnect();
+        self.dismiss_picker(&mut picker);
         let neutral_result = engine.shutdown(&mut *output.output);
         let worker_result = worker.shutdown();
         idle_activity.pause();
@@ -1940,14 +2136,33 @@ impl Supervisor {
                 self.update_status(|status| status.bindings = binding_status);
                 let _ = ack.send(result);
             }
+            RuntimeCommand::SetPickerConfig(config, ack) => {
+                self.config.profile_picker = config.map(PickerConfig::sanitized);
+                let picker_status = picker_status(&self.config, false);
+                self.update_status(|status| status.profile_picker = picker_status);
+                let _ = ack.send(Ok(()));
+            }
+            RuntimeCommand::SetPickerRoster(roster, ack) => {
+                self.config.picker_roster = roster;
+                let picker_status = picker_status(&self.config, false);
+                self.update_status(|status| status.profile_picker = picker_status);
+                let _ = ack.send(Ok(()));
+            }
         }
     }
 
+    // Commands act on the whole active session, and bundling its parts into a
+    // struct only to unpack them again here would hide which ones each command
+    // actually touches.
+    #[allow(clippy::too_many_arguments)]
     fn service_active_commands(
         &mut self,
         now: Duration,
         idle_activity: &mut IdleActivityTracker,
         bindings: &mut DesktopBindingsRuntime,
+        picker: &mut PickerRuntime,
+        engine: &mut BridgeEngine,
+        output: &mut OutputSession,
         worker: &HidWorker,
     ) -> Option<ActiveExit> {
         while let Ok(command) = self.commands.try_recv() {
@@ -1987,6 +2202,7 @@ impl Supervisor {
                     let _ = ack.send(Ok(()));
                 }
                 RuntimeCommand::SetBindingProfile(profile, ack) => {
+                    neutralize_before_desktop_work(engine, output);
                     worker.clear_pad_feedback();
                     let profile = *profile;
                     let result = bindings.replace_profile(profile.clone());
@@ -1996,14 +2212,51 @@ impl Supervisor {
                     let _ = ack.send(result);
                 }
                 RuntimeCommand::EnableDesktopBindings(ack) => {
+                    neutralize_before_desktop_work(engine, output);
                     let result = bindings.enable();
                     let binding_status = bindings.status();
                     self.update_status(|status| status.bindings = binding_status);
                     let _ = ack.send(result);
                 }
+                RuntimeCommand::SetPickerConfig(config, ack) => {
+                    self.config.profile_picker = config.map(PickerConfig::sanitized);
+                    // A reconfigured wheel is a closed wheel, so the game gets
+                    // its controls back and the frontend hides the overlay.
+                    if picker.set_config(self.config.profile_picker) {
+                        engine.set_output_suppression(None);
+                        self.emit_picker_event(PickerEvent::Dismissed);
+                    }
+                    let picker_status = picker_status(&self.config, false);
+                    self.update_status(|status| status.profile_picker = picker_status);
+                    eprintln!(
+                        "level=info event=profile_picker_configured enabled={}",
+                        self.config.profile_picker.is_some()
+                    );
+                    let _ = ack.send(Ok(()));
+                }
+                RuntimeCommand::SetPickerRoster(roster, ack) => {
+                    self.config.picker_roster = roster;
+                    let picker_status = picker_status(&self.config, picker.is_open());
+                    self.update_status(|status| status.profile_picker = picker_status);
+                    let _ = ack.send(Ok(()));
+                }
             }
         }
         None
+    }
+
+    fn emit_picker_event(&self, event: PickerEvent) {
+        (self.picker_events)(event);
+    }
+
+    /// Closes the wheel and tells the frontend, for a controller that went away
+    /// or a session that is ending. Suppression dies with the engine.
+    fn dismiss_picker(&self, picker: &mut PickerRuntime) {
+        if picker.close() {
+            self.emit_picker_event(PickerEvent::Dismissed);
+            let picker_status = picker_status(&self.config, false);
+            self.update_status(|status| status.profile_picker = picker_status);
+        }
     }
 
     fn transition(&self, state: RuntimeState, detail: &str, error: Option<&str>) {
@@ -2074,6 +2327,7 @@ impl Supervisor {
             || status.lizard != previous.lizard
             || status.haptics != previous.haptics
             || status.bindings != previous.bindings
+            || status.profile_picker != previous.profile_picker
             || status.automatic_shutdown != previous.automatic_shutdown
             || status.bridge_metrics != previous.bridge_metrics
             || status.output_diagnostics != previous.output_diagnostics
@@ -2437,6 +2691,27 @@ struct OutputSession {
     xiao: Option<SerialDeviceInfo>,
 }
 
+/// Parks the gamepad output at neutral before a slow desktop-input operation.
+///
+/// Building or dropping the desktop-input sink is a synchronous window-server
+/// operation, and it runs on the thread that also feeds the XIAO. It can easily
+/// outlast the firmware's 100 ms controller-data watchdog, and the host has
+/// nothing new to send while it is blocked, so the device faults and flashes
+/// red until traffic resumes -- with nothing logged, because no write ever
+/// failed. Shortening the operation is not something this side controls.
+///
+/// Sending neutral first makes the length irrelevant: firmware disarms that
+/// watchdog for a neutral report, so no stall can fault it. The next controller
+/// report restores the real state, and `reset` keeps the unchanged-output
+/// dedupe consistent so that restore is not skipped.
+fn neutralize_before_desktop_work(engine: &mut BridgeEngine, output: &mut OutputSession) {
+    if let Err(error) = engine.reset(&mut *output.output) {
+        // Worth knowing about, but not worth failing the command over: the
+        // caller's own error handling covers a genuinely dead link.
+        eprintln!("level=warn event=neutral_before_desktop_work_failed error={error:?}");
+    }
+}
+
 fn service_waiting_output(output: Option<&mut OutputSession>) -> bool {
     output.is_some_and(|output| match output.output.service() {
         Ok(()) => {
@@ -2583,6 +2858,7 @@ enum ReportEffect {
     ControllerState {
         meaningful_activity: bool,
         desktop_input: DesktopInputSnapshot,
+        picker_input: PickerInput,
     },
     Connected,
     Battery {
@@ -2639,6 +2915,11 @@ fn process_report(
                         touched: source.right_pad_touched,
                         pressed: source.right_pad_pressed,
                     },
+                },
+                picker_input: PickerInput {
+                    buttons: source.buttons,
+                    left_stick: (source.left_stick_x, source.left_stick_y),
+                    right_stick: (source.right_stick_x, source.right_stick_y),
                 },
             })
         }
@@ -4193,6 +4474,348 @@ mod tests {
 
     fn desktop_snapshot(buttons: steam_controller_protocol::SteamButtons) -> DesktopInputSnapshot {
         DesktopInputSnapshot::buttons_only(buttons)
+    }
+
+    /// Replays the glue `run_active` puts between a report and the profile
+    /// wheel, so these tests cover the wiring and not just the state machine.
+    struct PickerHarness {
+        picker: PickerRuntime,
+        bindings: DesktopBindingsRuntime,
+        engine: BridgeEngine,
+        output: MockOutput,
+        idle: IdleActivityTracker,
+        started: Instant,
+        events: Vec<PickerEvent>,
+    }
+
+    impl PickerHarness {
+        fn new(profile: BindingProfile, sink: Box<dyn DesktopInputSink>) -> Self {
+            let mut engine =
+                BridgeEngine::new(BridgeConfig::default(), MapperConfig::default()).unwrap();
+            engine.connected();
+            Self {
+                picker: PickerRuntime::new(Some(PickerConfig::default())),
+                bindings: DesktopBindingsRuntime::with_sink(profile, sink),
+                engine,
+                output: MockOutput::default(),
+                idle: IdleActivityTracker::new(None),
+                started: Instant::now(),
+                events: Vec::new(),
+            }
+        }
+
+        fn feed(&mut self, now: Duration, report: &RawHidReport, roster: PickerRoster) {
+            let effect = process_report(
+                report,
+                &mut self.engine,
+                &mut self.output,
+                &mut None,
+                self.started,
+                &mut self.idle,
+            )
+            .unwrap();
+            let ReportEffect::ControllerState {
+                desktop_input,
+                picker_input,
+                ..
+            } = effect
+            else {
+                return;
+            };
+            let was_open = self.picker.is_open();
+            let events = self.picker.observe(now, &picker_input, roster);
+            let tapped = events
+                .iter()
+                .any(|event| matches!(event, PickerEvent::TriggerTapped));
+            self.events.extend(events);
+            if self.picker.is_open() != was_open {
+                self.engine
+                    .set_output_suppression(self.picker.suppression());
+            }
+            if tapped {
+                let _ = self.bindings.observe(
+                    DesktopInputSnapshot {
+                        buttons: profile_picker::with_trigger(desktop_input.buttons),
+                        ..desktop_input
+                    },
+                    now,
+                );
+            }
+            let _ = self.bindings.observe(
+                DesktopInputSnapshot {
+                    buttons: self.picker.mask_trigger(desktop_input.buttons),
+                    ..desktop_input
+                },
+                now,
+            );
+        }
+    }
+
+    fn quick_access_profile() -> BindingProfile {
+        let mut profile = BindingProfile::default();
+        profile.bindings.quick_access = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F5,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+        profile
+    }
+
+    fn picker_report(
+        sequence: u8,
+        buttons: &[SteamButton],
+        right_stick: (i16, i16),
+    ) -> RawHidReport {
+        let mut data = vec![0; INPUT_REPORT_SIZE];
+        data[0] = INPUT_REPORT_ID;
+        data[1] = sequence;
+        let mask = buttons
+            .iter()
+            .fold(0_u32, |mask, button| mask | 1 << *button as u8);
+        data[2..6].copy_from_slice(&mask.to_le_bytes());
+        data[14..16].copy_from_slice(&right_stick.0.to_le_bytes());
+        data[16..18].copy_from_slice(&right_stick.1.to_le_bytes());
+        RawHidReport {
+            timestamp: Duration::ZERO,
+            report_id: INPUT_REPORT_ID,
+            data,
+            source_device_id: "picker-test".to_owned(),
+            transport: "USB".to_owned(),
+            dropped_reports: 0,
+        }
+    }
+
+    const TEST_ROSTER: PickerRoster = PickerRoster {
+        len: 4,
+        active: Some(0),
+    };
+
+    #[derive(Clone, Default)]
+    struct SharedOutput(Arc<Mutex<Vec<gamepad_state::GamepadState>>>);
+
+    impl GamepadOutput for SharedOutput {
+        fn send_state(
+            &mut self,
+            state: &gamepad_state::GamepadState,
+        ) -> Result<(), bridge_output::OutputError> {
+            self.0.lock().unwrap().push(*state);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_slow_desktop_operation_is_preceded_by_neutral_on_the_wire() {
+        // Regression: building or dropping the desktop-input sink blocks this
+        // thread for longer than the firmware's 100 ms controller-data
+        // watchdog, and the device faults and flashes red with nothing logged,
+        // because no write ever fails. Neutral disarms that watchdog, so the
+        // length of the stall stops mattering.
+        let states = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OutputSession {
+            output: Box::new(SharedOutput(Arc::clone(&states))),
+            xiao: None,
+        };
+        let mut engine =
+            BridgeEngine::new(BridgeConfig::default(), MapperConfig::default()).unwrap();
+        engine.connected();
+        let mut idle = IdleActivityTracker::new(None);
+        let started = Instant::now();
+        let held = [SteamButton::A];
+
+        let report = picker_report(1, &held, (0, 32_767));
+        process_report(
+            &report,
+            &mut engine,
+            &mut *session.output,
+            &mut None,
+            started,
+            &mut idle,
+        )
+        .unwrap();
+        let active = *states.lock().unwrap().last().unwrap();
+        assert_ne!(active, gamepad_state::GamepadState::NEUTRAL);
+
+        neutralize_before_desktop_work(&mut engine, &mut session);
+        assert_eq!(
+            states.lock().unwrap().last(),
+            Some(&gamepad_state::GamepadState::NEUTRAL),
+            "the device must be parked before the thread blocks"
+        );
+
+        // The controller has not moved, so the unchanged-output dedupe must
+        // still know the wire is at neutral and resend the real state.
+        process_report(
+            &picker_report(2, &held, (0, 32_767)),
+            &mut engine,
+            &mut *session.output,
+            &mut None,
+            started,
+            &mut idle,
+        )
+        .unwrap();
+        assert_eq!(
+            states.lock().unwrap().last(),
+            Some(&active),
+            "the real state must come back after the operation"
+        );
+    }
+
+    #[test]
+    fn holding_quick_access_opens_the_wheel_without_firing_its_binding() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut harness = PickerHarness::new(
+            quick_access_profile(),
+            Box::new(SharedDesktopSink(Arc::clone(&keys))),
+        );
+        harness.feed(Duration::ZERO, &picker_report(1, &[], (0, 0)), TEST_ROSTER);
+        harness.feed(
+            Duration::from_millis(10),
+            &picker_report(2, &[SteamButton::QuickAccess], (0, 0)),
+            TEST_ROSTER,
+        );
+        // Arming already hides the press, so the F5 chord never fires.
+        assert!(keys.lock().unwrap().is_empty());
+
+        harness.feed(
+            Duration::from_millis(2_010),
+            &picker_report(3, &[SteamButton::QuickAccess], (0, 0)),
+            TEST_ROSTER,
+        );
+        assert_eq!(
+            harness.events,
+            vec![PickerEvent::Opened {
+                selected: 0,
+                page: 0
+            }]
+        );
+        assert!(keys.lock().unwrap().is_empty());
+        assert!(harness.engine.output_suppression().is_some());
+    }
+
+    #[test]
+    fn an_open_wheel_hides_its_controls_from_the_game_and_gives_them_back() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut harness = PickerHarness::new(
+            quick_access_profile(),
+            Box::new(SharedDesktopSink(Arc::clone(&keys))),
+        );
+        let held = [SteamButton::QuickAccess];
+        harness.feed(Duration::ZERO, &picker_report(1, &[], (0, 0)), TEST_ROSTER);
+        harness.feed(
+            Duration::from_millis(10),
+            &picker_report(2, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        harness.feed(
+            Duration::from_millis(2_010),
+            &picker_report(3, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        assert!(harness.picker.is_open());
+
+        // Steering the wheel must not also steer the game.
+        harness.feed(
+            Duration::from_millis(2_100),
+            &picker_report(4, &held, (0, 32_767)),
+            TEST_ROSTER,
+        );
+        let hidden = *harness.output.states.last().unwrap();
+        assert_eq!((hidden.right_x, hidden.right_y), (0.0, 0.0));
+        assert!(!hidden.buttons.contains(gamepad_state::Button::Extra3));
+
+        // A commits, the wheel closes, and the game gets everything back.
+        harness.feed(
+            Duration::from_millis(2_200),
+            &picker_report(5, &[SteamButton::A], (0, 32_767)),
+            TEST_ROSTER,
+        );
+        assert!(!harness.picker.is_open());
+        assert!(harness.engine.output_suppression().is_none());
+        assert_eq!(
+            harness.events.last(),
+            Some(&PickerEvent::Commit { index: 0 })
+        );
+
+        harness.feed(
+            Duration::from_millis(2_300),
+            &picker_report(6, &[], (0, 32_767)),
+            TEST_ROSTER,
+        );
+        let restored = *harness.output.states.last().unwrap();
+        assert!(restored.right_y > 0.0);
+    }
+
+    #[test]
+    fn a_quick_access_tap_still_fires_its_desktop_binding() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut harness = PickerHarness::new(
+            quick_access_profile(),
+            Box::new(SharedDesktopSink(Arc::clone(&keys))),
+        );
+        harness.feed(Duration::ZERO, &picker_report(1, &[], (0, 0)), TEST_ROSTER);
+        harness.feed(
+            Duration::from_millis(10),
+            &picker_report(2, &[SteamButton::QuickAccess], (0, 0)),
+            TEST_ROSTER,
+        );
+        harness.feed(
+            Duration::from_millis(500),
+            &picker_report(3, &[], (0, 0)),
+            TEST_ROSTER,
+        );
+        assert_eq!(harness.events, vec![PickerEvent::TriggerTapped]);
+        assert_eq!(
+            *keys.lock().unwrap(),
+            ["key:F5:true".to_owned(), "key:F5:false".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_disabled_wheel_leaves_quick_access_entirely_alone() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut harness = PickerHarness::new(
+            quick_access_profile(),
+            Box::new(SharedDesktopSink(Arc::clone(&keys))),
+        );
+        harness.picker = PickerRuntime::new(None);
+        harness.feed(Duration::ZERO, &picker_report(1, &[], (0, 0)), TEST_ROSTER);
+        harness.feed(
+            Duration::from_millis(10),
+            &picker_report(2, &[SteamButton::QuickAccess], (0, 0)),
+            TEST_ROSTER,
+        );
+        // The binding fires on the press edge, exactly as before the wheel existed.
+        assert_eq!(*keys.lock().unwrap(), ["key:F5:true".to_owned()]);
+        harness.feed(
+            Duration::from_secs(5),
+            &picker_report(3, &[SteamButton::QuickAccess], (0, 0)),
+            TEST_ROSTER,
+        );
+        assert!(harness.events.is_empty());
+        assert!(harness.engine.output_suppression().is_none());
+    }
+
+    #[test]
+    fn closing_the_wheel_for_a_lost_controller_reports_it_once() {
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut harness = PickerHarness::new(
+            quick_access_profile(),
+            Box::new(SharedDesktopSink(Arc::clone(&keys))),
+        );
+        let held = [SteamButton::QuickAccess];
+        harness.feed(Duration::ZERO, &picker_report(1, &[], (0, 0)), TEST_ROSTER);
+        harness.feed(
+            Duration::from_millis(10),
+            &picker_report(2, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        harness.feed(
+            Duration::from_millis(2_010),
+            &picker_report(3, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        assert!(harness.picker.is_open());
+        assert!(harness.picker.close());
+        assert!(!harness.picker.close());
     }
 
     #[test]

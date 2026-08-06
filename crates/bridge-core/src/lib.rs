@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use bridge_output::{GamepadOutput, OutputError};
 use controller_mapper::{ControllerMapper, MapperConfig, MappingError};
-use gamepad_state::GamepadState;
+use gamepad_state::{GamepadState, OutputSuppression};
 use steam_controller_protocol::{
     DecodeError, DecodedReport, SteamControllerDecoder, SteamControllerState,
 };
@@ -126,6 +126,7 @@ pub struct BridgeEngine {
     consecutive_decode_failures: u32,
     connected_once: bool,
     neutralized: bool,
+    suppression: Option<OutputSuppression>,
 }
 
 impl BridgeEngine {
@@ -150,12 +151,28 @@ impl BridgeEngine {
             consecutive_decode_failures: 0,
             connected_once: false,
             neutralized: true,
+            suppression: None,
         })
     }
 
     #[must_use]
     pub const fn metrics(&self) -> BridgeMetrics {
         self.metrics
+    }
+
+    /// Hides controls a host feature has taken over from the gamepad output.
+    ///
+    /// A host overlay that steers with the sticks would otherwise drive the
+    /// game at the same time. Suppression is applied to the mapped state, so
+    /// the unchanged-output dedupe and the metrics see exactly what the game
+    /// sees. `None` restores full passthrough.
+    pub fn set_output_suppression(&mut self, suppression: Option<OutputSuppression>) {
+        self.suppression = suppression;
+    }
+
+    #[must_use]
+    pub const fn output_suppression(&self) -> Option<OutputSuppression> {
+        self.suppression
     }
     pub fn note_dropped_reports(&mut self, count: u64) {
         self.metrics.dropped_input_reports += count;
@@ -205,7 +222,10 @@ impl BridgeEngine {
                 self.last_input = Some(now);
                 self.neutralized = false;
                 let mapping_started = Instant::now();
-                let mapped = self.mapper.map(&source, 0.004);
+                let mut mapped = self.mapper.map(&source, 0.004);
+                if let Some(suppression) = self.suppression {
+                    suppression.apply(&mut mapped);
+                }
                 self.metrics.mapping_time_ns += mapping_started.elapsed().as_nanos();
                 let sent = if self.last_sent == Some(mapped) {
                     self.metrics.outputs_skipped_unchanged += 1;
@@ -307,8 +327,10 @@ impl Default for BridgeEngine {
 mod tests {
     use super::*;
     use bridge_output::MockOutput;
+    use gamepad_state::Button;
     use steam_controller_protocol::{
-        INPUT_REPORT_ID, INPUT_REPORT_SIZE, LIZARD_MOUSE_REPORT_ID, LIZARD_MOUSE_REPORT_SIZE,
+        SteamButton, INPUT_REPORT_ID, INPUT_REPORT_SIZE, LIZARD_MOUSE_REPORT_ID,
+        LIZARD_MOUSE_REPORT_SIZE,
     };
 
     fn report(sequence: u8, x: i16) -> Vec<u8> {
@@ -317,6 +339,89 @@ mod tests {
         bytes[1] = sequence;
         bytes[18..20].copy_from_slice(&x.to_le_bytes());
         bytes
+    }
+
+    /// A report that actually deflects the left stick, unlike `report`, which
+    /// writes the left pad and so never reaches the mapped axes.
+    fn stick_report(sequence: u8, stick_x: i16, buttons: &[SteamButton]) -> Vec<u8> {
+        let mut bytes = vec![0; INPUT_REPORT_SIZE];
+        bytes[0] = INPUT_REPORT_ID;
+        bytes[1] = sequence;
+        let mask = buttons
+            .iter()
+            .fold(0_u32, |mask, button| mask | 1 << *button as u8);
+        bytes[2..6].copy_from_slice(&mask.to_le_bytes());
+        bytes[10..12].copy_from_slice(&stick_x.to_le_bytes());
+        bytes
+    }
+
+    fn mapped_state(outcome: &ProcessOutcome) -> GamepadState {
+        match outcome {
+            ProcessOutcome::State { mapped, .. } => *mapped,
+            other => panic!("expected a controller state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn suppression_parks_the_output_at_exactly_neutral() {
+        let mut engine = BridgeEngine::default();
+        let mut output = MockOutput::default();
+        engine.connected();
+        let pressed = [SteamButton::A, SteamButton::X];
+
+        let outcome = engine
+            .process_report(
+                INPUT_REPORT_ID,
+                &stick_report(1, 10_000, &pressed),
+                Duration::ZERO,
+                &mut output,
+            )
+            .unwrap();
+        let passthrough = mapped_state(&outcome);
+        assert!(passthrough.left_x > 0.0);
+        assert!(passthrough.buttons.contains(Button::South));
+        assert!(passthrough.buttons.contains(Button::West));
+
+        engine.set_output_suppression(Some(OutputSuppression));
+
+        // The physical state is unchanged, but the suppressed view is not, so
+        // this must reach the game rather than being deduped away.
+        let outcome = engine
+            .process_report(
+                INPUT_REPORT_ID,
+                &stick_report(2, 10_000, &pressed),
+                Duration::from_millis(4),
+                &mut output,
+            )
+            .unwrap();
+        assert!(matches!(outcome, ProcessOutcome::State { sent: true, .. }));
+        let hidden = mapped_state(&outcome);
+        // Exactly neutral, so firmware disarms its controller-data watchdog and
+        // a host stall while the overlay is up cannot fault the device.
+        assert_eq!(hidden, GamepadState::NEUTRAL);
+        assert_eq!(output.states.last(), Some(&GamepadState::NEUTRAL));
+
+        // A suppressed run still dedupes; only the first frame is sent.
+        let outcome = engine
+            .process_report(
+                INPUT_REPORT_ID,
+                &stick_report(3, 10_000, &pressed),
+                Duration::from_millis(8),
+                &mut output,
+            )
+            .unwrap();
+        assert!(matches!(outcome, ProcessOutcome::State { sent: false, .. }));
+
+        engine.set_output_suppression(None);
+        let outcome = engine
+            .process_report(
+                INPUT_REPORT_ID,
+                &stick_report(4, 10_000, &pressed),
+                Duration::from_millis(12),
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(mapped_state(&outcome), passthrough);
     }
 
     #[test]

@@ -6,10 +6,21 @@ mod macos;
 // Its unit tests therefore run on macOS only.
 #[cfg(target_os = "macos")]
 mod model;
+#[cfg(all(target_os = "macos", feature = "overlay"))]
+mod overlay_host;
+#[cfg(target_os = "macos")]
+mod overlay_protocol;
+#[cfg(all(target_os = "macos", feature = "overlay"))]
+mod profile_overlay;
 
 #[cfg(target_os = "macos")]
 fn main() {
-    let editor = std::env::args().any(|argument| argument == "--bindings-editor");
+    let mut editor = false;
+    let mut overlay = false;
+    for argument in std::env::args() {
+        editor |= argument == "--bindings-editor";
+        overlay |= argument == overlay_protocol::OVERLAY_ARGUMENT;
+    }
     let result = if editor {
         #[cfg(feature = "editor")]
         {
@@ -18,6 +29,15 @@ fn main() {
         #[cfg(not(feature = "editor"))]
         {
             Err("this build has no bindings editor".to_owned())
+        }
+    } else if overlay {
+        #[cfg(feature = "overlay")]
+        {
+            profile_overlay::run()
+        }
+        #[cfg(not(feature = "overlay"))]
+        {
+            Err("this build has no profile overlay".to_owned())
         }
     } else {
         macos::run()

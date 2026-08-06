@@ -375,7 +375,33 @@ fn safety_status_changes(
     );
     haptics_status_changes(changes, previous, current);
     bindings_status_changes(changes, previous, current);
+    picker_status_changes(changes, previous, current);
     shutdown_status_changes(changes, previous, current);
+}
+
+fn picker_status_changes(
+    changes: &mut Vec<StatusLogChange>,
+    previous: &BridgeStatus,
+    current: &BridgeStatus,
+) {
+    push_change(
+        changes,
+        "profile_picker",
+        &previous.profile_picker.enabled,
+        &current.profile_picker.enabled,
+    );
+    push_change(
+        changes,
+        "profile_picker_open",
+        &previous.profile_picker.open,
+        &current.profile_picker.open,
+    );
+    push_change(
+        changes,
+        "profile_picker_roster",
+        &previous.profile_picker.roster_len,
+        &current.profile_picker.roster_len,
+    );
 }
 
 fn haptics_status_changes(
@@ -564,6 +590,7 @@ fn tracked_status_changed(previous: &BridgeStatus, current: &BridgeStatus) -> bo
         || previous.bindings.configured_binding_count != current.bindings.configured_binding_count
         || previous.bindings.failures != current.bindings.failures
         || previous.bindings.last_error != current.bindings.last_error
+        || previous.profile_picker != current.profile_picker
         || previous.automatic_shutdown.configured_timeout
             != current.automatic_shutdown.configured_timeout
         || previous.automatic_shutdown.puck_dock_action

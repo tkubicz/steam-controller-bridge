@@ -7,12 +7,14 @@ license.workspace = true
 publish = false
 
 [features]
-default = ["editor"]
+default = ["editor", "overlay"]
 editor = ["dep:eframe"]
+overlay = ["dep:eframe"]
 
 [dependencies]
 bridge-runtime = { path = "../../crates/bridge-runtime" }
 desktop-bindings = { path = "../../crates/desktop-bindings" }
+profile-picker = { path = "../../crates/profile-picker" }
 serde.workspace = true
 serde_json.workspace = true
 

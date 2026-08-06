@@ -1,0 +1,666 @@
+//! The in-game profile wheel, drawn by a second process of this binary.
+//!
+//! It renders what the runtime decided and nothing else: no keyboard, no
+//! mouse, no focus. That is what lets the window be click-through and
+//! non-activating, so it can sit over a game without the game noticing.
+
+use std::io::BufRead;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use eframe::egui;
+use objc2::rc::Retained;
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSApplication, NSPopUpMenuWindowLevel, NSWindow, NSWindowCollectionBehavior};
+use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+
+use crate::overlay_protocol::{OverlayEnvelope, OverlayMessage, OVERLAY_WINDOW_TITLE};
+
+/// Matches the bindings editor so the two windows read as one product.
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(84, 211, 224);
+const SURFACE: egui::Color32 = egui::Color32::from_rgb(29, 34, 42);
+const SURFACE_RAISED: egui::Color32 = egui::Color32::from_rgb(36, 42, 51);
+const MUTED_TEXT: egui::Color32 = egui::Color32::from_rgb(157, 166, 177);
+const TEXT: egui::Color32 = egui::Color32::from_rgb(232, 237, 243);
+const ON_ACCENT: egui::Color32 = egui::Color32::from_rgb(8, 28, 32);
+const SCRIM: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 130);
+
+const WHEEL_RADIUS: f32 = 210.0;
+const HUB_RADIUS: f32 = 84.0;
+const LABEL_RADIUS_FRACTION: f32 = 0.72;
+/// Angular gap between wedges, in radians, so the sectors read as separate.
+const WEDGE_GAP: f32 = 0.03;
+const ARC_STEPS: usize = 16;
+
+/// Fallback size until the first frame reports the real monitor.
+const INITIAL_SIZE: [f32; 2] = [1280.0, 800.0];
+
+#[derive(Debug, Clone, Default)]
+struct OverlayState {
+    names: Vec<String>,
+    active: Option<usize>,
+    sectors_per_page: usize,
+    /// `Some((selected, page))` while the wheel is up.
+    open: Option<(usize, usize)>,
+}
+
+impl OverlayState {
+    fn apply(&mut self, message: OverlayMessage) {
+        match message {
+            OverlayMessage::Roster {
+                names,
+                active,
+                sectors_per_page,
+            } => {
+                self.names = names;
+                self.active = active;
+                self.sectors_per_page = sectors_per_page.max(1);
+            }
+            OverlayMessage::Open { selected, page } | OverlayMessage::Select { selected, page } => {
+                self.open = Some((selected, page));
+            }
+            OverlayMessage::Close => self.open = None,
+        }
+    }
+
+    /// The profile indices on the given page, and where the selection sits.
+    fn page_entries(&self, page: usize) -> (&[String], usize) {
+        let per_page = self.sectors_per_page.max(1);
+        let start = (page * per_page).min(self.names.len());
+        let end = (start + per_page).min(self.names.len());
+        (&self.names[start..end], start)
+    }
+
+    fn page_count(&self) -> usize {
+        let per_page = self.sectors_per_page.max(1);
+        self.names.len().div_ceil(per_page).max(1)
+    }
+}
+
+/// Runs the overlay process until the parent's pipe closes.
+///
+/// # Errors
+/// Returns an error if the window cannot be created.
+pub fn run() -> Result<(), String> {
+    let state = Arc::new(Mutex::new(OverlayState::default()));
+    let options = eframe::NativeOptions {
+        // Without this the overlay becomes a regular foreground app: a Dock
+        // icon appears and the game loses focus the moment the wheel opens.
+        event_loop_builder: Some(Box::new(|builder| {
+            builder
+                .with_activation_policy(ActivationPolicy::Accessory)
+                .with_activate_ignoring_other_apps(false);
+        })),
+        viewport: egui::ViewportBuilder::default()
+            .with_title(OVERLAY_WINDOW_TITLE)
+            .with_inner_size(INITIAL_SIZE)
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_always_on_top()
+            .with_has_shadow(false)
+            .with_taskbar(false)
+            // The wheel is driven by the controller, so the window must never
+            // take focus or swallow a click meant for the game.
+            .with_active(false)
+            .with_mouse_passthrough(true)
+            // Stays hidden until the runtime says the wheel opened. Starting up
+            // early is what keeps the first hold from paying window-creation cost.
+            .with_visible(false),
+        ..eframe::NativeOptions::default()
+    };
+    let reader_state = Arc::clone(&state);
+    eframe::run_native(
+        OVERLAY_WINDOW_TITLE,
+        options,
+        Box::new(move |creation| {
+            spawn_stdin_reader(reader_state, creation.egui_ctx.clone());
+            Ok(Box::new(ProfileOverlay {
+                state,
+                presentation: Presentation::default(),
+                sized: false,
+                log_native_window: false,
+            }))
+        }),
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Reads the parent's commands on a background thread and wakes the UI.
+fn spawn_stdin_reader(state: Arc<Mutex<OverlayState>>, ctx: egui::Context) {
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() {
+                continue;
+            }
+            match OverlayEnvelope::from_line(&line) {
+                Ok(envelope) => {
+                    lock(&state).apply(envelope.message);
+                    ctx.request_repaint();
+                }
+                Err(error) => {
+                    // A message this build cannot read is survivable; the next
+                    // one may well be fine, so keep the wheel alive.
+                    eprintln!("level=warn event=overlay_message_rejected error={error:?}");
+                }
+            }
+        }
+        // The pipe closed, so the menu app is gone and this process has nothing
+        // left to display. Exit from this thread rather than asking the render
+        // loop to close: a window that is not currently being drawn would never
+        // run the frame that handles the request, and the overlay would outlive
+        // its parent with a window still on screen. There is nothing to flush.
+        eprintln!("level=info event=overlay_parent_closed action=exit");
+        let _ = &ctx;
+        std::process::exit(0);
+    });
+}
+
+fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    value
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What the window must be told this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct PresentationChange {
+    /// Order the window in. Happens exactly once in the process's life.
+    order_in: bool,
+    /// The wheel's new visibility, when it changed.
+    wheel: Option<bool>,
+}
+
+/// Decides how the window presents the wheel, without touching one.
+///
+/// The rule this encodes, and the reason it is a type of its own rather than a
+/// pair of bools inline: **the window is ordered in once and never ordered
+/// out.** A window that macOS has ordered out stops receiving redraws, and the
+/// overlay's only route to the main thread is a redraw -- so a hidden window
+/// can never be told to come back, and the wheel opens exactly once per process
+/// and never again. Visibility is therefore expressed as alpha on a window that
+/// stays ordered in.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Presentation {
+    ordered_in: bool,
+    wheel_visible: bool,
+}
+
+impl Presentation {
+    /// `sized` gates the first order-in so the window is never shown at the
+    /// placeholder size it was created with.
+    fn update(&mut self, open: bool, sized: bool) -> PresentationChange {
+        let mut change = PresentationChange::default();
+        if !self.ordered_in && sized {
+            self.ordered_in = true;
+            change.order_in = true;
+        }
+        if open != self.wheel_visible {
+            self.wheel_visible = open;
+            change.wheel = Some(open);
+        }
+        change
+    }
+}
+
+struct ProfileOverlay {
+    state: Arc<Mutex<OverlayState>>,
+    presentation: Presentation,
+    sized: bool,
+    /// Report the native window once, on the frame after the wheel is shown.
+    log_native_window: bool,
+}
+
+impl eframe::App for ProfileOverlay {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        // Fully transparent: everything visible is painted below.
+        [0.0, 0.0, 0.0, 0.0]
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        configure_native_window();
+        self.cover_the_screen(&ctx);
+
+        let state = lock(&self.state).clone();
+        let open = state.open.is_some();
+        let change = self.presentation.update(open, self.sized);
+        if let Some(wheel) = change.wheel {
+            set_wheel_alpha(wheel);
+            self.log_native_window = wheel;
+        }
+        if change.order_in {
+            // Alpha is already zero from `configure_native_window`, so this
+            // orders in a window that shows nothing.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        } else if self.log_native_window && open {
+            // Logged a frame late, once the alpha change has been applied.
+            // "The wheel never appeared" is this feature's whole failure mode,
+            // and these are the numbers that say whether the window is where it
+            // should be, so they belong in the diagnostics.
+            self.log_native_window = false;
+            log_native_window_state();
+        }
+        if !open {
+            // Painting nothing clears the previous wheel out of the surface, so
+            // a stale frame cannot survive behind the zeroed alpha.
+            return;
+        }
+        let screen = ui.max_rect();
+        paint_wheel(ui.painter(), screen, &state);
+    }
+}
+
+impl ProfileOverlay {
+    /// Grows the window to the whole monitor once its size is known.
+    ///
+    /// The size is not available before the first frame, so this cannot be part
+    /// of the initial `ViewportBuilder`.
+    fn cover_the_screen(&mut self, ctx: &egui::Context) {
+        if self.sized {
+            return;
+        }
+        let Some(monitor) = ctx.input(|input| input.viewport().monitor_size) else {
+            return;
+        };
+        if monitor.x <= 1.0 || monitor.y <= 1.0 {
+            return;
+        }
+        self.sized = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(0.0, 0.0)));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(monitor));
+    }
+}
+
+/// Lifts the window above a fullscreen game, using only safe `AppKit` calls.
+///
+/// `winit` exposes neither `NSWindowCollectionBehavior` nor a window level high
+/// enough, and building an `NSPanel` directly needs `unsafe`, which this
+/// workspace forbids. Creating the window through `winit` and then finding it
+/// by title in `NSApp.windows()` reaches the same result through safe API.
+/// Runs once; a failure leaves an overlay that still works on the current Space.
+fn configure_native_window() {
+    static CONFIGURED: OnceLock<()> = OnceLock::new();
+    if CONFIGURED.get().is_some() {
+        return;
+    }
+    // The window may not exist yet on the very first frame.
+    let Some(window) = native_window() else {
+        return;
+    };
+    let _ = CONFIGURED.set(());
+    window.setLevel(NSPopUpMenuWindowLevel);
+    window.setCollectionBehavior(
+        // `CanJoinAllSpaces` puts the wheel on whatever Space the game is on,
+        // and `FullScreenAuxiliary` lets it coexist with a fullscreen window
+        // instead of being hidden behind it.
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary
+            | NSWindowCollectionBehavior::Stationary
+            | NSWindowCollectionBehavior::IgnoresCycle,
+    );
+    window.setIgnoresMouseEvents(true);
+    window.setHasShadow(false);
+    // Ordered in later at zero alpha, so nothing is ever seen before the first
+    // wheel opens. See `Presentation` for why it is not simply kept hidden.
+    window.setAlphaValue(0.0);
+    eprintln!("level=info event=overlay_window_configured");
+}
+
+/// Shows or hides the wheel without ordering the window out.
+fn set_wheel_alpha(visible: bool) {
+    if let Some(window) = native_window() {
+        window.setAlphaValue(if visible { 1.0 } else { 0.0 });
+    }
+}
+
+/// Finds the overlay's own window among the application's windows.
+fn native_window() -> Option<Retained<NSWindow>> {
+    let mtm = MainThreadMarker::new()?;
+    NSApplication::sharedApplication(mtm)
+        .windows()
+        .iter()
+        .find(|window| window.title().to_string() == OVERLAY_WINDOW_TITLE)
+}
+
+/// Records where the wheel actually landed.
+///
+/// If a user reports that nothing appears, this line distinguishes the cases
+/// that look identical from the outside: a window that was never shown, one
+/// sized or positioned off-screen, one at too low a level, and one stranded on
+/// the wrong Space.
+fn log_native_window_state() {
+    let Some(window) = native_window() else {
+        eprintln!("level=warn event=overlay_window_missing");
+        return;
+    };
+    let frame = window.frame();
+    eprintln!(
+        "level=info event=overlay_window_shown visible={} on_active_space={} level={} \
+         origin={},{} size={}x{} collection_behavior={:#x}",
+        window.isVisible(),
+        window.isOnActiveSpace(),
+        window.level(),
+        frame.origin.x,
+        frame.origin.y,
+        frame.size.width,
+        frame.size.height,
+        window.collectionBehavior().0,
+    );
+}
+
+fn paint_wheel(painter: &egui::Painter, rect: egui::Rect, state: &OverlayState) {
+    let Some((selected, page)) = state.open else {
+        return;
+    };
+    painter.rect_filled(rect, 0.0, SCRIM);
+    let center = rect.center();
+    let (entries, offset) = state.page_entries(page);
+    if entries.is_empty() {
+        return;
+    }
+
+    let sectors = entries.len();
+    let selected = selected.min(sectors - 1);
+    for (index, name) in entries.iter().enumerate() {
+        let chosen = index == selected;
+        paint_wedge(painter, center, index, sectors, chosen);
+        paint_label(
+            painter,
+            center,
+            index,
+            sectors,
+            name,
+            chosen,
+            state.active == Some(offset + index),
+        );
+    }
+
+    // The hub covers the wedges' shared apex, turning the pie into a ring and
+    // leaving room to name what is about to be applied.
+    painter.circle_filled(center, HUB_RADIUS, SURFACE);
+    painter.text(
+        center - egui::vec2(0.0, 14.0),
+        egui::Align2::CENTER_CENTER,
+        entries[selected].as_str(),
+        egui::FontId::proportional(17.0),
+        TEXT,
+    );
+    painter.text(
+        center + egui::vec2(0.0, 10.0),
+        egui::Align2::CENTER_CENTER,
+        "A apply",
+        egui::FontId::proportional(12.0),
+        MUTED_TEXT,
+    );
+    painter.text(
+        center + egui::vec2(0.0, 26.0),
+        egui::Align2::CENTER_CENTER,
+        "B cancel",
+        egui::FontId::proportional(12.0),
+        MUTED_TEXT,
+    );
+
+    let pages = state.page_count();
+    if pages > 1 {
+        painter.text(
+            center + egui::vec2(0.0, WHEEL_RADIUS + 28.0),
+            egui::Align2::CENTER_CENTER,
+            format!("L1 / R1   page {} of {pages}", page + 1),
+            egui::FontId::proportional(13.0),
+            MUTED_TEXT,
+        );
+    }
+}
+
+fn paint_wedge(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    index: usize,
+    sectors: usize,
+    selected: bool,
+) {
+    let arc = std::f32::consts::TAU / sectors_as_f32(sectors);
+    let middle = arc * sectors_as_f32(index);
+    let (start, end) = (
+        middle - arc / 2.0 + WEDGE_GAP,
+        middle + arc / 2.0 - WEDGE_GAP,
+    );
+    let radius = if selected {
+        WHEEL_RADIUS + 10.0
+    } else {
+        WHEEL_RADIUS
+    };
+
+    // A pie wedge shares the centre, so it stays convex for any sector count of
+    // two or more and tessellates correctly. The hub hides the apex afterwards.
+    let mut points = Vec::with_capacity(ARC_STEPS + 2);
+    points.push(center);
+    for step in 0..=ARC_STEPS {
+        let t = sectors_as_f32(step) / sectors_as_f32(ARC_STEPS);
+        points.push(point_on_wheel(center, start + (end - start) * t, radius));
+    }
+    painter.add(egui::Shape::convex_polygon(
+        points,
+        if selected { ACCENT } else { SURFACE_RAISED },
+        egui::Stroke::NONE,
+    ));
+}
+
+fn paint_label(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    index: usize,
+    sectors: usize,
+    name: &str,
+    selected: bool,
+    active: bool,
+) {
+    let arc = std::f32::consts::TAU / sectors_as_f32(sectors);
+    let position = point_on_wheel(
+        center,
+        arc * sectors_as_f32(index),
+        WHEEL_RADIUS * LABEL_RADIUS_FRACTION,
+    );
+    painter.text(
+        position,
+        egui::Align2::CENTER_CENTER,
+        name,
+        egui::FontId::proportional(14.0),
+        if selected { ON_ACCENT } else { TEXT },
+    );
+    if active {
+        // A dot marks the profile that is already in use, so the user can see
+        // what a cancel would leave them with.
+        painter.circle_filled(
+            position + egui::vec2(0.0, 15.0),
+            3.0,
+            if selected { ON_ACCENT } else { ACCENT },
+        );
+    }
+}
+
+/// Sector zero sits at twelve o'clock and they run clockwise, matching
+/// `profile_picker::sector_for`. Screen y grows downwards, hence the negation.
+fn point_on_wheel(center: egui::Pos2, angle: f32, radius: f32) -> egui::Pos2 {
+    center + egui::vec2(angle.sin() * radius, -angle.cos() * radius)
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "sector and step counts are small enough to be exact in f32"
+)]
+fn sectors_as_f32(value: usize) -> f32 {
+    value as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roster(count: usize, sectors_per_page: usize) -> OverlayState {
+        let mut state = OverlayState::default();
+        state.apply(OverlayMessage::Roster {
+            names: (0..count).map(|index| format!("Profile {index}")).collect(),
+            active: Some(0),
+            sectors_per_page,
+        });
+        state
+    }
+
+    #[test]
+    fn the_wheel_can_be_shown_again_after_it_has_been_hidden() {
+        // Regression: the overlay used to hide by ordering the window out.
+        // macOS then stopped delivering redraws, the overlay's only route to
+        // the main thread, so the second open could never be acted on and the
+        // wheel opened exactly once per process.
+        let mut presentation = Presentation::default();
+        assert_eq!(
+            presentation.update(false, false),
+            PresentationChange::default(),
+            "nothing happens before the window has been sized"
+        );
+        assert_eq!(
+            presentation.update(false, true),
+            PresentationChange {
+                order_in: true,
+                wheel: None
+            }
+        );
+
+        for round in 0..3 {
+            assert_eq!(
+                presentation.update(true, true),
+                PresentationChange {
+                    order_in: false,
+                    wheel: Some(true)
+                },
+                "round {round} must be able to show the wheel"
+            );
+            assert_eq!(
+                presentation.update(false, true),
+                PresentationChange {
+                    order_in: false,
+                    wheel: Some(false)
+                },
+                "round {round} must be able to hide the wheel"
+            );
+        }
+    }
+
+    #[test]
+    fn the_window_is_ordered_in_exactly_once() {
+        let mut presentation = Presentation::default();
+        let mut order_ins = 0;
+        for open in [false, true, false, true, true, false, false, true] {
+            if presentation.update(open, true).order_in {
+                order_ins += 1;
+            }
+        }
+        // More than one would mean the window had been ordered out in between,
+        // which is the state the wheel cannot recover from.
+        assert_eq!(order_ins, 1);
+    }
+
+    #[test]
+    fn an_unchanged_wheel_state_asks_for_no_work() {
+        let mut presentation = Presentation::default();
+        presentation.update(false, true);
+        presentation.update(true, true);
+        assert_eq!(
+            presentation.update(true, true),
+            PresentationChange::default(),
+            "a repeated frame must not re-apply the alpha"
+        );
+    }
+
+    #[test]
+    fn open_and_close_drive_visibility() {
+        let mut state = roster(4, 8);
+        assert!(state.open.is_none());
+        state.apply(OverlayMessage::Open {
+            selected: 2,
+            page: 0,
+        });
+        assert_eq!(state.open, Some((2, 0)));
+        state.apply(OverlayMessage::Select {
+            selected: 3,
+            page: 0,
+        });
+        assert_eq!(state.open, Some((3, 0)));
+        state.apply(OverlayMessage::Close);
+        assert!(state.open.is_none());
+    }
+
+    #[test]
+    fn a_roster_update_while_open_keeps_the_wheel_up() {
+        let mut state = roster(4, 8);
+        state.apply(OverlayMessage::Open {
+            selected: 1,
+            page: 0,
+        });
+        state.apply(OverlayMessage::Roster {
+            names: vec!["Solo".to_owned()],
+            active: None,
+            sectors_per_page: 8,
+        });
+        // Only the runtime closes the wheel; the overlay must not decide that
+        // for itself or the two would disagree about what is on screen.
+        assert_eq!(state.open, Some((1, 0)));
+    }
+
+    #[test]
+    fn pages_slice_the_roster_without_gaps_or_overlap() {
+        let state = roster(11, 8);
+        assert_eq!(state.page_count(), 2);
+        let (first, first_offset) = state.page_entries(0);
+        let (second, second_offset) = state.page_entries(1);
+        assert_eq!(first.len(), 8);
+        assert_eq!(first_offset, 0);
+        assert_eq!(second.len(), 3);
+        assert_eq!(second_offset, 8);
+        assert_eq!(second[0], "Profile 8");
+    }
+
+    #[test]
+    fn a_page_past_the_end_yields_nothing_rather_than_panicking() {
+        let state = roster(3, 8);
+        let (entries, offset) = state.page_entries(9);
+        assert!(entries.is_empty());
+        assert_eq!(offset, 3);
+    }
+
+    #[test]
+    fn an_empty_roster_reports_one_page_and_no_entries() {
+        let state = roster(0, 8);
+        assert_eq!(state.page_count(), 1);
+        assert!(state.page_entries(0).0.is_empty());
+    }
+
+    #[test]
+    fn a_zero_sector_roster_cannot_divide_by_zero() {
+        let mut state = OverlayState::default();
+        state.apply(OverlayMessage::Roster {
+            names: vec!["One".to_owned(), "Two".to_owned()],
+            active: None,
+            sectors_per_page: 0,
+        });
+        assert_eq!(state.sectors_per_page, 1);
+        assert_eq!(state.page_count(), 2);
+        assert_eq!(state.page_entries(1).0, ["Two".to_owned()]);
+    }
+
+    #[test]
+    fn sector_zero_is_up_and_the_wheel_runs_clockwise() {
+        let center = egui::pos2(100.0, 100.0);
+        let up = point_on_wheel(center, 0.0, 10.0);
+        assert!((up.x - 100.0).abs() < 1.0e-4);
+        assert!((up.y - 90.0).abs() < 1.0e-4, "sector zero must point up");
+
+        let right = point_on_wheel(center, std::f32::consts::FRAC_PI_2, 10.0);
+        assert!(
+            (right.x - 110.0).abs() < 1.0e-4,
+            "a quarter turn must point right"
+        );
+        assert!((right.y - 100.0).abs() < 1.0e-4);
+    }
+}

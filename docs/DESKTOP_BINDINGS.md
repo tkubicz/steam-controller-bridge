@@ -17,7 +17,21 @@ or invalid file appears.
 
 Selecting a profile applies it without restarting HID or serial. A switch
 releases every old held output and ignores physical controls already held until
-they are released. At launch, the menu app queries Input Monitoring directly
+they are released. The gamepad output is parked at neutral for the length of the
+switch: building or dropping the desktop-input sink is a synchronous
+window-server operation on the thread that also feeds the XIAO, and a neutral
+report disarms the firmware's controller-data watchdog so the delay cannot fault
+the device. Switching to a profile with no bindings drops the sink and switching
+away builds one, so both directions take that path. See
+[PROFILE_OVERLAY.md](PROFILE_OVERLAY.md#why-suppression-must-be-exactly-neutral). Profiles can also be switched from the controller itself; see
+[PROFILE_OVERLAY.md](PROFILE_OVERLAY.md).
+
+When the profile wheel is enabled, it takes Quick Access over for the length of
+a hold. A Quick Access binding still fires on a short press: the press edge is
+withheld while the hold is being timed, and replayed as a tap if the button
+comes up before the wheel opens. Once the wheel is open the binding is not
+delivered at all. Nothing changes for L4, L5, R4, R5, or the pads, and nothing
+changes at all while the wheel is disabled. At launch, the menu app queries Input Monitoring directly
 and uses `IOHIDRequestAccess` when macOS has not decided yet. Only after that
 grant is detected does it request Post Event and Accessibility access, before a
 profile needs any bindings. This works even when no controller is attached and
