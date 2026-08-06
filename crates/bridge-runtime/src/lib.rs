@@ -68,6 +68,7 @@ const INPUT_MAILBOX_CAPACITY: usize = 64;
 const STATUS_INTERVAL: Duration = Duration::from_millis(250);
 const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const SUPERVISOR_STALL_THRESHOLD: Duration = Duration::from_millis(50);
 const RUMBLE_REFRESH_INTERVAL: Duration = Duration::from_millis(40);
 const RUMBLE_LEASE_TIMEOUT: Duration = Duration::from_millis(100);
 const RUMBLE_RETRY_INTERVAL: Duration = Duration::from_millis(500);
@@ -80,6 +81,84 @@ const POWER_OFF_BURST_WRITES: u8 = 3;
 const POWER_OFF_BURST_INTERVAL: Duration = Duration::from_millis(10);
 const MIN_IDLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_mins(1);
 pub const MAX_IDLE_SHUTDOWN_TIMEOUT: Duration = Duration::from_hours(24);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SupervisorStall {
+    elapsed: Duration,
+    phase: &'static str,
+    phase_elapsed: Duration,
+}
+
+struct SupervisorIterationTimer {
+    started: Instant,
+    phase_started: Instant,
+    phase: &'static str,
+    slowest_phase: &'static str,
+    slowest_phase_elapsed: Duration,
+    reported: bool,
+}
+
+impl SupervisorIterationTimer {
+    fn new(initial_phase: &'static str) -> Self {
+        Self::new_at(initial_phase, Instant::now())
+    }
+
+    fn new_at(initial_phase: &'static str, now: Instant) -> Self {
+        Self {
+            started: now,
+            phase_started: now,
+            phase: initial_phase,
+            slowest_phase: initial_phase,
+            slowest_phase_elapsed: Duration::ZERO,
+            reported: false,
+        }
+    }
+
+    fn enter(&mut self, phase: &'static str) {
+        self.enter_at(phase, Instant::now());
+    }
+
+    fn enter_at(&mut self, phase: &'static str, now: Instant) {
+        self.record_current_phase(now);
+        self.phase = phase;
+        self.phase_started = now;
+    }
+
+    fn take_stall_at(&mut self, now: Instant) -> Option<SupervisorStall> {
+        if self.reported {
+            return None;
+        }
+        self.record_current_phase(now);
+        self.reported = true;
+        let elapsed = now.saturating_duration_since(self.started);
+        (elapsed >= SUPERVISOR_STALL_THRESHOLD).then_some(SupervisorStall {
+            elapsed,
+            phase: self.slowest_phase,
+            phase_elapsed: self.slowest_phase_elapsed,
+        })
+    }
+
+    fn record_current_phase(&mut self, now: Instant) {
+        let elapsed = now.saturating_duration_since(self.phase_started);
+        if elapsed > self.slowest_phase_elapsed {
+            self.slowest_phase = self.phase;
+            self.slowest_phase_elapsed = elapsed;
+        }
+    }
+}
+
+impl Drop for SupervisorIterationTimer {
+    fn drop(&mut self) {
+        if let Some(stall) = self.take_stall_at(Instant::now()) {
+            eprintln!(
+                "level=warn event=supervisor_stall elapsed_ms={} phase={} phase_elapsed_ms={}",
+                stall.elapsed.as_millis(),
+                stall.phase,
+                stall.phase_elapsed.as_millis()
+            );
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControllerSelection {
@@ -927,6 +1006,9 @@ impl PickerRuntime {
 
 struct DesktopBindingsRuntime {
     engine: Option<BindingEngine>,
+    // Once authorized, the sink belongs to the active runtime session. Profile
+    // changes may release outputs or remove the engine, but must not destroy
+    // the sink: Enigo's macOS `Drop` can sleep for seconds after pad traffic.
     sink: Option<Box<dyn DesktopInputSink>>,
     last_snapshot: Option<DesktopInputSnapshot>,
     discard_pending_feedback: bool,
@@ -1000,6 +1082,21 @@ impl DesktopBindingsRuntime {
         std::mem::take(&mut self.discard_pending_feedback)
     }
 
+    fn drop_sink(&mut self, reason: &'static str) {
+        let Some(sink) = self.sink.take() else {
+            return;
+        };
+        let started = Instant::now();
+        drop(sink);
+        let elapsed = started.elapsed();
+        if elapsed >= SUPERVISOR_STALL_THRESHOLD {
+            eprintln!(
+                "level=warn event=desktop_sink_drop_stall reason={reason} elapsed_ms={}",
+                elapsed.as_millis()
+            );
+        }
+    }
+
     fn replace_profile(&mut self, profile: Option<BindingProfile>) -> Result<(), String> {
         let status = binding_status_for_profile(profile.as_ref());
         let result = if let Some(profile) = profile {
@@ -1017,7 +1114,6 @@ impl DesktopBindingsRuntime {
                     Ok(())
                 };
             self.engine = None;
-            self.sink = None;
             result
         };
         self.status = status;
@@ -1026,7 +1122,6 @@ impl DesktopBindingsRuntime {
             return Err(error);
         }
         if self.status.configured_binding_count == 0 {
-            self.sink = None;
             return Ok(());
         }
         if self.sink.is_none() {
@@ -1115,8 +1210,14 @@ impl DesktopBindingsRuntime {
         self.status.state = DesktopBindingsState::Degraded;
         self.status.failures = self.status.failures.saturating_add(1);
         self.status.last_error = Some(bounded_error(error));
-        self.sink = None;
+        self.drop_sink("backend_failure");
         self.discard_pending_feedback = true;
+    }
+}
+
+impl Drop for DesktopBindingsRuntime {
+    fn drop(&mut self) {
+        self.drop_sink("active_session_end");
     }
 }
 
@@ -1718,7 +1819,8 @@ impl Supervisor {
         )?;
 
         let exit = 'active: loop {
-            if let Some(command_exit) = self.service_active_commands(
+            let mut iteration_timer = SupervisorIterationTimer::new("commands");
+            let command_exit = self.service_active_commands(
                 started.elapsed(),
                 &mut idle_activity,
                 &mut bindings,
@@ -1726,7 +1828,9 @@ impl Supervisor {
                 &mut engine,
                 &mut output,
                 &worker,
-            ) {
+            );
+            iteration_timer.enter("worker_health");
+            if let Some(command_exit) = command_exit {
                 break command_exit;
             }
             if let Some(error) = worker.take_failure() {
@@ -1738,6 +1842,7 @@ impl Supervisor {
                 return Err(error);
             }
             let mut direct_report = None;
+            iteration_timer.enter("hid_wait");
             match worker.receiver.recv_timeout(RUNTIME_POLL_INTERVAL) {
                 Ok(HidWorkerEvent::Connected(info)) => {
                     self.update_source_discovered(&info, false);
@@ -1754,6 +1859,7 @@ impl Supervisor {
                     break ActiveExit::SourceLost;
                 }
             }
+            iteration_timer.enter("mailbox");
             let batch = worker.take_report_batch();
             if batch.overflowed {
                 bindings.overflow();
@@ -1764,6 +1870,7 @@ impl Supervisor {
                     "level=warn event=desktop_binding_mailbox_overflow action=release_and_rebaseline"
                 );
             }
+            iteration_timer.enter("controller_reports");
             for report in direct_report.into_iter().chain(batch.reports) {
                 match process_report(
                     &report,
@@ -1884,6 +1991,7 @@ impl Supervisor {
                     }
                 }
             }
+            iteration_timer.enter("desktop_binding_tick");
             bindings.tick(started.elapsed());
             if bindings.take_discard_pending_feedback() {
                 worker.clear_pad_feedback();
@@ -1892,6 +2000,7 @@ impl Supervisor {
             if lost > 0 {
                 engine.note_dropped_reports(lost);
             }
+            iteration_timer.enter("output_service");
             let service_result = if should_tick_input_timeout(lost, worker.has_pending_report()) {
                 engine
                     .tick(started.elapsed(), &mut *output.output)
@@ -1907,6 +2016,7 @@ impl Supervisor {
                     "XIAO service failed; waiting for reconnect: {error}"
                 ));
             }
+            iteration_timer.enter("output_feedback");
             while let Some(feedback) = output.output.take_feedback() {
                 match feedback {
                     OutputFeedback::Rumble {
@@ -1915,6 +2025,7 @@ impl Supervisor {
                     } => worker.set_rumble(low_frequency, high_frequency),
                 }
             }
+            iteration_timer.enter("automatic_shutdown");
             let now = Instant::now();
             let dock_retry_due = self.automatic_shutdown.trigger == Some(ShutdownTrigger::PuckDock)
                 && self.automatic_shutdown.phase == AutomaticShutdownPhase::Degraded
@@ -1991,6 +2102,7 @@ impl Supervisor {
                 let _ = engine.disconnected(&mut *output.output);
                 break ActiveExit::SourceLost;
             }
+            iteration_timer.enter("status_update");
             if last_status.elapsed() >= STATUS_INTERVAL {
                 let controller_age = last_controller_state.elapsed();
                 let automatic = self.automatic_shutdown.status(
@@ -2693,12 +2805,12 @@ struct OutputSession {
 
 /// Parks the gamepad output at neutral before a slow desktop-input operation.
 ///
-/// Building or dropping the desktop-input sink is a synchronous window-server
-/// operation, and it runs on the thread that also feeds the XIAO. It can easily
-/// outlast the firmware's 100 ms controller-data watchdog, and the host has
-/// nothing new to send while it is blocked, so the device faults and flashes
-/// red until traffic resumes -- with nothing logged, because no write ever
-/// failed. Shortening the operation is not something this side controls.
+/// Constructing the desktop-input sink is synchronous, and Enigo's macOS
+/// destructor can deliberately sleep after sustained event traffic. Both run
+/// on the thread that also feeds the XIAO and can outlast the firmware's 100 ms
+/// controller-data watchdog. Healthy profile switches retain their sink to
+/// avoid that destructor, but initialization and failure cleanup still need a
+/// safety boundary.
 ///
 /// Sending neutral first makes the length irrelevant: firmware disarms that
 /// watchdog for a neutral report, so no stall can fault it. The next controller
@@ -4069,6 +4181,34 @@ fn publish_report(
 mod tests {
     use super::*;
 
+    #[test]
+    fn supervisor_timer_reports_the_slowest_phase_after_a_stall() {
+        let started = Instant::now();
+        let mut timer = SupervisorIterationTimer::new_at("commands", started);
+        timer.enter_at("hid_wait", started + Duration::from_millis(4));
+        timer.enter_at("controller_reports", started + Duration::from_millis(62));
+
+        let stall = timer
+            .take_stall_at(started + Duration::from_millis(70))
+            .unwrap();
+        assert_eq!(stall.elapsed, Duration::from_millis(70));
+        assert_eq!(stall.phase, "hid_wait");
+        assert_eq!(stall.phase_elapsed, Duration::from_millis(58));
+        assert!(timer
+            .take_stall_at(started + Duration::from_millis(80))
+            .is_none());
+    }
+
+    #[test]
+    fn supervisor_timer_ignores_iterations_below_the_warning_threshold() {
+        let started = Instant::now();
+        let mut timer = SupervisorIterationTimer::new_at("commands", started);
+        timer.enter_at("hid_wait", started + Duration::from_millis(10));
+        let below_threshold = SUPERVISOR_STALL_THRESHOLD.saturating_sub(Duration::from_millis(1));
+
+        assert!(timer.take_stall_at(started + below_threshold).is_none());
+    }
+
     struct FakeDiscoverySession {
         events: std::collections::VecDeque<Result<Option<DeviceEvent>, String>>,
         timeouts: Arc<Mutex<Vec<Duration>>>,
@@ -4436,6 +4576,56 @@ mod tests {
         }
     }
 
+    struct DropTrackedDesktopSink {
+        inner: SharedDesktopSink,
+        drops: Arc<AtomicU64>,
+    }
+
+    impl DropTrackedDesktopSink {
+        fn new(events: Arc<Mutex<Vec<String>>>, drops: Arc<AtomicU64>) -> Self {
+            Self {
+                inner: SharedDesktopSink(events),
+                drops,
+            }
+        }
+    }
+
+    impl Drop for DropTrackedDesktopSink {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    impl DesktopInputSink for DropTrackedDesktopSink {
+        fn key(&mut self, key: desktop_bindings::KeyboardKey, pressed: bool) -> Result<(), String> {
+            self.inner.key(key, pressed)
+        }
+
+        fn modifier(
+            &mut self,
+            modifier: desktop_bindings::Modifier,
+            pressed: bool,
+        ) -> Result<(), String> {
+            self.inner.modifier(modifier, pressed)
+        }
+
+        fn mouse_button(
+            &mut self,
+            button: desktop_bindings::MouseButton,
+            pressed: bool,
+        ) -> Result<(), String> {
+            self.inner.mouse_button(button, pressed)
+        }
+
+        fn mouse_move(&mut self, x: i32, y: i32) -> Result<(), String> {
+            self.inner.mouse_move(x, y)
+        }
+
+        fn scroll(&mut self, x: i32, y: i32) -> Result<(), String> {
+            self.inner.scroll(x, y)
+        }
+    }
+
     struct FailingMotionSink;
 
     impl DesktopInputSink for FailingMotionSink {
@@ -4604,11 +4794,10 @@ mod tests {
 
     #[test]
     fn a_slow_desktop_operation_is_preceded_by_neutral_on_the_wire() {
-        // Regression: building or dropping the desktop-input sink blocks this
-        // thread for longer than the firmware's 100 ms controller-data
-        // watchdog, and the device faults and flashes red with nothing logged,
-        // because no write ever fails. Neutral disarms that watchdog, so the
-        // length of the stall stops mattering.
+        // Regression: constructing the desktop-input sink, or destroying it
+        // after a backend failure, can block this thread beyond the firmware's
+        // 100 ms controller-data watchdog. Healthy profile switches retain the
+        // sink, but neutral remains the safety boundary around lifecycle work.
         let states = Arc::new(Mutex::new(Vec::new()));
         let mut session = OutputSession {
             output: Box::new(SharedOutput(Arc::clone(&states))),
@@ -5052,6 +5241,113 @@ mod tests {
         assert_eq!(status.configured_binding_count, 1);
         assert!(status.last_error.is_none());
         assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn switching_through_an_unbound_profile_reuses_the_authorized_sink() {
+        let mut first = BindingProfile::default();
+        first.bindings.r4 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F5,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicU64::new(0));
+        let mut bindings = DesktopBindingsRuntime::with_sink(
+            first,
+            Box::new(DropTrackedDesktopSink::new(
+                Arc::clone(&events),
+                Arc::clone(&drops),
+            )),
+        );
+        let neutral = steam_controller_protocol::SteamButtons::default();
+        let r4 = steam_controller_protocol::SteamButtons(
+            1_u32 << steam_controller_protocol::SteamButton::RightGrip4 as u8,
+        );
+        let _ = bindings.observe(desktop_snapshot(neutral), Duration::ZERO);
+        let _ = bindings.observe(desktop_snapshot(r4), Duration::from_millis(1));
+
+        bindings
+            .replace_profile(Some(BindingProfile::default()))
+            .unwrap();
+
+        let status = bindings.status();
+        assert_eq!(status.state, DesktopBindingsState::Disabled);
+        assert_eq!(status.configured_binding_count, 0);
+        assert_eq!(status.held_output_count, 0);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["key:F5:true".to_owned(), "key:F5:false".to_owned()]
+        );
+
+        let mut rebound = BindingProfile {
+            name: "Rebound".to_owned(),
+            ..BindingProfile::default()
+        };
+        rebound.bindings.r4 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F9,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+        bindings.replace_profile(Some(rebound)).unwrap();
+        assert_eq!(bindings.status().state, DesktopBindingsState::Ready);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+        // The control stayed held through both switches. Reusing the sink must
+        // not turn that into a synthetic press in the replacement profile.
+        let _ = bindings.observe(desktop_snapshot(r4), Duration::from_millis(2));
+        assert_eq!(events.lock().unwrap().len(), 2);
+        let _ = bindings.observe(desktop_snapshot(neutral), Duration::from_millis(3));
+        let _ = bindings.observe(desktop_snapshot(r4), Duration::from_millis(4));
+        assert_eq!(
+            *events.lock().unwrap(),
+            [
+                "key:F5:true".to_owned(),
+                "key:F5:false".to_owned(),
+                "key:F9:true".to_owned(),
+            ]
+        );
+
+        drop(bindings);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn clearing_a_profile_retains_the_authorized_sink_for_later_reuse() {
+        let mut first = BindingProfile::default();
+        first.bindings.r4 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F5,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicU64::new(0));
+        let mut bindings = DesktopBindingsRuntime::with_sink(
+            first,
+            Box::new(DropTrackedDesktopSink::new(
+                Arc::clone(&events),
+                Arc::clone(&drops),
+            )),
+        );
+
+        bindings.replace_profile(None).unwrap();
+        assert_eq!(bindings.status(), DesktopBindingsStatus::default());
+        assert!(bindings.engine.is_none());
+        assert!(bindings.sink.is_some());
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+        let mut replacement = BindingProfile::default();
+        replacement.bindings.r5 = Some(desktop_bindings::BindingAction::KeyChord {
+            key: desktop_bindings::KeyboardKey::F9,
+            modifiers: std::collections::BTreeSet::new(),
+        });
+        bindings.replace_profile(Some(replacement)).unwrap();
+        assert_eq!(bindings.status().state, DesktopBindingsState::Ready);
+        assert!(bindings.engine.is_some());
+        assert!(bindings.sink.is_some());
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert!(events.lock().unwrap().is_empty());
+
+        drop(bindings);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
     }
 
     #[test]
