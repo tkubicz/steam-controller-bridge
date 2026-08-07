@@ -15,6 +15,7 @@ recording = { path = "../../crates/recording" }
 serde_json.workspace = true
 steam-controller-device = { path = "../../crates/steam-controller-device" }
 steam-controller-protocol = { path = "../../crates/steam-controller-protocol" }
+ui-theme = { path = "../../crates/ui-theme" }
 
 [lints]
 workspace = true

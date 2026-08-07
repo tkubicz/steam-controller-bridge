@@ -13,6 +13,7 @@ members = [
     "crates/recording",
     "crates/steam-controller-device",
     "crates/steam-controller-protocol",
+    "crates/ui-theme",
     "apps/gamepad-simulator",
     "apps/sc-replay",
     "apps/sc-probe",

@@ -16,7 +16,7 @@ use objc2_app_kit::{
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
 use crate::overlay_protocol::{OverlayEnvelope, OverlayMessage, OVERLAY_WINDOW_TITLE};
-use crate::theme::{ACCENT, MUTED_TEXT, ON_ACCENT, SURFACE, SURFACE_RAISED, TEXT};
+use ui_theme::{ACCENT, MUTED_TEXT, ON_ACCENT, SURFACE, SURFACE_RAISED, TEXT};
 
 /// Matches the bindings editor so the two windows read as one product.
 const SCRIM: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 130);
