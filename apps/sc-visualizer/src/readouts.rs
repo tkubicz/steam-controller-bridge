@@ -4,43 +4,116 @@
 use eframe::egui;
 use eframe::egui::{Sense, Stroke, Vec2};
 
+use controller_mapper::RightAxisSource;
 use gamepad_state::{Button, GamepadState};
 use steam_controller_protocol::{SteamButton, SteamControllerState};
 use ui_theme::{
-    ACCENT, BORDER, DETAIL, INSET, MUTED_TEXT, ON_ACCENT, OUTLINE, SURFACE_RAISED, TEXT,
+    ACCENT, BORDER, DANGER, DETAIL, INSET, MUTED_TEXT, ON_ACCENT, OUTLINE, SURFACE_RAISED, TEXT,
 };
 
-pub(crate) fn source_state_ui(ui: &mut egui::Ui, state: &SteamControllerState) {
+/// The radial dead zones the mapper is configured with.
+///
+/// Drawn on the decoded controls so resting jitter can be judged against what
+/// will actually be filtered. Which control each one acts on is not a display
+/// choice: `left_stick_dead_zone` always applies to the left axes, which the
+/// left stick always feeds, while `right_axis_dead_zone` applies to the right
+/// axes, which `right_axis_source` routes from either the right stick or the
+/// right pad. Drawing the right ring on the stick regardless would show a
+/// threshold that is not being applied there.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DeadZones {
+    pub(crate) left_stick: f32,
+    pub(crate) right_axis: f32,
+    pub(crate) right_source: RightAxisSource,
+}
+
+impl DeadZones {
+    /// The dead zone actually applied to one decoded control, if any.
+    fn applied_to(self, control: Axis) -> Option<f32> {
+        match control {
+            Axis::LeftStick => Some(self.left_stick),
+            Axis::RightStick => {
+                (self.right_source == RightAxisSource::RightStick).then_some(self.right_axis)
+            }
+            Axis::RightPad => {
+                (self.right_source == RightAxisSource::RightPad).then_some(self.right_axis)
+            }
+            // The left pad feeds no gamepad axis, so the mapper never filters
+            // it. The bridge's desktop scrolling has its own threshold, which
+            // this app does not run.
+            Axis::LeftPad => None,
+        }
+    }
+
+    /// Names the control the right dead zone is currently acting on.
+    const fn right_target(self) -> &'static str {
+        match self.right_source {
+            RightAxisSource::RightStick => "right stick",
+            RightAxisSource::RightPad => "right pad",
+        }
+    }
+}
+
+/// The four decoded position controls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    LeftStick,
+    LeftPad,
+    RightPad,
+    RightStick,
+}
+
+pub(crate) fn source_state_ui(
+    ui: &mut egui::Ui,
+    state: &SteamControllerState,
+    dead_zones: DeadZones,
+) {
     ui.horizontal_wrapped(|ui| {
-        stick(
-            ui,
-            "Left stick",
-            Bounds::Round,
-            state.left_stick_x,
-            state.left_stick_y,
-        );
-        stick(
-            ui,
-            "Left pad",
-            Bounds::Square,
-            state.left_pad_x,
-            state.left_pad_y,
-        );
-        stick(
-            ui,
-            "Right pad",
-            Bounds::Square,
-            state.right_pad_x,
-            state.right_pad_y,
-        );
-        stick(
-            ui,
-            "Right stick",
-            Bounds::Round,
-            state.right_stick_x,
-            state.right_stick_y,
-        );
+        for (axis, label, bounds, x, y) in [
+            (
+                Axis::LeftStick,
+                "Left stick",
+                Bounds::Round,
+                state.left_stick_x,
+                state.left_stick_y,
+            ),
+            (
+                Axis::LeftPad,
+                "Left pad",
+                Bounds::Square,
+                state.left_pad_x,
+                state.left_pad_y,
+            ),
+            (
+                Axis::RightPad,
+                "Right pad",
+                Bounds::Square,
+                state.right_pad_x,
+                state.right_pad_y,
+            ),
+            (
+                Axis::RightStick,
+                "Right stick",
+                Bounds::Round,
+                state.right_stick_x,
+                state.right_stick_y,
+            ),
+        ] {
+            stick(ui, label, bounds, dead_zones.applied_to(axis), x, y);
+        }
     });
+    // Absence of a ring has to mean "no dead zone here", not "not drawn".
+    ui.label(
+        egui::RichText::new(format!(
+            "Inner ring: radial dead zone the mapper applies — {:.3} on the left stick, \
+             {:.3} on the {}. No ring means none is applied to that control.",
+            dead_zones.left_stick,
+            dead_zones.right_axis,
+            dead_zones.right_target(),
+        ))
+        .small()
+        .color(MUTED_TEXT),
+    );
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         cell(ui, "Trigger L", &state.left_trigger.to_string());
@@ -340,11 +413,12 @@ enum Bounds {
 ///
 /// The illustration shows where a control physically is; this shows what the
 /// report actually said, which is what you need when the two disagree.
-fn stick(ui: &mut egui::Ui, label: &str, bounds: Bounds, x: i16, y: i16) {
+fn stick(ui: &mut egui::Ui, label: &str, bounds: Bounds, dead_zone: Option<f32>, x: i16, y: i16) {
     crosshair(
         ui,
         label,
         bounds,
+        dead_zone,
         f32::from(x) / 32767.0,
         f32::from(y) / 32767.0,
         &format!("{x:>6} {y:>6}"),
@@ -357,24 +431,50 @@ fn normalized_stick(ui: &mut egui::Ui, label: &str, x: f32, y: f32) {
         ui,
         label,
         Bounds::Round,
+        None,
         x,
         y,
         &format!("{x:>6.3} {y:>6.3}"),
     );
 }
 
-fn crosshair(ui: &mut egui::Ui, label: &str, bounds: Bounds, x: f32, y: f32, value: &str) {
+fn crosshair(
+    ui: &mut egui::Ui,
+    label: &str,
+    bounds: Bounds,
+    dead_zone: Option<f32>,
+    x: f32,
+    y: f32,
+    value: &str,
+) {
+    const RING: f32 = 45.0;
+    const DOT: f32 = 5.0;
     ui.vertical(|ui| {
         ui.label(egui::RichText::new(label).small().color(MUTED_TEXT));
         let (response, painter) = ui.allocate_painter(Vec2::splat(100.0), Sense::hover());
         let center = response.rect.center();
+        // A round control's raw magnitude can exceed 1: each axis caps at
+        // 32767, so a full diagonal reaches sqrt(2). The dot has to be brought
+        // back inside the well to be drawn, and that would make "past full
+        // deflection" look identical to "exactly full" — so the bound itself
+        // reports the clipping instead of hiding it. The mapper discards the
+        // same excess (`magnitude.min(1.0)`), so this marks real lost range.
+        let saturated = bounds == Bounds::Round && x.hypot(y) > 1.0;
         match bounds {
             Bounds::Round => {
-                painter.circle_stroke(center, 45.0, Stroke::new(1.0, OUTLINE));
+                painter.circle_stroke(
+                    center,
+                    RING,
+                    if saturated {
+                        Stroke::new(2.0, DANGER)
+                    } else {
+                        Stroke::new(1.0, OUTLINE)
+                    },
+                );
             }
             Bounds::Square => {
                 painter.rect_stroke(
-                    egui::Rect::from_center_size(center, Vec2::splat(90.0)),
+                    egui::Rect::from_center_size(center, Vec2::splat(RING * 2.0)),
                     4.0,
                     Stroke::new(1.0, OUTLINE),
                     egui::StrokeKind::Inside,
@@ -382,20 +482,41 @@ fn crosshair(ui: &mut egui::Ui, label: &str, bounds: Bounds, x: f32, y: f32, val
             }
         }
         painter.line_segment(
-            [center - Vec2::new(45.0, 0.0), center + Vec2::new(45.0, 0.0)],
+            [center - Vec2::new(RING, 0.0), center + Vec2::new(RING, 0.0)],
             Stroke::new(1.0, DETAIL),
         );
         painter.line_segment(
-            [center - Vec2::new(0.0, 45.0), center + Vec2::new(0.0, 45.0)],
+            [center - Vec2::new(0.0, RING), center + Vec2::new(0.0, RING)],
             Stroke::new(1.0, DETAIL),
         );
-        painter.circle_filled(
-            center + Vec2::new(x.clamp(-1.0, 1.0), -y.clamp(-1.0, 1.0)) * 45.0,
-            5.0,
-            ACCENT,
+        // A round control is bounded by its magnitude, not by each axis: raw
+        // stick values are not magnitude-capped the way the mapper's output is,
+        // so clamping x and y separately would draw a full diagonal outside the
+        // ring. The numeric readout still shows the true raw values.
+        let (x, y) = match bounds {
+            Bounds::Round => controller_art::clamp_to_unit_circle(x, y),
+            Bounds::Square => (x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0)),
+        };
+        // Keep the dot's own body inside the bound as well.
+        painter.circle_filled(center + Vec2::new(x, -y) * (RING - DOT), DOT, ACCENT);
+        // The dead zone the mapper will apply, drawn *over* the dot: a resting
+        // stick's jitter is smaller than the dot itself, so a ring underneath
+        // would be hidden by the very reading it is there to qualify.
+        if let Some(dead_zone) = dead_zone.filter(|value| *value > 0.0) {
+            painter.circle_stroke(
+                center,
+                RING * dead_zone,
+                Stroke::new(1.0, MUTED_TEXT.gamma_multiply(0.8)),
+            );
+        }
+        // The numeric readout these widgets never had. It always shows the
+        // true reading, clipped or not.
+        ui.label(
+            egui::RichText::new(value)
+                .monospace()
+                .small()
+                .color(if saturated { DANGER } else { TEXT }),
         );
-        // The numeric readout these widgets never had.
-        ui.label(egui::RichText::new(value).monospace().small().color(TEXT));
         ui.add_space(6.0);
     });
 }
@@ -517,5 +638,53 @@ mod tests {
             .expect("a System section exists");
         assert!(system.1.contains(&(SteamButton::Menu, "View")));
         assert!(system.1.contains(&(SteamButton::View, "Menu")));
+    }
+}
+
+#[cfg(test)]
+mod dead_zone_tests {
+    use super::{Axis, DeadZones};
+    use controller_mapper::RightAxisSource;
+
+    fn zones(source: RightAxisSource) -> DeadZones {
+        DeadZones {
+            left_stick: 0.08,
+            right_axis: 0.15,
+            right_source: source,
+        }
+    }
+
+    /// `right_axis_dead_zone` filters whichever control feeds the right axes.
+    /// Showing it on the stick while the pad is the source would draw a
+    /// threshold that is not being applied there.
+    #[test]
+    fn the_right_dead_zone_follows_the_configured_axis_source() {
+        let stick = zones(RightAxisSource::RightStick);
+        assert_eq!(stick.applied_to(Axis::RightStick), Some(0.15));
+        assert_eq!(stick.applied_to(Axis::RightPad), None);
+
+        let pad = zones(RightAxisSource::RightPad);
+        assert_eq!(pad.applied_to(Axis::RightPad), Some(0.15));
+        assert_eq!(pad.applied_to(Axis::RightStick), None);
+    }
+
+    /// The left axes are always fed by the left stick, so its dead zone always
+    /// applies; the left pad feeds no gamepad axis, so none ever does.
+    #[test]
+    fn the_left_side_does_not_depend_on_configuration() {
+        for source in [RightAxisSource::RightStick, RightAxisSource::RightPad] {
+            let zones = zones(source);
+            assert_eq!(zones.applied_to(Axis::LeftStick), Some(0.08));
+            assert_eq!(zones.applied_to(Axis::LeftPad), None);
+        }
+    }
+
+    #[test]
+    fn the_caption_names_the_control_the_right_zone_acts_on() {
+        assert_eq!(
+            zones(RightAxisSource::RightStick).right_target(),
+            "right stick"
+        );
+        assert_eq!(zones(RightAxisSource::RightPad).right_target(), "right pad");
     }
 }

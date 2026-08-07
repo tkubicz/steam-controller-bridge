@@ -4,11 +4,11 @@ use eframe::egui;
 
 use crate::geometry::{
     body_bounds, body_shape, control_rect, dpad_arm, dpad_shape, locus_point, shoulder_shapes,
-    trackpad_shapes, view_for_available, BODY_HALF, DPAD_ARM, DPAD_CENTER, FACE_BUTTONS,
-    FACE_BUTTON_OFFSET, FACE_BUTTON_RADIUS, GRIP_PADDLES, OPTION_BUTTONS, OPTION_SIZE,
-    PUCK_CONNECTOR, PUCK_CONNECTOR_SIZE, QUICK_ACCESS, QUICK_ACCESS_SIZE, SHOULDERS, STEAM_BUTTON,
-    STEAM_RADIUS, STICKS, STICK_RADIUS, TOP_SEAM, TOP_SEAM_WIDTH, TRACKPADS, TRACKPAD_SIZE,
-    USB_PORT_SIZE,
+    trackpad_shapes, view_for_available, BODY_HALF, DOT_RADIUS, DPAD_ARM, DPAD_CENTER,
+    FACE_BUTTONS, FACE_BUTTON_OFFSET, FACE_BUTTON_RADIUS, GRIP_PADDLES, OPTION_BUTTONS,
+    OPTION_SIZE, PUCK_CONNECTOR, PUCK_CONNECTOR_SIZE, QUICK_ACCESS, QUICK_ACCESS_SIZE, SHOULDERS,
+    STEAM_BUTTON, STEAM_RADIUS, STICKS, STICK_RADIUS, TOP_SEAM, TOP_SEAM_WIDTH, TRACKPADS,
+    TRACKPAD_SIZE, USB_PORT_SIZE,
 };
 use crate::shape::{cross, signed_area};
 use crate::{Analog, Control, ControlState, Face, Highlight};
@@ -429,6 +429,36 @@ fn a_neutral_locus_lands_on_the_control_centre() {
     }
 }
 
+/// A stick well is drawn as a circle, so its bounding rect is not the bound
+/// that matters: a diagonal can sit inside the box and outside the ring.
+#[test]
+fn a_stick_dot_stays_inside_the_drawn_circle() {
+    let view = test_view();
+    let scale = view.width();
+    for control in [Control::LeftStick, Control::RightStick] {
+        let centre = control_rect(view, control).center();
+        for offset in [
+            [1.0, 1.0],
+            [-1.0, 1.0],
+            [1.0, -1.0],
+            [-1.0, -1.0],
+            [0.8, 0.8],
+            [1.0, 0.0],
+            [0.0, -1.0],
+        ] {
+            let point = locus_point(view, control, offset);
+            // The dot is drawn filled, so its whole body must fit.
+            let reach = (point - centre).length() + scale * DOT_RADIUS;
+            let ring = scale * STICK_RADIUS;
+            assert!(
+                reach <= ring + 0.5,
+                "{} at {offset:?} reaches {reach:.2} past a {ring:.2} ring",
+                control.label(),
+            );
+        }
+    }
+}
+
 #[test]
 fn a_full_deflection_stays_inside_its_control() {
     let view = test_view();
@@ -439,7 +469,19 @@ fn a_full_deflection_stays_inside_its_control() {
         Control::RightPad,
     ] {
         let rect = control_rect(view, control);
-        for offset in [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]] {
+        for offset in [
+            [1.0, 0.0],
+            [-1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, -1.0],
+            // Diagonals: a per-axis clamp bounds each component but not the
+            // magnitude, so a round control leaks by a factor of sqrt(2).
+            [1.0, 1.0],
+            [-1.0, 1.0],
+            [1.0, -1.0],
+            [-1.0, -1.0],
+            [0.8, 0.8],
+        ] {
             let point = locus_point(view, control, offset);
             assert!(
                 rect.contains(point),
@@ -671,4 +713,37 @@ fn shoulder_shapes_stay_in_their_documented_index_order() {
     assert_eq!(SHOULDERS[2].0, "L2");
     assert_eq!(SHOULDERS[3].0, "L1");
     assert_eq!(shoulder_shapes().len(), 4);
+}
+
+#[test]
+fn clamping_to_the_unit_circle_caps_magnitude_without_turning() {
+    use crate::clamp_to_unit_circle;
+
+    // Inside the circle: untouched.
+    for (x, y) in [(0.0, 0.0), (0.5, 0.5), (1.0, 0.0), (0.0, -1.0), (0.6, -0.8)] {
+        assert_eq!(clamp_to_unit_circle(x, y), (x, y), "{x},{y} was inside");
+    }
+
+    // Outside: capped at 1, direction preserved.
+    for (x, y) in [(1.0, 1.0), (-1.0, 1.0), (3.0, 4.0), (-0.9, -0.9)] {
+        let (cx, cy) = clamp_to_unit_circle(x, y);
+        assert!(
+            (cx.hypot(cy) - 1.0).abs() < 1e-5,
+            "{x},{y} clamped to magnitude {}",
+            cx.hypot(cy)
+        );
+        // Same bearing: the cross product of the two vectors is zero.
+        assert!(
+            (x * cy - y * cx).abs() < 1e-5,
+            "{x},{y} was turned to {cx},{cy}"
+        );
+        assert!(cx.is_sign_positive() == x.is_sign_positive());
+        assert!(cy.is_sign_positive() == y.is_sign_positive());
+    }
+
+    // Non-finite input neutralizes rather than propagating NaN into a position.
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let (x, y) = clamp_to_unit_circle(bad, bad);
+        assert!(x.is_finite() && y.is_finite());
+    }
 }

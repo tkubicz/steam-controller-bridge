@@ -19,8 +19,8 @@ mod paint;
 mod shape;
 
 pub use geometry::{
-    body_bounds, body_rect, control_rect, locus_point, normalized_point, trackpad_rect, unit_rect,
-    view_for_available, view_for_body,
+    body_bounds, body_rect, clamp_to_unit_circle, control_rect, locus_point, normalized_point,
+    trackpad_rect, unit_rect, view_for_available, view_for_body,
 };
 pub use paint::{draw_body, draw_front, draw_rear};
 

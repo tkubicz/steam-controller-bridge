@@ -430,6 +430,11 @@ pub fn locus_point(view: egui::Rect, control: Control, locus: [f32; 2]) -> egui:
     match control {
         Control::LeftStick | Control::RightStick => {
             let center = STICKS[usize::from(control == Control::RightStick)];
+            // A stick well is round, so the magnitude has to be capped, not
+            // each axis: clamping x and y independently still lets a diagonal
+            // out to sqrt(2) and puts the dot outside the ring. Capping along
+            // the direction is what the mapper's radial dead zone does too.
+            let (x, y) = clamp_to_unit_circle(x, y);
             // Screen y grows downward, so an upward deflection subtracts.
             let reach = STICK_RADIUS - DOT_RADIUS;
             normalized_point(
@@ -455,6 +460,25 @@ pub fn locus_point(view: egui::Rect, control: Control, locus: [f32; 2]) -> egui:
         }
         _ => normalized_point(view, unit_center(control)),
     }
+}
+
+/// Caps a position at the unit circle without turning it.
+///
+/// A trackpad is square, so per-axis clamping is right for it. A stick well is
+/// round, and there the direction has to be preserved while the magnitude is
+/// capped — otherwise a full diagonal lands `sqrt(2)` out and draws outside the
+/// well it belongs to.
+#[must_use]
+pub fn clamp_to_unit_circle(x: f32, y: f32) -> (f32, f32) {
+    let (x, y) = (
+        if x.is_finite() { x } else { 0.0 },
+        if y.is_finite() { y } else { 0.0 },
+    );
+    let magnitude = x.hypot(y);
+    if magnitude <= 1.0 || magnitude == 0.0 {
+        return (x, y);
+    }
+    (x / magnitude, y / magnitude)
 }
 
 /// Radius of the live position dot, in unit-square units.

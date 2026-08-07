@@ -36,7 +36,7 @@ use clap::Parser;
 use cli::{Cli, Source};
 use demo::DemoState;
 use device::{input_worker, InputChannel};
-use readouts::{mapped_state_ui, source_state_ui};
+use readouts::{mapped_state_ui, source_state_ui, DeadZones};
 
 fn main() -> eframe::Result {
     let source = Cli::parse().source();
@@ -267,7 +267,15 @@ impl Visualizer {
             .default_open(true)
             .show(ui, |ui| {
                 if let Some(source) = &self.source {
-                    source_state_ui(ui, source);
+                    source_state_ui(
+                        ui,
+                        source,
+                        DeadZones {
+                            left_stick: self.config.left_stick_dead_zone,
+                            right_axis: self.config.right_axis_dead_zone,
+                            right_source: self.config.right_axis_source,
+                        },
+                    );
                 } else {
                     ui.label(
                         egui::RichText::new("No decoded controller state yet.").color(MUTED_TEXT),
