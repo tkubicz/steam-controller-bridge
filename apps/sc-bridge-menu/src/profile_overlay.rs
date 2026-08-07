@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use eframe::egui;
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSPopUpMenuWindowLevel, NSWindow, NSWindowCollectionBehavior};
+use objc2_app_kit::{
+    NSApplication, NSEvent, NSPopUpMenuWindowLevel, NSScreen, NSWindow, NSWindowCollectionBehavior,
+};
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
 use crate::overlay_protocol::{OverlayEnvelope, OverlayMessage, OVERLAY_WINDOW_TITLE};
@@ -31,7 +33,8 @@ const LABEL_RADIUS_FRACTION: f32 = 0.72;
 const WEDGE_GAP: f32 = 0.03;
 const ARC_STEPS: usize = 16;
 
-/// Fallback size until the first frame reports the real monitor.
+/// Placeholder until the window is placed on a real display. Never shown: the
+/// window is only ordered in once `place` has resized it.
 const INITIAL_SIZE: [f32; 2] = [1280.0, 800.0];
 
 #[derive(Debug, Clone, Default)]
@@ -116,7 +119,8 @@ pub fn run() -> Result<(), String> {
             Ok(Box::new(ProfileOverlay {
                 state,
                 presentation: Presentation::default(),
-                sized: false,
+                placed: false,
+                screen: None,
                 log_native_window: false,
             }))
         }),
@@ -205,9 +209,25 @@ impl Presentation {
 struct ProfileOverlay {
     state: Arc<Mutex<OverlayState>>,
     presentation: Presentation,
-    sized: bool,
+    /// Whether the window has been sized to a display yet. Gates the order-in,
+    /// so the window is never shown at the placeholder size it was created with.
+    placed: bool,
+    /// How the current display was chosen, for the diagnostics.
+    screen: Option<(ScreenSource, usize)>,
     /// Report the native window once, on the frame after the wheel is shown.
     log_native_window: bool,
+}
+
+impl ProfileOverlay {
+    /// Places the window on the display the wheel should appear on. Returns
+    /// whether the window existed to be placed.
+    fn place(&mut self) -> bool {
+        if let Some(screen) = place_on_target_screen() {
+            self.screen = Some(screen);
+            return true;
+        }
+        false
+    }
 }
 
 impl eframe::App for ProfileOverlay {
@@ -217,28 +237,47 @@ impl eframe::App for ProfileOverlay {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
+        // Everything about where this window is and whether it is on screen now
+        // goes through AppKit, so no viewport commands are sent from here.
         configure_native_window();
-        self.cover_the_screen(&ctx);
+        if !self.placed {
+            // The window does not exist on the very first frame, so keep trying
+            // until it does.
+            self.placed = self.place();
+        }
 
         let state = lock(&self.state).clone();
         let open = state.open.is_some();
-        let change = self.presentation.update(open, self.sized);
+        let change = self.presentation.update(open, self.placed);
         if let Some(wheel) = change.wheel {
+            if wheel {
+                // Re-pick the display: the process starts halfway through the
+                // hold, and the focused window can move between then and now.
+                self.place();
+            }
             set_wheel_alpha(wheel);
             self.log_native_window = wheel;
         }
         if change.order_in {
-            // Alpha is already zero from `configure_native_window`, so this
-            // orders in a window that shows nothing.
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            // Ordered in through AppKit rather than `ViewportCommand::Visible`,
+            // which winit implements as `makeKeyAndOrderFront`. That asks to
+            // become the key window, which a background accessory app cannot do
+            // over another app's fullscreen Space -- so the wheel never appeared
+            // over a fullscreen game. `orderFrontRegardless` is the call meant
+            // for showing a window from an app that is not active, and it is
+            // what the collection behaviour above is waiting for.
+            //
+            // Alpha is already zero, so this orders in a window showing nothing.
+            if let Some(window) = native_window() {
+                window.orderFrontRegardless();
+            }
         } else if self.log_native_window && open {
             // Logged a frame late, once the alpha change has been applied.
             // "The wheel never appeared" is this feature's whole failure mode,
             // and these are the numbers that say whether the window is where it
             // should be, so they belong in the diagnostics.
             self.log_native_window = false;
-            log_native_window_state();
+            log_native_window_state(self.screen);
         }
         if !open {
             // Painting nothing clears the previous wheel out of the surface, so
@@ -250,25 +289,22 @@ impl eframe::App for ProfileOverlay {
     }
 }
 
-impl ProfileOverlay {
-    /// Grows the window to the whole monitor once its size is known.
-    ///
-    /// The size is not available before the first frame, so this cannot be part
-    /// of the initial `ViewportBuilder`.
-    fn cover_the_screen(&mut self, ctx: &egui::Context) {
-        if self.sized {
-            return;
-        }
-        let Some(monitor) = ctx.input(|input| input.viewport().monitor_size) else {
-            return;
-        };
-        if monitor.x <= 1.0 || monitor.y <= 1.0 {
-            return;
-        }
-        self.sized = true;
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(0.0, 0.0)));
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(monitor));
-    }
+/// Sizes the window to cover the display the wheel should appear on.
+///
+/// Placement goes through `AppKit` rather than `winit` because winit positions
+/// windows relative to the **primary** display, so an overlay could only ever
+/// land there, while the size came from whichever display winit associated with
+/// the window -- one display's position with another's size. `NSScreen::frame`
+/// and `NSWindow::setFrame_display` share a coordinate space and unit, so this
+/// needs no conversion and cannot reproduce that mismatch.
+///
+/// Returns how the display was chosen, for the diagnostics.
+fn place_on_target_screen() -> Option<(ScreenSource, usize)> {
+    let mtm = MainThreadMarker::new()?;
+    let window = native_window()?;
+    let target = target_screen(mtm)?;
+    window.setFrame_display(target.screen.frame(), true);
+    Some((target.source, target.screen_count))
 }
 
 /// Lifts the window above a fullscreen game, using only safe `AppKit` calls.
@@ -313,6 +349,132 @@ fn set_wheel_alpha(visible: bool) {
     }
 }
 
+/// How the display the wheel appears on was decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenSource {
+    /// `NSScreen::mainScreen`, which macOS reports as the screen holding the
+    /// focused window.
+    FocusedWindow,
+    /// The screen the pointer is on.
+    Cursor,
+    /// First in the screen list, which is the one holding the menu bar.
+    Primary,
+}
+
+impl ScreenSource {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::FocusedWindow => "focused_window",
+            Self::Cursor => "cursor",
+            Self::Primary => "primary",
+        }
+    }
+}
+
+struct TargetScreen {
+    /// Held rather than reduced to a rectangle so the geometry type never has
+    /// to be named, which keeps `objc2-foundation` out of this crate's
+    /// dependencies.
+    screen: Retained<NSScreen>,
+    source: ScreenSource,
+    screen_count: usize,
+}
+
+/// Picks the display the wheel should cover.
+///
+/// `NSScreen::mainScreen` is documented as the screen holding the window with
+/// keyboard focus, which is what "the monitor I am looking at" means. But Apple
+/// also documents it as falling back to the **menu-bar screen** when the calling
+/// app has no key window, and this overlay never has one -- it is a background
+/// accessory app that must never take focus. So a `mainScreen` answer of "the
+/// primary" is ambiguous: it is indistinguishable from that fallback, and taking
+/// it at face value is what would leave the wheel pinned to the primary display.
+///
+/// The rule is therefore to use whichever signal can actually discriminate.
+/// `mainScreen` naming a **non**-primary display is real information, because
+/// the fallback could never produce it. When it names the primary, the cursor is
+/// asked instead, since that is unambiguous and, for a fullscreen game that has
+/// captured the pointer, lands on the display being played on.
+fn target_screen(mtm: MainThreadMarker) -> Option<TargetScreen> {
+    let screens = NSScreen::screens(mtm);
+    let screen_count = screens.len();
+    let frames: Vec<Rect> = screens.iter().map(|screen| rect_of(&screen)).collect();
+
+    let main =
+        NSScreen::mainScreen(mtm).and_then(|screen| index_of_frame(&frames, rect_of(&screen)));
+    let cursor = NSEvent::mouseLocation();
+    let cursor = screen_containing((cursor.x, cursor.y), &frames);
+
+    let (index, source) = choose_screen(main, cursor);
+    screens.iter().nth(index).map(|screen| TargetScreen {
+        screen,
+        source,
+        screen_count,
+    })
+}
+
+/// Chooses between the focused-window and cursor screens, by index.
+///
+/// Index 0 is the menu-bar screen, which is also what `NSScreen::mainScreen`
+/// falls back to for an app with no key window -- so a `main` of `Some(0)`
+/// carries no information and the cursor is preferred when it disagrees. Split
+/// out as integers so the rule is testable without a display attached.
+fn choose_screen(main: Option<usize>, cursor: Option<usize>) -> (usize, ScreenSource) {
+    match (main, cursor) {
+        // Only a real key window can put `mainScreen` off the primary.
+        (Some(index), _) if index != 0 => (index, ScreenSource::FocusedWindow),
+        // `main` was the primary, so it may only be the fallback. The cursor is
+        // the one signal left that can point somewhere else.
+        (_, Some(index)) if index != 0 => (index, ScreenSource::Cursor),
+        (Some(index), _) => (index, ScreenSource::FocusedWindow),
+        (_, Some(index)) => (index, ScreenSource::Cursor),
+        (None, None) => (0, ScreenSource::Primary),
+    }
+}
+
+/// Finds the screen whose frame matches `target`.
+///
+/// Compared with a tolerance rather than exactly: both sides come from `AppKit`
+/// and should be identical, but a float equality that silently fails would put
+/// the wheel on the wrong display, which is the bug this is here to prevent.
+fn index_of_frame(frames: &[Rect], target: Rect) -> Option<usize> {
+    const TOLERANCE: f64 = 0.5;
+    frames.iter().position(|frame| {
+        (frame.0 - target.0).abs() < TOLERANCE
+            && (frame.1 - target.1).abs() < TOLERANCE
+            && (frame.2 - target.2).abs() < TOLERANCE
+            && (frame.3 - target.3).abs() < TOLERANCE
+    })
+}
+
+/// A screen rectangle as `(x, y, width, height)` in `AppKit`'s global space.
+type Rect = (f64, f64, f64, f64);
+
+fn rect_of(screen: &NSScreen) -> Rect {
+    let frame = screen.frame();
+    (
+        frame.origin.x,
+        frame.origin.y,
+        frame.size.width,
+        frame.size.height,
+    )
+}
+
+/// Finds which of `frames` contains `point`.
+///
+/// Screens share one global space in which the primary sits at the origin and
+/// the others may extend into **negative** coordinates, so nothing here may
+/// assume a non-negative origin. Edges are half-open, so a point on a shared
+/// boundary belongs to exactly one screen.
+fn screen_containing(point: (f64, f64), frames: &[Rect]) -> Option<usize> {
+    let (x, y) = point;
+    frames
+        .iter()
+        .position(|&(origin_x, origin_y, width, height)| {
+            x >= origin_x && x < origin_x + width && y >= origin_y && y < origin_y + height
+        })
+}
+
 /// Finds the overlay's own window among the application's windows.
 fn native_window() -> Option<Retained<NSWindow>> {
     let mtm = MainThreadMarker::new()?;
@@ -328,15 +490,18 @@ fn native_window() -> Option<Retained<NSWindow>> {
 /// that look identical from the outside: a window that was never shown, one
 /// sized or positioned off-screen, one at too low a level, and one stranded on
 /// the wrong Space.
-fn log_native_window_state() {
+fn log_native_window_state(screen: Option<(ScreenSource, usize)>) {
     let Some(window) = native_window() else {
         eprintln!("level=warn event=overlay_window_missing");
         return;
     };
     let frame = window.frame();
+    let (source, screen_count) =
+        screen.map_or(("none", 0), |(source, count)| (source.label(), count));
     eprintln!(
         "level=info event=overlay_window_shown visible={} on_active_space={} level={} \
-         origin={},{} size={}x{} collection_behavior={:#x}",
+         origin={},{} size={}x{} collection_behavior={:#x} screen_source={source} \
+         screens={screen_count}",
         window.isVisible(),
         window.isOnActiveSpace(),
         window.level(),
@@ -505,6 +670,123 @@ mod tests {
             sectors_per_page,
         });
         state
+    }
+
+    /// A primary display with a second one placed to its left, which puts the
+    /// second at a negative origin -- the case that breaks any code assuming
+    /// screen coordinates start at zero.
+    const LEFT_OF_PRIMARY: [Rect; 2] = [(0.0, 0.0, 2560.0, 1440.0), (-1920.0, 0.0, 1920.0, 1080.0)];
+
+    #[test]
+    fn a_point_resolves_to_the_screen_it_falls_in() {
+        assert_eq!(screen_containing((100.0, 100.0), &LEFT_OF_PRIMARY), Some(0));
+        assert_eq!(
+            screen_containing((-100.0, 100.0), &LEFT_OF_PRIMARY),
+            Some(1),
+            "a display left of the primary has a negative origin"
+        );
+        assert_eq!(
+            screen_containing((-1920.0, 0.0), &LEFT_OF_PRIMARY),
+            Some(1),
+            "the far corner of that display is still inside it"
+        );
+    }
+
+    #[test]
+    fn a_shared_edge_belongs_to_exactly_one_screen() {
+        // x = 0 is the primary's left edge and one past the second's right
+        // edge. Half-open ranges keep it from matching both.
+        assert_eq!(screen_containing((0.0, 500.0), &LEFT_OF_PRIMARY), Some(0));
+        assert_eq!(
+            screen_containing((-0.001, 500.0), &LEFT_OF_PRIMARY),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_point_outside_every_screen_matches_nothing() {
+        // The cursor can sit in a gap between displays that are not aligned.
+        assert_eq!(screen_containing((0.0, 2000.0), &LEFT_OF_PRIMARY), None);
+        assert_eq!(screen_containing((-5000.0, 0.0), &LEFT_OF_PRIMARY), None);
+        assert_eq!(
+            screen_containing((2560.0, 0.0), &LEFT_OF_PRIMARY),
+            None,
+            "just past the primary's right edge"
+        );
+    }
+
+    #[test]
+    fn an_empty_screen_list_matches_nothing() {
+        assert_eq!(screen_containing((0.0, 0.0), &[]), None);
+    }
+
+    #[test]
+    fn a_non_primary_focused_window_wins_because_only_a_real_one_reports_it() {
+        assert_eq!(
+            choose_screen(Some(2), Some(1)),
+            (2, ScreenSource::FocusedWindow)
+        );
+        assert_eq!(
+            choose_screen(Some(3), None),
+            (3, ScreenSource::FocusedWindow)
+        );
+    }
+
+    #[test]
+    fn a_primary_focused_window_yields_to_the_cursor() {
+        // `mainScreen` returning the primary is indistinguishable from its
+        // no-key-window fallback, so it must not outvote a cursor that is
+        // somewhere else. Trusting it here is exactly the bug being fixed.
+        assert_eq!(choose_screen(Some(0), Some(4)), (4, ScreenSource::Cursor));
+        assert_eq!(choose_screen(None, Some(1)), (1, ScreenSource::Cursor));
+    }
+
+    #[test]
+    fn the_primary_is_used_when_nothing_points_anywhere_else() {
+        assert_eq!(
+            choose_screen(Some(0), Some(0)),
+            (0, ScreenSource::FocusedWindow)
+        );
+        assert_eq!(
+            choose_screen(Some(0), None),
+            (0, ScreenSource::FocusedWindow)
+        );
+        assert_eq!(choose_screen(None, Some(0)), (0, ScreenSource::Cursor));
+        assert_eq!(choose_screen(None, None), (0, ScreenSource::Primary));
+    }
+
+    #[test]
+    fn a_screen_frame_resolves_to_its_index() {
+        assert_eq!(
+            index_of_frame(&LEFT_OF_PRIMARY, LEFT_OF_PRIMARY[1]),
+            Some(1)
+        );
+        // AppKit hands back the same numbers on both sides, but a sub-pixel
+        // difference must not silently fall through to the wrong display.
+        assert_eq!(
+            index_of_frame(&LEFT_OF_PRIMARY, (-1920.2, 0.1, 1920.0, 1080.0)),
+            Some(1)
+        );
+        assert_eq!(
+            index_of_frame(&LEFT_OF_PRIMARY, (500.0, 0.0, 800.0, 600.0)),
+            None
+        );
+        assert_eq!(index_of_frame(&[], LEFT_OF_PRIMARY[0]), None);
+    }
+
+    #[test]
+    fn every_screen_source_has_a_distinct_label() {
+        let labels: Vec<_> = [
+            ScreenSource::FocusedWindow,
+            ScreenSource::Cursor,
+            ScreenSource::Primary,
+        ]
+        .into_iter()
+        .map(ScreenSource::label)
+        .collect();
+        // The log line is the only way to tell which branch won on real
+        // hardware, so the labels have to be distinguishable.
+        assert_eq!(labels, ["focused_window", "cursor", "primary"]);
     }
 
     #[test]

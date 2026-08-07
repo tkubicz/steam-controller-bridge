@@ -169,11 +169,61 @@ overlay's only route to the main thread: the stdin reader can set state and call
 it out therefore made the wheel a one-shot — it opened the first time and could
 never be told to come back, because no frame ever ran again.
 
-So the window is ordered in exactly once, at zero alpha as soon as its size is
-known, and is never ordered out; the process is killed instead. `Presentation`
-in `profile_overlay.rs` owns that rule and is unit tested for it. A second
-order-in in those tests would mean the window had been ordered out in between,
-which is the state the wheel cannot recover from.
+So the window is ordered in exactly once, at zero alpha as soon as it has been
+placed on a display, and is never ordered out; the process is killed instead.
+`Presentation` in `profile_overlay.rs` owns that rule and is unit tested for it.
+A second order-in in those tests would mean the window had been ordered out in
+between, which is the state the wheel cannot recover from.
+
+### Placement and ordering go through AppKit, not winit
+
+Both are done against the real `NSWindow`, alongside the level and collection
+behaviour. Neither is a stylistic preference; each replaces a winit path that
+produced a specific bug.
+
+**Ordering.** `ViewportCommand::Visible(true)` reaches winit's
+`makeKeyAndOrderFront`, which asks to become the **key** window. A background
+accessory app cannot do that over another application's fullscreen Space, so the
+call is ignored and the wheel never appears over a fullscreen game — which is
+most of what this feature exists for. `orderFrontRegardless` is the call meant
+for showing a window from an app that is not active, and it is what the
+`CanJoinAllSpaces | FullScreenAuxiliary` behaviour is waiting for. No viewport
+commands are sent from the render loop at all now; anything that asked winit to
+change visibility would `orderOut` and strand the wheel again.
+
+**Placement.** winit positions windows relative to the **primary** display, so
+an overlay could only ever land there, while its size came from whichever
+display winit associated with the window — one display's position with another's
+size. `NSScreen::frame` and `NSWindow::setFrame_display` share a coordinate
+space and a unit, so placement needs no conversion and cannot reproduce that
+mismatch.
+
+### Choosing the display
+
+`NSScreen::mainScreen` is documented as the screen holding the window with
+keyboard focus — but *also* as falling back to the menu-bar screen when the
+calling app has no key window, and this overlay never has one. So an answer of
+"the primary" is ambiguous: it cannot be told apart from that fallback, and
+trusting it is what would pin the wheel to the primary display forever.
+
+`choose_screen` therefore uses whichever signal can discriminate:
+
+| `mainScreen` | Cursor | Chosen |
+| --- | --- | --- |
+| non-primary | anything | `mainScreen` — only a real key window can report this |
+| primary | non-primary | the cursor — `mainScreen` carried no information |
+| primary | primary | the primary |
+| unavailable | anywhere | the cursor, else the primary |
+
+The cursor is a good second signal here specifically because a fullscreen game
+usually captures the pointer onto the display being played on.
+
+The window is placed on the first frame and again on each closed → open
+transition, since the process starts halfway through the hold and focus can move
+before the wheel appears. Both happen at zero alpha, so neither is visible.
+
+`screen_source=` in the `overlay_window_shown` log line reports which branch
+won, because that is the only way to tell from outside.
 
 ### Losing the parent exits the process, without waiting for a frame
 
@@ -236,10 +286,11 @@ The overlay process logs to stderr, which the menu app inherits:
 
 - `event=overlay_window_configured` — the AppKit setters were applied.
 - `event=overlay_window_shown` — the window's visibility, Space, level, frame,
-  and collection behaviour on the frame after it was shown. When a user reports
-  that nothing appeared, this line separates the cases that look identical from
-  outside: never shown, shown off-screen, shown too low, or stranded on the
-  wrong Space.
+  collection behaviour, `screen_source=`, and screen count, on the frame after it
+  was shown. When a user reports that nothing appeared, this line separates the
+  cases that look identical from outside: never shown, shown off-screen, shown
+  too low, stranded on the wrong Space, or placed on the wrong display.
+  `screen_source=` in particular says which of the display signals won.
 - `event=profile_overlay_started` / `_stopped` / `_exited` / `_start_failed` —
   from the parent, covering the child's lifecycle. A started/stopped pair per
   hold is normal; anything left running between holds is not.
