@@ -5,6 +5,26 @@ not edit release entries by hand; correct the originating pull-request metadata
 and let the release pull request regenerate them. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.3.0...v1.4.0) (2026-08-07)
+
+
+### Features
+
+* Adds support for Steam Controller pads - mouse movement and scrolling ([#19](https://github.com/tkubicz/steam-controller-bridge/issues/19)) ([5801b0e](https://github.com/tkubicz/steam-controller-bridge/commit/5801b0ee126ee869d80eed0f3914e2b5178aebd2))
+* **menu:** add controller-driven in-game profile wheel ([d2e4bef](https://github.com/tkubicz/steam-controller-bridge/commit/d2e4bef886273ec7bb114ab8de46e115f9718624))
+
+
+### Bug Fixes
+
+* proper version for macos application ([#17](https://github.com/tkubicz/steam-controller-bridge/issues/17)) ([f5b9730](https://github.com/tkubicz/steam-controller-bridge/commit/f5b9730e829ef5f0490cdac6a1fdd25ab491897f))
+* **runtime:** keep controller supervision responsive during desktop input cleanup ([d2e4bef](https://github.com/tkubicz/steam-controller-bridge/commit/d2e4bef886273ec7bb114ab8de46e115f9718624))
+* **runtime:** release bridge hardware safely across macOS sleep and wake ([d2e4bef](https://github.com/tkubicz/steam-controller-bridge/commit/d2e4bef886273ec7bb114ab8de46e115f9718624))
+
+
+### Performance Improvements
+
+* **runtime:** eliminate idle desktop-binding polling ([d2e4bef](https://github.com/tkubicz/steam-controller-bridge/commit/d2e4bef886273ec7bb114ab8de46e115f9718624))
+
 ## [1.3.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.2.0...v1.3.0) (2026-08-05)
 
 
