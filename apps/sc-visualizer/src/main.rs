@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use bridge_output::{GamepadOutput, SerialConfig, SerialOutput};
 use controller_mapper::{ControllerMapper, MapperConfig, RightAxisSource};
-use eframe::egui::{self, Color32, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, RichText, Sense, Stroke, Vec2};
 use gamepad_state::{Button, GamepadState};
 use recording::{
     RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED, KIND_MARKER,
@@ -15,6 +15,7 @@ use steam_controller_device::{DeviceEvent, HidSession};
 use steam_controller_protocol::{
     DecodedReport, SteamButton, SteamControllerDecoder, SteamControllerState,
 };
+use ui_theme::{ACCENT, DANGER, DETAIL, OUTLINE, SUCCESS};
 
 const FRAME_TIME: f32 = 1.0 / 250.0;
 
@@ -27,7 +28,10 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Steam Controller Visualizer",
         options,
-        Box::new(move |_creation| Ok(Box::new(Visualizer::new(index)))),
+        Box::new(move |creation| {
+            ui_theme::configure_visuals(&creation.egui_ctx);
+            Ok(Box::new(Visualizer::new(index)))
+        }),
     )
 }
 
@@ -459,11 +463,7 @@ impl eframe::App for Visualizer {
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let color = if self.connected {
-                        Color32::GREEN
-                    } else {
-                        Color32::RED
-                    };
+                    let color = if self.connected { SUCCESS } else { DANGER };
                     ui.label(
                         RichText::new(if self.connected {
                             "● Connected"
@@ -610,19 +610,19 @@ fn stick(ui: &mut egui::Ui, label: &str, x: f32, y: f32) {
         ui.label(label);
         let (response, painter) = ui.allocate_painter(Vec2::splat(100.0), Sense::hover());
         let center = response.rect.center();
-        painter.circle_stroke(center, 45.0, Stroke::new(1.0, Color32::GRAY));
+        painter.circle_stroke(center, 45.0, Stroke::new(1.0, OUTLINE));
         painter.line_segment(
             [center - Vec2::new(45.0, 0.0), center + Vec2::new(45.0, 0.0)],
-            Stroke::new(1.0, Color32::DARK_GRAY),
+            Stroke::new(1.0, DETAIL),
         );
         painter.line_segment(
             [center - Vec2::new(0.0, 45.0), center + Vec2::new(0.0, 45.0)],
-            Stroke::new(1.0, Color32::DARK_GRAY),
+            Stroke::new(1.0, DETAIL),
         );
         painter.circle_filled(
             center + Vec2::new(x.clamp(-1.0, 1.0), -y.clamp(-1.0, 1.0)) * 45.0,
             5.0,
-            Color32::LIGHT_BLUE,
+            ACCENT,
         );
     });
 }

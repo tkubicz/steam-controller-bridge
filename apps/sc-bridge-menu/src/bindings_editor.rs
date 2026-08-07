@@ -8,18 +8,16 @@ use desktop_bindings::{
 };
 use eframe::egui;
 
-use crate::theme::{ACCENT, MUTED_TEXT, ON_ACCENT, SURFACE, SURFACE_RAISED};
+use ui_theme::{
+    ACCENT, ACCENT_SUBTLE, BORDER, DANGER, DETAIL, INSET, MUTED_TEXT, ON_ACCENT, OUTLINE, PANEL,
+    SUNKEN, SURFACE, SURFACE_RAISED, TEXT,
+};
 
 const WINDOW_SIZE: [f32; 2] = [1260.0, 720.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [1080.0, 660.0];
 const INSPECTOR_WIDTH: f32 = 300.0;
 const COLUMN_GAP: f32 = 16.0;
 const CANVAS_MIN_WIDTH: f32 = 620.0;
-const CANVAS_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(18, 21, 26);
-const CANVAS_BORDER: egui::Color32 = egui::Color32::from_rgb(46, 52, 62);
-const INSET: egui::Color32 = egui::Color32::from_rgb(22, 26, 32);
-const OUTLINE: egui::Color32 = egui::Color32::from_rgb(126, 136, 149);
-const DETAIL: egui::Color32 = egui::Color32::from_rgb(82, 92, 105);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControllerView {
@@ -328,11 +326,11 @@ impl BindingsEditor {
         let desired = egui::vec2(width, ui.available_height());
         let (canvas_rect, _) = ui.allocate_exact_size(desired, egui::Sense::hover());
         let painter = ui.painter_at(canvas_rect);
-        painter.rect_filled(canvas_rect, 14.0, CANVAS_BACKGROUND);
+        painter.rect_filled(canvas_rect, 14.0, SUNKEN);
         painter.rect_stroke(
             canvas_rect,
             14.0,
-            egui::Stroke::new(1.0, CANVAS_BORDER),
+            egui::Stroke::new(1.0, BORDER),
             egui::StrokeKind::Inside,
         );
 
@@ -457,11 +455,7 @@ impl BindingsEditor {
             let button = egui::Button::new(
                 egui::RichText::new(format!("{}\n{summary}", callout.control.label()))
                     .size(10.5)
-                    .color(if selected {
-                        egui::Color32::from_rgb(7, 31, 35)
-                    } else {
-                        egui::Color32::WHITE
-                    }),
+                    .color(if selected { ON_ACCENT } else { TEXT }),
             )
             .fill(if selected { ACCENT } else { SURFACE_RAISED })
             .stroke(egui::Stroke::new(
@@ -484,7 +478,7 @@ impl BindingsEditor {
         let card_height = ui.available_height() - 32.0;
         egui::Frame::new()
             .fill(SURFACE)
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 58, 68)))
+            .stroke(egui::Stroke::new(1.0, BORDER))
             .corner_radius(12.0)
             .inner_margin(16.0)
             .show(ui, |ui| {
@@ -692,7 +686,7 @@ impl BindingsEditor {
     fn show(&mut self, ui: &mut egui::Ui) {
         self.capture_key(ui.ctx());
         egui::Frame::new()
-            .fill(egui::Color32::from_rgb(14, 17, 21))
+            .fill(PANEL)
             .inner_margin(egui::Margin::symmetric(20, 16))
             .show(ui, |ui| {
                 ui.heading("Controller bindings");
@@ -742,9 +736,7 @@ impl BindingsEditor {
                                 ui.add_sized(
                                     [84.0, 32.0],
                                     egui::Button::new(
-                                        egui::RichText::new("Save")
-                                            .strong()
-                                            .color(egui::Color32::from_rgb(7, 31, 35)),
+                                        egui::RichText::new("Save").strong().color(ON_ACCENT),
                                     )
                                     .fill(ACCENT),
                                 )
@@ -762,7 +754,7 @@ impl BindingsEditor {
                         }
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             if let Some(message) = &self.message {
-                                ui.colored_label(egui::Color32::from_rgb(255, 115, 115), message);
+                                ui.colored_label(DANGER, message);
                             } else if dirty {
                                 ui.label(
                                     egui::RichText::new("Unsaved changes take effect after Save.")
@@ -826,17 +818,10 @@ fn configure_modifier_glyphs(ctx: &egui::Context) {
 }
 
 fn configure_visuals(ctx: &egui::Context) {
+    // The palette itself is shared with the overlay and the visualizer; only the
+    // modifier glyph font is specific to this window.
     configure_modifier_glyphs(ctx);
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = egui::Color32::from_rgb(14, 17, 21);
-    visuals.window_fill = SURFACE;
-    visuals.extreme_bg_color = egui::Color32::from_rgb(20, 24, 30);
-    visuals.selection.bg_fill = ACCENT;
-    visuals.selection.stroke = egui::Stroke::new(1.0, ON_ACCENT);
-    visuals.widgets.inactive.bg_fill = SURFACE_RAISED;
-    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(45, 54, 65);
-    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(50, 61, 73);
-    ctx.set_visuals(visuals);
+    ui_theme::configure_visuals(ctx);
 }
 
 fn selection_description(selection: EditorSelection) -> &'static str {
@@ -1318,10 +1303,7 @@ fn selection_style(
     default_stroke: egui::Stroke,
 ) -> (egui::Color32, egui::Stroke) {
     if selected == item {
-        (
-            egui::Color32::from_rgb(34, 67, 73),
-            egui::Stroke::new(2.4, ACCENT),
-        )
+        (ACCENT_SUBTLE, egui::Stroke::new(2.4, ACCENT))
     } else if hovered == Some(item) {
         (INSET, egui::Stroke::new(1.8, ACCENT.gamma_multiply(0.6)))
     } else {

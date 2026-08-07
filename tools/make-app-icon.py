@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Render packaging/macos/AppIcon.icns.
+"""Render packaging/macos/AppIcon.icns and AppIcon.png.
 
-The generated .icns is committed, so building the app needs no Python. Run this
+The generated files are committed, so building the app needs no Python. Run this
 only when the artwork changes:
 
     python3 tools/make-app-icon.py
@@ -11,10 +11,16 @@ Requires Pillow and macOS's iconutil.
 The controller silhouette reuses the geometry that apps/sc-bridge-menu/src/macos.rs
 draws for the menu-bar template, so the Dock icon and the menu-bar icon stay the
 same shape. Keep the two in sync if either changes.
+
+The colours below are the app's own: the tile runs SURFACE_RAISED to SUNKEN and
+the glyph is ACCENT, so the icon reads as the app window in miniature. Python
+cannot import Rust constants, so the three values are duplicated here and
+checked against crates/ui-theme at startup rather than left to drift.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -28,6 +34,10 @@ except ImportError:
 
 REPO = Path(__file__).resolve().parent.parent
 OUTPUT = REPO / "packaging" / "macos" / "AppIcon.icns"
+# The 1024 render, kept beside the .icns for docs and for eyeballing a change.
+# Nothing in the build reads it; it exists so the artwork is inspectable without
+# unpacking the icns.
+PREVIEW = REPO / "packaging" / "macos" / "AppIcon.png"
 
 # Master canvas. The tile fills it edge to edge; see render().
 CANVAS = 1024
@@ -35,9 +45,12 @@ CANVAS = 1024
 # Anti-aliasing comes from drawing large and downsampling.
 OVERSAMPLE = 4
 
-# Diagonal gradient, top-left to bottom-right.
-GRADIENT_FROM = (0x8B, 0x7C, 0xF6)
-GRADIENT_TO = (0x43, 0x38, 0xCA)
+# Diagonal gradient, top-left to bottom-right. SURFACE_RAISED to SUNKEN.
+GRADIENT_FROM = (0x24, 0x2A, 0x33)
+GRADIENT_TO = (0x12, 0x15, 0x1A)
+
+# The controller silhouette. ACCENT.
+GLYPH = (0x54, 0xD3, 0xE0)
 
 # The controller outline from macos.rs, in its 24x18 logical space.
 # ("c", ...) is a cubic with two control points; ("l", ...) a line.
@@ -226,15 +239,57 @@ def render(size):
             pen.ellipse([cx - r, cy - r, cx + r, cy + r], fill=0)
 
     glyph = glyph.resize((size, size), Image.LANCZOS)
-    white = Image.new("RGBA", (size, size), (255, 255, 255, 255))
-    white.putalpha(glyph)
-    canvas.alpha_composite(white)
+    fill = Image.new("RGBA", (size, size), (*GLYPH, 255))
+    fill.putalpha(glyph)
+    canvas.alpha_composite(fill)
     return canvas
+
+
+def check_palette():
+    """Fail if the colours here have drifted from crates/ui-theme.
+
+    The icon is the one place the palette is duplicated across languages. A
+    silent mismatch is exactly how the icon ended up violet while every window
+    was cyan, so the duplication is checked rather than trusted.
+    """
+    source = REPO / "crates" / "ui-theme" / "src" / "lib.rs"
+    if not source.exists():
+        sys.exit(f"cannot verify palette: {source.relative_to(REPO)} is missing")
+    text = source.read_text(encoding="utf-8")
+
+    problems = []
+    for token, expected in (
+        ("SURFACE_RAISED", GRADIENT_FROM),
+        ("SUNKEN", GRADIENT_TO),
+        ("ACCENT", GLYPH),
+    ):
+        match = re.search(
+            rf"pub const {token}: egui::Color32 = egui::Color32::from_rgb\(\s*"
+            r"(\d+),\s*(\d+),\s*(\d+),?\s*\);",
+            text,
+        )
+        if match is None:
+            problems.append(f"  {token}: not found in {source.name}")
+            continue
+        found = tuple(int(group) for group in match.groups())
+        if found != expected:
+            problems.append(
+                f"  {token}: ui-theme has #{found[0]:02X}{found[1]:02X}{found[2]:02X}, "
+                f"this script has #{expected[0]:02X}{expected[1]:02X}{expected[2]:02X}"
+            )
+
+    if problems:
+        sys.exit(
+            "palette drift between this script and crates/ui-theme:\n"
+            + "\n".join(problems)
+            + "\n\nUpdate GRADIENT_FROM / GRADIENT_TO / GLYPH to match, then rerun."
+        )
 
 
 def main():
     if not shutil.which("iconutil"):
         sys.exit("iconutil not found; this script requires macOS")
+    check_palette()
 
     with tempfile.TemporaryDirectory() as work:
         iconset = Path(work) / "AppIcon.iconset"
@@ -251,8 +306,10 @@ def main():
             ["iconutil", "--convert", "icns", "--output", str(OUTPUT), str(iconset)],
             check=True,
         )
+        cache[CANVAS].save(PREVIEW)
 
-    print(f"wrote {OUTPUT.relative_to(REPO)} ({OUTPUT.stat().st_size} bytes)")
+    for path in (OUTPUT, PREVIEW):
+        print(f"wrote {path.relative_to(REPO)} ({path.stat().st_size} bytes)")
 
 
 if __name__ == "__main__":

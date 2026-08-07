@@ -15,8 +15,6 @@ mod overlay_host;
 mod overlay_protocol;
 #[cfg(all(target_os = "macos", feature = "overlay"))]
 mod profile_overlay;
-#[cfg(all(target_os = "macos", any(feature = "editor", feature = "overlay")))]
-mod theme;
 
 #[cfg(target_os = "macos")]
 fn main() {
