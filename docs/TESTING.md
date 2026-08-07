@@ -31,6 +31,32 @@ cargo build --workspace --all-targets
 ./tools/build-macos-app.sh
 ```
 
+Runtime lifecycle tests additionally prove that system-sleep suspension enters
+the stopped state, serial output and controller-discovery ownership are dropped
+before the command acknowledgement is observable, desktop shutdown retains a
+real timeout even when a platform sink is blocked, and control/event mailboxes
+stay bounded. On macOS, launching either serial frontend also exercises the
+fail-closed `IOKit` monitor registration; a registration failure must leave the
+runtime in Error without opening hardware. A real sleep/wake cycle with the
+XIAO attached remains a physical acceptance gate because a unit test cannot
+exercise CDC re-enumeration or the operating-system power callback.
+
+The optimized desktop-worker latency probe is repeatable with:
+
+```bash
+cargo test --release -p bridge-runtime \
+  tests::desktop_worker_input_latency_stays_within_budget -- --exact --nocapture
+```
+
+Its p95 must stay below the 10 ms runtime tick. For a release menu-app resource
+check, take at least two idle samples of `%CPU`, RSS, open descriptors, threads,
+and `leaks -quiet` output from the same PID. Counts must remain stable after
+startup; the overlay host's repeated-child test separately exercises kill,
+reap, and writer-thread join across 32 process cycles. Restricted-process leak
+reports can include stable AppKit/AppIntents framework cycles, so treat growth
+between samples or project-owned roots as a failure rather than attributing an
+unchanged framework root to this code.
+
 The protocol tests cover every message type, fixed axis endpoints, the static CRC vector, partial and combined reads, garbage, truncation, invalid versions, oversized lengths, corruption, and recovery. A deterministic pseudo-random byte-stream test checks that framing never panics.
 
 Rumble coverage includes the protocol type-8 little-endian vector, exact

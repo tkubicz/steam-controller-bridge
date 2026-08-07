@@ -416,6 +416,26 @@ Quit, disconnect, output failure, and permission loss also release all held
 desktop inputs. A desktop binding failure reports Permission required or
 Degraded while the standard gamepad continues running.
 
+### Switching profiles from the controller
+
+`Profile Wheel -> Hold Quick Access for Profile Wheel` lets a profile be chosen
+without leaving the game. Hold Quick Access for two seconds (three is also
+offered), point either stick at a profile, then press **A** to apply or **B** to
+cancel. The wheel stays open after Quick Access is released, and the selection
+stays put when the stick recentres, so there is no rush. `L1`/`R1` page through
+a store with more than eight profiles.
+
+The wheel is off by default because it takes Quick Access over. Short presses
+still fire whatever Quick Access is bound to. While the wheel is open the game
+sees a fully neutral gamepad — sticks centred, every button released, triggers
+at rest — so choosing a profile does not swing the camera, and a trigger held
+out of habit stops firing until the wheel closes.
+
+The wheel cannot appear over a game that captures the display exclusively.
+Native fullscreen and borderless-windowed games, including those under Game
+Porting Toolkit or Whisky, are fine. See
+[PROFILE_OVERLAY.md](PROFILE_OVERLAY.md) for the details.
+
 For opt-in CLI use, both arguments are required:
 
 ```bash

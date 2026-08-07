@@ -146,6 +146,46 @@ impl GamepadState {
     }
 }
 
+/// How much of the controller a host feature is holding back from the game.
+///
+/// **Which variant is correct depends on whether the state is pinned, and
+/// getting it wrong faults the hardware.** Firmware arms its controller-data
+/// watchdog only for reports that are *not* exactly neutral, and the host stops
+/// refreshing unchanged state once it has sent a neutral one. So a state that is
+/// both **pinned** and **non-neutral** leaves the watchdog armed while the host
+/// has nothing new to send, and any host stall longer than the watchdog then
+/// faults the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputSuppression {
+    /// Every control at rest, for a feature that has taken the controller over.
+    ///
+    /// Required whenever the state is pinned for as long as the feature lasts,
+    /// because exactly-neutral is what disarms the watchdog -- which makes the
+    /// fault above impossible however badly the host is scheduled. It is also
+    /// the right semantics: a user in an overlay is not playing, so a trigger
+    /// they happen to be holding should not keep firing.
+    Neutral,
+    /// Specific buttons withheld while the rest of the controller works.
+    ///
+    /// For controls a feature has already consumed and that are still physically
+    /// held after it finishes -- the button that dismissed an overlay must not
+    /// reach the game just because the user has not let go yet. Safe despite the
+    /// note above because the state is no longer pinned: it tracks the
+    /// controller again, so it either keeps changing or settles at exactly
+    /// neutral once the user lets go.
+    Buttons(GamepadButtons),
+}
+
+impl OutputSuppression {
+    /// Withholds whatever this variant covers.
+    pub fn apply(self, state: &mut GamepadState) {
+        match self {
+            Self::Neutral => *state = GamepadState::NEUTRAL,
+            Self::Buttons(buttons) => state.buttons.0 &= !buttons.0,
+        }
+    }
+}
+
 fn sanitize(value: f32, min: f32, max: f32) -> f32 {
     if value.is_finite() {
         value.clamp(min, max)
@@ -252,6 +292,49 @@ mod tests {
         assert_eq!(state.validate(), Err(InvalidState::NonFinite("left_x")));
         state.left_x = 1.1;
         assert_eq!(state.validate(), Err(InvalidState::OutOfRange("left_x")));
+    }
+
+    #[test]
+    fn suppression_leaves_no_control_active() {
+        // Every control, not just the ones an overlay reads: a partially
+        // suppressed state is still non-neutral, and firmware keeps its
+        // controller-data watchdog armed for anything that is not exactly
+        // neutral. Leaving one control active is what turns a slow host into a
+        // faulted device.
+        let mut buttons = GamepadButtons::default();
+        for button in [Button::South, Button::Extra3, Button::North, Button::Guide] {
+            buttons.set(button, true);
+        }
+        let mut state = GamepadState {
+            buttons,
+            hat: HatState::North,
+            left_x: 0.9,
+            left_y: -0.5,
+            right_x: -0.3,
+            right_y: 0.7,
+            left_trigger: 0.4,
+            right_trigger: 1.0,
+        };
+
+        OutputSuppression::Neutral.apply(&mut state);
+
+        assert_eq!(state, GamepadState::NEUTRAL);
+    }
+
+    #[test]
+    fn a_suppressed_state_is_exactly_the_neutral_the_wire_agrees_on() {
+        // The firmware disarms its watchdog by comparing against its own
+        // neutral report, so "close enough to neutral" is not good enough.
+        let mut state = GamepadState {
+            hat: HatState::SouthWest,
+            left_trigger: 0.01,
+            ..GamepadState::neutral()
+        };
+        OutputSuppression::Neutral.apply(&mut state);
+        assert_eq!(state.hat, HatState::Centered);
+        assert!(state.left_trigger.abs() < f32::EPSILON);
+        assert_eq!(state.buttons.0, 0);
+        assert!(state.validate().is_ok());
     }
 
     #[test]

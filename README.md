@@ -328,7 +328,12 @@ When Placed on Puck` controls the independent immediate-dock action. Both are
 applied live and saved under `~/Library/Application Support/Steam Controller
 Bridge/`. The menu-bar icon distinguishes Off, On but waiting, Controller ready,
 and Action required states. The dynamic `Bindings` submenu selects profiles,
-launches the editor, and opens Accessibility settings. Friendly problem summaries stay bounded; use
+launches the editor, and opens Accessibility settings. `Profile Wheel` enables
+an in-game radial switcher: hold Quick Access, point either stick at a profile,
+press A to apply or B to cancel. It floats over native-fullscreen and
+borderless-windowed games, is off by default because it takes Quick Access over,
+and is documented in [docs/PROFILE_OVERLAY.md](docs/PROFILE_OVERLAY.md).
+Friendly problem summaries stay bounded; use
 `Copy Full Error`, `Copy Diagnostics`, or the rotated log folder for the
 complete technical detail. Start/Stop, Input Monitoring settings, and Quit are
 also available. Logs write concise `status_change` records immediately, full
@@ -353,6 +358,11 @@ work.
   tests, but real Puck/Bluetooth power-off, charge-state transitions, and
   stay-asleep behavior remain an explicit hardware acceptance gate. Use the
   documented `sc-probe power-off --index N` procedure before relying on it.
+- The profile wheel cannot appear over a game that captures the display
+  exclusively; such a game draws above every window level. Native-fullscreen and
+  borderless-windowed games, including those under Game Porting Toolkit or
+  Whisky, are supported. The wheel also does not suppress the Quick Access hold
+  itself, so the game sees `Extra3` held for the hold duration before it opens.
 - Steam coexistence, multiple simultaneous SC2 controllers, and running another
   HID consumer against the selected slot are unsupported.
 - Automatic discovery deliberately reports an ambiguity instead of choosing

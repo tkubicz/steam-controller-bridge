@@ -160,50 +160,17 @@ impl ControllerMapper {
 
     fn map_unfiltered(&self, input: &SteamControllerState) -> GamepadState {
         let mut state = GamepadState::neutral();
-        map_button(input, SteamButton::A, &mut state, Button::South);
-        map_button(input, SteamButton::B, &mut state, Button::East);
-        map_button(input, SteamButton::X, &mut state, Button::West);
-        map_button(input, SteamButton::Y, &mut state, Button::North);
-        map_button(
-            input,
-            SteamButton::LeftShoulder,
-            &mut state,
-            Button::LeftShoulder,
-        );
-        map_button(
-            input,
-            SteamButton::RightShoulder,
-            &mut state,
-            Button::RightShoulder,
-        );
-        map_button(
-            input,
-            SteamButton::LeftStickPress,
-            &mut state,
-            Button::LeftStick,
-        );
+        for source in DIRECT_GAMEPAD_BUTTONS {
+            if let Some(target) = gamepad_button(source) {
+                map_button(input, source, &mut state, target);
+            }
+        }
         state.buttons.set(
             Button::RightStick,
             input.buttons.contains(SteamButton::RightStickPress)
                 || (self.config.right_axis_source == RightAxisSource::RightPad
                     && input.buttons.contains(SteamButton::RightPadClick)),
         );
-        // Triton's button names are counterintuitive at the generic/Xbox
-        // boundary: SDL and OpenPuck both map VIEW to Start and MENU to Back.
-        map_button(input, SteamButton::View, &mut state, Button::Start);
-        map_button(input, SteamButton::Menu, &mut state, Button::Back);
-        map_button(input, SteamButton::Steam, &mut state, Button::Guide);
-        map_button(input, SteamButton::LeftGrip4, &mut state, Button::LeftGrip);
-        map_button(
-            input,
-            SteamButton::RightGrip4,
-            &mut state,
-            Button::RightGrip,
-        );
-        map_button(input, SteamButton::LeftGrip5, &mut state, Button::Extra1);
-        map_button(input, SteamButton::RightGrip5, &mut state, Button::Extra2);
-        map_button(input, SteamButton::QuickAccess, &mut state, Button::Extra3);
-
         state.hat = map_hat(input);
         state.left_x = normalize_axis(input.left_stick_x);
         state.left_y = normalize_axis(input.left_stick_y);
@@ -220,6 +187,66 @@ impl ControllerMapper {
         state.left_trigger = (f32::from(input.left_trigger) / trigger_scale).clamp(0.0, 1.0);
         state.right_trigger = (f32::from(input.right_trigger) / trigger_scale).clamp(0.0, 1.0);
         state
+    }
+}
+
+const DIRECT_GAMEPAD_BUTTONS: [SteamButton; 16] = [
+    SteamButton::A,
+    SteamButton::B,
+    SteamButton::X,
+    SteamButton::Y,
+    SteamButton::LeftShoulder,
+    SteamButton::RightShoulder,
+    SteamButton::LeftStickPress,
+    SteamButton::RightStickPress,
+    SteamButton::View,
+    SteamButton::Menu,
+    SteamButton::Steam,
+    SteamButton::LeftGrip4,
+    SteamButton::RightGrip4,
+    SteamButton::LeftGrip5,
+    SteamButton::RightGrip5,
+    SteamButton::QuickAccess,
+];
+
+/// Returns the stable, direct generic-gamepad mapping for a Steam button.
+///
+/// D-pad directions map to the hat, and pad/touch/trigger-click controls are
+/// conditional or host-only, so they return `None`. Triton's counterintuitive
+/// naming is preserved here: SDL/OpenPuck map View to Start and Menu to Back.
+#[must_use]
+pub const fn gamepad_button(source: SteamButton) -> Option<Button> {
+    match source {
+        SteamButton::A => Some(Button::South),
+        SteamButton::B => Some(Button::East),
+        SteamButton::X => Some(Button::West),
+        SteamButton::Y => Some(Button::North),
+        SteamButton::LeftShoulder => Some(Button::LeftShoulder),
+        SteamButton::RightShoulder => Some(Button::RightShoulder),
+        SteamButton::LeftStickPress => Some(Button::LeftStick),
+        SteamButton::RightStickPress => Some(Button::RightStick),
+        SteamButton::View => Some(Button::Start),
+        SteamButton::Menu => Some(Button::Back),
+        SteamButton::Steam => Some(Button::Guide),
+        SteamButton::LeftGrip4 => Some(Button::LeftGrip),
+        SteamButton::RightGrip4 => Some(Button::RightGrip),
+        SteamButton::LeftGrip5 => Some(Button::Extra1),
+        SteamButton::RightGrip5 => Some(Button::Extra2),
+        SteamButton::QuickAccess => Some(Button::Extra3),
+        SteamButton::DpadDown
+        | SteamButton::DpadRight
+        | SteamButton::DpadLeft
+        | SteamButton::DpadUp
+        | SteamButton::RightStickTouch
+        | SteamButton::RightPadTouch
+        | SteamButton::RightPadClick
+        | SteamButton::RightTriggerClick
+        | SteamButton::LeftStickTouch
+        | SteamButton::LeftPadTouch
+        | SteamButton::LeftPadClick
+        | SteamButton::LeftTriggerClick
+        | SteamButton::RightGripTouch
+        | SteamButton::LeftGripTouch => None,
     }
 }
 
@@ -517,25 +544,8 @@ mod tests {
 
     #[test]
     fn maps_every_documented_output_button() {
-        let cases = [
-            (SteamButton::A, Button::South),
-            (SteamButton::B, Button::East),
-            (SteamButton::X, Button::West),
-            (SteamButton::Y, Button::North),
-            (SteamButton::LeftShoulder, Button::LeftShoulder),
-            (SteamButton::RightShoulder, Button::RightShoulder),
-            (SteamButton::LeftStickPress, Button::LeftStick),
-            (SteamButton::RightStickPress, Button::RightStick),
-            (SteamButton::View, Button::Start),
-            (SteamButton::Menu, Button::Back),
-            (SteamButton::Steam, Button::Guide),
-            (SteamButton::LeftGrip4, Button::LeftGrip),
-            (SteamButton::RightGrip4, Button::RightGrip),
-            (SteamButton::LeftGrip5, Button::Extra1),
-            (SteamButton::RightGrip5, Button::Extra2),
-            (SteamButton::QuickAccess, Button::Extra3),
-        ];
-        for (source, target) in cases {
+        for source in DIRECT_GAMEPAD_BUTTONS {
+            let target = gamepad_button(source).expect("direct mapping table must stay complete");
             let mut input = source_state();
             set_button(&mut input, source);
             let output = ControllerMapper::default().map(&input, 0.004);

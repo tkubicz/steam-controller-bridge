@@ -1,13 +1,15 @@
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bridge_runtime::{
-    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, PuckDockAction,
-    RuntimeConfig, StatusLogRecord, StatusLogTracker,
+    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, PickerConfig,
+    PickerEvent, PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord, StatusLogTracker,
 };
 use desktop_bindings::{
     default_store_path, input_monitoring_access, load_or_create_store, parse_store,
@@ -24,11 +26,12 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuIt
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::window::WindowId;
 
 use crate::model::{MenuModel, RunAction, TrayState};
+use crate::overlay_host::OverlayHost;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const LOG_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
@@ -49,7 +52,12 @@ const IDLE_10_ID: &str = "idle-10";
 const IDLE_15_ID: &str = "idle-15";
 const IDLE_30_ID: &str = "idle-30";
 const PUCK_DOCK_ID: &str = "puck-dock-power-off";
-const SETTINGS_VERSION: u32 = 2;
+const OVERLAY_ENABLED_ID: &str = "profile-overlay-enabled";
+const OVERLAY_HOLD_PREFIX: &str = "profile-overlay-hold:";
+const PICKER_EVENT_MAILBOX_CAPACITY: usize = 32;
+const SETTINGS_VERSION: u32 = 3;
+/// Hold durations the menu offers, in milliseconds.
+const OVERLAY_HOLD_CHOICES: [u64; 2] = [2_000, 3_000];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PermissionStage {
@@ -82,6 +90,12 @@ struct AppSettings {
     power_off_on_puck: bool,
     #[serde(default = "default_binding_profile_id")]
     active_binding_profile: String,
+    /// Whether holding Quick Access opens the in-game profile wheel. Off by
+    /// default: it takes Quick Access over, which existing users have bound.
+    #[serde(default)]
+    profile_overlay_enabled: bool,
+    #[serde(default = "default_overlay_hold_ms")]
+    profile_overlay_hold_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +117,102 @@ fn default_binding_profile_id() -> String {
     desktop_bindings::DEFAULT_PROFILE_ID.to_owned()
 }
 
+/// Describes the profile store to the wheel: how many there are, and where the
+/// active one sits. Names stay here, because only this side can resolve them.
+fn picker_roster(store: &BindingStore, active_profile_id: &str, revision: u64) -> PickerRoster {
+    PickerRoster::with_revision(
+        store.profiles.len(),
+        store
+            .profiles
+            .iter()
+            .position(|profile| profile.id.eq_ignore_ascii_case(active_profile_id)),
+        revision,
+    )
+}
+
+#[derive(Default)]
+struct PickerEventMailbox {
+    events: Mutex<VecDeque<PickerEvent>>,
+}
+
+impl PickerEventMailbox {
+    /// Publishes without blocking the runtime thread. Returns whether the UI
+    /// needs a wake-up; one pending wake covers the whole bounded batch.
+    fn publish(&self, event: PickerEvent) -> bool {
+        let mut events = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let was_empty = events.is_empty();
+
+        if matches!(event, PickerEvent::Selection { .. })
+            && matches!(events.back(), Some(PickerEvent::Selection { .. }))
+        {
+            let _ = events.pop_back();
+            events.push_back(event);
+            return was_empty;
+        }
+
+        if matches!(event, PickerEvent::Opened { .. })
+            && matches!(events.back(), Some(PickerEvent::Preparing))
+        {
+            let _ = events.pop_back();
+        } else if matches!(
+            event,
+            PickerEvent::Commit { .. } | PickerEvent::Dismissed | PickerEvent::TriggerTapped
+        ) {
+            while matches!(
+                events.back(),
+                Some(
+                    PickerEvent::Preparing
+                        | PickerEvent::Opened { .. }
+                        | PickerEvent::Selection { .. }
+                )
+            ) {
+                let _ = events.pop_back();
+            }
+        }
+
+        if events.len() == PICKER_EVENT_MAILBOX_CAPACITY {
+            let _ = events.pop_front();
+            eprintln!("level=warn event=profile_picker_event_mailbox_overflow action=drop_oldest");
+        }
+        events.push_back(event);
+        was_empty
+    }
+
+    fn pop(&self) -> Option<PickerEvent> {
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+}
+
+fn resolve_picker_commit(
+    profile_ids: &[String],
+    current_revision: u64,
+    event_revision: u64,
+    index: usize,
+) -> Option<&str> {
+    if current_revision != event_revision {
+        return None;
+    }
+    profile_ids.get(index).map(String::as_str)
+}
+
+const fn default_overlay_hold_ms() -> u64 {
+    OVERLAY_HOLD_CHOICES[0]
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -110,7 +220,22 @@ impl Default for AppSettings {
             idle_shutdown_minutes: Some(15),
             power_off_on_puck: false,
             active_binding_profile: default_binding_profile_id(),
+            profile_overlay_enabled: false,
+            profile_overlay_hold_ms: default_overlay_hold_ms(),
         }
+    }
+}
+
+impl AppSettings {
+    /// The wheel's runtime configuration, or `None` when it is switched off.
+    fn picker_config(&self) -> Option<PickerConfig> {
+        self.profile_overlay_enabled.then(|| {
+            PickerConfig {
+                hold: Duration::from_millis(self.profile_overlay_hold_ms),
+                ..PickerConfig::default()
+            }
+            .sanitized()
+        })
     }
 }
 
@@ -137,12 +262,21 @@ fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
     let parsed = serde_json::from_slice::<AppSettings>(&bytes).map_err(|error| error.to_string());
     match parsed {
         Ok(mut settings)
-            if matches!(settings.version, 1 | SETTINGS_VERSION)
+            if matches!(settings.version, 1 | 2 | SETTINGS_VERSION)
                 && settings
                     .idle_shutdown_minutes
                     .is_none_or(|minutes| matches!(minutes, 5 | 10 | 15 | 30)) =>
         {
             settings.version = SETTINGS_VERSION;
+            // A hand-edited hold falls back alone rather than dragging every
+            // other setting down with it.
+            if !OVERLAY_HOLD_CHOICES.contains(&settings.profile_overlay_hold_ms) {
+                eprintln!(
+                    "level=warn event=settings_invalid_overlay_hold value={} action=default",
+                    settings.profile_overlay_hold_ms
+                );
+                settings.profile_overlay_hold_ms = default_overlay_hold_ms();
+            }
             (settings, None)
         }
         Ok(settings) => (
@@ -182,7 +316,7 @@ pub fn run() -> Result<(), String> {
         .with_activate_ignoring_other_apps(false)
         .build()
         .map_err(|error| error.to_string())?;
-    let mut app = MenuApp::new()?;
+    let mut app = MenuApp::new(event_loop.create_proxy())?;
     event_loop
         .run_app(&mut app)
         .map_err(|error| error.to_string())
@@ -205,6 +339,8 @@ struct MenuItems {
     puck_dock: CheckMenuItem,
     bindings_submenu: Submenu,
     binding_profiles: Vec<(String, CheckMenuItem)>,
+    overlay_enabled: CheckMenuItem,
+    overlay_hold: Vec<(u64, CheckMenuItem)>,
 }
 
 fn binding_profile_menu_items(
@@ -245,10 +381,29 @@ struct MenuApp {
     bindings_file_fingerprint: BindingsFileFingerprint,
     permission_request_pending: Option<PermissionStage>,
     shutting_down: bool,
+    overlay: OverlayHost,
+    /// Bounded/coalesced wheel events from the runtime thread.
+    picker_events: Arc<PickerEventMailbox>,
+    /// Profile ids in the order last published to the wheel, so a
+    /// `Commit { index }` resolves against what the wheel showed even if the
+    /// store has changed since.
+    picker_roster_ids: Vec<String>,
+    picker_roster_revision: u64,
+    /// Monotonic count of roster publish attempts. A revision is spent even by
+    /// a publish whose acknowledgement failed, because the runtime may still
+    /// apply it late — reusing the number would let events from that stale
+    /// generation resolve against a newer id list.
+    picker_roster_publishes: u64,
+    /// The last roster publish failed; retried on the next status poll so a
+    /// transient runtime stall cannot leave the wheel dead until the next
+    /// unrelated store change.
+    picker_roster_dirty: bool,
+    /// Spawned bindings editors, reaped on the status poll once they exit.
+    editor_children: Vec<std::process::Child>,
 }
 
 impl MenuApp {
-    fn new() -> Result<Self, String> {
+    fn new(proxy: EventLoopProxy<()>) -> Result<Self, String> {
         let settings_path = settings_path()?;
         let (settings, warning) = load_settings(&settings_path);
         if let Some(warning) = warning {
@@ -276,10 +431,30 @@ impl MenuApp {
                 PuckDockAction::LeaveOn
             },
             binding_profile: active_profile,
+            profile_picker: settings.picker_config(),
+            picker_roster: picker_roster(&binding_store, &settings.active_binding_profile, 0),
             ..RuntimeConfig::default()
         };
+        let profile_ids = binding_store
+            .profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect();
+        // The runtime thread hands wheel events over and wakes the event loop
+        // immediately. Polling for them would add up to POLL_INTERVAL of lag
+        // between letting go of Quick Access and the wheel appearing.
+        let picker_events = Arc::new(PickerEventMailbox::default());
+        let picker_sender = Arc::clone(&picker_events);
+        let runtime = BridgeRuntime::spawn_with_picker(
+            config,
+            Box::new(move |event| {
+                if picker_sender.publish(event) {
+                    let _ = proxy.send_event(());
+                }
+            }),
+        );
         Ok(Self {
-            runtime: BridgeRuntime::spawn(config),
+            runtime,
             tray: None,
             tray_icons: None,
             items: None,
@@ -294,6 +469,14 @@ impl MenuApp {
             bindings_file_fingerprint,
             permission_request_pending: None,
             shutting_down: false,
+            overlay: OverlayHost::new(),
+            picker_events,
+            // Matches the roster just handed to the runtime in `config`.
+            picker_roster_ids: profile_ids,
+            picker_roster_revision: 0,
+            picker_roster_publishes: 0,
+            picker_roster_dirty: false,
+            editor_children: Vec::new(),
         })
     }
 
@@ -388,6 +571,46 @@ impl MenuApp {
             self.settings.power_off_on_puck,
             None,
         );
+        let overlay_enabled = CheckMenuItem::with_id(
+            OVERLAY_ENABLED_ID,
+            "Hold Quick Access for Profile Wheel",
+            true,
+            self.settings.profile_overlay_enabled,
+            None,
+        );
+        let overlay_hold: Vec<(u64, CheckMenuItem)> = OVERLAY_HOLD_CHOICES
+            .into_iter()
+            .map(|milliseconds| {
+                (
+                    milliseconds,
+                    CheckMenuItem::with_id(
+                        format!("{OVERLAY_HOLD_PREFIX}{milliseconds}"),
+                        format!("{} seconds", milliseconds / 1_000),
+                        true,
+                        self.settings.profile_overlay_hold_ms == milliseconds,
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        let overlay_hold_submenu = Submenu::with_items(
+            "Hold Duration",
+            true,
+            &overlay_hold
+                .iter()
+                .map(|(_, item)| item as &dyn tray_icon::menu::IsMenuItem)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| error.to_string())?;
+        let overlay_submenu = Submenu::with_items(
+            "Profile Wheel",
+            true,
+            &[
+                &overlay_enabled as &dyn tray_icon::menu::IsMenuItem,
+                &overlay_hold_submenu,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
         let binding_profiles =
             binding_profile_menu_items(&self.binding_store, &self.settings.active_binding_profile);
         let bindings_submenu = Submenu::new("Bindings", true);
@@ -439,6 +662,7 @@ impl MenuApp {
             &puck_dock,
             &separators[4],
             &bindings_submenu,
+            &overlay_submenu,
             &permissions_submenu,
             &copy,
             &logs,
@@ -471,6 +695,8 @@ impl MenuApp {
             puck_dock,
             bindings_submenu,
             binding_profiles,
+            overlay_enabled,
+            overlay_hold,
         });
         self.tray_icons = Some(tray_icons);
         self.tray = Some(tray);
@@ -483,6 +709,7 @@ impl MenuApp {
         if let Err(error) = self.logger.write_status(&status) {
             eprintln!("cannot write menu-app diagnostics: {error}");
         }
+        self.sync_overlay_process(&status);
         if status.revision == self.last_revision {
             return;
         }
@@ -520,6 +747,7 @@ impl MenuApp {
         self.last_revision = status.revision;
     }
 
+    #[allow(clippy::too_many_lines)] // One dispatch table; splitting it hides the menu's shape.
     fn handle_menu_event(&mut self, id: &str, event_loop: &ActiveEventLoop) {
         match id {
             RUN_TOGGLE_ID => {
@@ -591,11 +819,10 @@ impl MenuApp {
             ENABLE_BINDINGS_ID => {
                 self.request_permissions_in_order(true);
             }
-            EDIT_BINDINGS_ID => {
-                if let Err(error) = launch_bindings_editor() {
-                    eprintln!("cannot launch bindings editor: {error}");
-                }
-            }
+            EDIT_BINDINGS_ID => match launch_bindings_editor() {
+                Ok(child) => self.editor_children.push(child),
+                Err(error) => eprintln!("cannot launch bindings editor: {error}"),
+            },
             LOGS_ID => {
                 if let Err(error) = open_path(&self.logger.directory.to_string_lossy()) {
                     eprintln!("cannot open log folder: {error}");
@@ -605,9 +832,31 @@ impl MenuApp {
                 self.shutdown();
                 event_loop.exit();
             }
+            OVERLAY_ENABLED_ID => {
+                self.settings.profile_overlay_enabled = !self.settings.profile_overlay_enabled;
+                if !self.apply_picker_settings() {
+                    self.settings.profile_overlay_enabled = !self.settings.profile_overlay_enabled;
+                    self.update_setting_checkmarks();
+                }
+                self.sync_picker_roster();
+            }
             _ if id.starts_with(BINDING_PROFILE_PREFIX) => {
                 let profile_id = &id[BINDING_PROFILE_PREFIX.len()..];
                 self.select_binding_profile(profile_id);
+            }
+            _ if id.starts_with(OVERLAY_HOLD_PREFIX) => {
+                let Ok(milliseconds) = id[OVERLAY_HOLD_PREFIX.len()..].parse::<u64>() else {
+                    return;
+                };
+                if !OVERLAY_HOLD_CHOICES.contains(&milliseconds) {
+                    return;
+                }
+                let previous = self.settings.profile_overlay_hold_ms;
+                self.settings.profile_overlay_hold_ms = milliseconds;
+                if !self.apply_picker_settings() {
+                    self.settings.profile_overlay_hold_ms = previous;
+                    self.update_setting_checkmarks();
+                }
             }
             _ => {}
         }
@@ -618,6 +867,7 @@ impl MenuApp {
             return;
         }
         self.shutting_down = true;
+        self.overlay.stop();
         if let Err(error) = self.runtime.shutdown() {
             eprintln!("bridge shutdown failed: {error}");
         }
@@ -632,6 +882,201 @@ impl MenuApp {
             for (profile_id, item) in &items.binding_profiles {
                 item.set_checked(*profile_id == self.settings.active_binding_profile);
             }
+            items
+                .overlay_enabled
+                .set_checked(self.settings.profile_overlay_enabled);
+            for (milliseconds, item) in &items.overlay_hold {
+                item.set_checked(*milliseconds == self.settings.profile_overlay_hold_ms);
+            }
+        }
+    }
+
+    /// Applies a change to the wheel's configuration, everywhere it is needed.
+    ///
+    /// Returns whether the runtime accepted it. Nothing is persisted on a
+    /// refusal — the caller reverts its settings change, so the menu never
+    /// claims a wheel the running bridge does not have.
+    fn apply_picker_settings(&mut self) -> bool {
+        let accepted = match self
+            .runtime
+            .request_set_picker_config(self.settings.picker_config())
+        {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("cannot update the profile wheel: {error}");
+                false
+            }
+        };
+        if accepted {
+            if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+                eprintln!("cannot save profile wheel settings: {error}");
+            }
+        }
+        self.update_setting_checkmarks();
+        if !self.settings.profile_overlay_enabled {
+            self.overlay.stop();
+        }
+        accepted
+    }
+
+    /// Republishes the profile list after the store or the active profile moved.
+    ///
+    /// The runtime is told only how many there are; the overlay is told their
+    /// names. Splitting it that way keeps profile names out of the runtime,
+    /// which has no use for them.
+    fn sync_picker_roster(&mut self) {
+        // Finish every event the old generation already published before the
+        // runtime switches away from it. The blocking acknowledgement then
+        // guarantees any concurrently emitted old event is already in this
+        // bounded mailbox, so the second drain resolves it against old ids.
+        self.drain_picker_events();
+        let previous_revision = self.picker_roster_revision;
+        // Spent regardless of outcome: a publish whose acknowledgement timed
+        // out may still be applied by the runtime later, and that stale
+        // generation must never share a number with a successful one.
+        let revision = self.picker_roster_publishes.wrapping_add(1);
+        self.picker_roster_publishes = revision;
+        let roster = picker_roster(
+            &self.binding_store,
+            &self.settings.active_binding_profile,
+            revision,
+        );
+        if let Err(error) = self.runtime.set_picker_roster(roster) {
+            eprintln!("cannot publish the profile wheel roster: {error}");
+            self.picker_roster_dirty = true;
+            return;
+        }
+        self.picker_roster_dirty = false;
+        self.drain_picker_events();
+        // A drained commit can synchronously select a profile and publish a
+        // newer roster. That nested update supersedes this one.
+        if self.picker_roster_revision != previous_revision {
+            return;
+        }
+        // The snapshot a later `Commit { index }` resolves against, taken at
+        // the same moment the runtime and the overlay learn this roster.
+        self.picker_roster_ids = self
+            .binding_store
+            .profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect();
+        self.picker_roster_revision = revision;
+        let names = self
+            .binding_store
+            .profiles
+            .iter()
+            .map(|profile| profile.name.clone())
+            .collect();
+        // `picker_config` is already sanitized; the default is for the wheel
+        // switched off, where the overlay still wants a plausible layout.
+        let sectors = self
+            .settings
+            .picker_config()
+            .unwrap_or_default()
+            .sectors_per_page;
+        self.overlay.set_roster(names, roster.active, sectors);
+    }
+
+    /// Handles everything the runtime's wheel reports.
+    ///
+    /// The overlay process is started here and torn down here, so no window and
+    /// no process exist at rest. It is started halfway through the hold, which
+    /// leaves it roughly a second to be ready -- several times what it needs --
+    /// and means an ordinary Quick Access press never starts anything.
+    fn handle_picker_event(&mut self, event: PickerEvent) {
+        // A queued event can be drained after a quit has begun or after the
+        // wheel was switched off; neither may resurrect the overlay process
+        // the teardown just killed.
+        if self.shutting_down {
+            return;
+        }
+        if !self.settings.profile_overlay_enabled {
+            self.overlay.stop();
+            return;
+        }
+        match event {
+            PickerEvent::Preparing => self.overlay.start(),
+            PickerEvent::Opened {
+                selected,
+                page,
+                roster_revision,
+            } if roster_revision == self.picker_roster_revision => {
+                // Idempotent, and the safety net for a `Preparing` that never
+                // arrived because reports were sparse enough to skip past it.
+                self.overlay.start();
+                self.overlay.show(selected, page);
+            }
+            PickerEvent::Selection {
+                selected,
+                page,
+                roster_revision,
+            } if roster_revision == self.picker_roster_revision => {
+                self.overlay.show(selected, page);
+            }
+            PickerEvent::Opened {
+                roster_revision, ..
+            }
+            | PickerEvent::Selection {
+                roster_revision, ..
+            } => {
+                eprintln!(
+                    "level=warn event=stale_profile_wheel_visual_event event_revision={roster_revision} current_revision={}",
+                    self.picker_roster_revision
+                );
+            }
+            PickerEvent::Commit {
+                index,
+                roster_revision,
+            } => {
+                // Killing the process takes the window with it, which is both
+                // instant and the only way to leave nothing behind.
+                self.overlay.stop();
+                // Resolved against the roster the wheel was actually showing,
+                // not the live store: an external edit can reorder the store
+                // between the publish and the press, and an index into the
+                // wrong list would silently apply the wrong profile.
+                let Some(profile_id) = resolve_picker_commit(
+                    &self.picker_roster_ids,
+                    self.picker_roster_revision,
+                    roster_revision,
+                    index,
+                )
+                .map(str::to_owned) else {
+                    eprintln!(
+                        "level=warn event=profile_wheel_commit_unknown index={index} event_revision={roster_revision} current_revision={}",
+                        self.picker_roster_revision
+                    );
+                    return;
+                };
+                // The same path the tray submenu uses, so the checkmark, the
+                // settings file, and the permission chain all stay in step.
+                self.select_binding_profile(&profile_id);
+            }
+            // Either way no wheel is coming, so the overlay goes away. A tap
+            // normally has nothing to stop, being far shorter than the half
+            // hold that starts one, and the runtime has already replayed its
+            // press to the desktop bindings.
+            PickerEvent::Dismissed | PickerEvent::TriggerTapped => self.overlay.stop(),
+        }
+    }
+
+    fn drain_picker_events(&mut self) {
+        while let Some(event) = self.picker_events.pop() {
+            self.handle_picker_event(event);
+        }
+    }
+
+    /// Tears the overlay down when it can no longer be wanted.
+    ///
+    /// Starting is driven entirely by the wheel's own events, so this never
+    /// starts anything: it is the backstop for a controller that vanishes or a
+    /// feature switched off while the wheel is up, either of which would
+    /// otherwise strand a window on screen.
+    fn sync_overlay_process(&mut self, status: &BridgeStatus) {
+        let wanted = self.settings.profile_overlay_enabled && status.controller.connected;
+        if !wanted && self.overlay.is_running() {
+            self.overlay.stop();
         }
     }
 
@@ -658,6 +1103,9 @@ impl MenuApp {
         if let Err(error) = save_settings(&self.settings_path, &self.settings) {
             eprintln!("cannot save active binding profile: {error}");
         }
+        // The wheel highlights whichever profile is in use, so it has to learn
+        // about a switch however that switch was made.
+        self.sync_picker_roster();
         self.request_permissions_in_order(false);
     }
 
@@ -716,6 +1164,9 @@ impl MenuApp {
         if let Err(error) = self.rebuild_bindings_submenu() {
             eprintln!("cannot rebuild Bindings menu: {error}");
         }
+        // Profiles may have been added, renamed, or deleted, so the wheel needs
+        // both the new count and the new names.
+        self.sync_picker_roster();
     }
 
     fn rebuild_bindings_submenu(&mut self) -> Result<(), String> {
@@ -920,6 +1371,7 @@ impl ApplicationHandler for MenuApp {
                 return;
             }
             self.request_permissions_in_order(false);
+            self.sync_picker_roster();
         }
     }
 
@@ -931,11 +1383,30 @@ impl ApplicationHandler for MenuApp {
     ) {
     }
 
+    /// The runtime thread woke us because the wheel moved.
+    ///
+    /// Going through the event loop rather than the status poll is what keeps
+    /// the wheel responsive: a stick flick shows up in the next frame instead
+    /// of up to `POLL_INTERVAL` later.
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, (): ()) {
+        self.drain_picker_events();
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             self.handle_menu_event(event.id.as_ref(), event_loop);
         }
+        // Also drained here so a wake-up that arrives between passes is never
+        // left sitting in the channel.
+        self.drain_picker_events();
         if Instant::now() >= self.next_poll {
+            if self.picker_roster_dirty {
+                // A publish the runtime failed to acknowledge left the wheel
+                // one generation behind; retry until it lands.
+                self.sync_picker_roster();
+            }
+            self.editor_children
+                .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
             self.reload_bindings_if_changed();
             self.observe_permission_grants();
             self.refresh_status();
@@ -1261,7 +1732,10 @@ fn open_privacy_pane(pane: PrivacyPane) {
     }
 }
 
-fn launch_bindings_editor() -> Result<(), String> {
+/// Spawns the editor process. The caller keeps the child so it can be reaped
+/// once the user closes the window; dropping the handle would leave a zombie
+/// per launch until the menu app itself exits.
+fn launch_bindings_editor() -> Result<std::process::Child, String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     Command::new(executable)
         .arg("--bindings-editor")
@@ -1269,7 +1743,6 @@ fn launch_bindings_editor() -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 
@@ -1363,6 +1836,8 @@ mod tests {
             idle_shutdown_minutes: None,
             power_off_on_puck: true,
             active_binding_profile: "gaming".to_owned(),
+            profile_overlay_enabled: true,
+            profile_overlay_hold_ms: 3_000,
         };
         save_settings(&path, &settings).unwrap();
         assert_eq!(load_settings(&path), (settings, None));
@@ -1379,6 +1854,7 @@ mod tests {
                 idle_shutdown_minutes: Some(1),
                 power_off_on_puck: true,
                 active_binding_profile: "default".to_owned(),
+                ..AppSettings::default()
             },
         )
         .unwrap();
@@ -1403,6 +1879,139 @@ mod tests {
         assert!(settings.power_off_on_puck);
         assert_eq!(settings.active_binding_profile, "default");
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn version_two_settings_migrate_with_the_wheel_switched_off() {
+        let path = temporary_settings_path("overlay-migration");
+        fs::write(
+            &path,
+            br#"{"version":2,"idle_shutdown_minutes":10,"power_off_on_puck":false,"active_binding_profile":"gaming"}"#,
+        )
+        .unwrap();
+        let (settings, warning) = load_settings(&path);
+        assert!(warning.is_none());
+        assert_eq!(settings.version, SETTINGS_VERSION);
+        // Existing choices survive, and the new feature stays off so it cannot
+        // take Quick Access away from a binding the user already relies on.
+        assert_eq!(settings.idle_shutdown_minutes, Some(10));
+        assert_eq!(settings.active_binding_profile, "gaming");
+        assert!(!settings.profile_overlay_enabled);
+        assert_eq!(settings.profile_overlay_hold_ms, OVERLAY_HOLD_CHOICES[0]);
+        assert!(settings.picker_config().is_none());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_hold_duration_the_menu_cannot_offer_falls_back_alone() {
+        // A hand-edited hold must not take idle shutdown, the active profile,
+        // and the enablement down with it; only the bad field resets.
+        let path = temporary_settings_path("overlay-bad-hold");
+        fs::write(
+            &path,
+            br#"{"version":3,"idle_shutdown_minutes":null,"power_off_on_puck":false,"active_binding_profile":"default","profile_overlay_enabled":true,"profile_overlay_hold_ms":45000}"#,
+        )
+        .unwrap();
+        let (settings, warning) = load_settings(&path);
+        assert!(warning.is_none());
+        assert_eq!(settings.profile_overlay_hold_ms, default_overlay_hold_ms());
+        assert!(settings.profile_overlay_enabled);
+        assert_eq!(settings.idle_shutdown_minutes, None);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_enabled_wheel_configures_the_chosen_hold() {
+        let settings = AppSettings {
+            profile_overlay_enabled: true,
+            profile_overlay_hold_ms: 3_000,
+            ..AppSettings::default()
+        };
+        let config = settings.picker_config().expect("the wheel is enabled");
+        assert_eq!(config.hold, Duration::from_secs(3));
+        assert_eq!(
+            config.sectors_per_page,
+            PickerConfig::default().sectors_per_page
+        );
+    }
+
+    #[test]
+    fn the_roster_reports_the_active_profiles_position() {
+        let mut store = BindingStore::default();
+        store.create_profile("Gaming").unwrap();
+        store.create_profile("Couch").unwrap();
+        assert_eq!(store.profiles.len(), 3);
+
+        let second = store.profiles[1].id.clone();
+        let roster = picker_roster(&store, &second, 7);
+        assert_eq!(roster.len, 3);
+        assert_eq!(roster.active, Some(1));
+        assert_eq!(roster.revision, 7);
+        assert!(roster.is_openable());
+
+        // A profile that no longer exists must not point the wheel somewhere
+        // arbitrary; it opens on the first sector instead.
+        let roster = picker_roster(&store, "deleted-profile", 8);
+        assert_eq!(roster.len, 3);
+        assert_eq!(roster.active, None);
+        assert_eq!(roster.revision, 8);
+    }
+
+    #[test]
+    fn a_single_profile_store_cannot_open_the_wheel() {
+        let store = BindingStore::default();
+        assert_eq!(store.profiles.len(), 1);
+        assert!(!picker_roster(&store, &store.profiles[0].id, 0).is_openable());
+    }
+
+    #[test]
+    fn picker_event_mailbox_coalesces_visual_updates_and_bounds_backlog() {
+        let mailbox = PickerEventMailbox::default();
+        assert!(mailbox.publish(PickerEvent::Preparing));
+        assert!(!mailbox.publish(PickerEvent::Opened {
+            selected: 0,
+            page: 0,
+            roster_revision: 4,
+        }));
+        assert_eq!(mailbox.len(), 1, "Opened replaces its pending preparation");
+
+        assert!(!mailbox.publish(PickerEvent::Selection {
+            selected: 1,
+            page: 0,
+            roster_revision: 4,
+        }));
+        assert!(!mailbox.publish(PickerEvent::Selection {
+            selected: 2,
+            page: 0,
+            roster_revision: 4,
+        }));
+        assert_eq!(mailbox.len(), 2, "only the latest selection is useful");
+        assert!(!mailbox.publish(PickerEvent::Commit {
+            index: 2,
+            roster_revision: 4,
+        }));
+        assert_eq!(
+            mailbox.pop(),
+            Some(PickerEvent::Commit {
+                index: 2,
+                roster_revision: 4,
+            }),
+            "a terminal event supersedes every pending visual update"
+        );
+        assert!(mailbox.pop().is_none());
+
+        for _ in 0..=PICKER_EVENT_MAILBOX_CAPACITY {
+            let _ = mailbox.publish(PickerEvent::Dismissed);
+        }
+        assert_eq!(mailbox.len(), PICKER_EVENT_MAILBOX_CAPACITY);
+    }
+
+    #[test]
+    fn picker_commits_only_resolve_against_the_roster_the_wheel_used() {
+        let ids = vec!["default".to_owned(), "gaming".to_owned()];
+        assert_eq!(resolve_picker_commit(&ids, 7, 7, 1), Some("gaming"));
+        assert_eq!(resolve_picker_commit(&ids, 8, 7, 1), None);
+        assert_eq!(resolve_picker_commit(&ids, 7, 7, 2), None);
     }
 
     #[test]
