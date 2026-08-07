@@ -175,9 +175,36 @@ mode without powering the controller off.
 Linux CI compiles the hardware-independent API and explicit unsupported-platform implementation; it does not require `hidapi` system libraries or physical hardware.
 
 The optional GUI remains part of the workspace build and strict Clippy gates.
-On macOS, use `cargo run -p sc-visualizer -- --index N` after `sc-probe list`
-to verify live report rate, decoded controls, mapped output, recording controls,
-and disconnect-to-neutral behavior with hardware.
+
+For visual checks that do not need hardware, run each deterministic state and
+capture it at 1100x760 and at the 820x600 minimum, with the sidebar at both
+260 px and 360 px:
+
+```bash
+cargo run -p sc-visualizer -- --demo-state digital
+```
+
+`digital` activates every drawable control at once and holds the two grip-shell
+touch bits, which have no artwork and must still appear in the button grid.
+`analog` puts each stick and pad in a different quadrant, touches both pads, and
+pulls one trigger halfway and one fully, so a mirrored axis or a broken trigger
+fill is obvious. Confirm the front and rear views switch from side-by-side to
+stacked below roughly 280 px per face, that button grids change style rather
+than reflowing, and that the hex rows scroll sideways instead of wrapping.
+
+On macOS with hardware, use `cargo run -p sc-visualizer -- --index N` after
+`sc-probe list` to verify live report rate, decoded controls, mapped output,
+recording controls, and disconnect-to-neutral behavior.
+
+**Axis orientation is a release gate, not an assumption.** The repository does
+not establish the physical sign of the stick and pad axes. Move each stick and
+each pad separately through left, right, up and down and confirm the dot on the
+illustration follows the physical motion; a circular sweep alone will not catch
+a transposed or mirrored axis. Correct the per-control transform in
+`apps/sc-visualizer/src/hero.rs` if the hardware disagrees, and record the
+verified signs in [STEAM_CONTROLLER_PROTOCOL.md](STEAM_CONTROLLER_PROTOCOL.md).
+Pull each trigger slowly from rest to full and confirm the fill reaches the top;
+it is calibrated against `MapperConfig::trigger_full_scale`, not `u16::MAX`.
 
 Serial tests use an in-memory `ByteTransport` and cover hello success,
 latest-only queued state flush and sequence ownership, version rejection,

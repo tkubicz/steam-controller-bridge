@@ -445,6 +445,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "controller-art"
+version = "1.4.0"
+dependencies = [
+ "eframe",
+ "ui-theme",
+]
+
+[[package]]
 name = "controller-mapper"
 version = "1.4.0"
 dependencies = [
@@ -2852,6 +2860,7 @@ name = "sc-bridge-menu"
 version = "1.4.0"
 dependencies = [
  "bridge-runtime",
+ "controller-art",
  "desktop-bindings",
  "eframe",
  "objc2 0.6.4",
@@ -2890,6 +2899,7 @@ name = "sc-visualizer"
 version = "1.4.0"
 dependencies = [
  "bridge-output",
+ "controller-art",
  "controller-mapper",
  "eframe",
  "gamepad-state",

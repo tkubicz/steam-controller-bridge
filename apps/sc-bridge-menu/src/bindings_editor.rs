@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
-use std::sync::OnceLock;
 
+use controller_art::{
+    body_bounds, control_rect, normalized_point, trackpad_rect, Control, ControlState,
+};
 use desktop_bindings::{
     default_store_path, load_or_create_store, save_store, BindableControl, BindingAction,
     BindingStore, KeyboardKey, Modifier, MouseButton, PadFeedbackConfig, PadFeedbackStrength,
@@ -9,8 +11,8 @@ use desktop_bindings::{
 use eframe::egui;
 
 use ui_theme::{
-    ACCENT, ACCENT_SUBTLE, BORDER, DANGER, DETAIL, INSET, MUTED_TEXT, ON_ACCENT, OUTLINE, PANEL,
-    SUNKEN, SURFACE, SURFACE_RAISED, TEXT,
+    ACCENT, BORDER, DANGER, DETAIL, MUTED_TEXT, ON_ACCENT, PANEL, SUNKEN, SURFACE, SURFACE_RAISED,
+    TEXT,
 };
 
 const WINDOW_SIZE: [f32; 2] = [1260.0, 720.0];
@@ -34,13 +36,6 @@ enum PadSide {
 impl PadSide {
     const ALL: [Self; 2] = [Self::Left, Self::Right];
 
-    const fn index(self) -> usize {
-        match self {
-            Self::Left => 0,
-            Self::Right => 1,
-        }
-    }
-
     const fn label(self) -> &'static str {
         match self {
             Self::Left => "Left Pad",
@@ -60,6 +55,56 @@ impl EditorSelection {
         match self {
             Self::Button(control) => control.label(),
             Self::Pad(side) => side.label(),
+        }
+    }
+}
+
+// The editor's vocabulary translated into the art crate's. These are plain
+// functions rather than `From` impls because orphan rules forbid the impl here:
+// inside this binary both types are foreign. The art crate cannot host it
+// either, since it deliberately does not depend on `desktop-bindings`.
+
+const fn art_control(control: BindableControl) -> Control {
+    match control {
+        BindableControl::L4 => Control::L4,
+        BindableControl::L5 => Control::L5,
+        BindableControl::R4 => Control::R4,
+        BindableControl::R5 => Control::R5,
+        BindableControl::QuickAccess => Control::QuickAccess,
+    }
+}
+
+const fn art_pad(side: PadSide) -> controller_art::PadSide {
+    match side {
+        PadSide::Left => controller_art::PadSide::Left,
+        PadSide::Right => controller_art::PadSide::Right,
+    }
+}
+
+const fn art_selection(selection: EditorSelection) -> Control {
+    match selection {
+        EditorSelection::Button(control) => art_control(control),
+        EditorSelection::Pad(PadSide::Left) => Control::LeftPad,
+        EditorSelection::Pad(PadSide::Right) => Control::RightPad,
+    }
+}
+
+/// What the artwork should show, given what is selected and what the pointer is
+/// over. The editor only ever sets these two states; live device state is the
+/// visualizer's business.
+fn editor_paint(
+    selected: EditorSelection,
+    hovered: Option<EditorSelection>,
+) -> impl Fn(Control) -> ControlState {
+    let marked = art_selection(selected);
+    let under_pointer = hovered.map(art_selection);
+    move |control| {
+        if control == marked {
+            ControlState::active()
+        } else if under_pointer == Some(control) {
+            ControlState::hovered()
+        } else {
+            ControlState::IDLE
         }
     }
 }
@@ -352,11 +397,12 @@ impl BindingsEditor {
         // feedback, and so the leader lines end up underneath the controls
         // they point at.
         let hovered = self.controller_hotspots(ui, &layout);
-        controller_body(&painter, layout.front);
-        controller_body(&painter, layout.rear);
+        controller_art::draw_body(&painter, layout.front);
+        controller_art::draw_body(&painter, layout.rear);
         self.draw_leaders(&painter, &layout);
-        draw_front_face(&painter, layout.front, self.selection, hovered);
-        draw_rear_face(&painter, layout.rear, self.selection, hovered);
+        let paint = editor_paint(self.selection, hovered);
+        controller_art::draw_front(&painter, layout.front, &paint);
+        controller_art::draw_rear(&painter, layout.rear, &paint);
         draw_pad_labels(
             &painter,
             layout.front,
@@ -385,7 +431,8 @@ impl BindingsEditor {
         let mut hovered = None;
         let mut clicked = None;
         for callout in CONTROL_CALLOUTS {
-            let rect = control_rect(layout.view(callout.view), callout.control).expand(4.0);
+            let rect =
+                control_rect(layout.view(callout.view), art_control(callout.control)).expand(4.0);
             let response = ui
                 .interact(
                     rect,
@@ -404,7 +451,7 @@ impl BindingsEditor {
             let selection = EditorSelection::Pad(side);
             let response = ui
                 .interact(
-                    trackpad_rect(layout.front, side).expand(4.0),
+                    trackpad_rect(layout.front, art_pad(side)).expand(4.0),
                     ui.id().with(("pad-hotspot", selection)),
                     egui::Sense::click(),
                 )
@@ -427,7 +474,8 @@ impl BindingsEditor {
 
     fn draw_leaders(&self, painter: &egui::Painter, layout: &CanvasLayout) {
         for callout in CONTROL_CALLOUTS {
-            let target = control_rect(layout.view(callout.view), callout.control).center();
+            let target =
+                control_rect(layout.view(callout.view), art_control(callout.control)).center();
             let label = layout.label(callout);
             let selected = self.selection == EditorSelection::Button(callout.control);
             // The leader runs from the label's edge to the middle of the
@@ -957,28 +1005,6 @@ impl CanvasLayout {
     }
 }
 
-fn normalized_point(rect: egui::Rect, point: [f32; 2]) -> egui::Pos2 {
-    egui::pos2(
-        egui::lerp(rect.x_range(), point[0]),
-        egui::lerp(rect.y_range(), point[1]),
-    )
-}
-
-fn unit_rect(view: egui::Rect, center: [f32; 2], size: [f32; 2]) -> egui::Rect {
-    egui::Rect::from_center_size(
-        normalized_point(view, center),
-        egui::vec2(size[0] * view.width(), size[1] * view.height()),
-    )
-}
-
-fn trackpad_rect(view: egui::Rect, side: PadSide) -> egui::Rect {
-    let mut bounds = egui::Rect::NOTHING;
-    for point in &trackpad_shapes()[side.index()].0.points {
-        bounds.extend_with(normalized_point(view, *point));
-    }
-    bounds
-}
-
 /// Where a ray from the middle of `rect` towards `toward` leaves the rectangle.
 fn rect_edge_towards(rect: egui::Rect, toward: egui::Pos2) -> egui::Pos2 {
     let center = rect.center();
@@ -999,405 +1025,6 @@ fn rect_edge_towards(rect: egui::Rect, toward: egui::Pos2) -> egui::Pos2 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Controller artwork
-//
-// Every coordinate below is normalized inside a unit square that is mapped onto
-// a square drawing rect, and is traced from the Steam Controller 2 hardware
-// diagram: square trackpads, oval rear grip paddles, and a Quick Access button
-// between the trackpads.
-// ---------------------------------------------------------------------------
-
-/// Left half of the silhouette, from the top centre down to the bottom centre.
-/// The right half is mirrored from it, which keeps the body exactly symmetric.
-///
-/// Traced pixel by pixel from `reference-front.jpg`: the drawing's background
-/// was flood filled from the border, and this is the boundary of what the fill
-/// could not reach, resampled along the path. The gap in the top edge is where
-/// the bumpers cover the shell.
-///
-/// Key proportions, for anyone checking against the reference: the shell is
-/// 1.46 times as wide as it is tall, at its widest 73% of the way down, and the
-/// notch between the grips opens 82% down and spans 45% of the width.
-const BODY_HALF: [[f32; 2]; 43] = [
-    [0.500, 0.200],
-    [0.472, 0.200],
-    [0.443, 0.200],
-    [0.415, 0.201],
-    [0.386, 0.202],
-    [0.358, 0.202],
-    [0.330, 0.204],
-    [0.159, 0.237],
-    [0.131, 0.283],
-    [0.121, 0.309],
-    [0.114, 0.336],
-    [0.106, 0.362],
-    [0.099, 0.389],
-    [0.091, 0.414],
-    [0.084, 0.441],
-    [0.077, 0.467],
-    [0.071, 0.493],
-    [0.066, 0.520],
-    [0.061, 0.546],
-    [0.057, 0.573],
-    [0.053, 0.598],
-    [0.051, 0.625],
-    [0.050, 0.651],
-    [0.051, 0.678],
-    [0.053, 0.704],
-    [0.058, 0.726],
-    [0.067, 0.749],
-    [0.080, 0.771],
-    [0.101, 0.793],
-    [0.158, 0.815],
-    [0.166, 0.815],
-    [0.175, 0.815],
-    [0.183, 0.815],
-    [0.218, 0.793],
-    [0.232, 0.771],
-    [0.243, 0.749],
-    [0.259, 0.726],
-    [0.299, 0.706],
-    [0.339, 0.705],
-    [0.379, 0.704],
-    [0.420, 0.704],
-    [0.460, 0.703],
-    [0.500, 0.703],
-];
-
-// Front-face controls, all measured from `reference-front.jpg` by finding the
-// regions its outlines enclose.
-const TRACKPADS: [[f32; 2]; 2] = [[0.329, 0.567], [0.671, 0.567]];
-const TRACKPAD_SIZE: [f32; 2] = [0.180, 0.180];
-const TRACKPAD_CORNER: f32 = 0.031;
-/// The pads are canted to follow the arc a thumb sweeps through.
-const TRACKPAD_TILT: f32 = 0.171;
-const STICKS: [[f32; 2]; 2] = [[0.370, 0.399], [0.630, 0.399]];
-const STICK_RADIUS: f32 = 0.066;
-const DPAD_CENTER: [f32; 2] = [0.225, 0.334];
-const DPAD_ARM: f32 = 0.064;
-const DPAD_THICKNESS: f32 = 0.021;
-const FACE_BUTTONS: [f32; 2] = [0.776, 0.334];
-const FACE_BUTTON_OFFSET: f32 = 0.052;
-const FACE_BUTTON_RADIUS: f32 = 0.024;
-const OPTION_BUTTONS: [[f32; 2]; 2] = [[0.341, 0.271], [0.659, 0.271]];
-const OPTION_SIZE: [f32; 2] = [0.052, 0.020];
-const STEAM_BUTTON: [f32; 2] = [0.500, 0.334];
-const STEAM_RADIUS: f32 = 0.025;
-const QUICK_ACCESS: [f32; 2] = [0.500, 0.569];
-const QUICK_ACCESS_SIZE: [f32; 2] = [0.066, 0.022];
-/// The bumpers ride on top of the shell at the corners, so they deliberately
-/// break the outline just as they do in the reference.
-const BUMPERS: [[f32; 2]; 2] = [[0.234, 0.213], [0.766, 0.213]];
-const BUMPER_SIZE: [f32; 2] = [0.132, 0.043];
-
-/// Rear shoulder controls as (name, centre, size, rotation), measured from
-/// `reference-back.jpeg`. Seen from behind each side is one big trigger wing
-/// wrapping the top corner, with the bumper riding along its upper edge.
-const SHOULDERS: [(&str, [f32; 2], [f32; 2], f32); 4] = [
-    ("R2", [0.232, 0.262], [0.147, 0.116], -0.240),
-    ("R1", [0.234, 0.207], [0.132, 0.040], -0.140),
-    ("L2", [0.768, 0.262], [0.147, 0.116], 0.240),
-    ("L1", [0.766, 0.207], [0.132, 0.040], 0.140),
-];
-const SHOULDER_CORNER: f32 = 0.030;
-/// The shell seam across the top, broken by the USB-C port at its centre.
-const TOP_SEAM: [f32; 2] = [0.500, 0.222];
-const TOP_SEAM_WIDTH: f32 = 0.300;
-const USB_PORT_SIZE: [f32; 2] = [0.045, 0.012];
-const PUCK_CONNECTOR: [f32; 2] = [0.500, 0.291];
-const PUCK_CONNECTOR_SIZE: [f32; 2] = [0.104, 0.027];
-
-/// Rear grip paddles as (control, centre, size), measured from
-/// `reference-back.jpeg`. The lower pair sits further out than the upper pair,
-/// following the grips as they splay.
-const GRIP_PADDLES: [(BindableControl, [f32; 2], [f32; 2]); 4] = [
-    (BindableControl::R4, [0.266, 0.533], [0.065, 0.093]),
-    (BindableControl::R5, [0.226, 0.655], [0.052, 0.090]),
-    (BindableControl::L4, [0.734, 0.533], [0.065, 0.093]),
-    (BindableControl::L5, [0.774, 0.655], [0.052, 0.090]),
-];
-
-/// Where a bindable control is drawn, so the artwork, the hit area and the
-/// callout leader can never drift apart.
-fn control_rect(view: egui::Rect, control: BindableControl) -> egui::Rect {
-    GRIP_PADDLES
-        .iter()
-        .find(|(candidate, _, _)| *candidate == control)
-        .map_or_else(
-            || unit_rect(view, QUICK_ACCESS, QUICK_ACCESS_SIZE),
-            |(_, center, size)| unit_rect(view, *center, *size),
-        )
-}
-
-/// A closed polygon in unit-square coordinates, triangulated once so that
-/// painting it is a plain mesh upload.
-struct UnitShape {
-    points: Vec<[f32; 2]>,
-    triangles: Vec<[u32; 3]>,
-}
-
-impl UnitShape {
-    fn new(points: Vec<[f32; 2]>) -> Self {
-        let triangles = triangulate(&points);
-        Self { points, triangles }
-    }
-
-    /// A rounded rectangle, optionally turned about its own centre.
-    fn rounded_rect(center: [f32; 2], size: [f32; 2], corner: f32, rotation: f32) -> Self {
-        const ARC_STEPS: usize = 5;
-        let (half_x, half_y) = (size[0] * 0.5, size[1] * 0.5);
-        let corner = corner.min(half_x).min(half_y);
-        let (sin, cos) = rotation.sin_cos();
-        let mut points = Vec::with_capacity(4 * (ARC_STEPS + 1));
-        for (index, [sign_x, sign_y]) in [[1.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [-1.0, -1.0]]
-            .into_iter()
-            .enumerate()
-        {
-            let pivot = [sign_x * (half_x - corner), sign_y * (half_y - corner)];
-            #[allow(clippy::cast_precision_loss)]
-            for step in 0..=ARC_STEPS {
-                let angle = std::f32::consts::FRAC_PI_2
-                    * (step as f32 / ARC_STEPS as f32 + index as f32 - 1.0);
-                let (arc_sin, arc_cos) = angle.sin_cos();
-                let local = [
-                    corner.mul_add(arc_cos, pivot[0]),
-                    corner.mul_add(arc_sin, pivot[1]),
-                ];
-                points.push([
-                    local[0].mul_add(cos, center[0]) - local[1] * sin,
-                    local[0].mul_add(sin, center[1]) + local[1] * cos,
-                ]);
-            }
-        }
-        Self::new(points)
-    }
-
-    fn screen_points(&self, view: egui::Rect) -> Vec<egui::Pos2> {
-        self.points
-            .iter()
-            .map(|point| normalized_point(view, *point))
-            .collect()
-    }
-
-    fn paint(
-        &self,
-        painter: &egui::Painter,
-        view: egui::Rect,
-        fill: egui::Color32,
-        stroke: egui::Stroke,
-    ) {
-        let points = self.screen_points(view);
-        // A mesh built from the triangulation fills concave silhouettes exactly.
-        // egui's generic path fill leaks outside the outline around the grips.
-        let mut mesh = egui::Mesh::default();
-        for point in &points {
-            mesh.colored_vertex(*point, fill);
-        }
-        for [a, b, c] in &self.triangles {
-            mesh.add_triangle(*a, *b, *c);
-        }
-        painter.add(egui::Shape::mesh(mesh));
-        painter.add(egui::Shape::closed_line(points, stroke));
-    }
-
-    fn outline(&self, painter: &egui::Painter, view: egui::Rect, stroke: egui::Stroke) {
-        painter.add(egui::Shape::closed_line(self.screen_points(view), stroke));
-    }
-}
-
-fn body_shape() -> &'static UnitShape {
-    static BODY: OnceLock<UnitShape> = OnceLock::new();
-    BODY.get_or_init(|| {
-        let mut points = BODY_HALF.to_vec();
-        for [x, y] in BODY_HALF
-            .iter()
-            .rev()
-            .skip(1)
-            .take(BODY_HALF.len() - 2)
-            .copied()
-        {
-            points.push([1.0 - x, y]);
-        }
-        UnitShape::new(points)
-    })
-}
-
-/// Bounding box of the silhouette inside the unit square.
-fn body_bounds() -> egui::Rect {
-    static BOUNDS: OnceLock<egui::Rect> = OnceLock::new();
-    *BOUNDS.get_or_init(|| {
-        let mut bounds = egui::Rect::NOTHING;
-        for [x, y] in body_shape().points.iter().copied() {
-            bounds.extend_with(egui::pos2(x, y));
-        }
-        bounds
-    })
-}
-
-/// The tilted trackpads, plus the inset ring drawn inside each of them.
-fn trackpad_shapes() -> &'static [(UnitShape, UnitShape); 2] {
-    static PADS: OnceLock<[(UnitShape, UnitShape); 2]> = OnceLock::new();
-    PADS.get_or_init(|| {
-        let pad = |index: usize| {
-            let tilt = if index == 0 {
-                TRACKPAD_TILT
-            } else {
-                -TRACKPAD_TILT
-            };
-            let inset = [TRACKPAD_SIZE[0] - 0.028, TRACKPAD_SIZE[1] - 0.028];
-            (
-                UnitShape::rounded_rect(TRACKPADS[index], TRACKPAD_SIZE, TRACKPAD_CORNER, tilt),
-                UnitShape::rounded_rect(TRACKPADS[index], inset, TRACKPAD_CORNER * 0.75, tilt),
-            )
-        };
-        [pad(0), pad(1)]
-    })
-}
-
-fn shoulder_shapes() -> &'static [UnitShape; 4] {
-    static SHOULDER: OnceLock<[UnitShape; 4]> = OnceLock::new();
-    SHOULDER.get_or_init(|| {
-        SHOULDERS.map(|(_, center, size, rotation)| {
-            UnitShape::rounded_rect(center, size, SHOULDER_CORNER, rotation)
-        })
-    })
-}
-
-fn dpad_shape() -> &'static UnitShape {
-    static DPAD: OnceLock<UnitShape> = OnceLock::new();
-    DPAD.get_or_init(|| {
-        let (arm, thickness) = (DPAD_ARM, DPAD_THICKNESS);
-        let cross = [
-            [thickness, thickness],
-            [arm, thickness],
-            [arm, -thickness],
-            [thickness, -thickness],
-            [thickness, -arm],
-            [-thickness, -arm],
-            [-thickness, -thickness],
-            [-arm, -thickness],
-            [-arm, thickness],
-            [-thickness, thickness],
-            [-thickness, arm],
-            [thickness, arm],
-        ];
-        UnitShape::new(
-            cross
-                .into_iter()
-                .map(|[x, y]| [DPAD_CENTER[0] + x, DPAD_CENTER[1] + y])
-                .collect(),
-        )
-    })
-}
-
-fn controller_body(painter: &egui::Painter, view: egui::Rect) {
-    body_shape().paint(painter, view, SURFACE, egui::Stroke::new(1.8, OUTLINE));
-}
-
-/// Stroke and fill for a selectable controller element.
-fn selection_style(
-    item: EditorSelection,
-    selected: EditorSelection,
-    hovered: Option<EditorSelection>,
-    default_stroke: egui::Stroke,
-) -> (egui::Color32, egui::Stroke) {
-    if selected == item {
-        (ACCENT_SUBTLE, egui::Stroke::new(2.4, ACCENT))
-    } else if hovered == Some(item) {
-        (INSET, egui::Stroke::new(1.8, ACCENT.gamma_multiply(0.6)))
-    } else {
-        (INSET, default_stroke)
-    }
-}
-
-fn draw_front_face(
-    painter: &egui::Painter,
-    view: egui::Rect,
-    selected: EditorSelection,
-    hovered: Option<EditorSelection>,
-) {
-    let scale = view.width();
-    let detail = egui::Stroke::new(1.3, DETAIL);
-    let outline = egui::Stroke::new(1.5, OUTLINE);
-
-    // The bumpers sit on the shell's top corners, breaking the outline.
-    for center in BUMPERS {
-        let bumper = unit_rect(view, center, BUMPER_SIZE);
-        painter.rect_filled(bumper, bumper.height() * 0.5, SURFACE);
-        painter.rect_stroke(
-            bumper,
-            bumper.height() * 0.5,
-            egui::Stroke::new(1.6, OUTLINE),
-            egui::StrokeKind::Inside,
-        );
-    }
-
-    for side in PadSide::ALL {
-        let (pad, inset) = &trackpad_shapes()[side.index()];
-        let selection = EditorSelection::Pad(side);
-        let (fill, stroke) = selection_style(selection, selected, hovered, outline);
-        pad.paint(painter, view, fill, stroke);
-        inset.outline(
-            painter,
-            view,
-            egui::Stroke::new(detail.width, stroke.color.gamma_multiply(0.75)),
-        );
-    }
-
-    for center in STICKS {
-        let center = normalized_point(view, center);
-        painter.circle_filled(center, scale * STICK_RADIUS, INSET);
-        painter.circle_stroke(center, scale * STICK_RADIUS, outline);
-        painter.circle_stroke(center, scale * (STICK_RADIUS - 0.014), detail);
-    }
-
-    dpad_shape().paint(painter, view, INSET, detail);
-
-    for offset in [
-        [0.0, -FACE_BUTTON_OFFSET],
-        [-FACE_BUTTON_OFFSET, 0.0],
-        [FACE_BUTTON_OFFSET, 0.0],
-        [0.0, FACE_BUTTON_OFFSET],
-    ] {
-        let center = normalized_point(
-            view,
-            [FACE_BUTTONS[0] + offset[0], FACE_BUTTONS[1] + offset[1]],
-        );
-        painter.circle_filled(center, scale * FACE_BUTTON_RADIUS, INSET);
-        painter.circle_stroke(center, scale * FACE_BUTTON_RADIUS, detail);
-    }
-
-    for center in OPTION_BUTTONS {
-        let button = unit_rect(view, center, OPTION_SIZE);
-        painter.rect_filled(button, scale * 0.010, INSET);
-        painter.rect_stroke(button, scale * 0.010, detail, egui::StrokeKind::Inside);
-    }
-
-    let steam = normalized_point(view, STEAM_BUTTON);
-    painter.circle_filled(steam, scale * STEAM_RADIUS, INSET);
-    painter.circle_stroke(steam, scale * STEAM_RADIUS, detail);
-    painter.circle_stroke(steam, scale * (STEAM_RADIUS - 0.009), detail);
-
-    let (fill, stroke) = selection_style(
-        EditorSelection::Button(BindableControl::QuickAccess),
-        selected,
-        hovered,
-        egui::Stroke::new(1.5, OUTLINE),
-    );
-    let quick = unit_rect(view, QUICK_ACCESS, QUICK_ACCESS_SIZE);
-    let radius = quick.height() * 0.5;
-    painter.rect_filled(quick, radius, fill);
-    painter.rect_stroke(quick, radius, stroke, egui::StrokeKind::Inside);
-    for x in [-0.014, 0.0, 0.014] {
-        painter.circle_filled(
-            normalized_point(view, [QUICK_ACCESS[0] + x, QUICK_ACCESS[1]]),
-            scale * 0.0045,
-            stroke.color,
-        );
-    }
-}
-
 fn draw_pad_labels(
     painter: &egui::Painter,
     view: egui::Rect,
@@ -1410,7 +1037,7 @@ fn draw_pad_labels(
         (PadSide::Right, "MOUSE", right_enabled),
     ] {
         let selection = EditorSelection::Pad(side);
-        let rect = trackpad_rect(view, side);
+        let rect = trackpad_rect(view, art_pad(side));
         let color = if selected == selection {
             ACCENT
         } else {
@@ -1442,126 +1069,6 @@ fn pad_feedback_editor(ui: &mut egui::Ui, feedback: &mut PadFeedbackConfig) {
             }
         });
     });
-}
-
-fn draw_rear_face(
-    painter: &egui::Painter,
-    view: egui::Rect,
-    selected: EditorSelection,
-    hovered: Option<EditorSelection>,
-) {
-    let scale = view.width();
-    let detail = egui::Stroke::new(1.3, DETAIL);
-    let outline = egui::Stroke::new(1.4, OUTLINE);
-
-    // The shell seam runs across the top and stops either side of the port.
-    let usb = unit_rect(view, TOP_SEAM, USB_PORT_SIZE);
-    let seam = unit_rect(view, TOP_SEAM, [TOP_SEAM_WIDTH, 0.0]);
-    for [from, to] in [
-        [seam.left(), usb.left() - scale * 0.012],
-        [usb.right() + scale * 0.012, seam.right()],
-    ] {
-        painter.line_segment(
-            [
-                egui::pos2(from, seam.center().y),
-                egui::pos2(to, seam.center().y),
-            ],
-            detail,
-        );
-    }
-    painter.rect_filled(usb, usb.height() * 0.5, INSET);
-    painter.rect_stroke(usb, usb.height() * 0.5, detail, egui::StrokeKind::Inside);
-
-    for shape in shoulder_shapes() {
-        shape.paint(painter, view, INSET, outline);
-    }
-
-    let puck = unit_rect(view, PUCK_CONNECTOR, PUCK_CONNECTOR_SIZE);
-    painter.rect_filled(puck, scale * 0.012, INSET);
-    painter.rect_stroke(puck, scale * 0.012, detail, egui::StrokeKind::Inside);
-    for x in [-0.026, 0.0, 0.026] {
-        painter.circle_filled(
-            normalized_point(view, [PUCK_CONNECTOR[0] + x, PUCK_CONNECTOR[1]]),
-            scale * 0.006,
-            DETAIL,
-        );
-    }
-    for (control, center, size) in GRIP_PADDLES {
-        let (fill, stroke) = selection_style(
-            EditorSelection::Button(control),
-            selected,
-            hovered,
-            egui::Stroke::new(1.5, OUTLINE),
-        );
-        let center = normalized_point(view, center);
-        let radius = egui::vec2(size[0] * 0.5 * scale, size[1] * 0.5 * scale);
-        painter.add(egui::Shape::ellipse_filled(center, radius, fill));
-        painter.add(egui::Shape::ellipse_stroke(center, radius, stroke));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Polygon helpers
-// ---------------------------------------------------------------------------
-
-fn cross(origin: [f32; 2], first: [f32; 2], second: [f32; 2]) -> f32 {
-    (first[0] - origin[0]).mul_add(
-        second[1] - origin[1],
-        -((first[1] - origin[1]) * (second[0] - origin[0])),
-    )
-}
-
-fn signed_area(points: &[[f32; 2]]) -> f32 {
-    let mut area = 0.0;
-    for (index, point) in points.iter().enumerate() {
-        let next = points[(index + 1) % points.len()];
-        area += point[0].mul_add(next[1], -(next[0] * point[1]));
-    }
-    area * 0.5
-}
-
-fn point_in_triangle(point: [f32; 2], triangle: [[f32; 2]; 3]) -> bool {
-    let [a, b, c] = triangle;
-    cross(a, b, point) >= 0.0 && cross(b, c, point) >= 0.0 && cross(c, a, point) >= 0.0
-}
-
-/// Ear-clipping triangulation of a simple polygon, concave parts included.
-fn triangulate(points: &[[f32; 2]]) -> Vec<[u32; 3]> {
-    let mut remaining: Vec<u32> = (0..points.len())
-        .map(|index| u32::try_from(index).expect("an outline has far fewer than u32::MAX points"))
-        .collect();
-    if signed_area(points) < 0.0 {
-        remaining.reverse();
-    }
-    let corner = |index: u32| points[index as usize];
-    let mut triangles = Vec::with_capacity(remaining.len().saturating_sub(2));
-    while remaining.len() > 3 {
-        let ear = (0..remaining.len()).find_map(|index| {
-            let triangle = [
-                remaining[(index + remaining.len() - 1) % remaining.len()],
-                remaining[index],
-                remaining[(index + 1) % remaining.len()],
-            ];
-            let corners = triangle.map(corner);
-            if cross(corners[0], corners[1], corners[2]) <= 0.0 {
-                return None;
-            }
-            let empty = remaining.iter().all(|candidate| {
-                triangle.contains(candidate) || !point_in_triangle(corner(*candidate), corners)
-            });
-            empty.then_some((index, triangle))
-        });
-        // A non-simple polygon has no ear left; stop instead of looping forever.
-        let Some((index, triangle)) = ear else {
-            break;
-        };
-        triangles.push(triangle);
-        remaining.remove(index);
-    }
-    if remaining.len() == 3 {
-        triangles.push([remaining[0], remaining[1], remaining[2]]);
-    }
-    triangles
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1661,47 +1168,6 @@ const fn keyboard_key(key: egui::Key) -> Option<KeyboardKey> {
 mod tests {
     use super::*;
 
-    /// Ray casting, used to check that no artwork escapes the silhouette.
-    fn point_in_polygon(polygon: &[[f32; 2]], point: [f32; 2]) -> bool {
-        let mut inside = false;
-        for (index, corner) in polygon.iter().enumerate() {
-            let next = polygon[(index + 1) % polygon.len()];
-            let crosses = (corner[1] > point[1]) != (next[1] > point[1]);
-            if crosses {
-                let x = (next[0] - corner[0]) * (point[1] - corner[1]) / (next[1] - corner[1])
-                    + corner[0];
-                if point[0] < x {
-                    inside = !inside;
-                }
-            }
-        }
-        inside
-    }
-
-    fn corners(center: [f32; 2], size: [f32; 2]) -> [[f32; 2]; 4] {
-        let (half_x, half_y) = (size[0] * 0.5, size[1] * 0.5);
-        [
-            [center[0] - half_x, center[1] - half_y],
-            [center[0] + half_x, center[1] - half_y],
-            [center[0] + half_x, center[1] + half_y],
-            [center[0] - half_x, center[1] + half_y],
-        ]
-    }
-
-    fn assert_polygon_inside_body(what: &str, points: &[[f32; 2]]) {
-        let body = &body_shape().points;
-        for point in points {
-            assert!(
-                point_in_polygon(body, *point),
-                "{what} reaches {point:?}, which is outside the controller body",
-            );
-        }
-    }
-
-    fn assert_inside_body(what: &str, center: [f32; 2], size: [f32; 2]) {
-        assert_polygon_inside_body(what, &corners(center, size));
-    }
-
     #[test]
     fn callouts_cover_each_bindable_control_once() {
         let controls = CONTROL_CALLOUTS
@@ -1716,17 +1182,9 @@ mod tests {
 
     #[test]
     fn rear_callouts_match_physical_view_orientation() {
-        let paddle = |wanted: BindableControl| {
-            GRIP_PADDLES
-                .iter()
-                .find(|(control, _, _)| *control == wanted)
-                .expect("every grip paddle is drawn")
-                .1
-        };
-        // The rear view is a mirror, so the right grip is drawn on the left.
-        assert!(paddle(BindableControl::R4)[0] < paddle(BindableControl::L4)[0]);
-        assert!(paddle(BindableControl::R5)[0] < paddle(BindableControl::L5)[0]);
-        assert!(paddle(BindableControl::R4)[1] < paddle(BindableControl::R5)[1]);
+        // The paddle geometry half of this now lives in `controller-art` as
+        // `the_rear_view_keeps_physical_handedness`; what stays here is that
+        // the callouts agree with it.
         for callout in CONTROL_CALLOUTS {
             let rear = callout.view == ControllerView::Rear;
             assert_eq!(rear, callout.control != BindableControl::QuickAccess);
@@ -1820,194 +1278,6 @@ mod tests {
     }
 
     #[test]
-    fn controller_outline_is_exactly_mirrored() {
-        let body = &body_shape().points;
-        assert_eq!(body.len(), 2 * BODY_HALF.len() - 2);
-        for [x, y] in body.iter().copied() {
-            assert!(
-                body.iter().any(
-                    |[other_x, other_y]| (other_x - (1.0 - x)).abs() < f32::EPSILON
-                        && (other_y - y).abs() < f32::EPSILON
-                ),
-                "the outline point {x},{y} has no mirrored twin",
-            );
-        }
-    }
-
-    #[test]
-    fn body_triangles_tile_the_outline_without_gaps_or_overlap() {
-        let body = body_shape();
-        // Ear clipping only reaches n - 2 triangles on a simple polygon, and
-        // their areas only add up to the polygon's when they do not overlap.
-        assert_eq!(body.triangles.len(), body.points.len() - 2);
-        let covered: f32 = body
-            .triangles
-            .iter()
-            .map(|[a, b, c]| {
-                let triangle = [
-                    body.points[*a as usize],
-                    body.points[*b as usize],
-                    body.points[*c as usize],
-                ];
-                cross(triangle[0], triangle[1], triangle[2]).abs() * 0.5
-            })
-            .sum();
-        assert!(
-            (covered - signed_area(&body.points).abs()).abs() < 1e-4,
-            "triangles cover {covered}, the outline encloses {}",
-            signed_area(&body.points).abs(),
-        );
-    }
-
-    #[test]
-    fn every_drawn_control_stays_inside_the_body() {
-        for (control, center, size) in GRIP_PADDLES {
-            assert_inside_body(control.label(), center, size);
-        }
-        assert_inside_body("the Quick Access button", QUICK_ACCESS, QUICK_ACCESS_SIZE);
-        for (pad, _) in trackpad_shapes() {
-            assert_polygon_inside_body("a trackpad", &pad.points);
-        }
-        for center in STICKS {
-            assert_inside_body("a thumbstick", center, [STICK_RADIUS * 2.0; 2]);
-        }
-        assert_inside_body("the D-pad", DPAD_CENTER, [DPAD_ARM * 2.0; 2]);
-        for offset in [
-            [0.0, -FACE_BUTTON_OFFSET],
-            [-FACE_BUTTON_OFFSET, 0.0],
-            [FACE_BUTTON_OFFSET, 0.0],
-            [0.0, FACE_BUTTON_OFFSET],
-        ] {
-            assert_inside_body(
-                "an ABXY button",
-                [FACE_BUTTONS[0] + offset[0], FACE_BUTTONS[1] + offset[1]],
-                [FACE_BUTTON_RADIUS * 2.0; 2],
-            );
-        }
-        for center in OPTION_BUTTONS {
-            assert_inside_body("a View/Menu button", center, OPTION_SIZE);
-        }
-        assert_inside_body("the Steam button", STEAM_BUTTON, [STEAM_RADIUS * 2.0; 2]);
-        // The shoulders are deliberately not checked: in both references the
-        // bumpers and trigger wings wrap over the shell's top edge rather than
-        // sitting inside it. Their placement is covered by the test below.
-        assert_inside_body("the USB-C port", TOP_SEAM, USB_PORT_SIZE);
-        assert_inside_body("the shell seam", TOP_SEAM, [TOP_SEAM_WIDTH, 0.0]);
-        assert_inside_body("the puck connector", PUCK_CONNECTOR, PUCK_CONNECTOR_SIZE);
-    }
-
-    #[test]
-    fn triggers_and_bumpers_are_told_apart_by_shape_and_place() {
-        let names: BTreeSet<&str> = SHOULDERS.iter().map(|(name, ..)| *name).collect();
-        assert_eq!(names, BTreeSet::from(["L1", "L2", "R1", "R2"]));
-        let shoulder = |wanted: &str| {
-            SHOULDERS
-                .iter()
-                .find(|(name, ..)| *name == wanted)
-                .copied()
-                .expect("every shoulder is described once")
-        };
-        for (trigger, bumper) in [("R2", "R1"), ("L2", "L1")] {
-            let (_, trigger_at, trigger_size, _) = shoulder(trigger);
-            let (_, bumper_at, bumper_size, _) = shoulder(bumper);
-            // In the reference the trigger is the deep wing wrapping the top
-            // corner, with the bumper as a thin strip riding above it.
-            assert!(
-                trigger_at[1] > bumper_at[1],
-                "the bumper should sit above the trigger"
-            );
-            assert!(
-                trigger_size[1] > bumper_size[1] * 2.5,
-                "the trigger should be far deeper than the bumper",
-            );
-            assert!(
-                bumper_size[0] > bumper_size[1] * 3.0,
-                "the bumper should read as a strip, not a block",
-            );
-        }
-    }
-
-    #[test]
-    fn the_silhouette_keeps_the_proportions_of_the_reference_drawing() {
-        // Every figure here was measured off reference-front.jpg by flood
-        // filling its background, so this fails if the outline drifts away
-        // from the hardware rather than merely away from a previous drawing.
-        let bounds = body_bounds();
-        let aspect = bounds.width() / bounds.height();
-        assert!(
-            (aspect - 1.463).abs() < 0.03,
-            "the shell is 1.463 times as wide as it is tall in the reference, got {aspect}",
-        );
-
-        let widest = BODY_HALF
-            .iter()
-            .copied()
-            .reduce(|narrowest, point| {
-                if point[0] < narrowest[0] {
-                    point
-                } else {
-                    narrowest
-                }
-            })
-            .expect("the outline has points");
-        let widest_at = (widest[1] - bounds.top()) / bounds.height();
-        assert!(
-            (widest_at - 0.733).abs() < 0.04,
-            "the reference is widest 73% of the way down, this is widest at {widest_at}",
-        );
-
-        // The notch between the grips: the bottom edge is the run of points
-        // that sits above the grip tips.
-        let tip = BODY_HALF
-            .iter()
-            .copied()
-            .reduce(|lowest, point| if point[1] > lowest[1] { point } else { lowest })
-            .expect("the outline has points");
-        let bottom: Vec<[f32; 2]> = BODY_HALF
-            .iter()
-            .copied()
-            .filter(|[x, y]| *x > 0.28 && *y > 0.60 && *y < tip[1] - 0.05)
-            .collect();
-        assert!(bottom.len() >= 4, "the bottom edge needs several points");
-        let notch_at = (bottom[0][1] - bounds.top()) / bounds.height();
-        assert!(
-            (notch_at - 0.819).abs() < 0.04,
-            "the notch opens 82% down in the reference, here it opens at {notch_at}",
-        );
-        let notch_width = 2.0 * (0.5 - bottom[0][0]) / bounds.width();
-        assert!(
-            (notch_width - 0.447).abs() < 0.06,
-            "the notch spans 45% of the width in the reference, here {notch_width}",
-        );
-        let (lowest, highest) = bottom.iter().fold((f32::MAX, f32::MIN), |range, [_, y]| {
-            (range.0.min(*y), range.1.max(*y))
-        });
-        assert!(
-            highest - lowest < 0.01,
-            "the bottom edge is not straight: it spans {lowest}..{highest}",
-        );
-
-        // The grips hang below that bottom edge and taper to narrow tips.
-        let hang = (tip[1] - bottom[0][1]) / bounds.height();
-        assert!(
-            (hang - 0.181).abs() < 0.04,
-            "the grips hang 18% of the body below the bottom edge, here {hang}",
-        );
-    }
-
-    #[test]
-    fn trackpads_are_square_and_do_not_overlap_the_quick_access_button() {
-        let aspect = TRACKPAD_SIZE[0] / TRACKPAD_SIZE[1];
-        assert!(
-            (aspect - 1.0).abs() < 0.05,
-            "the Steam Controller 2 trackpads are square, got an aspect of {aspect}",
-        );
-        let pad_edge = TRACKPADS[0][0] + TRACKPAD_SIZE[0] * 0.5;
-        let button_edge = QUICK_ACCESS[0] - QUICK_ACCESS_SIZE[0] * 0.5;
-        assert!(pad_edge < button_edge);
-    }
-
-    #[test]
     fn canvas_layout_keeps_both_views_square_and_leaves_room_for_labels() {
         let canvas = egui::Rect::from_min_size(egui::pos2(20.0, 40.0), egui::vec2(830.0, 560.0));
         let layout = CanvasLayout::new(canvas);
@@ -2045,7 +1315,8 @@ mod tests {
         // of the control it names.
         for callout in CONTROL_CALLOUTS {
             let label = layout.label(callout);
-            let target = control_rect(layout.view(callout.view), callout.control).center();
+            let target =
+                control_rect(layout.view(callout.view), art_control(callout.control)).center();
             let start = rect_edge_towards(label, target);
             let on_edge = (start.x - label.left()).abs() < 0.01
                 || (start.x - label.right()).abs() < 0.01
