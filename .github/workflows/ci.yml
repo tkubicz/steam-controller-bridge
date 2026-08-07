@@ -31,6 +31,9 @@ jobs:
         run: python3 tools/check-pr-title.py "${PR_TITLE}"
 
   test:
+    # macOS is the shipped product target. Ubuntu is intentionally retained as
+    # a portability gate for shared crates and non-macOS stubs; passing it does
+    # not claim that the live bridge or menu application supports Linux.
     strategy:
       # Never let one platform's failure hide the other platform's result.
       fail-fast: false

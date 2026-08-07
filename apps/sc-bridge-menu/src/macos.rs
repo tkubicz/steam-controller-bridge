@@ -389,6 +389,17 @@ struct MenuApp {
     /// store has changed since.
     picker_roster_ids: Vec<String>,
     picker_roster_revision: u64,
+    /// Monotonic count of roster publish attempts. A revision is spent even by
+    /// a publish whose acknowledgement failed, because the runtime may still
+    /// apply it late — reusing the number would let events from that stale
+    /// generation resolve against a newer id list.
+    picker_roster_publishes: u64,
+    /// The last roster publish failed; retried on the next status poll so a
+    /// transient runtime stall cannot leave the wheel dead until the next
+    /// unrelated store change.
+    picker_roster_dirty: bool,
+    /// Spawned bindings editors, reaped on the status poll once they exit.
+    editor_children: Vec<std::process::Child>,
 }
 
 impl MenuApp {
@@ -463,6 +474,9 @@ impl MenuApp {
             // Matches the roster just handed to the runtime in `config`.
             picker_roster_ids: profile_ids,
             picker_roster_revision: 0,
+            picker_roster_publishes: 0,
+            picker_roster_dirty: false,
+            editor_children: Vec::new(),
         })
     }
 
@@ -805,11 +819,10 @@ impl MenuApp {
             ENABLE_BINDINGS_ID => {
                 self.request_permissions_in_order(true);
             }
-            EDIT_BINDINGS_ID => {
-                if let Err(error) = launch_bindings_editor() {
-                    eprintln!("cannot launch bindings editor: {error}");
-                }
-            }
+            EDIT_BINDINGS_ID => match launch_bindings_editor() {
+                Ok(child) => self.editor_children.push(child),
+                Err(error) => eprintln!("cannot launch bindings editor: {error}"),
+            },
             LOGS_ID => {
                 if let Err(error) = open_path(&self.logger.directory.to_string_lossy()) {
                     eprintln!("cannot open log folder: {error}");
@@ -918,7 +931,11 @@ impl MenuApp {
         // bounded mailbox, so the second drain resolves it against old ids.
         self.drain_picker_events();
         let previous_revision = self.picker_roster_revision;
-        let revision = previous_revision.wrapping_add(1);
+        // Spent regardless of outcome: a publish whose acknowledgement timed
+        // out may still be applied by the runtime later, and that stale
+        // generation must never share a number with a successful one.
+        let revision = self.picker_roster_publishes.wrapping_add(1);
+        self.picker_roster_publishes = revision;
         let roster = picker_roster(
             &self.binding_store,
             &self.settings.active_binding_profile,
@@ -926,8 +943,10 @@ impl MenuApp {
         );
         if let Err(error) = self.runtime.set_picker_roster(roster) {
             eprintln!("cannot publish the profile wheel roster: {error}");
+            self.picker_roster_dirty = true;
             return;
         }
+        self.picker_roster_dirty = false;
         self.drain_picker_events();
         // A drained commit can synchronously select a profile and publish a
         // newer roster. That nested update supersedes this one.
@@ -1381,6 +1400,13 @@ impl ApplicationHandler for MenuApp {
         // left sitting in the channel.
         self.drain_picker_events();
         if Instant::now() >= self.next_poll {
+            if self.picker_roster_dirty {
+                // A publish the runtime failed to acknowledge left the wheel
+                // one generation behind; retry until it lands.
+                self.sync_picker_roster();
+            }
+            self.editor_children
+                .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
             self.reload_bindings_if_changed();
             self.observe_permission_grants();
             self.refresh_status();
@@ -1706,7 +1732,10 @@ fn open_privacy_pane(pane: PrivacyPane) {
     }
 }
 
-fn launch_bindings_editor() -> Result<(), String> {
+/// Spawns the editor process. The caller keeps the child so it can be reaped
+/// once the user closes the window; dropping the handle would leave a zombie
+/// per launch until the menu app itself exits.
+fn launch_bindings_editor() -> Result<std::process::Child, String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     Command::new(executable)
         .arg("--bindings-editor")
@@ -1714,7 +1743,6 @@ fn launch_bindings_editor() -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map(|_| ())
         .map_err(|error| error.to_string())
 }
 

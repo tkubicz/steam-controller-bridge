@@ -16,6 +16,12 @@ use objc2_io_kit::{
 
 use crate::{PowerEvent, PowerMonitorError};
 
+impl PowerMonitorError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
 /// Owns the `IOKit` notification port and the run-loop thread that services it.
 pub struct PowerMonitor {
     run_loop: Option<SendableRunLoop>,
@@ -68,10 +74,18 @@ impl PowerMonitor {
 impl Drop for PowerMonitor {
     fn drop(&mut self) {
         let run_loop = self.run_loop.take();
-        if let Some(run_loop) = &run_loop {
-            run_loop.0.stop();
-        }
         if let Some(thread) = self.thread.take() {
+            if let Some(run_loop) = &run_loop {
+                // `CFRunLoopStop` only stops a loop that is already running. A
+                // drop can land in the instant between the startup barrier and
+                // the monitor thread entering its run loop, where a single stop
+                // would be lost and the join below would wait forever — so keep
+                // stopping until the thread has actually exited.
+                while !thread.is_finished() {
+                    run_loop.0.stop();
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
             let _ = thread.join();
         }
     }

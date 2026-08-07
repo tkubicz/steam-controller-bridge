@@ -62,6 +62,10 @@ pub use status_log::{
 use idle_shutdown::IdleActivityTracker;
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_millis(500);
+/// The longest a `WillSleep` callback waits for the hardware teardown before
+/// acknowledging the sleep anyway. Far above every bounded teardown step, and
+/// safely under macOS's ~30-second forced-sleep cap.
+const SLEEP_TEARDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(25);
 /// How long after a system wake before hardware discovery may reopen ports.
 /// The XIAO's CDC interface re-enumerates for a couple of seconds after a
 /// wake, and touching it mid-setup is the window the sleep suspension exists
@@ -582,9 +586,16 @@ fn power_monitor(
                 .send(RuntimeCommand::SuspendForSleep(ack))
                 .map_err(|_| "bridge runtime stopped before system sleep".to_owned())
                 .and_then(|()| {
-                    receiver.recv().map_err(|_| {
-                        "system-sleep hardware teardown ended without an acknowledgement".to_owned()
-                    })?
+                    // Bounded: blocking here delays the sleep, and a teardown
+                    // wedged in a platform call must not hold sleep, the wake
+                    // notification, and app quit hostage forever. The bound
+                    // stays under macOS's ~30 s forced-sleep cap, and a late
+                    // acknowledgement lands in a dropped receiver harmlessly.
+                    receiver
+                        .recv_timeout(SLEEP_TEARDOWN_ACK_TIMEOUT)
+                        .map_err(|_| {
+                            "system-sleep hardware teardown did not acknowledge in time".to_owned()
+                        })?
                 });
             match result {
                 Ok(()) => eprintln!("level=info event=system_sleep_hardware_released"),
@@ -693,14 +704,6 @@ impl BridgeHandle {
         config: Option<PickerConfig>,
     ) -> Result<(), RuntimeError> {
         self.request(|ack| RuntimeCommand::SetPickerConfig(config, ack))
-    }
-
-    /// Tells the wheel how many profiles there are and which one is active.
-    ///
-    /// # Errors
-    /// Returns an error if the runtime thread has stopped.
-    pub fn request_set_picker_roster(&self, roster: PickerRoster) -> Result<(), RuntimeError> {
-        self.request(|ack| RuntimeCommand::SetPickerRoster(roster, ack))
     }
 
     /// Replaces the wheel roster and waits until the runtime has stopped using
@@ -1936,7 +1939,19 @@ impl DesktopBindingsWorker {
         };
         let command_result = if self.alive.load(Ordering::Acquire) {
             let (ack, receiver) = mpsc::channel();
-            self.enqueue_control(DesktopWorkerMessage::Shutdown(ack), true);
+            if let Err(message) =
+                self.mailbox
+                    .push_control(&self.outputs, DesktopWorkerMessage::Shutdown(ack), true)
+            {
+                // A full mailbox means the worker is not draining. With no
+                // Shutdown queued, a join could never be satisfied — detach,
+                // exactly as the timeout path below does.
+                self.outputs.discard_feedback();
+                publish_desktop_worker_failure(&self.status, "desktop-input worker is unavailable");
+                (*message).reject("desktop-input worker is unavailable");
+                drop(handle);
+                return Err("desktop-input worker control queue is full at shutdown".to_owned());
+            }
             if let Ok(result) = receiver.recv_timeout(timeout) {
                 result
             } else {
