@@ -2524,8 +2524,12 @@ impl Supervisor {
                         for event in events {
                             self.emit_picker_event(event);
                         }
+                        // Refreshed every report, not just on an open/close
+                        // edge: the wheel keeps withholding the button that
+                        // closed it until the user lets go, so what is
+                        // suppressed changes while the wheel is already shut.
+                        engine.set_output_suppression(picker.suppression());
                         if picker.is_open() != was_open {
-                            engine.set_output_suppression(picker.suppression());
                             let picker_status = picker_status(&self.config, picker.is_open());
                             self.update_status(|status| status.profile_picker = picker_status);
                         }
@@ -5856,16 +5860,16 @@ mod tests {
             else {
                 return;
             };
-            let was_open = self.picker.is_open();
             let events = self.picker.observe(now, &picker_input, roster);
             let tapped = events
                 .iter()
                 .any(|event| matches!(event, PickerEvent::TriggerTapped));
             self.events.extend(events);
-            if self.picker.is_open() != was_open {
-                self.engine
-                    .set_output_suppression(self.picker.suppression());
-            }
+            // Every report, matching `run_active`: what is suppressed keeps
+            // changing after the wheel has already closed, while the button that
+            // closed it is still held.
+            self.engine
+                .set_output_suppression(self.picker.suppression());
             if tapped {
                 let _ = self.bindings.observe(
                     DesktopInputSnapshot {
@@ -6055,26 +6059,47 @@ mod tests {
         assert_eq!((hidden.right_x, hidden.right_y), (0.0, 0.0));
         assert!(!hidden.buttons.contains(gamepad_state::Button::Extra3));
 
-        // A commits, the wheel closes, and the game gets everything back.
+        // A commits and the wheel closes, but A is still physically down.
         harness.feed(
             Duration::from_millis(2_200),
             &picker_report(5, &[SteamButton::A], (0, 32_767)),
             TEST_ROSTER,
         );
         assert!(!harness.picker.is_open());
-        assert!(harness.engine.output_suppression().is_none());
         assert_eq!(
             harness.events.last(),
             Some(&PickerEvent::Commit { index: 0 })
         );
 
+        // The sticks come back immediately -- the user can play again -- but the
+        // press that closed the wheel must not reach the game just because it is
+        // still held. Regression: it used to, on this very report.
         harness.feed(
-            Duration::from_millis(2_300),
-            &picker_report(6, &[], (0, 32_767)),
+            Duration::from_millis(2_250),
+            &picker_report(6, &[SteamButton::A], (0, 32_767)),
             TEST_ROSTER,
         );
-        let restored = *harness.output.states.last().unwrap();
-        assert!(restored.right_y > 0.0);
+        let after_commit = *harness.output.states.last().unwrap();
+        assert!(after_commit.right_y > 0.0, "the game is playable again");
+        assert!(
+            !after_commit.buttons.contains(gamepad_state::Button::South),
+            "the commit press must not leak into the game"
+        );
+
+        // Released, so a later, deliberate press does reach the game.
+        harness.feed(
+            Duration::from_millis(2_300),
+            &picker_report(7, &[], (0, 32_767)),
+            TEST_ROSTER,
+        );
+        assert!(harness.engine.output_suppression().is_none());
+        harness.feed(
+            Duration::from_millis(2_400),
+            &picker_report(8, &[SteamButton::A], (0, 32_767)),
+            TEST_ROSTER,
+        );
+        let deliberate = *harness.output.states.last().unwrap();
+        assert!(deliberate.buttons.contains(gamepad_state::Button::South));
     }
 
     #[test]

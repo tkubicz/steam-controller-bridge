@@ -146,27 +146,43 @@ impl GamepadState {
     }
 }
 
-/// A host feature has taken the controller over; the game sees a resting pad.
+/// How much of the controller a host feature is holding back from the game.
 ///
-/// Suppression is deliberately all-or-nothing rather than a per-control mask,
-/// and that is a protocol requirement, not a simplification. Firmware arms its
-/// controller-data watchdog only for reports that are *not* exactly neutral, and
-/// the host stops refreshing unchanged state once it has sent a neutral one. A
-/// partially suppressed state is pinned but still non-neutral, so it leaves the
-/// watchdog armed while the host has nothing new to send -- and any host stall
-/// longer than the watchdog then faults the device. An exactly neutral state
-/// disarms the watchdog instead, which makes that failure impossible however
-/// badly the host is scheduled.
-///
-/// It is also the right semantics: a user in an overlay is not playing, so a
-/// trigger they happen to be holding should not keep firing in the game.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct OutputSuppression;
+/// **Which variant is correct depends on whether the state is pinned, and
+/// getting it wrong faults the hardware.** Firmware arms its controller-data
+/// watchdog only for reports that are *not* exactly neutral, and the host stops
+/// refreshing unchanged state once it has sent a neutral one. So a state that is
+/// both **pinned** and **non-neutral** leaves the watchdog armed while the host
+/// has nothing new to send, and any host stall longer than the watchdog then
+/// faults the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputSuppression {
+    /// Every control at rest, for a feature that has taken the controller over.
+    ///
+    /// Required whenever the state is pinned for as long as the feature lasts,
+    /// because exactly-neutral is what disarms the watchdog -- which makes the
+    /// fault above impossible however badly the host is scheduled. It is also
+    /// the right semantics: a user in an overlay is not playing, so a trigger
+    /// they happen to be holding should not keep firing.
+    Neutral,
+    /// Specific buttons withheld while the rest of the controller works.
+    ///
+    /// For controls a feature has already consumed and that are still physically
+    /// held after it finishes -- the button that dismissed an overlay must not
+    /// reach the game just because the user has not let go yet. Safe despite the
+    /// note above because the state is no longer pinned: it tracks the
+    /// controller again, so it either keeps changing or settles at exactly
+    /// neutral once the user lets go.
+    Buttons(GamepadButtons),
+}
 
 impl OutputSuppression {
-    /// Replaces the state with a fully neutral one.
+    /// Withholds whatever this variant covers.
     pub fn apply(self, state: &mut GamepadState) {
-        *state = GamepadState::NEUTRAL;
+        match self {
+            Self::Neutral => *state = GamepadState::NEUTRAL,
+            Self::Buttons(buttons) => state.buttons.0 &= !buttons.0,
+        }
     }
 }
 
@@ -300,7 +316,7 @@ mod tests {
             right_trigger: 1.0,
         };
 
-        OutputSuppression.apply(&mut state);
+        OutputSuppression::Neutral.apply(&mut state);
 
         assert_eq!(state, GamepadState::NEUTRAL);
     }
@@ -314,7 +330,7 @@ mod tests {
             left_trigger: 0.01,
             ..GamepadState::neutral()
         };
-        OutputSuppression.apply(&mut state);
+        OutputSuppression::Neutral.apply(&mut state);
         assert_eq!(state.hat, HatState::Centered);
         assert!(state.left_trigger.abs() < f32::EPSILON);
         assert_eq!(state.buttons.0, 0);

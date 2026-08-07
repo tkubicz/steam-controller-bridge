@@ -382,7 +382,7 @@ mod tests {
         assert!(passthrough.buttons.contains(Button::South));
         assert!(passthrough.buttons.contains(Button::West));
 
-        engine.set_output_suppression(Some(OutputSuppression));
+        engine.set_output_suppression(Some(OutputSuppression::Neutral));
 
         // The physical state is unchanged, but the suppressed view is not, so
         // this must reach the game rather than being deduped away.

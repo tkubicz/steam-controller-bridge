@@ -46,6 +46,28 @@ Two consequences are deliberate and worth knowing:
 - Suppression begins on the report **after** the wheel opens, about 4 ms later,
   because the mapped state for a report is sent before the picker has seen it.
 
+### The button that closed the wheel is held back until released
+
+The wheel closes on a **press**, not a release, so whatever closed it — A, B, or
+a second Quick Access — is still physically down on the next report. Simply
+lifting suppression there sent that press straight into the game: a press the
+user aimed at the overlay, arriving as an in-game action a few milliseconds
+later.
+
+So on closing, the controls the wheel consumes that are still held become
+`OutputSuppression::Buttons` and stay withheld until the user lets go. The
+sticks and everything else come back immediately — play resumes at once; only
+the button that is still down is withheld, and only until it is not.
+
+This is the one place a **partial** mask is correct rather than dangerous. The
+rule in `OutputSuppression` is about *pinned* states: once the wheel is closed
+the state tracks the controller again, so it either keeps changing or settles at
+exactly neutral when the user lets go. Neither leaves the watchdog armed against
+a silent host.
+
+A forced close — a controller that disappeared — latches nothing, since no
+further report would ever arrive to clear it.
+
 ## Why suppression must be exactly neutral
 
 The firmware arms its 100 ms controller-data watchdog only for reports that are

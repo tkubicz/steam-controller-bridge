@@ -12,7 +12,7 @@
 use std::f32::consts::TAU;
 use std::time::Duration;
 
-use gamepad_state::OutputSuppression;
+use gamepad_state::{Button, GamepadButtons, OutputSuppression};
 use steam_controller_protocol::{SteamButton, SteamButtons};
 
 /// The control that opens the wheel. Also dismisses it while it is open.
@@ -219,7 +219,14 @@ pub struct Picker {
     /// Whether a stick is currently steering the selection. Recentering the
     /// stick clears this and leaves the selection where the user left it.
     steering: bool,
+    /// Controls the wheel consumed that are still physically held after it
+    /// closed. Cleared bit by bit as the user lets go. See [`Picker::suppression`].
+    latched: SteamButtons,
 }
+
+/// The controls the wheel reads, and which therefore must never reach the game
+/// as a side effect of operating it.
+const CONSUMED: [SteamButton; 5] = [TRIGGER, COMMIT, DISMISS, PAGE_PREVIOUS, PAGE_NEXT];
 
 impl Picker {
     #[must_use]
@@ -229,6 +236,7 @@ impl Picker {
             phase: Phase::Idle,
             previous: None,
             steering: false,
+            latched: SteamButtons(0),
         }
     }
 
@@ -245,6 +253,7 @@ impl Picker {
         self.config = config.sanitized();
         self.phase = Phase::Idle;
         self.steering = false;
+        self.latched = SteamButtons(0);
     }
 
     #[must_use]
@@ -257,14 +266,32 @@ impl Picker {
         matches!(self.phase, Phase::Arming { .. })
     }
 
-    /// Whether the game should see a resting pad, because the wheel has the
-    /// controller.
+    /// What the game must not see right now.
     ///
-    /// This covers every control rather than only the ones the wheel reads.
-    /// See [`OutputSuppression`] for why a partial mask is not an option.
+    /// While the wheel is up, everything: the user is operating a menu, not
+    /// playing, and [`OutputSuppression::Neutral`] is also the only variant that
+    /// is safe for a pinned state.
+    ///
+    /// Afterwards, the buttons the wheel consumed stay withheld until they are
+    /// physically released. The wheel closes on a **press**, so without this the
+    /// A that applied a profile, or the B that dismissed it, would still be down
+    /// on the very next report and would reach the game the moment suppression
+    /// lifted. That is a press the user aimed at the overlay, not at the game.
     #[must_use]
     pub fn suppression(&self) -> Option<OutputSuppression> {
-        self.is_open().then_some(OutputSuppression)
+        if self.is_open() {
+            return Some(OutputSuppression::Neutral);
+        }
+        if self.latched.0 == 0 {
+            return None;
+        }
+        let mut buttons = GamepadButtons::default();
+        for control in CONSUMED {
+            if self.latched.contains(control) {
+                buttons.set(gamepad_button(control), true);
+            }
+        }
+        Some(OutputSuppression::Buttons(buttons))
     }
 
     /// Whether the trigger is currently the picker's and not the host's.
@@ -297,6 +324,9 @@ impl Picker {
         self.phase = Phase::Idle;
         self.previous = None;
         self.steering = false;
+        // Nothing to hold back: the controller this would apply to is gone, and
+        // a latch with no reports arriving would never clear.
+        self.latched = SteamButtons(0);
         was_active
     }
 
@@ -317,6 +347,9 @@ impl Picker {
         };
         let pressed =
             |button: SteamButton| input.buttons.contains(button) && !previous.contains(button);
+        // A latched control is released the moment the user lets go of it.
+        self.latched = SteamButtons(self.latched.0 & input.buttons.0);
+        let was_open = self.is_open();
 
         match self.phase {
             Phase::Idle => {
@@ -355,6 +388,17 @@ impl Picker {
             Phase::Open { selected, page } => {
                 self.update_open(input, roster, selected, page, &pressed, &mut events);
             }
+        }
+        if was_open && !self.is_open() {
+            // The wheel closed on a press, so whatever closed it is still down.
+            // Hold those controls back until the user lets go, or the press
+            // aimed at the overlay reaches the game on the very next report.
+            self.latched = SteamButtons(
+                input.buttons.0
+                    & CONSUMED
+                        .iter()
+                        .fold(0, |mask, control| mask | bit(*control)),
+            );
         }
         events
     }
@@ -435,6 +479,22 @@ impl Picker {
 
 const fn bit(button: SteamButton) -> u32 {
     1_u32 << button as u8
+}
+
+/// The gamepad button a control the wheel consumes maps to.
+///
+/// Mirrors `controller-mapper`'s table for exactly these five controls, so the
+/// right bit is withheld from the mapped state. Anything not consumed by the
+/// wheel has no business being here.
+const fn gamepad_button(control: SteamButton) -> Button {
+    match control {
+        SteamButton::A => Button::South,
+        SteamButton::B => Button::East,
+        SteamButton::LeftShoulder => Button::LeftShoulder,
+        SteamButton::RightShoulder => Button::RightShoulder,
+        // Quick Access, and the backstop for a control that is not consumed.
+        _ => Button::Extra3,
+    }
 }
 
 /// Adds the trigger to a button snapshot.
@@ -842,6 +902,79 @@ mod tests {
     }
 
     #[test]
+    fn the_button_that_applied_a_profile_is_held_back_until_released() {
+        // Regression: the wheel closes on the press edge, so A is still down on
+        // the next report. Lifting suppression there sent that press straight to
+        // the game -- a press the user aimed at the overlay.
+        let mut picker = opened(ROSTER);
+        picker.update(ms(2_100), &input(&[]), ROSTER);
+        picker.update(ms(2_200), &input(&[COMMIT]), ROSTER);
+        assert!(!picker.is_open());
+
+        let Some(OutputSuppression::Buttons(buttons)) = picker.suppression() else {
+            panic!("a still-held commit must keep being withheld");
+        };
+        assert!(buttons.contains(Button::South));
+        assert!(
+            !buttons.contains(Button::North),
+            "only what the wheel consumed is withheld; the rest of the pad works"
+        );
+
+        // Still down a few reports later.
+        picker.update(ms(2_250), &input(&[COMMIT]), ROSTER);
+        assert!(matches!(
+            picker.suppression(),
+            Some(OutputSuppression::Buttons(_))
+        ));
+
+        // Released, so the game gets the button back.
+        picker.update(ms(2_300), &input(&[]), ROSTER);
+        assert_eq!(picker.suppression(), None);
+
+        // And a deliberate later press does reach the game.
+        picker.update(ms(2_400), &input(&[COMMIT]), ROSTER);
+        assert_eq!(picker.suppression(), None);
+    }
+
+    #[test]
+    fn the_button_that_dismissed_the_wheel_is_held_back_too() {
+        for closing in [DISMISS, TRIGGER] {
+            let mut picker = opened(ROSTER);
+            picker.update(ms(2_100), &input(&[]), ROSTER);
+            picker.update(ms(2_200), &input(&[closing]), ROSTER);
+            assert!(!picker.is_open());
+            let Some(OutputSuppression::Buttons(buttons)) = picker.suppression() else {
+                panic!("{closing:?} must keep being withheld while held");
+            };
+            assert!(buttons.contains(gamepad_button(closing)));
+            picker.update(ms(2_300), &input(&[]), ROSTER);
+            assert_eq!(picker.suppression(), None, "{closing:?}");
+        }
+    }
+
+    #[test]
+    fn a_control_released_before_the_wheel_closed_is_never_latched() {
+        // Committing with A while Quick Access was long since released must not
+        // withhold Quick Access from the game.
+        let mut picker = opened(ROSTER);
+        picker.update(ms(2_100), &input(&[]), ROSTER);
+        picker.update(ms(2_200), &input(&[COMMIT]), ROSTER);
+        let Some(OutputSuppression::Buttons(buttons)) = picker.suppression() else {
+            panic!("the commit is still held");
+        };
+        assert!(!buttons.contains(Button::Extra3));
+    }
+
+    #[test]
+    fn a_forced_close_latches_nothing() {
+        // The controller is gone, so no report will ever arrive to clear a
+        // latch. Holding one would withhold those buttons forever.
+        let mut picker = opened(ROSTER);
+        assert!(picker.close());
+        assert_eq!(picker.suppression(), None);
+    }
+
+    #[test]
     fn only_an_open_wheel_takes_the_output_from_the_game() {
         let mut picker = Picker::new(PickerConfig::default());
         assert!(picker.suppression().is_none());
@@ -858,9 +991,12 @@ mod tests {
 
         picker.update(ms(2_010), &input(&[TRIGGER]), ROSTER);
         assert!(picker.is_open());
-        assert_eq!(picker.suppression(), Some(OutputSuppression));
+        assert_eq!(picker.suppression(), Some(OutputSuppression::Neutral));
 
+        // Closing hands the pad back, save for the still-held button that closed
+        // it; releasing that clears the last of it.
         picker.update(ms(2_100), &input(&[DISMISS]), ROSTER);
+        picker.update(ms(2_200), &input(&[]), ROSTER);
         assert!(picker.suppression().is_none());
     }
 
