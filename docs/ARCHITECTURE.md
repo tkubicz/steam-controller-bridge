@@ -40,6 +40,7 @@ game/browser -> Xbox OUT -> XIAO -> CDC Rumble -> bridge-runtime
 - `steam-controller-protocol` owns the Steam Controller 2 host-facing `0x45`/`0x42` state layouts, status reports, button masks, motion fields, and structured decode errors. It has no HID or transport dependency and preserves each complete validated report.
 - `controller-mapper` owns the validated default mapping profile and allocation-free filter pipeline. Its only inputs are decoded controller state, elapsed time, and explicit configuration; disconnect handling resets its optional smoothing history.
 - `desktop-bindings` owns the versioned profile schema, validation and atomic persistence, bindable-control edge engine, pad motion/feedback policy, shared-output reference counts, and platform-neutral `DesktopInputSink`. Its target-gated macOS adapter is the only layer that exposes Enigo types.
+- `macos-power-monitor` is the deliberately narrow IOKit/CFRunLoop ownership boundary for committed sleep and completed wake notifications. It acknowledges sleep only after the runtime callback has closed hardware, and exposes no raw platform pointers.
 - `profile-picker` owns the in-game profile wheel as pure logic: hold timing, stick angle to wheel sector with hysteresis, paging, and the set of controls an open wheel takes over. It knows nothing about how the wheel is drawn or how a profile is applied, and it never learns profile names -- only how many there are and which is active.
 - `bridge-core` owns the hardware-independent integrated state machine: decode/map timing, changed-state suppression, reconnect counters, repeated-failure and timeout safety, mapper reset, neutral output, and applying host output suppression to the mapped state.
 - `bridge-runtime` owns reusable live discovery and orchestration: uniquely active Puck-or-Bluetooth source selection, metadata/Hello-verified XIAO selection, HID/serial ownership, lizard suppression, bounded rumble leasing, typed battery/charge state, meaningful-idle tracking, one-shot Puck-dock detection, automatic power-off, status snapshots, reconnect recovery, and neutral/rumble-zero-before-release cleanup. Its shared status-log tracker converts snapshots into immediate semantic deltas, five-minute full snapshots, and error-context snapshots for both frontends.
@@ -51,9 +52,12 @@ game/browser -> Xbox OUT -> XIAO -> CDC Rumble -> bridge-runtime
 - `sc-bridge-menu` is a macOS-only, windowless `winit`/`tray-icon` frontend over the same runtime. It owns menu rendering, actions, log rotation, and local `.app` packaging, not controller logic. At startup it renders the four status states once, retains their native images through `tray-icon`'s documented `NSStatusItem` access, and swaps those same objects on transitions instead of creating new AppKit/CoreUI cache identities. It also owns the profile store the wheel chooses from, resolving a committed index through the same path the tray submenu uses.
 - The bindings editor and the profile overlay are separate processes of that same binary, because `eframe::run_native` owns an event loop and the menu app's is already committed to the status item. The overlay is a pure display driven by newline-delimited JSON on its stdin; it makes no decisions and takes no input, which is what lets its window be non-activating and click-through. See [PROFILE_OVERLAY.md](PROFILE_OVERLAY.md).
 
-All project-authored crates forbid unsafe code. Recording and desktop bindings
-use the shared serialization libraries; only recording uses base64. The GUI,
-HID, mapping, and serial layers remain separate components.
+All project-authored crates except `macos-power-monitor` forbid unsafe code.
+That crate contains the documented IOKit callback and Core Foundation ownership
+operations required for system-power notifications; its public API is safe and
+typed. Recording and desktop bindings use the shared serialization libraries;
+only recording uses base64. The GUI, HID, mapping, and serial layers remain
+separate components.
 
 ## Lifecycle and safety
 
@@ -70,17 +74,18 @@ supervisor-level one-shot latch; it is not represented as a zero-minute idle
 timeout.
 
 System sleep is handled by the runtime, because the runtime owns the hardware
-handles: `BridgeHandle::suspend_for_sleep` parks the XIAO at neutral, closes
-the serial port and HID sessions, and acknowledges only once they are gone;
-`request_resume_from_wake` lets discovery run again after a two-second settle
-so the CDC interface can finish re-enumerating. Serial I/O left in flight
-across a sleep/wake transition has panicked macOS's USB CDC-ACM kext (a NULL
-dereference in `com.apple.driver.usb.cdc` about two seconds after wake, twice,
-while the XIAO re-enumerated under an open, pinging port), so every frontend
-that can observe sleep must call the pair — the exposure is identical whether
-`sc-bridge-menu` or the `sc-bridge` CLI is hosting the runtime. Suspension is
-orthogonal to start/stop: a bridge the user stopped stays stopped after wake,
-and a running one resumes on its own.
+handles. For serial output it automatically registers `macos-power-monitor`,
+so every frontend inherits the same protection: on committed sleep the runtime
+parks the XIAO at neutral, closes the serial port and HID sessions, and only
+then lets IOKit acknowledge; on wake it resumes discovery after a two-second
+settle so CDC can finish re-enumerating. The public
+`BridgeHandle::suspend_for_sleep` and `request_resume_from_wake` methods remain
+available for explicit lifecycle integration and tests. Monitor registration
+is fail-closed: serial hardware cannot start without it. Serial I/O left in
+flight across sleep/wake has panicked macOS's USB CDC-ACM kext, so this safety
+boundary is part of runtime ownership rather than optional frontend policy.
+Suspension is orthogonal to start/stop: a bridge the user stopped stays stopped
+after wake, and a running one resumes on its own.
 
 The HID session uses a bounded 1,024-byte report buffer. Automatic discovery
 opens only exact official Puck and direct Bluetooth vendor collections by

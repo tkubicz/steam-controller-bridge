@@ -8,20 +8,18 @@ use desktop_bindings::{
 };
 use eframe::egui;
 
+use crate::theme::{ACCENT, MUTED_TEXT, ON_ACCENT, SURFACE, SURFACE_RAISED};
+
 const WINDOW_SIZE: [f32; 2] = [1260.0, 720.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [1080.0, 660.0];
 const INSPECTOR_WIDTH: f32 = 300.0;
 const COLUMN_GAP: f32 = 16.0;
 const CANVAS_MIN_WIDTH: f32 = 620.0;
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(84, 211, 224);
 const CANVAS_BACKGROUND: egui::Color32 = egui::Color32::from_rgb(18, 21, 26);
 const CANVAS_BORDER: egui::Color32 = egui::Color32::from_rgb(46, 52, 62);
-const SURFACE: egui::Color32 = egui::Color32::from_rgb(29, 34, 42);
-const SURFACE_RAISED: egui::Color32 = egui::Color32::from_rgb(36, 42, 51);
 const INSET: egui::Color32 = egui::Color32::from_rgb(22, 26, 32);
 const OUTLINE: egui::Color32 = egui::Color32::from_rgb(126, 136, 149);
 const DETAIL: egui::Color32 = egui::Color32::from_rgb(82, 92, 105);
-const MUTED_TEXT: egui::Color32 = egui::Color32::from_rgb(157, 166, 177);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControllerView {
@@ -834,7 +832,7 @@ fn configure_visuals(ctx: &egui::Context) {
     visuals.window_fill = SURFACE;
     visuals.extreme_bg_color = egui::Color32::from_rgb(20, 24, 30);
     visuals.selection.bg_fill = ACCENT;
-    visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(8, 28, 32));
+    visuals.selection.stroke = egui::Stroke::new(1.0, ON_ACCENT);
     visuals.widgets.inactive.bg_fill = SURFACE_RAISED;
     visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(45, 54, 65);
     visuals.widgets.active.bg_fill = egui::Color32::from_rgb(50, 61, 73);

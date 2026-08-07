@@ -1,9 +1,10 @@
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bridge_runtime::{
@@ -53,6 +54,7 @@ const IDLE_30_ID: &str = "idle-30";
 const PUCK_DOCK_ID: &str = "puck-dock-power-off";
 const OVERLAY_ENABLED_ID: &str = "profile-overlay-enabled";
 const OVERLAY_HOLD_PREFIX: &str = "profile-overlay-hold:";
+const PICKER_EVENT_MAILBOX_CAPACITY: usize = 32;
 const SETTINGS_VERSION: u32 = 3;
 /// Hold durations the menu offers, in milliseconds.
 const OVERLAY_HOLD_CHOICES: [u64; 2] = [2_000, 3_000];
@@ -117,14 +119,94 @@ fn default_binding_profile_id() -> String {
 
 /// Describes the profile store to the wheel: how many there are, and where the
 /// active one sits. Names stay here, because only this side can resolve them.
-fn picker_roster(store: &BindingStore, active_profile_id: &str) -> PickerRoster {
-    PickerRoster::new(
+fn picker_roster(store: &BindingStore, active_profile_id: &str, revision: u64) -> PickerRoster {
+    PickerRoster::with_revision(
         store.profiles.len(),
         store
             .profiles
             .iter()
             .position(|profile| profile.id.eq_ignore_ascii_case(active_profile_id)),
+        revision,
     )
+}
+
+#[derive(Default)]
+struct PickerEventMailbox {
+    events: Mutex<VecDeque<PickerEvent>>,
+}
+
+impl PickerEventMailbox {
+    /// Publishes without blocking the runtime thread. Returns whether the UI
+    /// needs a wake-up; one pending wake covers the whole bounded batch.
+    fn publish(&self, event: PickerEvent) -> bool {
+        let mut events = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let was_empty = events.is_empty();
+
+        if matches!(event, PickerEvent::Selection { .. })
+            && matches!(events.back(), Some(PickerEvent::Selection { .. }))
+        {
+            let _ = events.pop_back();
+            events.push_back(event);
+            return was_empty;
+        }
+
+        if matches!(event, PickerEvent::Opened { .. })
+            && matches!(events.back(), Some(PickerEvent::Preparing))
+        {
+            let _ = events.pop_back();
+        } else if matches!(
+            event,
+            PickerEvent::Commit { .. } | PickerEvent::Dismissed | PickerEvent::TriggerTapped
+        ) {
+            while matches!(
+                events.back(),
+                Some(
+                    PickerEvent::Preparing
+                        | PickerEvent::Opened { .. }
+                        | PickerEvent::Selection { .. }
+                )
+            ) {
+                let _ = events.pop_back();
+            }
+        }
+
+        if events.len() == PICKER_EVENT_MAILBOX_CAPACITY {
+            let _ = events.pop_front();
+            eprintln!("level=warn event=profile_picker_event_mailbox_overflow action=drop_oldest");
+        }
+        events.push_back(event);
+        was_empty
+    }
+
+    fn pop(&self) -> Option<PickerEvent> {
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+    }
+}
+
+fn resolve_picker_commit(
+    profile_ids: &[String],
+    current_revision: u64,
+    event_revision: u64,
+    index: usize,
+) -> Option<&str> {
+    if current_revision != event_revision {
+        return None;
+    }
+    profile_ids.get(index).map(String::as_str)
 }
 
 const fn default_overlay_hold_ms() -> u64 {
@@ -300,12 +382,13 @@ struct MenuApp {
     permission_request_pending: Option<PermissionStage>,
     shutting_down: bool,
     overlay: OverlayHost,
-    /// Wheel events from the runtime thread, drained on the main thread.
-    picker_events: mpsc::Receiver<PickerEvent>,
+    /// Bounded/coalesced wheel events from the runtime thread.
+    picker_events: Arc<PickerEventMailbox>,
     /// Profile ids in the order last published to the wheel, so a
     /// `Commit { index }` resolves against what the wheel showed even if the
     /// store has changed since.
     picker_roster_ids: Vec<String>,
+    picker_roster_revision: u64,
 }
 
 impl MenuApp {
@@ -338,7 +421,7 @@ impl MenuApp {
             },
             binding_profile: active_profile,
             profile_picker: settings.picker_config(),
-            picker_roster: picker_roster(&binding_store, &settings.active_binding_profile),
+            picker_roster: picker_roster(&binding_store, &settings.active_binding_profile, 0),
             ..RuntimeConfig::default()
         };
         let profile_ids = binding_store
@@ -349,11 +432,12 @@ impl MenuApp {
         // The runtime thread hands wheel events over and wakes the event loop
         // immediately. Polling for them would add up to POLL_INTERVAL of lag
         // between letting go of Quick Access and the wheel appearing.
-        let (picker_sender, picker_events) = mpsc::channel();
+        let picker_events = Arc::new(PickerEventMailbox::default());
+        let picker_sender = Arc::clone(&picker_events);
         let runtime = BridgeRuntime::spawn_with_picker(
             config,
             Box::new(move |event| {
-                if picker_sender.send(event).is_ok() {
+                if picker_sender.publish(event) {
                     let _ = proxy.send_event(());
                 }
             }),
@@ -378,6 +462,7 @@ impl MenuApp {
             picker_events,
             // Matches the roster just handed to the runtime in `config`.
             picker_roster_ids: profile_ids,
+            picker_roster_revision: 0,
         })
     }
 
@@ -827,9 +912,27 @@ impl MenuApp {
     /// names. Splitting it that way keeps profile names out of the runtime,
     /// which has no use for them.
     fn sync_picker_roster(&mut self) {
-        let roster = picker_roster(&self.binding_store, &self.settings.active_binding_profile);
-        if let Err(error) = self.runtime.request_set_picker_roster(roster) {
+        // Finish every event the old generation already published before the
+        // runtime switches away from it. The blocking acknowledgement then
+        // guarantees any concurrently emitted old event is already in this
+        // bounded mailbox, so the second drain resolves it against old ids.
+        self.drain_picker_events();
+        let previous_revision = self.picker_roster_revision;
+        let revision = previous_revision.wrapping_add(1);
+        let roster = picker_roster(
+            &self.binding_store,
+            &self.settings.active_binding_profile,
+            revision,
+        );
+        if let Err(error) = self.runtime.set_picker_roster(roster) {
             eprintln!("cannot publish the profile wheel roster: {error}");
+            return;
+        }
+        self.drain_picker_events();
+        // A drained commit can synchronously select a profile and publish a
+        // newer roster. That nested update supersedes this one.
+        if self.picker_roster_revision != previous_revision {
+            return;
         }
         // The snapshot a later `Commit { index }` resolves against, taken at
         // the same moment the runtime and the overlay learn this roster.
@@ -839,6 +942,7 @@ impl MenuApp {
             .iter()
             .map(|profile| profile.id.clone())
             .collect();
+        self.picker_roster_revision = revision;
         let names = self
             .binding_store
             .profiles
@@ -874,14 +978,38 @@ impl MenuApp {
         }
         match event {
             PickerEvent::Preparing => self.overlay.start(),
-            PickerEvent::Opened { selected, page } => {
+            PickerEvent::Opened {
+                selected,
+                page,
+                roster_revision,
+            } if roster_revision == self.picker_roster_revision => {
                 // Idempotent, and the safety net for a `Preparing` that never
                 // arrived because reports were sparse enough to skip past it.
                 self.overlay.start();
                 self.overlay.show(selected, page);
             }
-            PickerEvent::Selection { selected, page } => self.overlay.show(selected, page),
-            PickerEvent::Commit { index } => {
+            PickerEvent::Selection {
+                selected,
+                page,
+                roster_revision,
+            } if roster_revision == self.picker_roster_revision => {
+                self.overlay.show(selected, page);
+            }
+            PickerEvent::Opened {
+                roster_revision, ..
+            }
+            | PickerEvent::Selection {
+                roster_revision, ..
+            } => {
+                eprintln!(
+                    "level=warn event=stale_profile_wheel_visual_event event_revision={roster_revision} current_revision={}",
+                    self.picker_roster_revision
+                );
+            }
+            PickerEvent::Commit {
+                index,
+                roster_revision,
+            } => {
                 // Killing the process takes the window with it, which is both
                 // instant and the only way to leave nothing behind.
                 self.overlay.stop();
@@ -889,8 +1017,17 @@ impl MenuApp {
                 // not the live store: an external edit can reorder the store
                 // between the publish and the press, and an index into the
                 // wrong list would silently apply the wrong profile.
-                let Some(profile_id) = self.picker_roster_ids.get(index).cloned() else {
-                    eprintln!("level=warn event=profile_wheel_index_unknown index={index}");
+                let Some(profile_id) = resolve_picker_commit(
+                    &self.picker_roster_ids,
+                    self.picker_roster_revision,
+                    roster_revision,
+                    index,
+                )
+                .map(str::to_owned) else {
+                    eprintln!(
+                        "level=warn event=profile_wheel_commit_unknown index={index} event_revision={roster_revision} current_revision={}",
+                        self.picker_roster_revision
+                    );
                     return;
                 };
                 // The same path the tray submenu uses, so the checkmark, the
@@ -906,7 +1043,7 @@ impl MenuApp {
     }
 
     fn drain_picker_events(&mut self) {
-        while let Ok(event) = self.picker_events.try_recv() {
+        while let Some(event) = self.picker_events.pop() {
             self.handle_picker_event(event);
         }
     }
@@ -1778,23 +1915,75 @@ mod tests {
         assert_eq!(store.profiles.len(), 3);
 
         let second = store.profiles[1].id.clone();
-        let roster = picker_roster(&store, &second);
+        let roster = picker_roster(&store, &second, 7);
         assert_eq!(roster.len, 3);
         assert_eq!(roster.active, Some(1));
+        assert_eq!(roster.revision, 7);
         assert!(roster.is_openable());
 
         // A profile that no longer exists must not point the wheel somewhere
         // arbitrary; it opens on the first sector instead.
-        let roster = picker_roster(&store, "deleted-profile");
+        let roster = picker_roster(&store, "deleted-profile", 8);
         assert_eq!(roster.len, 3);
         assert_eq!(roster.active, None);
+        assert_eq!(roster.revision, 8);
     }
 
     #[test]
     fn a_single_profile_store_cannot_open_the_wheel() {
         let store = BindingStore::default();
         assert_eq!(store.profiles.len(), 1);
-        assert!(!picker_roster(&store, &store.profiles[0].id).is_openable());
+        assert!(!picker_roster(&store, &store.profiles[0].id, 0).is_openable());
+    }
+
+    #[test]
+    fn picker_event_mailbox_coalesces_visual_updates_and_bounds_backlog() {
+        let mailbox = PickerEventMailbox::default();
+        assert!(mailbox.publish(PickerEvent::Preparing));
+        assert!(!mailbox.publish(PickerEvent::Opened {
+            selected: 0,
+            page: 0,
+            roster_revision: 4,
+        }));
+        assert_eq!(mailbox.len(), 1, "Opened replaces its pending preparation");
+
+        assert!(!mailbox.publish(PickerEvent::Selection {
+            selected: 1,
+            page: 0,
+            roster_revision: 4,
+        }));
+        assert!(!mailbox.publish(PickerEvent::Selection {
+            selected: 2,
+            page: 0,
+            roster_revision: 4,
+        }));
+        assert_eq!(mailbox.len(), 2, "only the latest selection is useful");
+        assert!(!mailbox.publish(PickerEvent::Commit {
+            index: 2,
+            roster_revision: 4,
+        }));
+        assert_eq!(
+            mailbox.pop(),
+            Some(PickerEvent::Commit {
+                index: 2,
+                roster_revision: 4,
+            }),
+            "a terminal event supersedes every pending visual update"
+        );
+        assert!(mailbox.pop().is_none());
+
+        for _ in 0..=PICKER_EVENT_MAILBOX_CAPACITY {
+            let _ = mailbox.publish(PickerEvent::Dismissed);
+        }
+        assert_eq!(mailbox.len(), PICKER_EVENT_MAILBOX_CAPACITY);
+    }
+
+    #[test]
+    fn picker_commits_only_resolve_against_the_roster_the_wheel_used() {
+        let ids = vec!["default".to_owned(), "gaming".to_owned()];
+        assert_eq!(resolve_picker_commit(&ids, 7, 7, 1), Some("gaming"));
+        assert_eq!(resolve_picker_commit(&ids, 8, 7, 1), None);
+        assert_eq!(resolve_picker_commit(&ids, 7, 7, 2), None);
     }
 
     #[test]

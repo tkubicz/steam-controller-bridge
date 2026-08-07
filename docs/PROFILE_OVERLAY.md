@@ -95,12 +95,13 @@ that stalls the host thread past 100 ms then faults the device, which flashes
 red until traffic resumes. Nothing is logged, because no write ever failed.
 
 The same hazard applies to any slow work on the thread that feeds the XIAO.
-Building or dropping the desktop-input sink during a binding-profile switch is
-exactly that: a synchronous window-server operation whose duration this side
-does not control. `neutralize_before_desktop_work` in `bridge-runtime` parks the
-device at neutral first, which disarms the watchdog and makes the duration
-irrelevant. Switching **to** a profile with no bindings drops the sink, and
-switching away builds one, so both directions need it.
+macOS input-sink construction and destruction are window-server operations
+whose duration this side does not control, so `bridge-runtime` owns them on a
+dedicated worker. `neutralize_before_desktop_work` still parks the device at
+neutral before an ordered profile operation, which makes even a blocked worker
+irrelevant to the firmware watchdog. An authorized sink is retained through
+ordinary and unbound profile switches; backend failure and shutdown are the
+places that destroy it.
 
 If you ever add work to the supervisor loop that can block, park the output
 first. The symptom of getting this wrong is a red-flashing XIAO and a clean log.
@@ -148,12 +149,15 @@ suppression   profile-picker: hold timing, angle to sector, commit
   sink given to `BridgeRuntime::spawn_with_picker`.
 - **`apps/sc-bridge-menu`** owns the profile store. The runtime is told only how
   many profiles there are and which is active (`PickerRoster`); it never learns
-  their names, because it has no use for them. A `Commit { index }` is resolved
-  against the store and applied through `select_binding_profile`, the same path
-  the tray submenu uses.
+  their names, because it has no use for them. Every roster carries an opaque
+  revision that selection and commit events echo, so a queued `Commit { index }`
+  can only resolve against the exact ID snapshot the wheel used. The resolved
+  profile is applied through `select_binding_profile`, the same path the tray
+  submenu uses.
 
-Events reach the frontend through a channel plus an `EventLoopProxy` wake-up
-rather than the 250 ms status poll, so a stick flick shows up in the next frame.
+Events reach the frontend through a bounded, coalescing mailbox plus one
+`EventLoopProxy` wake-up per pending batch rather than the 250 ms status poll,
+so a stick flick shows up in the next frame without an unbounded UI backlog.
 
 ## The overlay process
 

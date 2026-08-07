@@ -83,7 +83,10 @@ impl OverlayHost {
             return;
         }
         self.roster = Some(message.clone());
-        self.send(message);
+        let had_child = self.child.is_some();
+        if !self.send(message) && had_child && self.open.is_some() {
+            self.start();
+        }
     }
 
     /// Starts the overlay if it is not already running.
@@ -106,10 +109,12 @@ impl OverlayHost {
                 // A child that replaced a crashed one has to be told what the
                 // world looks like before it can draw anything.
                 if let Some(roster) = self.roster.clone() {
-                    self.send(roster);
+                    if !self.send(roster) {
+                        return;
+                    }
                 }
                 if let Some(open) = self.open.clone() {
-                    self.send(open);
+                    let _ = self.send(open);
                 }
             }
             Err(error) => {
@@ -131,7 +136,10 @@ impl OverlayHost {
     pub fn show(&mut self, selected: usize, page: usize) {
         let message = OverlayMessage::Open { selected, page };
         self.open = Some(message.clone());
-        self.send(message);
+        let had_child = self.child.is_some();
+        if !self.send(message) && had_child {
+            self.start();
+        }
     }
 
     #[must_use]
@@ -139,29 +147,32 @@ impl OverlayHost {
         self.child.is_some()
     }
 
-    fn send(&mut self, message: OverlayMessage) {
+    fn send(&mut self, message: OverlayMessage) -> bool {
         let Some(writer) = self.writer.as_ref() else {
-            return;
+            return false;
         };
         let line = match OverlayEnvelope::new(message).to_line() {
             Ok(line) => line,
             Err(error) => {
                 eprintln!("level=warn event=overlay_message_unserializable error={error:?}");
-                return;
+                return false;
             }
         };
         match writer.sender.try_send(line) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(TrySendError::Full(_)) => {
-                // The child has not read anything for dozens of messages. The
-                // latest wheel state is kept in `roster`/`open`, so a child
-                // that recovers is reseeded by the next `start`.
+                // A live child with a full queue is wedged. Retaining it would
+                // make every later `start` return early and permanently lose
+                // the cached latest state, so force a fresh process.
                 eprintln!("level=warn event=profile_overlay_queue_full");
+                self.discard_child();
+                false
             }
             Err(TrySendError::Disconnected(_)) => {
                 // The writer hit a broken pipe, so the overlay is gone. Drop it
-                // here and let the next `start` bring a replacement up.
+                // here; the caller restarts it when a wheel is still open.
                 self.discard_child();
+                false
             }
         }
     }
@@ -197,23 +208,28 @@ impl OverlayHost {
     /// leaves no process behind on quit. The writer thread is joined so a
     /// spawn/kill cycle per hold cannot accumulate threads.
     fn kill_child(&mut self) -> bool {
-        let Some(mut child) = self.child.take() else {
-            self.writer = None;
-            return false;
-        };
-        let _ = child.kill();
-        let _ = child.wait();
+        let child = self.child.take();
+        let existed = child.is_some();
+        if let Some(mut child) = child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         if let Some(writer) = self.writer.take() {
             drop(writer.sender);
             let _ = writer.thread.join();
         }
-        true
+        existed
     }
 
     fn spawn(&mut self) -> Result<(), String> {
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-        let mut child = Command::new(executable)
-            .arg(OVERLAY_ARGUMENT)
+        let mut command = Command::new(executable);
+        command.arg(OVERLAY_ARGUMENT);
+        self.spawn_command(&mut command)
+    }
+
+    fn spawn_command(&mut self, command: &mut Command) -> Result<(), String> {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             // stderr is inherited so the overlay's structured log lines land in
@@ -304,5 +320,37 @@ mod tests {
             host.next_launch.is_none(),
             "only a failed spawn may back the host off"
         );
+    }
+
+    #[test]
+    fn a_saturated_writer_is_discarded_instead_of_stranding_cached_state() {
+        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+        sender.send("already queued".to_owned()).unwrap();
+        let mut host = OverlayHost::new();
+        host.writer = Some(OverlayWriter {
+            sender,
+            thread: std::thread::spawn(|| {}),
+        });
+
+        assert!(!host.send(OverlayMessage::Open {
+            selected: 1,
+            page: 0,
+        }));
+        assert!(host.writer.is_none());
+        assert!(!host.is_running());
+    }
+
+    #[test]
+    fn repeated_child_cycles_reap_processes_and_join_writers() {
+        let mut host = OverlayHost::new();
+        for index in 0..32 {
+            let mut command = Command::new("/bin/cat");
+            host.spawn_command(&mut command).unwrap();
+            host.set_roster(vec![format!("Profile {index}")], Some(0), 8);
+            host.show(0, 0);
+            host.stop();
+            assert!(!host.is_running());
+            assert!(host.writer.is_none());
+        }
     }
 }

@@ -16,14 +16,9 @@ use objc2_app_kit::{
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
 use crate::overlay_protocol::{OverlayEnvelope, OverlayMessage, OVERLAY_WINDOW_TITLE};
+use crate::theme::{ACCENT, MUTED_TEXT, ON_ACCENT, SURFACE, SURFACE_RAISED, TEXT};
 
 /// Matches the bindings editor so the two windows read as one product.
-const ACCENT: egui::Color32 = egui::Color32::from_rgb(84, 211, 224);
-const SURFACE: egui::Color32 = egui::Color32::from_rgb(29, 34, 42);
-const SURFACE_RAISED: egui::Color32 = egui::Color32::from_rgb(36, 42, 51);
-const MUTED_TEXT: egui::Color32 = egui::Color32::from_rgb(157, 166, 177);
-const TEXT: egui::Color32 = egui::Color32::from_rgb(232, 237, 243);
-const ON_ACCENT: egui::Color32 = egui::Color32::from_rgb(8, 28, 32);
 const SCRIM: egui::Color32 = egui::Color32::from_rgba_premultiplied(0, 0, 0, 130);
 
 const WHEEL_RADIUS: f32 = 210.0;
@@ -315,8 +310,8 @@ fn place_on_target_screen() -> Option<(ScreenSource, usize)> {
 /// Lifts the window above a fullscreen game, using only safe `AppKit` calls.
 ///
 /// `winit` exposes neither `NSWindowCollectionBehavior` nor a window level high
-/// enough, and building an `NSPanel` directly needs `unsafe`, which this
-/// workspace forbids. Creating the window through `winit` and then finding it
+/// enough, and building an `NSPanel` directly needs `unsafe`, which this UI
+/// crate forbids. Creating the window through `winit` and then finding it
 /// by title in `NSApp.windows()` reaches the same result through safe API.
 /// Runs once; a failure leaves an overlay that still works on the current Space.
 fn configure_native_window() {

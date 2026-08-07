@@ -12,7 +12,8 @@
 use std::f32::consts::TAU;
 use std::time::Duration;
 
-use gamepad_state::{Button, GamepadButtons, OutputSuppression};
+use controller_mapper::gamepad_button;
+use gamepad_state::{GamepadButtons, OutputSuppression};
 use steam_controller_protocol::{SteamButton, SteamButtons};
 
 /// The control that opens the wheel. Also dismisses it while it is open.
@@ -100,12 +101,28 @@ impl PickerConfig {
 pub struct PickerRoster {
     pub len: usize,
     pub active: Option<usize>,
+    /// Opaque host generation echoed by selection and commit events so a
+    /// frontend can never resolve an old index against a newly reordered list.
+    pub revision: u64,
 }
 
 impl PickerRoster {
     #[must_use]
     pub const fn new(len: usize, active: Option<usize>) -> Self {
-        Self { len, active }
+        Self {
+            len,
+            active,
+            revision: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_revision(len: usize, active: Option<usize>, revision: u64) -> Self {
+        Self {
+            len,
+            active,
+            revision,
+        }
     }
 
     #[must_use]
@@ -134,13 +151,16 @@ pub enum PickerEvent {
     Opened {
         selected: usize,
         page: usize,
+        roster_revision: u64,
     },
     Selection {
         selected: usize,
         page: usize,
+        roster_revision: u64,
     },
     Commit {
         index: usize,
+        roster_revision: u64,
     },
     Dismissed,
     /// The trigger was released before the hold elapsed, so it was an ordinary
@@ -322,7 +342,9 @@ impl Picker {
         let mut buttons = GamepadButtons::default();
         for control in CONSUMED {
             if self.latched.contains(control) {
-                buttons.set(gamepad_button(control), true);
+                if let Some(button) = gamepad_button(control) {
+                    buttons.set(button, true);
+                }
             }
         }
         Some(OutputSuppression::Buttons(buttons))
@@ -414,7 +436,11 @@ impl Picker {
                     let selected = selected_index % self.config.sectors_per_page;
                     self.phase = Phase::Open { selected, page };
                     self.steering = None;
-                    events.push(PickerEvent::Opened { selected, page });
+                    events.push(PickerEvent::Opened {
+                        selected,
+                        page,
+                        roster_revision: roster.revision,
+                    });
                 } else if !prepared && now.saturating_sub(since) >= self.config.hold / 2 {
                     self.phase = Phase::Arming {
                         since,
@@ -431,12 +457,7 @@ impl Picker {
             // The wheel closed on a press, so whatever closed it is still down.
             // Hold those controls back until the user lets go, or the press
             // aimed at the overlay reaches the game on the very next report.
-            self.latched = SteamButtons(
-                input.buttons.0
-                    & CONSUMED
-                        .iter()
-                        .fold(0, |mask, control| mask | bit(*control)),
-            );
+            self.latched = SteamButtons(input.buttons.0 & consumed_mask());
         }
         events
     }
@@ -477,7 +498,11 @@ impl Picker {
 
         if (selected, page) != (was_selected, was_page) {
             self.phase = Phase::Open { selected, page };
-            events.push(PickerEvent::Selection { selected, page });
+            events.push(PickerEvent::Selection {
+                selected,
+                page,
+                roster_revision: roster.revision,
+            });
         }
 
         if pressed(COMMIT) {
@@ -485,6 +510,7 @@ impl Picker {
             self.steering = None;
             events.push(PickerEvent::Commit {
                 index: (page * per_page + selected).min(roster.len - 1),
+                roster_revision: roster.revision,
             });
         } else if pressed(DISMISS) || pressed(TRIGGER) {
             self.phase = Phase::Idle;
@@ -537,22 +563,6 @@ impl Picker {
 
 const fn bit(button: SteamButton) -> u32 {
     1_u32 << button as u8
-}
-
-/// The gamepad button a control the wheel consumes maps to.
-///
-/// Mirrors `controller-mapper`'s table for exactly these five controls, so the
-/// right bit is withheld from the mapped state. Anything not consumed by the
-/// wheel has no business being here.
-const fn gamepad_button(control: SteamButton) -> Button {
-    match control {
-        SteamButton::A => Button::South,
-        SteamButton::B => Button::East,
-        SteamButton::LeftShoulder => Button::LeftShoulder,
-        SteamButton::RightShoulder => Button::RightShoulder,
-        // Quick Access, and the backstop for a control that is not consumed.
-        _ => Button::Extra3,
-    }
 }
 
 /// Adds the trigger to a button snapshot.
@@ -637,10 +647,12 @@ pub const fn sectors_on_page(len: usize, per_page: usize, page: usize) -> usize 
 )]
 mod tests {
     use super::*;
+    use gamepad_state::Button;
 
     const ROSTER: PickerRoster = PickerRoster {
         len: 4,
         active: Some(0),
+        revision: 0,
     };
 
     fn buttons(pressed: &[SteamButton]) -> SteamButtons {
@@ -704,7 +716,37 @@ mod tests {
             events,
             vec![PickerEvent::Opened {
                 selected: 0,
-                page: 0
+                page: 0,
+                roster_revision: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn events_echo_the_roster_revision_that_defined_their_indices() {
+        let roster = PickerRoster::with_revision(4, Some(0), 37);
+        let mut picker = Picker::new(PickerConfig::default());
+        picker.update(ms(0), &input(&[]), roster);
+        picker.update(ms(10), &input(&[TRIGGER]), roster);
+        assert_eq!(
+            picker
+                .update(ms(2_010), &input(&[TRIGGER]), roster)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![PickerEvent::Opened {
+                selected: 0,
+                page: 0,
+                roster_revision: 37,
+            }]
+        );
+        assert_eq!(
+            picker
+                .update(ms(2_020), &input(&[COMMIT]), roster)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            vec![PickerEvent::Commit {
+                index: 0,
+                roster_revision: 37,
             }]
         );
     }
@@ -738,7 +780,8 @@ mod tests {
             events,
             vec![PickerEvent::Opened {
                 selected: 0,
-                page: 0
+                page: 0,
+                roster_revision: 0,
             }]
         );
     }
@@ -815,7 +858,8 @@ mod tests {
             events,
             vec![PickerEvent::Opened {
                 selected: 1,
-                page: 1
+                page: 1,
+                roster_revision: 0,
             }]
         );
     }
@@ -862,7 +906,13 @@ mod tests {
             .update(ms(2_200), &input(&[COMMIT]), ROSTER)
             .into_iter()
             .collect();
-        assert_eq!(events, vec![PickerEvent::Commit { index: 0 }]);
+        assert_eq!(
+            events,
+            vec![PickerEvent::Commit {
+                index: 0,
+                roster_revision: 0,
+            }]
+        );
         assert!(!picker.is_open());
 
         let mut picker = opened(ROSTER);
@@ -894,7 +944,8 @@ mod tests {
             events,
             vec![PickerEvent::Opened {
                 selected: 0,
-                page: 0
+                page: 0,
+                roster_revision: 0,
             }]
         );
     }
@@ -917,7 +968,8 @@ mod tests {
             events,
             vec![PickerEvent::Opened {
                 selected: 0,
-                page: 0
+                page: 0,
+                roster_revision: 0,
             }]
         );
     }
@@ -1004,7 +1056,8 @@ mod tests {
             let Some(OutputSuppression::Buttons(buttons)) = picker.suppression() else {
                 panic!("{closing:?} must keep being withheld while held");
             };
-            assert!(buttons.contains(gamepad_button(closing)));
+            assert!(buttons
+                .contains(gamepad_button(closing).expect("consumed controls are directly mapped")));
             picker.update(ms(2_300), &input(&[]), ROSTER);
             assert_eq!(picker.suppression(), None, "{closing:?}");
         }
@@ -1155,7 +1208,8 @@ mod tests {
             events,
             vec![PickerEvent::Selection {
                 selected: 2,
-                page: 0
+                page: 0,
+                roster_revision: 0,
             }]
         );
     }
@@ -1178,7 +1232,13 @@ mod tests {
             .update(ms(2_300), &input(&[COMMIT]), ROSTER)
             .into_iter()
             .collect();
-        assert_eq!(events, vec![PickerEvent::Commit { index: 2 }]);
+        assert_eq!(
+            events,
+            vec![PickerEvent::Commit {
+                index: 2,
+                roster_revision: 0,
+            }]
+        );
     }
 
     #[test]
@@ -1210,7 +1270,8 @@ mod tests {
             events,
             vec![PickerEvent::Selection {
                 selected: 3,
-                page: 0
+                page: 0,
+                roster_revision: 0,
             }]
         );
     }
@@ -1236,7 +1297,8 @@ mod tests {
             events,
             vec![PickerEvent::Selection {
                 selected: 2,
-                page: 0
+                page: 0,
+                roster_revision: 0,
             }]
         );
     }
@@ -1262,7 +1324,8 @@ mod tests {
                 events,
                 vec![PickerEvent::Selection {
                     selected: 1,
-                    page: 0
+                    page: 0,
+                    roster_revision: 0,
                 }]
             );
         }
@@ -1297,7 +1360,8 @@ mod tests {
             events,
             vec![PickerEvent::Selection {
                 selected: 0,
-                page: 1
+                page: 1,
+                roster_revision: 0,
             }]
         );
         // Page 1 is a short page: indices 8..11 spread over three sectors, so
@@ -1316,7 +1380,13 @@ mod tests {
             .update(ms(2_400), &input(&[COMMIT]), roster)
             .into_iter()
             .collect();
-        assert_eq!(events, vec![PickerEvent::Commit { index: 10 }]);
+        assert_eq!(
+            events,
+            vec![PickerEvent::Commit {
+                index: 10,
+                roster_revision: 0,
+            }]
+        );
     }
 
     #[test]
@@ -1331,7 +1401,8 @@ mod tests {
             events,
             vec![PickerEvent::Selection {
                 selected: 0,
-                page: 1
+                page: 1,
+                roster_revision: 0,
             }]
         );
         picker.update(ms(2_200), &input(&[]), roster);
@@ -1343,7 +1414,8 @@ mod tests {
             events,
             vec![PickerEvent::Selection {
                 selected: 0,
-                page: 0
+                page: 0,
+                roster_revision: 0,
             }]
         );
     }
@@ -1375,14 +1447,21 @@ mod tests {
             events,
             vec![PickerEvent::Selection {
                 selected: 1,
-                page: 0
+                page: 0,
+                roster_revision: 0,
             }]
         );
         let events: Vec<_> = picker
             .update(ms(2_200), &input(&[COMMIT]), smaller)
             .into_iter()
             .collect();
-        assert_eq!(events, vec![PickerEvent::Commit { index: 1 }]);
+        assert_eq!(
+            events,
+            vec![PickerEvent::Commit {
+                index: 1,
+                roster_revision: 0,
+            }]
+        );
     }
 
     #[test]
@@ -1417,9 +1496,13 @@ mod tests {
             vec![
                 PickerEvent::Selection {
                     selected: 2,
-                    page: 0
+                    page: 0,
+                    roster_revision: 0,
                 },
-                PickerEvent::Commit { index: 2 },
+                PickerEvent::Commit {
+                    index: 2,
+                    roster_revision: 0,
+                },
             ]
         );
     }
@@ -1584,7 +1667,8 @@ mod tests {
             events,
             vec![PickerEvent::Selection {
                 selected: 2,
-                page: 0
+                page: 0,
+                roster_revision: 0,
             }]
         );
     }
@@ -1606,7 +1690,8 @@ mod tests {
             events,
             vec![PickerEvent::Opened {
                 selected: 0,
-                page: 0
+                page: 0,
+                roster_revision: 0,
             }]
         );
     }
@@ -1625,7 +1710,8 @@ mod tests {
             events,
             vec![PickerEvent::Opened {
                 selected: 0,
-                page: 0
+                page: 0,
+                roster_revision: 0,
             }]
         );
     }
@@ -1646,7 +1732,8 @@ mod tests {
             events,
             vec![PickerEvent::Opened {
                 selected: 3,
-                page: 0
+                page: 0,
+                roster_revision: 0,
             }]
         );
     }

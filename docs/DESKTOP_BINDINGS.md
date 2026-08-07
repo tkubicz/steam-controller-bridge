@@ -18,11 +18,12 @@ or invalid file appears.
 Selecting a profile applies it without restarting HID or serial. A switch
 releases every old held output and ignores physical controls already held until
 they are released. The gamepad output is parked at neutral for the length of the
-switch: building or dropping the desktop-input sink is a synchronous
-window-server operation on the thread that also feeds the XIAO, and a neutral
-report disarms the firmware's controller-data watchdog so the delay cannot fault
-the device. Switching to a profile with no bindings drops the sink and switching
-away builds one, so both directions take that path. See
+switch. Profile reconfiguration and macOS input-sink lifecycle work run on a
+dedicated bounded worker, so a slow window-server operation cannot stall the
+thread feeding the XIAO; the neutral report remains the safety boundary while
+that ordered work completes. Once authorized, the sink is retained across
+profile switches, including an unbound profile, and is dropped only after a
+backend failure or during worker shutdown. See
 [PROFILE_OVERLAY.md](PROFILE_OVERLAY.md#why-suppression-must-be-exactly-neutral). Profiles can also be switched from the controller itself; see
 [PROFILE_OVERLAY.md](PROFILE_OVERLAY.md).
 

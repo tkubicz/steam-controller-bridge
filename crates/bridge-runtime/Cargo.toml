@@ -19,5 +19,8 @@ serde_json.workspace = true
 steam-controller-device = { path = "../steam-controller-device" }
 steam-controller-protocol = { path = "../steam-controller-protocol" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+macos-power-monitor = { path = "../macos-power-monitor" }
+
 [lints]
 workspace = true
