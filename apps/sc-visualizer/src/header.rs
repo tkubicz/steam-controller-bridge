@@ -21,15 +21,20 @@ impl Visualizer {
             ui.label(egui::RichText::new(&self.device).color(TEXT));
             ui.add_space(8.0);
             ui.label(
-                egui::RichText::new(format!("{:.1} Hz", self.report_hz))
+                egui::RichText::new(format!("{:.1} input Hz", self.report_hz))
                     .monospace()
                     .color(if self.connected { ACCENT } else { MUTED_TEXT }),
             );
-            if self.recording.is_some() {
+            if let Some(recording) = &self.recording {
                 ui.add_space(8.0);
                 let elapsed = self.recording_started.elapsed().as_secs();
+                let state = if recording.is_accepting() {
+                    "REC"
+                } else {
+                    "FLUSH"
+                };
                 ui.label(
-                    egui::RichText::new(format!("● REC {}:{:02}", elapsed / 60, elapsed % 60))
+                    egui::RichText::new(format!("● {state} {}:{:02}", elapsed / 60, elapsed % 60))
                         .color(DANGER),
                 );
             }

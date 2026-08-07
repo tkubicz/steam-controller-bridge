@@ -176,6 +176,23 @@ Linux CI compiles the hardware-independent API and explicit unsupported-platform
 
 The optional GUI remains part of the workspace build and strict Clippy gates.
 
+The visualizer's release-mode pipeline checks exercise one nominal second of
+250 Hz input drained in four-report UI batches without loss, and a worst-case
+three-records-per-report second through the bounded background recording sink:
+
+```bash
+cargo test --release -p sc-visualizer \
+  mailbox::tests::nominal_device_rate_with_sixty_hz_drains_loses_no_reports -- --exact
+cargo test --release -p sc-visualizer \
+  recording_sink::tests::background_sink_preserves_an_nominal_second_of_three_event_reports -- --exact
+```
+
+The first gate requires zero coalesced, dropped, or overflowed reports. The
+second requires all 750 accepted JSONL events to be readable after the worker
+flushes. Static demo views are event-driven rather than force-repainted, and
+live mapper smoothing derives elapsed time from report timestamps so a
+pressure-coalesced gap does not slow the filter clock.
+
 For visual checks that do not need hardware, run each deterministic state and
 capture it at 1100x760 and at the 820x600 minimum, with the sidebar at both
 260 px and 360 px:

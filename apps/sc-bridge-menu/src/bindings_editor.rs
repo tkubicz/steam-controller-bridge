@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use controller_art::{
-    body_bounds, control_rect, normalized_point, trackpad_rect, Control, ControlState,
+    body_bounds, control_rect, normalized_point, trackpad_rect, Control, ControlState, PadSide,
 };
 use desktop_bindings::{
     default_store_path, load_or_create_store, save_store, BindableControl, BindingAction,
@@ -25,23 +25,6 @@ const CANVAS_MIN_WIDTH: f32 = 620.0;
 enum ControllerView {
     Front,
     Rear,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum PadSide {
-    Left,
-    Right,
-}
-
-impl PadSide {
-    const ALL: [Self; 2] = [Self::Left, Self::Right];
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Left => "Left Pad",
-            Self::Right => "Right Pad",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -71,13 +54,6 @@ const fn art_control(control: BindableControl) -> Control {
         BindableControl::R4 => Control::R4,
         BindableControl::R5 => Control::R5,
         BindableControl::QuickAccess => Control::QuickAccess,
-    }
-}
-
-const fn art_pad(side: PadSide) -> controller_art::PadSide {
-    match side {
-        PadSide::Left => controller_art::PadSide::Left,
-        PadSide::Right => controller_art::PadSide::Right,
     }
 }
 
@@ -451,7 +427,7 @@ impl BindingsEditor {
             let selection = EditorSelection::Pad(side);
             let response = ui
                 .interact(
-                    trackpad_rect(layout.front, art_pad(side)).expand(4.0),
+                    trackpad_rect(layout.front, side).expand(4.0),
                     ui.id().with(("pad-hotspot", selection)),
                     egui::Sense::click(),
                 )
@@ -1037,7 +1013,7 @@ fn draw_pad_labels(
         (PadSide::Right, "MOUSE", right_enabled),
     ] {
         let selection = EditorSelection::Pad(side);
-        let rect = trackpad_rect(view, art_pad(side));
+        let rect = trackpad_rect(view, side);
         let color = if selected == selection {
             ACCENT
         } else {

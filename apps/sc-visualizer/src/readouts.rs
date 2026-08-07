@@ -4,7 +4,7 @@
 use eframe::egui;
 use eframe::egui::{Sense, Stroke, Vec2};
 
-use controller_mapper::RightAxisSource;
+use controller_mapper::{normalize_axis, RightAxisSource};
 use gamepad_state::{Button, GamepadState};
 use steam_controller_protocol::{SteamButton, SteamControllerState};
 use ui_theme::{
@@ -69,11 +69,12 @@ pub(crate) fn source_state_ui(
     dead_zones: DeadZones,
 ) {
     ui.horizontal_wrapped(|ui| {
-        for (axis, label, bounds, x, y) in [
+        for (axis, label, bounds, touch_gate, x, y) in [
             (
                 Axis::LeftStick,
                 "Left stick",
                 Bounds::Round,
+                None,
                 state.left_stick_x,
                 state.left_stick_y,
             ),
@@ -81,6 +82,7 @@ pub(crate) fn source_state_ui(
                 Axis::LeftPad,
                 "Left pad",
                 Bounds::Square,
+                Some(state.left_pad_touched),
                 state.left_pad_x,
                 state.left_pad_y,
             ),
@@ -88,6 +90,7 @@ pub(crate) fn source_state_ui(
                 Axis::RightPad,
                 "Right pad",
                 Bounds::Square,
+                Some(state.right_pad_touched),
                 state.right_pad_x,
                 state.right_pad_y,
             ),
@@ -95,18 +98,28 @@ pub(crate) fn source_state_ui(
                 Axis::RightStick,
                 "Right stick",
                 Bounds::Round,
+                None,
                 state.right_stick_x,
                 state.right_stick_y,
             ),
         ] {
-            stick(ui, label, bounds, dead_zones.applied_to(axis), x, y);
+            stick(
+                ui,
+                label,
+                bounds,
+                dead_zones.applied_to(axis),
+                touch_gate,
+                x,
+                y,
+            );
         }
     });
     // Absence of a ring has to mean "no dead zone here", not "not drawn".
     ui.label(
         egui::RichText::new(format!(
             "Inner ring: radial dead zone the mapper applies — {:.3} on the left stick, \
-             {:.3} on the {}. No ring means none is applied to that control.",
+             {:.3} on the {}. No ring means none is applied to that control. \
+             Pad coordinates are touch-gated; an untouched pad maps to neutral.",
             dead_zones.left_stick,
             dead_zones.right_axis,
             dead_zones.right_target(),
@@ -129,7 +142,7 @@ pub(crate) fn source_state_ui(
     ui.add_space(6.0);
     imu(ui, state);
     ui.add_space(6.0);
-    button_sections(ui, &steam_sections(), |button| {
+    button_sections(ui, steam_sections(), |button| {
         state.buttons.contains(button)
     });
 }
@@ -140,100 +153,98 @@ pub(crate) fn source_state_ui(
 /// `L-grip Touch` — so the two hands are their own sections and get drawn as
 /// two columns, left on the left. `sections_cover_every_steam_button` proves
 /// nothing is lost in the regrouping.
-fn steam_sections() -> Sections<SteamButton> {
-    Sections {
-        shared: vec![
-            (
-                "Face",
-                vec![
-                    (SteamButton::A, "A"),
-                    (SteamButton::B, "B"),
-                    (SteamButton::X, "X"),
-                    (SteamButton::Y, "Y"),
-                ],
-            ),
-            (
-                "D-pad",
-                vec![
-                    (SteamButton::DpadUp, "Up"),
-                    (SteamButton::DpadDown, "Down"),
-                    (SteamButton::DpadLeft, "Left"),
-                    (SteamButton::DpadRight, "Right"),
-                ],
-            ),
-            (
-                "System",
-                vec![
-                    // Physical names. The source bits are crossed here exactly
-                    // as `hero::control_for_button` documents.
-                    (SteamButton::Menu, "View"),
-                    (SteamButton::View, "Menu"),
-                    (SteamButton::Steam, "Steam"),
-                    (SteamButton::QuickAccess, "Quick Access"),
-                ],
-            ),
-        ],
-        left: vec![
-            (SteamButton::LeftShoulder, "LB"),
-            (SteamButton::LeftTriggerClick, "LT Click"),
-            (SteamButton::LeftStickPress, "L3"),
-            (SteamButton::LeftStickTouch, "L-stick Touch"),
-            (SteamButton::LeftPadClick, "L-pad Click"),
-            (SteamButton::LeftPadTouch, "L-pad Touch"),
-            (SteamButton::LeftGrip4, "L4"),
-            (SteamButton::LeftGrip5, "L5"),
-            (SteamButton::LeftGripTouch, "L-grip Touch"),
-        ],
-        right: vec![
-            (SteamButton::RightShoulder, "RB"),
-            (SteamButton::RightTriggerClick, "RT Click"),
-            (SteamButton::RightStickPress, "R3"),
-            (SteamButton::RightStickTouch, "R-stick Touch"),
-            (SteamButton::RightPadClick, "R-pad Click"),
-            (SteamButton::RightPadTouch, "R-pad Touch"),
-            (SteamButton::RightGrip4, "R4"),
-            (SteamButton::RightGrip5, "R5"),
-            (SteamButton::RightGripTouch, "R-grip Touch"),
-        ],
-    }
+const STEAM_FACE: &[(SteamButton, &str)] = &[
+    (SteamButton::A, "A"),
+    (SteamButton::B, "B"),
+    (SteamButton::X, "X"),
+    (SteamButton::Y, "Y"),
+];
+const STEAM_DPAD: &[(SteamButton, &str)] = &[
+    (SteamButton::DpadUp, "Up"),
+    (SteamButton::DpadDown, "Down"),
+    (SteamButton::DpadLeft, "Left"),
+    (SteamButton::DpadRight, "Right"),
+];
+const STEAM_SYSTEM: &[(SteamButton, &str)] = &[
+    // Physical names. The source bits are crossed here exactly as
+    // `hero::control_for_button` documents.
+    (SteamButton::Menu, "View"),
+    (SteamButton::View, "Menu"),
+    (SteamButton::Steam, "Steam"),
+    (SteamButton::QuickAccess, "Quick Access"),
+];
+const STEAM_SHARED: &[(&str, &[(SteamButton, &str)])] = &[
+    ("FACE", STEAM_FACE),
+    ("D-PAD", STEAM_DPAD),
+    ("SYSTEM", STEAM_SYSTEM),
+];
+const STEAM_LEFT: &[(SteamButton, &str)] = &[
+    (SteamButton::LeftShoulder, "LB"),
+    (SteamButton::LeftTriggerClick, "LT Click"),
+    (SteamButton::LeftStickPress, "L3"),
+    (SteamButton::LeftStickTouch, "L-stick Touch"),
+    (SteamButton::LeftPadClick, "L-pad Click"),
+    (SteamButton::LeftPadTouch, "L-pad Touch"),
+    (SteamButton::LeftGrip4, "L4"),
+    (SteamButton::LeftGrip5, "L5"),
+    (SteamButton::LeftGripTouch, "L-grip Touch"),
+];
+const STEAM_RIGHT: &[(SteamButton, &str)] = &[
+    (SteamButton::RightShoulder, "RB"),
+    (SteamButton::RightTriggerClick, "RT Click"),
+    (SteamButton::RightStickPress, "R3"),
+    (SteamButton::RightStickTouch, "R-stick Touch"),
+    (SteamButton::RightPadClick, "R-pad Click"),
+    (SteamButton::RightPadTouch, "R-pad Touch"),
+    (SteamButton::RightGrip4, "R4"),
+    (SteamButton::RightGrip5, "R5"),
+    (SteamButton::RightGripTouch, "R-grip Touch"),
+];
+const STEAM_SECTIONS: Sections<SteamButton> = Sections {
+    shared: STEAM_SHARED,
+    left: STEAM_LEFT,
+    right: STEAM_RIGHT,
+};
+
+const fn steam_sections() -> &'static Sections<SteamButton> {
+    &STEAM_SECTIONS
 }
 
 /// The mapped gamepad buttons, grouped the same way.
-fn gamepad_sections() -> Sections<Button> {
-    Sections {
-        shared: vec![
-            (
-                "Face",
-                vec![
-                    (Button::South, "South"),
-                    (Button::East, "East"),
-                    (Button::West, "West"),
-                    (Button::North, "North"),
-                ],
-            ),
-            (
-                "System",
-                vec![
-                    (Button::Back, "Back"),
-                    (Button::Start, "Start"),
-                    (Button::Guide, "Guide"),
-                    (Button::Extra1, "Extra 1"),
-                    (Button::Extra2, "Extra 2"),
-                    (Button::Extra3, "Extra 3"),
-                ],
-            ),
-        ],
-        left: vec![
-            (Button::LeftShoulder, "LB"),
-            (Button::LeftStick, "L3"),
-            (Button::LeftGrip, "Left Grip"),
-        ],
-        right: vec![
-            (Button::RightShoulder, "RB"),
-            (Button::RightStick, "R3"),
-            (Button::RightGrip, "Right Grip"),
-        ],
-    }
+const GAMEPAD_FACE: &[(Button, &str)] = &[
+    (Button::South, "South"),
+    (Button::East, "East"),
+    (Button::West, "West"),
+    (Button::North, "North"),
+];
+const GAMEPAD_SYSTEM: &[(Button, &str)] = &[
+    (Button::Back, "Back"),
+    (Button::Start, "Start"),
+    (Button::Guide, "Guide"),
+    (Button::Extra1, "Extra 1"),
+    (Button::Extra2, "Extra 2"),
+    (Button::Extra3, "Extra 3"),
+];
+const GAMEPAD_SHARED: &[(&str, &[(Button, &str)])] =
+    &[("FACE", GAMEPAD_FACE), ("SYSTEM", GAMEPAD_SYSTEM)];
+const GAMEPAD_LEFT: &[(Button, &str)] = &[
+    (Button::LeftShoulder, "LB"),
+    (Button::LeftStick, "L3"),
+    (Button::LeftGrip, "Left Grip"),
+];
+const GAMEPAD_RIGHT: &[(Button, &str)] = &[
+    (Button::RightShoulder, "RB"),
+    (Button::RightStick, "R3"),
+    (Button::RightGrip, "Right Grip"),
+];
+const GAMEPAD_SECTIONS: Sections<Button> = Sections {
+    shared: GAMEPAD_SHARED,
+    left: GAMEPAD_LEFT,
+    right: GAMEPAD_RIGHT,
+};
+
+const fn gamepad_sections() -> &'static Sections<Button> {
+    &GAMEPAD_SECTIONS
 }
 
 /// A labelled value. Keeps its place whatever the value does.
@@ -316,15 +327,15 @@ fn meter(ui: &mut egui::Ui, label: &str, value: i16) {
 /// Bit order interleaves the hands — it puts `R-grip Touch` next to
 /// `L-grip Touch` — which is why the left-hand and right-hand groups are drawn
 /// as two columns with the left one on the left.
-struct Sections<T> {
+struct Sections<T: 'static> {
     /// Drawn full width, above the two hands.
-    shared: Vec<(&'static str, Vec<(T, &'static str)>)>,
-    left: Vec<(T, &'static str)>,
-    right: Vec<(T, &'static str)>,
+    shared: &'static [(&'static str, &'static [(T, &'static str)])],
+    left: &'static [(T, &'static str)],
+    right: &'static [(T, &'static str)],
 }
 
 fn button_sections<T: Copy>(ui: &mut egui::Ui, sections: &Sections<T>, held: impl Fn(T) -> bool) {
-    for (heading, entries) in &sections.shared {
+    for (heading, entries) in sections.shared {
         section_label(ui, heading);
         chip_row(ui, entries, &held);
         ui.add_space(4.0);
@@ -339,7 +350,7 @@ fn button_sections<T: Copy>(ui: &mut egui::Ui, sections: &Sections<T>, held: imp
         .num_columns(2)
         .spacing([10.0, 4.0])
         .show(ui, |ui| {
-            for (left, right) in sections.left.iter().zip(&sections.right) {
+            for (left, right) in sections.left.iter().zip(sections.right) {
                 chip(ui, left.1, held(left.0));
                 chip(ui, right.1, held(right.0));
                 ui.end_row();
@@ -348,11 +359,7 @@ fn button_sections<T: Copy>(ui: &mut egui::Ui, sections: &Sections<T>, held: imp
 }
 
 fn section_label(ui: &mut egui::Ui, heading: &str) {
-    ui.label(
-        egui::RichText::new(heading.to_uppercase())
-            .small()
-            .color(DETAIL),
-    );
+    ui.label(egui::RichText::new(heading).small().color(DETAIL));
 }
 
 /// Every name keeps its place; a press changes a chip's style, never the
@@ -395,7 +402,7 @@ pub(crate) fn mapped_state_ui(ui: &mut egui::Ui, state: &GamepadState) {
         cell(ui, "Trigger R", &format!("{:.3}", state.right_trigger));
     });
     ui.add_space(6.0);
-    button_sections(ui, &gamepad_sections(), |button| {
+    button_sections(ui, gamepad_sections(), |button| {
         state.buttons.contains(button)
     });
 }
@@ -413,15 +420,32 @@ enum Bounds {
 ///
 /// The illustration shows where a control physically is; this shows what the
 /// report actually said, which is what you need when the two disagree.
-fn stick(ui: &mut egui::Ui, label: &str, bounds: Bounds, dead_zone: Option<f32>, x: i16, y: i16) {
+fn stick(
+    ui: &mut egui::Ui,
+    label: &str,
+    bounds: Bounds,
+    dead_zone: Option<f32>,
+    touch_gate: Option<bool>,
+    x: i16,
+    y: i16,
+) {
+    let active = position_is_active(touch_gate);
+    let value = if touch_gate == Some(false) {
+        format!("{x:>6} {y:>6} · touch-gated")
+    } else {
+        format!("{x:>6} {y:>6}")
+    };
     crosshair(
         ui,
         label,
-        bounds,
-        dead_zone,
-        f32::from(x) / 32767.0,
-        f32::from(y) / 32767.0,
-        &format!("{x:>6} {y:>6}"),
+        Crosshair {
+            bounds,
+            dead_zone,
+            position_active: active,
+            x: normalize_axis(x),
+            y: normalize_axis(y),
+        },
+        &value,
     );
 }
 
@@ -430,25 +454,34 @@ fn normalized_stick(ui: &mut egui::Ui, label: &str, x: f32, y: f32) {
     crosshair(
         ui,
         label,
-        Bounds::Round,
-        None,
-        x,
-        y,
+        Crosshair {
+            bounds: Bounds::Round,
+            dead_zone: None,
+            position_active: true,
+            x,
+            y,
+        },
         &format!("{x:>6.3} {y:>6.3}"),
     );
 }
 
-fn crosshair(
-    ui: &mut egui::Ui,
-    label: &str,
+#[derive(Clone, Copy)]
+struct Crosshair {
     bounds: Bounds,
     dead_zone: Option<f32>,
+    position_active: bool,
     x: f32,
     y: f32,
-    value: &str,
-) {
-    const RING: f32 = 45.0;
-    const DOT: f32 = 5.0;
+}
+
+fn crosshair(ui: &mut egui::Ui, label: &str, reading: Crosshair, value: &str) {
+    let Crosshair {
+        bounds,
+        dead_zone,
+        position_active,
+        x,
+        y,
+    } = reading;
     ui.vertical(|ui| {
         ui.label(egui::RichText::new(label).small().color(MUTED_TEXT));
         let (response, painter) = ui.allocate_painter(Vec2::splat(100.0), Sense::hover());
@@ -464,7 +497,7 @@ fn crosshair(
             Bounds::Round => {
                 painter.circle_stroke(
                     center,
-                    RING,
+                    CONTROL_RADIUS,
                     if saturated {
                         Stroke::new(2.0, DANGER)
                     } else {
@@ -474,7 +507,7 @@ fn crosshair(
             }
             Bounds::Square => {
                 painter.rect_stroke(
-                    egui::Rect::from_center_size(center, Vec2::splat(RING * 2.0)),
+                    egui::Rect::from_center_size(center, Vec2::splat(CONTROL_RADIUS * 2.0)),
                     4.0,
                     Stroke::new(1.0, OUTLINE),
                     egui::StrokeKind::Inside,
@@ -482,11 +515,17 @@ fn crosshair(
             }
         }
         painter.line_segment(
-            [center - Vec2::new(RING, 0.0), center + Vec2::new(RING, 0.0)],
+            [
+                center - Vec2::new(CONTROL_RADIUS, 0.0),
+                center + Vec2::new(CONTROL_RADIUS, 0.0),
+            ],
             Stroke::new(1.0, DETAIL),
         );
         painter.line_segment(
-            [center - Vec2::new(0.0, RING), center + Vec2::new(0.0, RING)],
+            [
+                center - Vec2::new(0.0, CONTROL_RADIUS),
+                center + Vec2::new(0.0, CONTROL_RADIUS),
+            ],
             Stroke::new(1.0, DETAIL),
         );
         // A round control is bounded by its magnitude, not by each axis: raw
@@ -498,14 +537,16 @@ fn crosshair(
             Bounds::Square => (x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0)),
         };
         // Keep the dot's own body inside the bound as well.
-        painter.circle_filled(center + Vec2::new(x, -y) * (RING - DOT), DOT, ACCENT);
+        if position_active {
+            painter.circle_filled(center + Vec2::new(x, -y) * LOCUS_RADIUS, DOT_RADIUS, ACCENT);
+        }
         // The dead zone the mapper will apply, drawn *over* the dot: a resting
         // stick's jitter is smaller than the dot itself, so a ring underneath
         // would be hidden by the very reading it is there to qualify.
         if let Some(dead_zone) = dead_zone.filter(|value| *value > 0.0) {
             painter.circle_stroke(
                 center,
-                RING * dead_zone,
+                dead_zone_radius(dead_zone),
                 Stroke::new(1.0, MUTED_TEXT.gamma_multiply(0.8)),
             );
         }
@@ -515,10 +556,30 @@ fn crosshair(
             egui::RichText::new(value)
                 .monospace()
                 .small()
-                .color(if saturated { DANGER } else { TEXT }),
+                .color(if saturated {
+                    DANGER
+                } else if position_active {
+                    TEXT
+                } else {
+                    MUTED_TEXT
+                }),
         );
         ui.add_space(6.0);
     });
+}
+
+const CONTROL_RADIUS: f32 = 45.0;
+const DOT_RADIUS: f32 = 5.0;
+/// Dot-center travel. Dead-zone thresholds must use this same coordinate
+/// system or the ring will not line up with the readings it qualifies.
+const LOCUS_RADIUS: f32 = CONTROL_RADIUS - DOT_RADIUS;
+
+fn dead_zone_radius(dead_zone: f32) -> f32 {
+    LOCUS_RADIUS * dead_zone.clamp(0.0, 1.0)
+}
+
+fn position_is_active(touch_gate: Option<bool>) -> bool {
+    touch_gate.unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -544,7 +605,7 @@ mod tests {
     /// to be the guarantee; this is.
     #[test]
     fn sections_cover_every_steam_button_exactly_once() {
-        let listed = flatten(&steam_sections());
+        let listed = flatten(steam_sections());
         let buttons: BTreeSet<u8> = listed.iter().map(|(b, _)| *b as u8).collect();
         assert_eq!(
             buttons.len(),
@@ -557,7 +618,7 @@ mod tests {
 
     #[test]
     fn sections_cover_every_gamepad_button_exactly_once() {
-        let listed = flatten(&gamepad_sections());
+        let listed = flatten(gamepad_sections());
         let buttons: BTreeSet<u8> = listed.iter().map(|(b, _)| *b as u8).collect();
         assert_eq!(
             buttons.len(),
@@ -593,7 +654,7 @@ mod tests {
     #[test]
     fn the_hands_are_separated_and_left_comes_first() {
         let sections = steam_sections();
-        for (button, name) in &sections.left {
+        for (button, name) in sections.left {
             assert!(
                 matches!(
                     button,
@@ -616,8 +677,8 @@ mod tests {
             "the two hands should mirror each other"
         );
         // And no left-hand control leaked into the shared sections.
-        for (_, entries) in &sections.shared {
-            for (_, name) in entries {
+        for (_, entries) in sections.shared {
+            for (_, name) in *entries {
                 assert!(
                     !name.starts_with("L-") && !name.starts_with("R-"),
                     "{name} belongs to a hand, not to a shared section"
@@ -634,7 +695,7 @@ mod tests {
         let system = sections
             .shared
             .iter()
-            .find(|(heading, _)| *heading == "System")
+            .find(|(heading, _)| *heading == "SYSTEM")
             .expect("a System section exists");
         assert!(system.1.contains(&(SteamButton::Menu, "View")));
         assert!(system.1.contains(&(SteamButton::View, "Menu")));
@@ -643,7 +704,7 @@ mod tests {
 
 #[cfg(test)]
 mod dead_zone_tests {
-    use super::{Axis, DeadZones};
+    use super::{dead_zone_radius, position_is_active, Axis, DeadZones, LOCUS_RADIUS};
     use controller_mapper::RightAxisSource;
 
     fn zones(source: RightAxisSource) -> DeadZones {
@@ -686,5 +747,22 @@ mod dead_zone_tests {
             "right stick"
         );
         assert_eq!(zones(RightAxisSource::RightPad).right_target(), "right pad");
+    }
+
+    #[test]
+    fn the_ring_uses_the_same_radius_as_the_dot_locus() {
+        assert!((dead_zone_radius(0.5) - LOCUS_RADIUS * 0.5).abs() < f32::EPSILON);
+        assert!(dead_zone_radius(0.0).abs() < f32::EPSILON);
+        assert!((dead_zone_radius(1.0) - LOCUS_RADIUS).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn pad_positions_are_hidden_until_touch_while_sticks_are_always_live() {
+        assert!(position_is_active(None), "sticks are not touch-gated");
+        assert!(
+            !position_is_active(Some(false)),
+            "stale pad coordinates hide"
+        );
+        assert!(position_is_active(Some(true)), "a touched pad is live");
     }
 }

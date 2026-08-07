@@ -69,7 +69,10 @@ fn base() -> SteamControllerState {
         imu_timestamp: 0,
         gyro: None,
         acceleration: None,
-        raw_report: vec![0x45, 42, 0, 0, 0, 0],
+        // These are decoded fixtures, not fabricated wire captures. Leaving
+        // raw bytes absent is more honest than displaying a truncated neutral
+        // header beside mutated decoded fields.
+        raw_report: Vec::new(),
     }
 }
 
@@ -159,7 +162,7 @@ mod tests {
         let paint = control_states(&state, state.buttons, 0x8000);
         assert!(Control::ALL
             .into_iter()
-            .all(|control| paint(control).highlight == Highlight::Idle));
+            .all(|control| paint[control as usize].highlight == Highlight::Idle));
     }
 
     /// The whole point of the digital mode: one capture must exercise every
@@ -170,7 +173,7 @@ mod tests {
         let paint = control_states(&state, state.buttons, 0x8000);
         for control in Control::ALL {
             assert_eq!(
-                paint(control).highlight,
+                paint[control as usize].highlight,
                 Highlight::Active,
                 "{} stayed idle in the digital demo",
                 control.label()
@@ -188,7 +191,7 @@ mod tests {
     fn analog_puts_each_stick_and_pad_in_a_different_quadrant() {
         let state = DemoState::Analog.state().expect("analog has a state");
         let paint = control_states(&state, state.buttons, 0x8000);
-        let quadrant = |control| match paint(control).analog {
+        let quadrant = |control: Control| match paint[control as usize].analog {
             Some(Analog::Position {
                 offset: Some([x, y]),
                 ..
@@ -212,7 +215,7 @@ mod tests {
     fn analog_shows_one_half_and_one_full_trigger() {
         let state = DemoState::Analog.state().expect("analog has a state");
         let paint = control_states(&state, state.buttons, 0x8000);
-        let travel = |control| match paint(control).analog {
+        let travel = |control: Control| match paint[control as usize].analog {
             Some(Analog::Trigger { travel }) => travel,
             _ => panic!("{control:?} should report travel"),
         };
@@ -227,5 +230,12 @@ mod tests {
         let accel = state.acceleration.expect("acceleration present");
         assert!(gyro.x != 0 && gyro.y != 0 && gyro.z != 0);
         assert!(accel.x != 0 && accel.y != 0 && accel.z != 0);
+    }
+
+    #[test]
+    fn decoded_demos_do_not_claim_fabricated_raw_bytes() {
+        for mode in [DemoState::Neutral, DemoState::Digital, DemoState::Analog] {
+            assert!(mode.state().expect("connected demo").raw_report.is_empty());
+        }
     }
 }

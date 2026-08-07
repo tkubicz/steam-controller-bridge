@@ -4,10 +4,8 @@ use eframe::egui;
 
 use bridge_output::{SerialConfig, SerialOutput};
 use controller_mapper::RightAxisSource;
-use gamepad_state::GamepadState;
-use recording::{RecordingEvent, RecordingWriter, KIND_MARKER};
+use recording::{RecordingEvent, KIND_MARKER};
 use serde_json::json;
-use std::fs::File;
 use std::time::Instant;
 
 use ui_theme::MUTED_TEXT;
@@ -104,9 +102,11 @@ impl Visualizer {
             self.rebuild_mapper();
         }
         if ui.button("Reset to neutral").clicked() {
-            self.mapper.reset();
-            self.mapped = GamepadState::neutral();
+            self.neutralize_output();
             self.last_output = None;
+            if !self.status.starts_with("Output neutralization failed") {
+                "Reset to neutral".clone_into(&mut self.status);
+            }
         }
         ui.checkbox(&mut self.show_raw, "Show raw report bytes");
     }
@@ -118,32 +118,59 @@ impl Visualizer {
         });
         if self.recording.is_none() {
             if ui.button("Start recording").clicked() {
-                match File::create(&self.recording_path) {
-                    Ok(file) => {
+                match crate::recording_sink::RecordingSession::start(&self.recording_path) {
+                    Ok(recording) => {
                         self.recording_started = Instant::now();
-                        self.recording = Some(RecordingWriter::new(file));
+                        self.recording_stop_error = None;
+                        self.recording = Some(recording);
                         self.status = format!("Recording to {}", self.recording_path);
                     }
                     Err(error) => self.status = format!("Cannot start recording: {error}"),
                 }
             }
-        } else if ui.button("Stop recording").clicked() {
-            self.recording = None;
-            "Recording stopped".clone_into(&mut self.status);
+        } else if self
+            .recording
+            .as_ref()
+            .is_some_and(crate::recording_sink::RecordingSession::is_accepting)
+        {
+            if ui.button("Stop recording").clicked() {
+                if let Some(recording) = &mut self.recording {
+                    recording.request_finish();
+                }
+                "Finishing recording…".clone_into(&mut self.status);
+            }
+        } else {
+            ui.add_enabled(false, egui::Button::new("Finishing recording…"));
         }
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Marker").small().color(MUTED_TEXT));
             ui.text_edit_singleline(&mut self.marker);
-            if ui.button("Insert marker").clicked() && !self.marker.trim().is_empty() {
+            let can_insert = !self.marker.trim().is_empty()
+                && self
+                    .recording
+                    .as_ref()
+                    .is_some_and(crate::recording_sink::RecordingSession::is_accepting);
+            if ui
+                .add_enabled(can_insert, egui::Button::new("Insert marker"))
+                .clicked()
+            {
                 let name = self.marker.trim().to_owned();
-                self.record(&RecordingEvent::new(
-                    self.timestamp_us(),
-                    KIND_MARKER,
-                    json!({"name": name}),
-                ));
+                let timestamp = self.timestamp_us();
+                self.record_lazy(|| {
+                    Ok(RecordingEvent::new(
+                        timestamp,
+                        KIND_MARKER,
+                        json!({"name": name}),
+                    ))
+                });
                 self.marker.clear();
             }
         });
+        self.output_controls(ui);
+    }
+
+    fn output_controls(&mut self, ui: &mut egui::Ui) {
+        let mut selected_output = self.output;
         egui::ComboBox::from_label("Output backend")
             .selected_text(output_label(self.output))
             .show_ui(ui, |ui| {
@@ -152,9 +179,10 @@ impl Visualizer {
                     OutputChoice::Mock,
                     OutputChoice::Serial,
                 ] {
-                    ui.selectable_value(&mut self.output, choice, output_label(choice));
+                    ui.selectable_value(&mut selected_output, choice, output_label(choice));
                 }
             });
+        self.select_output(selected_output);
         if self.output == OutputChoice::Serial {
             labelled(ui, "Port", |ui| {
                 ui.text_edit_singleline(&mut self.serial_config.path);
@@ -192,14 +220,17 @@ impl Visualizer {
                         }) {
                         Ok(serial) => {
                             self.serial = Some(serial);
-                            "Serial connected".clone_into(&mut self.status);
+                            self.publish_mapped();
+                            if self.serial.is_some() {
+                                "Serial connected; current state published"
+                                    .clone_into(&mut self.status);
+                            }
                         }
                         Err(error) => self.status = error,
                     }
                 }
             } else if ui.button("Disconnect serial").clicked() {
-                self.serial = None;
-                "Serial disconnected".clone_into(&mut self.status);
+                self.disconnect_serial();
             }
             ui.label(format!(
                 "Serial: {}",

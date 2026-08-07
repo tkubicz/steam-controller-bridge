@@ -4,6 +4,7 @@
 //! crate paints, and lays the two faces out side by side or stacked.
 
 use controller_art::{Analog, Control, ControlState, Face, Highlight};
+use controller_mapper::{normalize_axis, normalize_trigger};
 use eframe::egui;
 use steam_controller_protocol::{SteamButton, SteamButtons, SteamControllerState};
 use ui_theme::{BORDER, MUTED_TEXT, SUNKEN};
@@ -79,27 +80,12 @@ pub(crate) enum Sensor {
     Touch,
 }
 
-/// Normalizes a symmetric `i16` axis to `-1.0..=1.0`.
-fn axis(value: i16) -> f32 {
-    (f32::from(value) / 32767.0).clamp(-1.0, 1.0)
-}
-
-/// Trigger travel against the mapper's own calibration. Using `u16::MAX` here
-/// would show a full physical pull as half travel, because a full pull tops out
-/// near `trigger_full_scale` (0x8000 by default).
-fn travel(raw: u16, full_scale: u16) -> f32 {
-    if full_scale == 0 {
-        return 0.0;
-    }
-    (f32::from(raw) / f32::from(full_scale)).clamp(0.0, 1.0)
-}
-
 /// What every control should look like, given one decoded report.
 pub(crate) fn control_states(
     state: &SteamControllerState,
     held: SteamButtons,
     trigger_full_scale: u16,
-) -> impl Fn(Control) -> ControlState {
+) -> [ControlState; 24] {
     let mut pressed = [false; 24];
     for button in ALL_STEAM_BUTTONS {
         if !held.contains(button) {
@@ -112,10 +98,22 @@ pub(crate) fn control_states(
         }
     }
 
-    let left_stick = [axis(state.left_stick_x), axis(state.left_stick_y)];
-    let right_stick = [axis(state.right_stick_x), axis(state.right_stick_y)];
-    let left_pad = [axis(state.left_pad_x), axis(state.left_pad_y)];
-    let right_pad = [axis(state.right_pad_x), axis(state.right_pad_y)];
+    let left_stick = [
+        normalize_axis(state.left_stick_x),
+        normalize_axis(state.left_stick_y),
+    ];
+    let right_stick = [
+        normalize_axis(state.right_stick_x),
+        normalize_axis(state.right_stick_y),
+    ];
+    let left_pad = [
+        normalize_axis(state.left_pad_x),
+        normalize_axis(state.left_pad_y),
+    ];
+    let right_pad = [
+        normalize_axis(state.right_pad_x),
+        normalize_axis(state.right_pad_y),
+    ];
     // Every touch comes from `held`, not from the mirrored struct fields. The
     // decoder sets `left_pad_touched` from the same bit, so the two agree — but
     // taking one source keeps sticks and pads consistent, and keeps working if
@@ -124,10 +122,10 @@ pub(crate) fn control_states(
     let right_pad_touched = held.contains(SteamButton::RightPadTouch);
     let left_stick_touched = held.contains(SteamButton::LeftStickTouch);
     let right_stick_touched = held.contains(SteamButton::RightStickTouch);
-    let left_travel = travel(state.left_trigger, trigger_full_scale);
-    let right_travel = travel(state.right_trigger, trigger_full_scale);
-
-    move |control| {
+    let left_travel = normalize_trigger(state.left_trigger, trigger_full_scale);
+    let right_travel = normalize_trigger(state.right_trigger, trigger_full_scale);
+    let mut states = [ControlState::IDLE; 24];
+    for control in Control::ALL {
         let highlight = if pressed[control as usize] {
             Highlight::Active
         } else {
@@ -162,8 +160,9 @@ pub(crate) fn control_states(
             }),
             _ => None,
         };
-        ControlState { highlight, analog }
+        states[control as usize] = ControlState { highlight, analog };
     }
+    states
 }
 
 /// Every `SteamButton`, in bit order. The protocol crate has no `ALL`.
@@ -228,7 +227,8 @@ impl Visualizer {
             egui::StrokeKind::Inside,
         );
 
-        let paint = self.live_states();
+        let states = self.live_states();
+        let paint = |control: Control| states[control as usize];
         for (index, (face, caption)) in [(Face::Front, "FRONT"), (Face::Rear, "REAR")]
             .into_iter()
             .enumerate()
@@ -278,22 +278,19 @@ impl Visualizer {
 
     /// The per-control states for the current frame. Neutral when nothing has
     /// been decoded yet, so the artwork always draws.
-    fn live_states(&self) -> Box<dyn Fn(Control) -> ControlState + '_> {
+    fn live_states(&self) -> [ControlState; 24] {
         match &self.source {
-            Some(state) => Box::new(control_states(
-                state,
-                state.buttons,
-                self.config.trigger_full_scale,
-            )),
-            None => Box::new(|_| ControlState::IDLE),
+            Some(state) => control_states(state, state.buttons, self.config.trigger_full_scale),
+            None => [ControlState::IDLE; 24],
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{control_for_button, control_states, travel, Sensor, ALL_STEAM_BUTTONS};
+    use super::{control_for_button, control_states, Sensor, ALL_STEAM_BUTTONS};
     use controller_art::{Analog, Control, ControlState, Highlight};
+    use controller_mapper::normalize_trigger;
     use std::collections::BTreeSet;
     use steam_controller_protocol::{SteamButton, SteamButtons, SteamControllerState};
 
@@ -368,7 +365,7 @@ mod tests {
         let paint = control_states(&state, state.buttons, 0x8000);
         for control in Control::ALL {
             assert_eq!(
-                paint(control).highlight,
+                paint[control as usize].highlight,
                 Highlight::Idle,
                 "{} should be idle",
                 control.label()
@@ -386,7 +383,7 @@ mod tests {
             let held = SteamButtons(1 << (button as u8));
             let paint = control_states(&state, held, 0x8000);
             for control in Control::ALL {
-                let lit = paint(control).highlight == Highlight::Active;
+                let lit = paint[control as usize].highlight == Highlight::Active;
                 assert_eq!(
                     lit,
                     control == expected,
@@ -428,14 +425,14 @@ mod tests {
 
             let touched = control_states(&state, SteamButtons(1 << (touch as u8)), 0x8000);
             assert_eq!(
-                touched(control).highlight,
+                touched[control as usize].highlight,
                 Highlight::Idle,
                 "{} should not read as pressed when only touched",
                 control.label()
             );
             assert!(
                 matches!(
-                    touched(control).analog,
+                    touched[control as usize].analog,
                     Some(Analog::Position { touched: true, .. })
                 ),
                 "{} should report contact",
@@ -444,7 +441,7 @@ mod tests {
 
             let clicked = control_states(&state, SteamButtons(1 << (press as u8)), 0x8000);
             assert_eq!(
-                clicked(control).highlight,
+                clicked[control as usize].highlight,
                 Highlight::Active,
                 "{} should read as pressed when clicked",
                 control.label()
@@ -456,9 +453,9 @@ mod tests {
                 SteamButtons((1 << (press as u8)) | (1 << (touch as u8))),
                 0x8000,
             );
-            assert_eq!(both(control).highlight, Highlight::Active);
+            assert_eq!(both[control as usize].highlight, Highlight::Active);
             assert!(matches!(
-                both(control).analog,
+                both[control as usize].analog,
                 Some(Analog::Position { touched: true, .. })
             ));
         }
@@ -466,13 +463,13 @@ mod tests {
 
     #[test]
     fn a_full_pull_reaches_exactly_full_travel() {
-        assert!((travel(0x8000, 0x8000) - 1.0).abs() < f32::EPSILON);
-        assert!((travel(0x4000, 0x8000) - 0.5).abs() < f32::EPSILON);
-        assert!(travel(0, 0x8000).abs() < f32::EPSILON);
+        assert!((normalize_trigger(0x8000, 0x8000) - 1.0).abs() < f32::EPSILON);
+        assert!((normalize_trigger(0x4000, 0x8000) - 0.5).abs() < f32::EPSILON);
+        assert!(normalize_trigger(0, 0x8000).abs() < f32::EPSILON);
         // Beyond calibration clamps rather than overflowing the fill.
-        assert!((travel(u16::MAX, 0x8000) - 1.0).abs() < f32::EPSILON);
+        assert!((normalize_trigger(u16::MAX, 0x8000) - 1.0).abs() < f32::EPSILON);
         // A zero calibration must not divide by zero.
-        assert!(travel(1234, 0).abs() < f32::EPSILON);
+        assert!(normalize_trigger(1234, 0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -484,7 +481,7 @@ mod tests {
         let untouched = control_states(&state, state.buttons, 0x8000);
         assert!(
             matches!(
-                untouched(Control::LeftPad).analog,
+                untouched[Control::LeftPad as usize].analog,
                 Some(Analog::Position {
                     offset: None,
                     touched: false
@@ -497,7 +494,7 @@ mod tests {
         state.left_pad_touched = true;
         state.buttons = SteamButtons(1 << (SteamButton::LeftPadTouch as u8));
         let touched = control_states(&state, state.buttons, 0x8000);
-        match touched(Control::LeftPad).analog {
+        match touched[Control::LeftPad as usize].analog {
             Some(Analog::Position {
                 offset: Some(offset),
                 touched,
@@ -515,7 +512,7 @@ mod tests {
         let mut state = neutral();
         state.left_stick_x = -32_767;
         let paint = control_states(&state, state.buttons, 0x8000);
-        match paint(Control::LeftStick).analog {
+        match paint[Control::LeftStick as usize].analog {
             Some(Analog::Position {
                 offset: Some(offset),
                 touched,
@@ -533,9 +530,9 @@ mod tests {
         state.right_trigger = 0x8000;
         let paint = control_states(&state, state.buttons, 0x8000);
         assert!(matches!(
-            paint(Control::RightTrigger).analog,
+            paint[Control::RightTrigger as usize].analog,
             Some(Analog::Trigger { travel }) if (travel - 1.0).abs() < f32::EPSILON
         ));
-        assert_eq!(paint(Control::A), ControlState::IDLE);
+        assert_eq!(paint[Control::A as usize], ControlState::IDLE);
     }
 }

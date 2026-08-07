@@ -48,6 +48,14 @@ impl PadSide {
             Self::Right => 1,
         }
     }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Left Pad",
+            Self::Right => "Right Pad",
+        }
+    }
 }
 
 /// Every physically drawable control.

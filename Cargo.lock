@@ -288,6 +288,7 @@ dependencies = [
  "recording",
  "serde_json",
  "steam-controller-device",
+ "steam-controller-discovery",
  "steam-controller-protocol",
 ]
 
@@ -3011,7 +3012,6 @@ name = "sc-visualizer"
 version = "1.4.0"
 dependencies = [
  "bridge-output",
- "bridge-runtime",
  "clap",
  "controller-art",
  "controller-mapper",
@@ -3020,6 +3020,7 @@ dependencies = [
  "recording",
  "serde_json",
  "steam-controller-device",
+ "steam-controller-discovery",
  "steam-controller-protocol",
  "ui-theme",
 ]
@@ -3280,6 +3281,14 @@ version = "1.4.0"
 dependencies = [
  "hidapi",
  "rustix 1.1.4",
+ "steam-controller-protocol",
+]
+
+[[package]]
+name = "steam-controller-discovery"
+version = "1.4.0"
+dependencies = [
+ "steam-controller-device",
  "steam-controller-protocol",
 ]
 

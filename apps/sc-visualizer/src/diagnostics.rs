@@ -8,71 +8,60 @@ use eframe::egui;
 
 use crate::{OutputChoice, Visualizer};
 
-/// A value that has no meaning yet shows an em dash rather than a zero, so a
-/// real zero and "nothing has arrived" cannot be confused.
-fn unknown() -> String {
-    "—".to_owned()
+fn diagnostic_cell(ui: &mut egui::Ui, label: &str, value: impl std::fmt::Display) {
+    ui.label(
+        egui::RichText::new(format!("{label} {value}"))
+            .small()
+            .color(ui_theme::MUTED_TEXT),
+    );
+    ui.add_space(4.0);
 }
 
 impl Visualizer {
     pub(crate) fn diagnostics(&self, ui: &mut egui::Ui) {
-        let (coalesced, ui_dropped, overflows) = self
-            .input
-            .as_ref()
-            .map_or((0, 0, 0), |input| input.mailbox.counters.snapshot());
+        let (reports_received, coalesced, ui_dropped, overflows) =
+            self.input.as_ref().map_or((0, 0, 0, 0), |input| {
+                let (coalesced, dropped, overflows) = input.mailbox.counters.snapshot();
+                (
+                    input.mailbox.counters.published(),
+                    coalesced,
+                    dropped,
+                    overflows,
+                )
+            });
 
-        let mut cells: Vec<(&str, String)> = vec![
-            ("Reports", self.report_count.to_string()),
-            (
-                "Sequence",
-                self.source
-                    .as_ref()
-                    .map_or_else(unknown, |state| state.sequence.to_string()),
-            ),
-            (
-                "Report ID",
-                self.raw_report_id
-                    .map_or_else(unknown, |id| format!("0x{id:02x}")),
-            ),
-            ("Report bytes", self.raw.len().to_string()),
-            ("Decode failures", self.decode_failures.to_string()),
-            ("Source drops", self.source_report_drops.to_string()),
-            ("UI coalesced", coalesced.to_string()),
-            ("UI dropped", ui_dropped.to_string()),
-            ("Mailbox overflows", overflows.to_string()),
-            ("Packets sent", self.packets_sent.to_string()),
-        ];
-
-        if self.output == OutputChoice::Serial {
-            if let Some(metrics) = &self.serial_metrics {
-                cells.extend([
-                    ("Packets received", metrics.packets_received.to_string()),
-                    ("Framing failures", metrics.framing_failures.to_string()),
-                    ("Checksum failures", metrics.checksum_failures.to_string()),
-                    ("States dropped", metrics.states_dropped.to_string()),
-                    ("Reconnects", metrics.reconnects.to_string()),
-                    ("State refreshes", metrics.state_refreshes.to_string()),
-                    (
-                        "Rumble received",
-                        metrics.rumble_commands_received.to_string(),
-                    ),
-                    (
-                        "Rumble coalesced",
-                        metrics.rumble_commands_coalesced.to_string(),
-                    ),
-                ]);
-            }
-        }
-
-        // Wrapped, not one unbroken row: resizing must never clip a counter.
+        // Emit directly rather than constructing a temporary Vec<String> on
+        // every live repaint. Wrapped layout still prevents clipping.
         ui.horizontal_wrapped(|ui| {
-            for (label, value) in cells {
-                ui.label(
-                    egui::RichText::new(format!("{label} {value}"))
-                        .small()
-                        .color(ui_theme::MUTED_TEXT),
-                );
-                ui.add_space(4.0);
+            diagnostic_cell(ui, "Reports received", reports_received);
+            diagnostic_cell(ui, "Reports processed", self.report_count);
+            match &self.source {
+                Some(state) => diagnostic_cell(ui, "Sequence", state.sequence),
+                None => diagnostic_cell(ui, "Sequence", "—"),
+            }
+            match self.raw_report_id {
+                Some(id) => diagnostic_cell(ui, "Report ID", format_args!("0x{id:02x}")),
+                None => diagnostic_cell(ui, "Report ID", "—"),
+            }
+            diagnostic_cell(ui, "Report bytes", self.raw.len());
+            diagnostic_cell(ui, "Decode failures", self.decode_failures);
+            diagnostic_cell(ui, "Source drops", self.source_report_drops);
+            diagnostic_cell(ui, "UI coalesced", coalesced);
+            diagnostic_cell(ui, "UI dropped", ui_dropped);
+            diagnostic_cell(ui, "Mailbox overflows", overflows);
+            diagnostic_cell(ui, "Packets sent", self.packets_sent);
+
+            if self.output == OutputChoice::Serial {
+                if let Some(metrics) = &self.serial_metrics {
+                    diagnostic_cell(ui, "Packets received", metrics.packets_received);
+                    diagnostic_cell(ui, "Framing failures", metrics.framing_failures);
+                    diagnostic_cell(ui, "Checksum failures", metrics.checksum_failures);
+                    diagnostic_cell(ui, "States dropped", metrics.states_dropped);
+                    diagnostic_cell(ui, "Reconnects", metrics.reconnects);
+                    diagnostic_cell(ui, "State refreshes", metrics.state_refreshes);
+                    diagnostic_cell(ui, "Rumble received", metrics.rumble_commands_received);
+                    diagnostic_cell(ui, "Rumble coalesced", metrics.rumble_commands_coalesced);
+                }
             }
         });
     }

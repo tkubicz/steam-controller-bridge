@@ -1,16 +1,15 @@
-use std::fs::File;
+use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use bridge_output::{GamepadOutput, SerialOutput};
 use controller_mapper::{ControllerMapper, MapperConfig};
 use eframe::egui::{self, RichText};
 use gamepad_state::GamepadState;
-use recording::RecordingWriter;
 use steam_controller_protocol::{SteamControllerDecoder, SteamControllerState};
 use ui_theme::{DETAIL, MUTED_TEXT, PANEL, SURFACE};
 
-/// The fixed timestep handed to the mapper. Not measured elapsed time: the
-/// smoothing filter always assumes the device's 250 Hz report rate.
+/// Initial/fallback mapper timestep. Live reports use their device timestamps,
+/// so pressure coalescing still advances smoothing by the elapsed interval.
 const FRAME_TIME: f32 = 1.0 / 250.0;
 
 /// Window sizing. The minimum is small enough to sit beside a game window and
@@ -29,6 +28,7 @@ mod header;
 mod hero;
 mod mailbox;
 mod readouts;
+mod recording_sink;
 mod sidebar;
 
 use clap::Parser;
@@ -36,7 +36,9 @@ use clap::Parser;
 use cli::{Cli, Source};
 use demo::DemoState;
 use device::{input_worker, InputChannel};
+use mailbox::InputEvent;
 use readouts::{mapped_state_ui, source_state_ui, DeadZones};
+use recording_sink::RecordingSession;
 
 fn main() -> eframe::Result {
     let source = Cli::parse().source();
@@ -63,6 +65,12 @@ enum OutputChoice {
     Serial,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputState {
+    Neutralized,
+    Active,
+}
+
 struct SerialUiConfig {
     path: String,
     baud: String,
@@ -72,6 +80,9 @@ struct SerialUiConfig {
 struct Visualizer {
     /// `None` for a demo run: no worker, no device, no ownership lock.
     input: Option<InputChannel>,
+    /// Reused drain storage; neither side of the mailbox reallocates every
+    /// repaint under ordinary 250 Hz input.
+    input_events: Vec<InputEvent>,
     /// Reports the device layer says it lost before we saw them. Wired for
     /// when the platform backend starts reporting it; currently always zero.
     source_report_drops: u64,
@@ -88,10 +99,14 @@ struct Visualizer {
     raw_report_id: Option<u8>,
     show_raw: bool,
     report_count: u64,
-    rate_count: u16,
+    rate_report_start: u64,
     rate_started: Instant,
     report_hz: f32,
     decode_failures: u64,
+    consecutive_decode_failures: u32,
+    last_report_timestamp: Option<Duration>,
+    last_controller_input: Option<Instant>,
+    input_state: InputState,
     packets_sent: u64,
     /// The full serial metric set, kept whole so nothing is silently dropped
     /// and so it can be cleared when the backend is no longer Serial.
@@ -100,7 +115,10 @@ struct Visualizer {
     output: OutputChoice,
     serial: Option<SerialOutput>,
     serial_config: SerialUiConfig,
-    recording: Option<RecordingWriter<File>>,
+    recording: Option<RecordingSession>,
+    /// Preserved while an overloaded or failed recording drains accepted
+    /// events asynchronously.
+    recording_stop_error: Option<String>,
     recording_started: Instant,
     recording_path: String,
     marker: String,
@@ -120,6 +138,7 @@ impl Visualizer {
             // lock. The old code opened a collection and only skipped draining
             // it, which is not the same thing.
             input: (demo.is_none()).then(|| input_worker(source)),
+            input_events: Vec::with_capacity(mailbox::CAPACITY),
             source_report_drops: 0,
             decoder: SteamControllerDecoder::new(),
             mapper: ControllerMapper::default(),
@@ -141,10 +160,14 @@ impl Visualizer {
             raw_report_id: None,
             show_raw: false,
             report_count: 0,
-            rate_count: 0,
+            rate_report_start: 0,
             rate_started: Instant::now(),
             report_hz: 0.0,
             decode_failures: 0,
+            consecutive_decode_failures: 0,
+            last_report_timestamp: None,
+            last_controller_input: None,
+            input_state: InputState::Neutralized,
             packets_sent: 0,
             serial_metrics: None,
             last_output: None,
@@ -156,6 +179,7 @@ impl Visualizer {
                 packet_logging: false,
             },
             recording: None,
+            recording_stop_error: None,
             recording_started: Instant::now(),
             recording_path: "sc-visualizer.jsonl".to_owned(),
             marker: String::new(),
@@ -168,22 +192,28 @@ impl Visualizer {
         visualizer
     }
 
-    /// Feeds a demo state through the ordinary decode/map path, so what is
-    /// drawn is produced exactly the way hardware input would produce it.
+    /// Feeds a decoded fixture through the ordinary mapper and renderer. Demo
+    /// states intentionally carry no fabricated raw wire bytes.
     fn apply_demo(&mut self, mode: DemoState) {
         self.status = format!("Demo state: {}", mode.label());
         if let Some(state) = mode.state() {
             self.connected = true;
             self.device = format!("demo ({})", mode.label());
             self.mapped = self.mapper.map(&state, FRAME_TIME);
-            self.raw_report_id = Some(state.report_id);
-            self.raw.clone_from(&state.raw_report);
+            self.raw_report_id = None;
+            self.raw.clear();
             self.source = Some(state);
+            self.input_state = if self.mapped == GamepadState::neutral() {
+                InputState::Neutralized
+            } else {
+                InputState::Active
+            };
         } else {
             self.connected = false;
             "demo (disconnected)".clone_into(&mut self.device);
             self.source = None;
             self.mapped = GamepadState::neutral();
+            self.input_state = InputState::Neutralized;
         }
     }
 }
@@ -193,21 +223,40 @@ impl eframe::App for Visualizer {
         if self.input.is_some() {
             self.process_events();
         }
-        if let Some(serial) = &mut self.serial {
-            if let Err(error) = serial.service() {
-                self.status = format!("Serial service failed: {error}");
-            } else {
-                let metrics = serial.metrics();
-                self.packets_sent = metrics.packets_sent;
-                self.serial_metrics = Some(metrics);
+        self.check_input_timeout();
+        self.service_recording();
+        if self.output == OutputChoice::Serial {
+            if let Some(serial) = &mut self.serial {
+                if let Err(error) = serial.service() {
+                    self.status = format!("Serial service failed: {error}");
+                    self.serial = None;
+                    self.serial_metrics = None;
+                } else {
+                    let metrics = serial.metrics();
+                    self.packets_sent = metrics.packets_sent;
+                    self.serial_metrics = Some(metrics);
+                }
             }
         }
         if self.output != OutputChoice::Serial {
             // Otherwise the last session's counters linger and read as live.
             self.serial_metrics = None;
         }
-        ui.ctx().request_repaint_after(Duration::from_millis(16));
+        self.schedule_repaint(ui);
+        self.content(ui);
+    }
+}
 
+impl Visualizer {
+    fn schedule_repaint(&self, ui: &egui::Ui) {
+        if (self.input.is_some() && self.connected) || self.serial.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_millis(16));
+        } else if self.input.is_some() || self.recording.is_some() {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    fn content(&mut self, ui: &mut egui::Ui) {
         // `eframe::App` hands us the root `Ui`, not a `Context`, so the panels
         // take `show(ui, ..)`. `show_inside` is the deprecated spelling of the
         // same thing and would fail the `-D warnings` gate. egui 0.35 also
@@ -256,9 +305,7 @@ impl eframe::App for Visualizer {
                     .show(ui, |ui| self.central(ui));
             });
     }
-}
 
-impl Visualizer {
     fn central(&mut self, ui: &mut egui::Ui) {
         self.hero(ui);
         ui.add_space(12.0);
@@ -314,15 +361,20 @@ impl Visualizer {
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     for (offset, row) in self.raw.chunks(16).enumerate() {
-                        let bytes: Vec<String> =
-                            row.iter().map(|byte| format!("{byte:02x}")).collect();
+                        let mut bytes = String::with_capacity(row.len() * 3);
+                        for (index, byte) in row.iter().enumerate() {
+                            if index > 0 {
+                                bytes.push(' ');
+                            }
+                            let _ = write!(bytes, "{byte:02x}");
+                        }
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(format!("{:04x}", offset * 16))
                                     .monospace()
                                     .color(DETAIL),
                             );
-                            ui.label(RichText::new(bytes.join(" ")).monospace());
+                            ui.label(RichText::new(bytes).monospace());
                         });
                     }
                 });
