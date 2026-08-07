@@ -2030,24 +2030,42 @@ fn run_desktop_bindings_worker(
                         mailbox.generation(),
                     );
                 }
+                // Control acknowledgements are the caller's licence to read
+                // the shared status, so each arm publishes its status effects
+                // before sending the ack. Acking first let a caller — the
+                // supervisor's post-disconnect read, or a test using an ack as
+                // a barrier — observe the pre-command status and even write it
+                // back over the newer one.
                 DesktopWorkerMessage::ReplaceProfile { profile, ack } => {
                     let result = runtime.replace_profile(profile);
+                    if let Some(update) = runtime.take_status_update() {
+                        publish_desktop_binding_status(status, update);
+                    }
                     if let Some(ack) = ack {
                         let _ = ack.send(result);
                     }
                 }
                 DesktopWorkerMessage::Enable { ack } => {
                     let result = runtime.enable();
+                    if let Some(update) = runtime.take_status_update() {
+                        publish_desktop_binding_status(status, update);
+                    }
                     if let Some(ack) = ack {
                         let _ = ack.send(result);
                     }
                 }
                 DesktopWorkerMessage::Disconnect(ack) => {
                     let result = runtime.disconnect();
+                    if let Some(update) = runtime.take_status_update() {
+                        publish_desktop_binding_status(status, update);
+                    }
                     let _ = ack.send(result);
                 }
                 DesktopWorkerMessage::Shutdown(ack) => {
                     let result = runtime.shutdown();
+                    if let Some(update) = runtime.take_status_update() {
+                        publish_desktop_binding_status(status, update);
+                    }
                     let _ = ack.send(result);
                     shutdown = true;
                 }
