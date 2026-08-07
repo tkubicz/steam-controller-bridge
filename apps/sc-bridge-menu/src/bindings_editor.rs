@@ -455,11 +455,7 @@ impl BindingsEditor {
             let button = egui::Button::new(
                 egui::RichText::new(format!("{}\n{summary}", callout.control.label()))
                     .size(10.5)
-                    .color(if selected {
-                        ON_ACCENT
-                    } else {
-                        TEXT
-                    }),
+                    .color(if selected { ON_ACCENT } else { TEXT }),
             )
             .fill(if selected { ACCENT } else { SURFACE_RAISED })
             .stroke(egui::Stroke::new(
@@ -740,9 +736,7 @@ impl BindingsEditor {
                                 ui.add_sized(
                                     [84.0, 32.0],
                                     egui::Button::new(
-                                        egui::RichText::new("Save")
-                                            .strong()
-                                            .color(ON_ACCENT),
+                                        egui::RichText::new("Save").strong().color(ON_ACCENT),
                                     )
                                     .fill(ACCENT),
                                 )
@@ -1309,10 +1303,7 @@ fn selection_style(
     default_stroke: egui::Stroke,
 ) -> (egui::Color32, egui::Stroke) {
     if selected == item {
-        (
-            ACCENT_SUBTLE,
-            egui::Stroke::new(2.4, ACCENT),
-        )
+        (ACCENT_SUBTLE, egui::Stroke::new(2.4, ACCENT))
     } else if hovered == Some(item) {
         (INSET, egui::Stroke::new(1.8, ACCENT.gamma_multiply(0.6)))
     } else {
