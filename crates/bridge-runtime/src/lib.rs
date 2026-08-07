@@ -65,6 +65,7 @@ const DISCOVERY_INTERVAL: Duration = Duration::from_millis(500);
 /// The longest a `WillSleep` callback waits for the hardware teardown before
 /// acknowledging the sleep anyway. Far above every bounded teardown step, and
 /// safely under macOS's ~30-second forced-sleep cap.
+#[cfg(target_os = "macos")]
 const SLEEP_TEARDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(25);
 /// How long after a system wake before hardware discovery may reopen ports.
 /// The XIAO's CDC interface re-enumerates for a couple of seconds after a
