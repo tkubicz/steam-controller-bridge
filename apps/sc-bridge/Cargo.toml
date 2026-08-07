@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 bridge-core = { path = "../../crates/bridge-core" }
+clap.workspace = true
 bridge-output = { path = "../../crates/bridge-output" }
 bridge-runtime = { path = "../../crates/bridge-runtime" }
 ctrlc.workspace = true

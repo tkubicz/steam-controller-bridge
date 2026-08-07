@@ -63,7 +63,9 @@ Automatic shutdown is available only with live serial output to a ready XIAO:
 
 The idle timeout defaults to 15 minutes and accepts whole minutes from 1 to
 1440, or `never`. The Puck-dock action is independent and defaults to `leave`.
-Replay and dump/file/mock diagnostic outputs never power off hardware.
+Replay and dump/file/mock diagnostic outputs never power off hardware; passing
+either flag alongside one of them is rejected at startup rather than silently
+ignored, so a shutdown request is never lost without notice.
 
 Replay keeps textual dump output as its default:
 

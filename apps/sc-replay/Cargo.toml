@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 bridge-output = { path = "../../crates/bridge-output" }
+clap.workspace = true
 recording = { path = "../../crates/recording" }
 
 [lints]

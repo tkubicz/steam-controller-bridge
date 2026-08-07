@@ -10,7 +10,7 @@ use steam_controller_protocol::{
 
 use crate::hero::ALL_STEAM_BUTTONS;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum DemoState {
     Neutral,
     /// Every drawable digital control at once, plus the two grip-shell
@@ -23,16 +23,6 @@ pub(crate) enum DemoState {
 }
 
 impl DemoState {
-    pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value {
-            "neutral" => Some(Self::Neutral),
-            "digital" => Some(Self::Digital),
-            "analog" => Some(Self::Analog),
-            "disconnected" => Some(Self::Disconnected),
-            _ => None,
-        }
-    }
-
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Neutral => "neutral",
@@ -142,17 +132,24 @@ mod tests {
     use crate::hero::{control_for_button, control_states};
     use controller_art::{Analog, Control, Highlight};
 
+    /// `label` names the mode in the UI; clap derives the accepted CLI value
+    /// from the variant. This keeps the two spellings identical.
     #[test]
-    fn every_mode_round_trips_through_its_name() {
+    fn every_mode_reads_the_same_on_the_command_line_as_in_the_ui() {
+        use clap::ValueEnum as _;
         for mode in [
             DemoState::Neutral,
             DemoState::Digital,
             DemoState::Analog,
             DemoState::Disconnected,
         ] {
-            assert_eq!(DemoState::parse(mode.label()), Some(mode));
+            let cli = mode
+                .to_possible_value()
+                .expect("every mode is selectable")
+                .get_name()
+                .to_owned();
+            assert_eq!(cli, mode.label());
         }
-        assert_eq!(DemoState::parse("nonsense"), None);
     }
 
     #[test]

@@ -3933,6 +3933,122 @@ fn choose_unique_active(active_indices: &[usize]) -> Result<Option<usize>, Vec<u
     }
 }
 
+/// Finds the controller collection that is actually producing input.
+///
+/// A connected Puck presents four sibling `ff00:0001` collections (interfaces
+/// 2 to 5) and only one of them carries controller state, so opening the first
+/// supported entry yields a real Steam Controller collection that then sits
+/// silent. This runs the same scan/open/probe path as
+/// [`ControllerSelection::AutoActive`], including the requirement that exactly
+/// one candidate be active, rather than a second approximation of it.
+///
+/// Intended for tools that want the runtime's discovery without the runtime:
+/// the caller owns the retry cadence and simply calls [`Self::find`] again.
+pub struct ActiveControllerFinder {
+    enumerator: ControllerEnumerator,
+    discovery: ControllerDiscoveryState<HidSession>,
+}
+
+/// Why one discovery attempt did not produce a session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControllerSearch {
+    /// No supported Puck or Bluetooth collection is present.
+    NoController,
+    /// Collections are present but none could be opened. The string carries the
+    /// per-collection failures, already annotated with ownership guidance.
+    CannotOpen(String),
+    /// Collections are open but none has reported valid controller state yet.
+    NoInputYet,
+    /// More than one collection is reporting state, so the active one is
+    /// ambiguous. This is the same condition the runtime refuses to guess at.
+    Ambiguous(usize),
+}
+
+impl std::fmt::Display for ControllerSearch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoController => {
+                write!(formatter, "Waiting for a Steam Controller 2 connection")
+            }
+            Self::CannotOpen(detail) => write!(
+                formatter,
+                "Steam Controller input found, but no collection can be opened: {detail}"
+            ),
+            Self::NoInputYet => write!(
+                formatter,
+                "Steam Controller input found; waiting for valid controller state"
+            ),
+            Self::Ambiguous(count) => write!(
+                formatter,
+                "{count} Steam Controller sources are active at once; disconnect all but one"
+            ),
+        }
+    }
+}
+
+impl ActiveControllerFinder {
+    /// Builds the shared HID context the scans reuse.
+    ///
+    /// # Errors
+    ///
+    /// Returns the native error when the HID context cannot be initialized.
+    pub fn new() -> Result<Self, DeviceError> {
+        Ok(Self {
+            enumerator: ControllerEnumerator::new()?,
+            discovery: ControllerDiscoveryState::new(),
+        })
+    }
+
+    /// One attempt. Call again to retry; the scan cadence is the caller's.
+    ///
+    /// # Errors
+    ///
+    /// Returns why this attempt found nothing usable, which is a status to show
+    /// rather than a fault to report.
+    pub fn find(&mut self) -> Result<(HidDeviceInfo, HidSession), ControllerSearch> {
+        let discovered = self
+            .enumerator
+            .enumerate()
+            .map(|devices| devices.into_iter().enumerate().collect::<Vec<_>>())
+            .map_err(|error| error.to_string());
+        let enumerator = &self.enumerator;
+        self.discovery.refresh(discovered, |_, info| {
+            enumerator.open(info).map_err(|error| {
+                format!(
+                    "{}: {}",
+                    controller_source_identity(info),
+                    ownership_guidance(&error)
+                )
+            })
+        });
+
+        if self.discovery.is_empty() {
+            return Err(if self.discovery.supported_devices_seen() {
+                ControllerSearch::CannotOpen(
+                    self.discovery
+                        .current_errors(&[])
+                        .unwrap_or_else(|| "no detail available".to_owned()),
+                )
+            } else {
+                ControllerSearch::NoController
+            });
+        }
+
+        let probe = self.discovery.probe();
+        match choose_unique_active(&probe.active_indices) {
+            Ok(Some(selected)) => {
+                let candidate = self.discovery.select(selected);
+                Ok((candidate.info, candidate.session))
+            }
+            Ok(None) => Err(match self.discovery.current_errors(&probe.failures) {
+                Some(detail) => ControllerSearch::CannotOpen(detail),
+                None => ControllerSearch::NoInputYet,
+            }),
+            Err(active) => Err(ControllerSearch::Ambiguous(active.len())),
+        }
+    }
+}
+
 fn controller_source_description(enumeration_index: usize, info: &HidDeviceInfo) -> String {
     format!(
         "index {enumeration_index} {}",
@@ -5602,6 +5718,37 @@ mod tests {
             transport: "USB".to_owned(),
             dropped_reports: 0,
         }
+    }
+
+    /// The visualizer now depends on this vocabulary, so the states have to
+    /// stay distinguishable and legible rather than collapsing into one
+    /// "cannot connect" string.
+    #[test]
+    fn controller_search_states_read_distinctly() {
+        let states = [
+            ControllerSearch::NoController,
+            ControllerSearch::CannotOpen("held by Steam".to_owned()),
+            ControllerSearch::NoInputYet,
+            ControllerSearch::Ambiguous(2),
+        ];
+        let rendered: Vec<String> = states.iter().map(ToString::to_string).collect();
+        for (index, text) in rendered.iter().enumerate() {
+            assert!(!text.is_empty());
+            for other in &rendered[index + 1..] {
+                assert_ne!(text, other, "two search states read the same");
+            }
+        }
+        assert!(rendered[1].contains("held by Steam"), "detail is surfaced");
+        assert!(rendered[3].contains('2'), "the count is surfaced");
+    }
+
+    /// Exactly one active source, or the runtime refuses to guess. This is what
+    /// stops a four-collection Puck from being opened on the wrong interface.
+    #[test]
+    fn a_unique_active_source_is_required() {
+        assert_eq!(choose_unique_active(&[]), Ok(None));
+        assert_eq!(choose_unique_active(&[3]), Ok(Some(3)));
+        assert_eq!(choose_unique_active(&[1, 2]), Err(vec![1, 2]));
     }
 
     #[test]

@@ -7,13 +7,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bridge_output::GamepadOutput;
+use bridge_runtime::ActiveControllerFinder;
 use controller_mapper::ControllerMapper;
 use gamepad_state::GamepadState;
 use recording::{RecordingEvent, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
 use serde_json::json;
-use steam_controller_device::{DeviceEvent, HidSession, RawHidReport};
+use steam_controller_device::{DeviceEvent, HidDeviceInfo, HidSession, RawHidReport};
 use steam_controller_protocol::DecodedReport;
 
+use crate::cli::Source;
 use crate::mailbox::{InputEvent, InputMailbox};
 use crate::{OutputChoice, Visualizer, FRAME_TIME};
 
@@ -29,34 +31,116 @@ impl Drop for InputChannel {
     }
 }
 
-pub(crate) fn input_worker(index: usize) -> InputChannel {
+/// How long to wait before looking for a controller again.
+const DISCOVERY_INTERVAL: Duration = Duration::from_secs(1);
+
+/// An opened controller, plus the connection the caller still has to announce.
+struct Opened {
+    session: HidSession,
+    /// `Some` when discovery already consumed the session's synthetic open
+    /// event and the worker must re-announce it. See [`open`].
+    announce: Option<HidDeviceInfo>,
+}
+
+/// Opens the controller this run is pointed at.
+///
+/// Discovery delegates to [`ActiveControllerFinder`], which is the runtime's
+/// own `AutoActive` path. That matters twice over: the free `enumerate`
+/// function returns *every* HID collection in the system rather than the
+/// supported ones, and a connected Puck presents four sibling collections of
+/// which only one carries input. Picking a first entry gets both wrong.
+///
+/// Probing costs the synthetic `Connected` event: identifying the active
+/// collection means polling it, and that poll consumes the very event that
+/// would otherwise tell the UI it is connected. The finder hands back the
+/// [`HidDeviceInfo`] it selected precisely so the caller can re-announce it;
+/// `--index` skips probing, so there the event is still queued and re-announcing
+/// would double-count it.
+fn open(finder: &mut Option<ActiveControllerFinder>, source: Source) -> Result<Opened, String> {
+    match source {
+        Source::Collection(index) => HidSession::open_index(index)
+            .map(|session| Opened {
+                session,
+                announce: None,
+            })
+            .map_err(|error| error.to_string()),
+        Source::Discover => {
+            let finder = match finder {
+                Some(finder) => finder,
+                none => {
+                    none.insert(ActiveControllerFinder::new().map_err(|error| error.to_string())?)
+                }
+            };
+            finder
+                .find()
+                .map(|(info, session)| Opened {
+                    session,
+                    announce: Some(info),
+                })
+                .map_err(|search| search.to_string())
+        }
+        // A demo run never reaches the worker.
+        Source::Demo(_) => Err("demo runs open no device".to_owned()),
+    }
+}
+
+pub(crate) fn input_worker(source: Source) -> InputChannel {
     let mailbox = Arc::new(InputMailbox::default());
     let stop = Arc::new(AtomicBool::new(false));
     let worker_mailbox = Arc::clone(&mailbox);
     let worker_stop = Arc::clone(&stop);
     thread::spawn(move || {
-        let mut session = match HidSession::open_index(index) {
-            Ok(session) => session,
-            Err(error) => {
-                worker_mailbox.publish(InputEvent::Lifecycle(Box::new(Err(error.to_string()))));
-                return;
-            }
-        };
+        // Built once and reused across scans; it owns the shared HID context.
+        let mut finder = None;
         while !worker_stop.load(Ordering::Relaxed) {
-            let event = session
-                .poll(Duration::from_millis(10))
-                .map_err(|error| error.to_string());
-            match event {
-                // Reports may be coalesced under pressure; everything else is
-                // an ordered barrier the mailbox never discards.
-                Ok(Some(DeviceEvent::Report(report))) => {
-                    worker_mailbox.publish(InputEvent::Report(report));
+            let Opened {
+                mut session,
+                announce,
+            } = match open(&mut finder, source) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    worker_mailbox.publish(InputEvent::Lifecycle(Box::new(Err(error))));
+                    // An explicit `--index` is a claim about a specific
+                    // collection, so a failure there is final. Discovery is a
+                    // standing request, so it keeps trying.
+                    if matches!(source, Source::Collection(_)) {
+                        return;
+                    }
+                    thread::sleep(DISCOVERY_INTERVAL);
+                    continue;
                 }
-                Ok(Some(other)) => {
-                    worker_mailbox.publish(InputEvent::Lifecycle(Box::new(Ok(other))));
+            };
+            if let Some(info) = announce {
+                worker_mailbox.publish(InputEvent::Lifecycle(Box::new(Ok(
+                    DeviceEvent::Connected(info),
+                ))));
+            }
+            while !worker_stop.load(Ordering::Relaxed) {
+                let event = session
+                    .poll(Duration::from_millis(10))
+                    .map_err(|error| error.to_string());
+                match event {
+                    // Reports may be coalesced under pressure; everything else
+                    // is an ordered barrier the mailbox never discards.
+                    Ok(Some(DeviceEvent::Report(report))) => {
+                        worker_mailbox.publish(InputEvent::Report(report));
+                    }
+                    Ok(Some(DeviceEvent::Disconnected)) => {
+                        worker_mailbox.publish(InputEvent::Lifecycle(Box::new(Ok(
+                            DeviceEvent::Disconnected,
+                        ))));
+                        // Drop the session and go back to discovery, so a
+                        // replugged controller is picked up on its own.
+                        break;
+                    }
+                    Ok(Some(other)) => {
+                        worker_mailbox.publish(InputEvent::Lifecycle(Box::new(Ok(other))));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        worker_mailbox.publish(InputEvent::Lifecycle(Box::new(Err(error))));
+                    }
                 }
-                Ok(None) => {}
-                Err(error) => worker_mailbox.publish(InputEvent::Lifecycle(Box::new(Err(error)))),
             }
         }
     });
@@ -82,7 +166,10 @@ impl Visualizer {
     }
 
     pub(crate) fn process_events(&mut self) {
-        let (batch, overflowed) = self.input.mailbox.take_all();
+        let Some(input) = &self.input else {
+            return;
+        };
+        let (batch, overflowed) = input.mailbox.take_all();
         if overflowed {
             "Input backlog overflowed; recovered from the newest report"
                 .clone_into(&mut self.status);

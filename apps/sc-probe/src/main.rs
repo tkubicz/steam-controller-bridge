@@ -1,10 +1,10 @@
-use std::env;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use clap::{Parser, Subcommand};
 use recording::{RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
 use serde_json::json;
 use steam_controller_device::{
@@ -19,21 +19,110 @@ fn main() {
     }
 }
 
+/// Lists and inspects HID collections, and exercises a Steam Controller 2.
+#[derive(Debug, Parser)]
+#[command(name = "sc-probe", version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+/// `--index N` comes from `sc-probe list`.
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// List every HID collection.
+    List,
+    /// Show complete metadata and sibling count.
+    Inspect {
+        /// Limit to one collection; omit to dump them all.
+        #[arg(long, value_name = "N")]
+        index: Option<usize>,
+    },
+    /// Decode or print raw live reports.
+    Monitor {
+        #[arg(long, value_name = "N")]
+        index: usize,
+        /// Print raw report bytes instead of decoded state.
+        #[arg(long)]
+        raw: bool,
+        /// Stop after N seconds.
+        #[arg(long, value_name = "N")]
+        duration_secs: Option<u64>,
+    },
+    /// Capture raw and optional decoded JSONL.
+    Capture {
+        #[arg(long, value_name = "N")]
+        index: usize,
+        /// Capture file. Note this is a path, not an output backend.
+        #[arg(long, value_name = "PATH")]
+        output: String,
+        /// Also record decoded controller states.
+        #[arg(long)]
+        decoded: bool,
+        /// Stop after N seconds.
+        #[arg(long, value_name = "N")]
+        duration_secs: Option<u64>,
+    },
+    /// Safely test SC2 lizard-mode suppression.
+    SuppressLizard {
+        #[arg(long, value_name = "N")]
+        index: usize,
+        /// Stop after N seconds.
+        #[arg(long, value_name = "N")]
+        duration_secs: Option<u64>,
+    },
+    /// Test dual SC2 rumble.
+    Rumble {
+        #[arg(long, value_name = "N")]
+        index: usize,
+        /// Low-frequency channel intensity.
+        #[arg(long, value_name = "N", default_value_t = 32_768)]
+        low: u16,
+        /// High-frequency channel intensity.
+        #[arg(long, value_name = "N", default_value_t = 32_768)]
+        high: u16,
+        /// Rumble duration in milliseconds.
+        #[arg(long, value_name = "N", default_value_t = 1_000)]
+        duration_ms: u64,
+    },
+    /// Power off the selected SC2.
+    PowerOff {
+        #[arg(long, value_name = "N")]
+        index: usize,
+    },
+}
+
 fn run() -> Result<(), String> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() || args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_help();
-        return Ok(());
-    }
-    match args[0].as_str() {
-        "list" => list_devices(),
-        "inspect" => inspect_devices(optional_index(&args)?),
-        "monitor" => monitor(&args),
-        "capture" => capture(&args),
-        "suppress-lizard" => suppress_lizard(&args),
-        "rumble" => rumble(&args),
-        "power-off" => power_off(&args),
-        command => Err(format!("unknown command '{command}'")),
+    match Cli::parse().command {
+        Command::List => list_devices(),
+        Command::Inspect { index } => inspect_devices(index),
+        Command::Monitor {
+            index,
+            raw,
+            duration_secs,
+        } => monitor(index, raw, duration_secs.map(Duration::from_secs)),
+        Command::Capture {
+            index,
+            output,
+            decoded,
+            duration_secs,
+        } => capture(
+            index,
+            &output,
+            decoded,
+            duration_secs.map(Duration::from_secs),
+        ),
+        Command::SuppressLizard {
+            index,
+            duration_secs,
+        } => suppress_lizard(index, duration_secs.map(Duration::from_secs)),
+        Command::Rumble {
+            index,
+            low,
+            high,
+            duration_ms,
+        } => rumble(index, low, high, Duration::from_millis(duration_ms)),
+        Command::PowerOff { index } => power_off(index),
     }
 }
 
@@ -105,10 +194,7 @@ fn inspect_devices(index: Option<usize>) -> Result<(), String> {
     Ok(())
 }
 
-fn monitor(args: &[String]) -> Result<(), String> {
-    let index = required_index(args)?;
-    let raw = args.iter().any(|arg| arg == "--raw");
-    let duration = duration_limit(args)?;
+fn monitor(index: usize, raw: bool, duration: Option<Duration>) -> Result<(), String> {
     let mut session = HidSession::open_index(index).map_err(|error| error.to_string())?;
     let mut decoder = SteamControllerDecoder::new();
     let mut previous_state: Option<SteamControllerState> = None;
@@ -183,11 +269,12 @@ fn monitor(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn capture(args: &[String]) -> Result<(), String> {
-    let index = required_index(args)?;
-    let output_path = value_after(args, "--output").ok_or("capture requires --output PATH")?;
-    let duration = duration_limit(args)?;
-    let include_decoded_states = args.iter().any(|arg| arg == "--decoded");
+fn capture(
+    index: usize,
+    output_path: &str,
+    include_decoded_states: bool,
+    duration: Option<Duration>,
+) -> Result<(), String> {
     let mut session = HidSession::open_index(index).map_err(|error| error.to_string())?;
     let mut decoder = SteamControllerDecoder::new();
     let mut recording = RecordingWriter::new(
@@ -262,9 +349,7 @@ fn capture(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn suppress_lizard(args: &[String]) -> Result<(), String> {
-    let index = required_index(args)?;
-    let duration = duration_limit(args)?;
+fn suppress_lizard(index: usize, duration: Option<Duration>) -> Result<(), String> {
     let (info, mut session) = open_supported_controller_input(index)?;
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -335,11 +420,12 @@ fn send_lizard_refresh(
     Ok(())
 }
 
-fn rumble(args: &[String]) -> Result<(), String> {
-    let index = required_index(args)?;
-    let low_frequency = parse_value(args, "--low", 32_768_u16)?;
-    let high_frequency = parse_value(args, "--high", 32_768_u16)?;
-    let duration = Duration::from_millis(parse_value(args, "--duration-ms", 1_000_u64)?);
+fn rumble(
+    index: usize,
+    low_frequency: u16,
+    high_frequency: u16,
+    duration: Duration,
+) -> Result<(), String> {
     let (info, mut session) = open_supported_controller_input(index)?;
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -368,8 +454,7 @@ fn rumble(args: &[String]) -> Result<(), String> {
     result.and(stop_result)
 }
 
-fn power_off(args: &[String]) -> Result<(), String> {
-    let index = required_index(args)?;
+fn power_off(index: usize) -> Result<(), String> {
     let (info, mut session) = open_supported_controller_input(index)?;
     eprintln!(
         "WARNING: powering off Steam Controller 2 collection {index} ({}, interface {}).",
@@ -523,47 +608,6 @@ fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-fn duration_limit(args: &[String]) -> Result<Option<Duration>, String> {
-    value_after(args, "--duration-secs")
-        .map(|value| {
-            value
-                .parse::<u64>()
-                .map(Duration::from_secs)
-                .map_err(|_| format!("invalid --duration-secs value '{value}'"))
-        })
-        .transpose()
-}
-
-fn optional_index(args: &[String]) -> Result<Option<usize>, String> {
-    value_after(args, "--index")
-        .map(|value| {
-            value
-                .parse()
-                .map_err(|_| format!("invalid --index value '{value}'"))
-        })
-        .transpose()
-}
-
-fn required_index(args: &[String]) -> Result<usize, String> {
-    optional_index(args)?
-        .ok_or_else(|| "this command requires --index N from `sc-probe list`".to_owned())
-}
-
-fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    args.iter()
-        .position(|arg| arg == flag)
-        .and_then(|index| args.get(index + 1))
-        .map(String::as_str)
-}
-
-fn parse_value<T: std::str::FromStr>(args: &[String], flag: &str, default: T) -> Result<T, String> {
-    value_after(args, flag).map_or(Ok(default), |value| {
-        value
-            .parse()
-            .map_err(|_| format!("invalid {flag} value '{value}'"))
-    })
-}
-
 fn display_optional(value: Option<&str>) -> &str {
     value.filter(|text| !text.is_empty()).unwrap_or("<unknown>")
 }
@@ -579,31 +623,90 @@ fn hex_bytes(bytes: &[u8]) -> String {
     output
 }
 
-fn print_help() {
-    println!(
-        "sc-probe <command> [options]\n\nCommands:\n  list                                      List every HID collection\n  inspect [--index N]                       Show complete metadata and sibling count\n  monitor --index N [--raw]                 Decode or print raw live reports\n  capture --index N --output PATH [--decoded]\n                                            Capture raw and optional decoded JSONL\n  suppress-lizard --index N                 Safely test SC2 lizard-mode suppression\n  rumble --index N [--low N] [--high N] [--duration-ms N]\n                                            Test dual SC2 rumble (defaults: 50%/50%, 1 second)\n  power-off --index N                       Power off the selected SC2\n\nOptions:\n  --duration-secs N                         Stop monitor/capture/suppression after N seconds\n  --low N --high N                          Rumble channel intensity, 0..65535\n  --duration-ms N                           Rumble duration in milliseconds\n  -h, --help"
-    );
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Cli, Command};
+    use clap::Parser as _;
 
-    fn args(values: &[&str]) -> Vec<String> {
-        values.iter().map(ToString::to_string).collect()
+    fn parse(values: &[&str]) -> Command {
+        Cli::try_parse_from(std::iter::once("sc-probe").chain(values.iter().copied()))
+            .expect("these arguments should parse")
+            .command
+    }
+
+    fn reject(values: &[&str]) -> String {
+        Cli::try_parse_from(std::iter::once("sc-probe").chain(values.iter().copied()))
+            .expect_err("should have been rejected")
+            .to_string()
     }
 
     #[test]
     fn rumble_values_accept_full_u16_range_and_reject_overflow() {
-        assert_eq!(
-            parse_value(&args(&["--low", "0"]), "--low", 32_768_u16).unwrap(),
-            0
-        );
-        assert_eq!(
-            parse_value(&args(&["--high", "65535"]), "--high", 32_768_u16).unwrap(),
-            u16::MAX
-        );
-        assert!(parse_value(&args(&["--low", "65536"]), "--low", 32_768_u16).is_err());
-        assert_eq!(parse_value::<u16>(&[], "--low", 32_768).unwrap(), 32_768);
+        let Command::Rumble { low, high, .. } =
+            parse(&["rumble", "--index", "0", "--low", "0", "--high", "65535"])
+        else {
+            panic!("expected the rumble command");
+        };
+        assert_eq!(low, 0);
+        assert_eq!(high, u16::MAX);
+        assert!(reject(&["rumble", "--index", "0", "--low", "65536"]).contains("65536"));
+    }
+
+    #[test]
+    fn rumble_keeps_its_documented_defaults() {
+        let Command::Rumble {
+            low,
+            high,
+            duration_ms,
+            ..
+        } = parse(&["rumble", "--index", "0"])
+        else {
+            panic!("expected the rumble command");
+        };
+        assert_eq!((low, high, duration_ms), (32_768, 32_768, 1_000));
+    }
+
+    /// Every subcommand that acts on a device needs one, and `inspect` is the
+    /// one that may omit it.
+    #[test]
+    fn index_is_required_where_it_always_was() {
+        for command in [
+            "monitor",
+            "capture",
+            "suppress-lizard",
+            "rumble",
+            "power-off",
+        ] {
+            let message = reject(&[command]);
+            assert!(message.contains("--index"), "{command}: {message}");
+        }
+        assert!(matches!(
+            parse(&["inspect"]),
+            Command::Inspect { index: None }
+        ));
+    }
+
+    #[test]
+    fn capture_still_requires_its_output_path() {
+        assert!(reject(&["capture", "--index", "0"]).contains("--output"));
+    }
+
+    /// `sc-probe --index 0 monitor` used to fail with "unknown command
+    /// '--index'". clap accepts the flag on either side of the subcommand.
+    #[test]
+    fn flags_may_now_precede_the_subcommand_value() {
+        assert!(matches!(
+            parse(&["monitor", "--index", "3", "--raw"]),
+            Command::Monitor {
+                index: 3,
+                raw: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_unknown_command_is_reported() {
+        assert!(reject(&["bogus"]).contains("bogus"));
     }
 }

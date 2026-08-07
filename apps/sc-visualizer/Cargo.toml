@@ -9,6 +9,8 @@ publish = false
 [dependencies]
 controller-mapper = { path = "../../crates/controller-mapper" }
 bridge-output = { path = "../../crates/bridge-output" }
+bridge-runtime = { path = "../../crates/bridge-runtime" }
+clap.workspace = true
 eframe = { workspace = true, features = ["wayland", "x11"] }
 gamepad-state = { path = "../../crates/gamepad-state" }
 recording = { path = "../../crates/recording" }

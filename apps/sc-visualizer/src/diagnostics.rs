@@ -16,7 +16,10 @@ fn unknown() -> String {
 
 impl Visualizer {
     pub(crate) fn diagnostics(&self, ui: &mut egui::Ui) {
-        let (coalesced, ui_dropped, overflows) = self.input.mailbox.counters.snapshot();
+        let (coalesced, ui_dropped, overflows) = self
+            .input
+            .as_ref()
+            .map_or((0, 0, 0), |input| input.mailbox.counters.snapshot());
 
         let mut cells: Vec<(&str, String)> = vec![
             ("Reports", self.report_count.to_string()),

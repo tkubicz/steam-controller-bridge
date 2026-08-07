@@ -28,36 +28,55 @@ const CAPTION_ROW: f32 = 18.0;
 /// `None` means the bit has no drawn geometry. That is only ever the two
 /// grip-shell capacitive sensors, which are the shell itself rather than the
 /// L4/L5 paddles; they stay visible in the button grid.
-pub(crate) const fn control_for_button(button: SteamButton) -> Option<Control> {
+pub(crate) const fn control_for_button(button: SteamButton) -> Option<(Control, Sensor)> {
     Some(match button {
-        SteamButton::A => Control::A,
-        SteamButton::B => Control::B,
-        SteamButton::X => Control::X,
-        SteamButton::Y => Control::Y,
-        SteamButton::DpadUp => Control::DpadUp,
-        SteamButton::DpadDown => Control::DpadDown,
-        SteamButton::DpadLeft => Control::DpadLeft,
-        SteamButton::DpadRight => Control::DpadRight,
+        SteamButton::A => (Control::A, Sensor::Press),
+        SteamButton::B => (Control::B, Sensor::Press),
+        SteamButton::X => (Control::X, Sensor::Press),
+        SteamButton::Y => (Control::Y, Sensor::Press),
+        SteamButton::DpadUp => (Control::DpadUp, Sensor::Press),
+        SteamButton::DpadDown => (Control::DpadDown, Sensor::Press),
+        SteamButton::DpadLeft => (Control::DpadLeft, Sensor::Press),
+        SteamButton::DpadRight => (Control::DpadRight, Sensor::Press),
         // Crossed. See the doc comment above.
-        SteamButton::View => Control::Menu,
-        SteamButton::Menu => Control::View,
-        SteamButton::Steam => Control::Steam,
-        SteamButton::QuickAccess => Control::QuickAccess,
-        SteamButton::LeftShoulder => Control::LeftBumper,
-        SteamButton::RightShoulder => Control::RightBumper,
-        SteamButton::LeftTriggerClick => Control::LeftTrigger,
-        SteamButton::RightTriggerClick => Control::RightTrigger,
-        SteamButton::LeftStickPress | SteamButton::LeftStickTouch => Control::LeftStick,
-        SteamButton::RightStickPress | SteamButton::RightStickTouch => Control::RightStick,
-        SteamButton::LeftPadTouch | SteamButton::LeftPadClick => Control::LeftPad,
-        SteamButton::RightPadTouch | SteamButton::RightPadClick => Control::RightPad,
-        SteamButton::LeftGrip4 => Control::L4,
-        SteamButton::LeftGrip5 => Control::L5,
-        SteamButton::RightGrip4 => Control::R4,
-        SteamButton::RightGrip5 => Control::R5,
+        SteamButton::View => (Control::Menu, Sensor::Press),
+        SteamButton::Menu => (Control::View, Sensor::Press),
+        SteamButton::Steam => (Control::Steam, Sensor::Press),
+        SteamButton::QuickAccess => (Control::QuickAccess, Sensor::Press),
+        SteamButton::LeftShoulder => (Control::LeftBumper, Sensor::Press),
+        SteamButton::RightShoulder => (Control::RightBumper, Sensor::Press),
+        SteamButton::LeftTriggerClick => (Control::LeftTrigger, Sensor::Press),
+        SteamButton::RightTriggerClick => (Control::RightTrigger, Sensor::Press),
+        // Touch and click are separate sensors on the same control. Keeping
+        // them apart is what makes a resting thumb look different from a
+        // click, which it cannot if both simply light the control.
+        SteamButton::LeftStickPress => (Control::LeftStick, Sensor::Press),
+        SteamButton::LeftStickTouch => (Control::LeftStick, Sensor::Touch),
+        SteamButton::RightStickPress => (Control::RightStick, Sensor::Press),
+        SteamButton::RightStickTouch => (Control::RightStick, Sensor::Touch),
+        SteamButton::LeftPadClick => (Control::LeftPad, Sensor::Press),
+        SteamButton::LeftPadTouch => (Control::LeftPad, Sensor::Touch),
+        SteamButton::RightPadClick => (Control::RightPad, Sensor::Press),
+        SteamButton::RightPadTouch => (Control::RightPad, Sensor::Touch),
+        SteamButton::LeftGrip4 => (Control::L4, Sensor::Press),
+        SteamButton::LeftGrip5 => (Control::L5, Sensor::Press),
+        SteamButton::RightGrip4 => (Control::R4, Sensor::Press),
+        SteamButton::RightGrip5 => (Control::R5, Sensor::Press),
         // The grip shell, not a paddle: no geometry to light.
         SteamButton::LeftGripTouch | SteamButton::RightGripTouch => return None,
     })
+}
+
+/// Which sensor on a control a report bit represents.
+///
+/// A click always implies contact, so a control that only knew "active" would
+/// render a rested thumb and a pressed stick identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sensor {
+    /// A switch closed: the control is being pressed or clicked.
+    Press,
+    /// Capacitive contact only.
+    Touch,
 }
 
 /// Normalizes a symmetric `i16` axis to `-1.0..=1.0`.
@@ -83,10 +102,13 @@ pub(crate) fn control_states(
 ) -> impl Fn(Control) -> ControlState {
     let mut pressed = [false; 24];
     for button in ALL_STEAM_BUTTONS {
-        if held.contains(button) {
-            if let Some(control) = control_for_button(button) {
-                pressed[control as usize] = true;
-            }
+        if !held.contains(button) {
+            continue;
+        }
+        // Only a real press lights the control. Touch is reported separately so
+        // that resting a thumb and clicking read differently.
+        if let Some((control, Sensor::Press)) = control_for_button(button) {
+            pressed[control as usize] = true;
         }
     }
 
@@ -94,8 +116,12 @@ pub(crate) fn control_states(
     let right_stick = [axis(state.right_stick_x), axis(state.right_stick_y)];
     let left_pad = [axis(state.left_pad_x), axis(state.left_pad_y)];
     let right_pad = [axis(state.right_pad_x), axis(state.right_pad_y)];
-    let left_pad_touched = state.left_pad_touched;
-    let right_pad_touched = state.right_pad_touched;
+    // Every touch comes from `held`, not from the mirrored struct fields. The
+    // decoder sets `left_pad_touched` from the same bit, so the two agree — but
+    // taking one source keeps sticks and pads consistent, and keeps working if
+    // `held` is ever latched across reports to catch a sub-frame tap.
+    let left_pad_touched = held.contains(SteamButton::LeftPadTouch);
+    let right_pad_touched = held.contains(SteamButton::RightPadTouch);
     let left_stick_touched = held.contains(SteamButton::LeftStickTouch);
     let right_stick_touched = held.contains(SteamButton::RightStickTouch);
     let left_travel = travel(state.left_trigger, trigger_full_scale);
@@ -266,7 +292,7 @@ impl Visualizer {
 
 #[cfg(test)]
 mod tests {
-    use super::{control_for_button, control_states, travel, ALL_STEAM_BUTTONS};
+    use super::{control_for_button, control_states, travel, Sensor, ALL_STEAM_BUTTONS};
     use controller_art::{Analog, Control, ControlState, Highlight};
     use std::collections::BTreeSet;
     use steam_controller_protocol::{SteamButton, SteamButtons, SteamControllerState};
@@ -326,8 +352,14 @@ mod tests {
     /// buttons. See `docs/MAPPING.md`.
     #[test]
     fn the_option_buttons_are_crossed_over() {
-        assert_eq!(control_for_button(SteamButton::Menu), Some(Control::View));
-        assert_eq!(control_for_button(SteamButton::View), Some(Control::Menu));
+        assert_eq!(
+            control_for_button(SteamButton::Menu),
+            Some((Control::View, Sensor::Press))
+        );
+        assert_eq!(
+            control_for_button(SteamButton::View),
+            Some((Control::Menu, Sensor::Press))
+        );
     }
 
     #[test]
@@ -345,9 +377,9 @@ mod tests {
     }
 
     #[test]
-    fn each_button_lights_exactly_the_control_it_maps_to() {
+    fn each_press_lights_exactly_the_control_it_maps_to() {
         for button in ALL_STEAM_BUTTONS {
-            let Some(expected) = control_for_button(button) else {
+            let Some((expected, Sensor::Press)) = control_for_button(button) else {
                 continue;
             };
             let state = neutral();
@@ -363,6 +395,72 @@ mod tests {
                     control.label()
                 );
             }
+        }
+    }
+
+    /// Clicking a stick necessarily touches it, so if touch also lit the
+    /// control the two would be indistinguishable on the illustration.
+    #[test]
+    fn a_touch_does_not_light_the_control_the_way_a_press_does() {
+        for (touch, press, control) in [
+            (
+                SteamButton::LeftStickTouch,
+                SteamButton::LeftStickPress,
+                Control::LeftStick,
+            ),
+            (
+                SteamButton::RightStickTouch,
+                SteamButton::RightStickPress,
+                Control::RightStick,
+            ),
+            (
+                SteamButton::LeftPadTouch,
+                SteamButton::LeftPadClick,
+                Control::LeftPad,
+            ),
+            (
+                SteamButton::RightPadTouch,
+                SteamButton::RightPadClick,
+                Control::RightPad,
+            ),
+        ] {
+            let state = neutral();
+
+            let touched = control_states(&state, SteamButtons(1 << (touch as u8)), 0x8000);
+            assert_eq!(
+                touched(control).highlight,
+                Highlight::Idle,
+                "{} should not read as pressed when only touched",
+                control.label()
+            );
+            assert!(
+                matches!(
+                    touched(control).analog,
+                    Some(Analog::Position { touched: true, .. })
+                ),
+                "{} should report contact",
+                control.label()
+            );
+
+            let clicked = control_states(&state, SteamButtons(1 << (press as u8)), 0x8000);
+            assert_eq!(
+                clicked(control).highlight,
+                Highlight::Active,
+                "{} should read as pressed when clicked",
+                control.label()
+            );
+
+            // And the real hardware case: a click arrives with its touch bit.
+            let both = control_states(
+                &state,
+                SteamButtons((1 << (press as u8)) | (1 << (touch as u8))),
+                0x8000,
+            );
+            assert_eq!(both(control).highlight, Highlight::Active);
+            assert!(matches!(
+                both(control).analog,
+                Some(Analog::Position { touched: true, .. })
+            ));
         }
     }
 
@@ -395,7 +493,9 @@ mod tests {
             "a stale pad coordinate must not draw a dot"
         );
 
+        // The decoder sets both the bit and the mirrored field; do the same.
         state.left_pad_touched = true;
+        state.buttons = SteamButtons(1 << (SteamButton::LeftPadTouch as u8));
         let touched = control_states(&state, state.buttons, 0x8000);
         match touched(Control::LeftPad).analog {
             Some(Analog::Position {

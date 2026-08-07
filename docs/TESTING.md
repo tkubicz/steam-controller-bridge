@@ -192,9 +192,12 @@ fill is obvious. Confirm the front and rear views switch from side-by-side to
 stacked below roughly 280 px per face, that button grids change style rather
 than reflowing, and that the hex rows scroll sideways instead of wrapping.
 
-On macOS with hardware, use `cargo run -p sc-visualizer -- --index N` after
-`sc-probe list` to verify live report rate, decoded controls, mapped output,
-recording controls, and disconnect-to-neutral behavior.
+On macOS with hardware, `cargo run -p sc-visualizer` discovers a supported
+controller by itself; pass `--index N` from `sc-probe list` to pin a specific
+collection. Verify live report rate, decoded controls, mapped output, recording
+controls, and disconnect-to-neutral behavior. Unplugging should return the view
+to neutral and the app should reconnect on its own when the controller comes
+back.
 
 **Axis orientation is a release gate, not an assumption.** The repository does
 not establish the physical sign of the stick and pad axes. Move each stick and

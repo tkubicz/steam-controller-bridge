@@ -21,6 +21,7 @@ const SIDEBAR_DEFAULT_WIDTH: f32 = 300.0;
 const SIDEBAR_MIN_WIDTH: f32 = 260.0;
 const SIDEBAR_MAX_WIDTH: f32 = 360.0;
 
+mod cli;
 mod demo;
 mod device;
 mod diagnostics;
@@ -30,13 +31,15 @@ mod mailbox;
 mod readouts;
 mod sidebar;
 
+use clap::Parser;
+
+use cli::{Cli, Source};
 use demo::DemoState;
 use device::{input_worker, InputChannel};
 use readouts::{mapped_state_ui, source_state_ui};
 
 fn main() -> eframe::Result {
-    let demo = parse_demo_state();
-    let index = parse_index();
+    let source = Cli::parse().source();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(DEFAULT_WINDOW)
@@ -48,37 +51,9 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |creation| {
             ui_theme::configure_visuals(&creation.egui_ctx);
-            Ok(Box::new(Visualizer::new(index, demo)))
+            Ok(Box::new(Visualizer::new(source)))
         }),
     )
-}
-
-fn parse_index() -> usize {
-    let args: Vec<String> = std::env::args().collect();
-    args.windows(2)
-        .find(|pair| pair[0] == "--index")
-        .and_then(|pair| pair[1].parse().ok())
-        .unwrap_or(0)
-}
-
-/// `--demo-state neutral|digital|analog|disconnected`, mutually exclusive with
-/// `--index`: a demo run opens no device.
-fn parse_demo_state() -> Option<DemoState> {
-    let args: Vec<String> = std::env::args().collect();
-    let requested = args
-        .windows(2)
-        .find(|pair| pair[0] == "--demo-state")
-        .map(|pair| pair[1].clone())?;
-    let Some(mode) = DemoState::parse(&requested) else {
-        eprintln!(
-            "unknown --demo-state {requested:?}; expected neutral, digital, analog or disconnected"
-        );
-        std::process::exit(2);
-    };
-    if args.iter().any(|arg| arg == "--index") {
-        eprintln!("--demo-state and --index are mutually exclusive; ignoring --index");
-    }
-    Some(mode)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +70,8 @@ struct SerialUiConfig {
 }
 
 struct Visualizer {
-    input: InputChannel,
+    /// `None` for a demo run: no worker, no device, no ownership lock.
+    input: Option<InputChannel>,
     /// Reports the device layer says it lost before we saw them. Wired for
     /// when the platform backend starts reporting it; currently always zero.
     source_report_drops: u64,
@@ -130,18 +106,20 @@ struct Visualizer {
     marker: String,
     smoothing_enabled: bool,
     smoothing_time_constant: f32,
-    /// Set when the app was launched with `--demo-state`; live input is then
-    /// ignored so the picture stays deterministic for a capture.
-    demo: Option<DemoState>,
 }
 
 impl Visualizer {
-    fn new(index: usize, demo: Option<DemoState>) -> Self {
+    fn new(source: Source) -> Self {
         let config = MapperConfig::default();
+        let demo = match source {
+            Source::Demo(mode) => Some(mode),
+            Source::Discover | Source::Collection(_) => None,
+        };
         let mut visualizer = Self {
-            // A demo run never opens a device, so the worker is pointed at a
-            // collection index that will simply fail to open.
-            input: input_worker(index),
+            // A demo run starts no worker at all, so it takes no HID ownership
+            // lock. The old code opened a collection and only skipped draining
+            // it, which is not the same thing.
+            input: (demo.is_none()).then(|| input_worker(source)),
             source_report_drops: 0,
             decoder: SteamControllerDecoder::new(),
             mapper: ControllerMapper::default(),
@@ -149,8 +127,16 @@ impl Visualizer {
             source: None,
             mapped: GamepadState::neutral(),
             connected: false,
-            device: format!("HID collection {index}"),
-            status: "Opening device…".to_owned(),
+            device: match source {
+                Source::Discover => "no controller yet".to_owned(),
+                Source::Collection(index) => format!("HID collection {index}"),
+                Source::Demo(mode) => format!("demo ({})", mode.label()),
+            },
+            status: match source {
+                Source::Discover => "Searching for a controller…".to_owned(),
+                Source::Collection(index) => format!("Opening HID collection {index}…"),
+                Source::Demo(mode) => format!("Demo state: {}", mode.label()),
+            },
             raw: Vec::new(),
             raw_report_id: None,
             show_raw: false,
@@ -175,7 +161,6 @@ impl Visualizer {
             marker: String::new(),
             smoothing_enabled: false,
             smoothing_time_constant: 0.02,
-            demo,
         };
         if let Some(mode) = demo {
             visualizer.apply_demo(mode);
@@ -205,7 +190,7 @@ impl Visualizer {
 
 impl eframe::App for Visualizer {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if self.demo.is_none() {
+        if self.input.is_some() {
             self.process_events();
         }
         if let Some(serial) = &mut self.serial {
