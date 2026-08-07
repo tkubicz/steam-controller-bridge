@@ -1,24 +1,64 @@
 //! Parent-side lifecycle for the profile-wheel overlay process.
 //!
-//! The overlay is started as soon as a controller is present rather than when
-//! the wheel opens, because creating a window and a GL context takes longer
-//! than the user expects between letting go of Quick Access and seeing the
-//! wheel. It is stopped again when the controller goes away, so an idle machine
-//! carries no extra process.
+//! There is one overlay process per wheel and none at rest: `start` is called
+//! when a hold reaches [`profile_picker::PickerEvent::Preparing`] — halfway
+//! through, so the window and GL context are ready by the time the wheel is
+//! wanted — and `stop` kills the process on every close. A window on the
+//! game's Space is not free to the compositor, and the wheel is up for a few
+//! seconds at a time, so it does not get to exist the rest of the time.
 
 use std::io::Write;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{SyncSender, TrySendError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::overlay_protocol::{OverlayEnvelope, OverlayMessage, OVERLAY_ARGUMENT};
 
-/// A crash-looping overlay must not be relaunched on every status poll.
+/// An overlay binary that cannot even start must not be re-executed on every
+/// hold of a determined user.
 const RELAUNCH_BACKOFF: Duration = Duration::from_secs(5);
+
+/// Lines waiting for the child to read them. The wheel produces messages at
+/// human rate, so this is only reachable with a child wedged before its stdin
+/// loop — the case the writer thread exists to keep off the main thread.
+const WRITER_QUEUE_CAPACITY: usize = 64;
+
+/// Owns the pipe to the child so the main thread never blocks on it.
+///
+/// A pipe write blocks once the kernel buffer fills, and the child only starts
+/// reading after its window and GL context exist. A child wedged in that setup
+/// would otherwise freeze the whole menu app inside `write_all`.
+struct OverlayWriter {
+    sender: SyncSender<String>,
+    thread: JoinHandle<()>,
+}
+
+impl OverlayWriter {
+    fn new(mut stdin: std::process::ChildStdin) -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<String>(WRITER_QUEUE_CAPACITY);
+        let thread = std::thread::spawn(move || {
+            while let Ok(line) = receiver.recv() {
+                if let Err(error) = stdin
+                    .write_all(line.as_bytes())
+                    .and_then(|()| stdin.flush())
+                {
+                    eprintln!("level=warn event=profile_overlay_write_failed error={error:?}");
+                    return;
+                }
+            }
+            // The sender is gone: the host dropped this child. Returning drops
+            // stdin, which is the child's cue to exit if it is somehow still
+            // alive after the kill.
+        });
+        Self { sender, thread }
+    }
+}
 
 #[derive(Default)]
 pub struct OverlayHost {
     child: Option<Child>,
-    stdin: Option<ChildStdin>,
+    writer: Option<OverlayWriter>,
     /// Replayed to a freshly started child so it knows what to draw.
     roster: Option<OverlayMessage>,
     /// Whether the wheel was open when the child last went away.
@@ -48,8 +88,10 @@ impl OverlayHost {
 
     /// Starts the overlay if it is not already running.
     ///
-    /// Safe to call on every status poll: it is a no-op while the child is
-    /// alive, and it backs off after a failure so a broken overlay cannot spin.
+    /// Called at `Preparing` and again as a safety net at `Opened`, so a child
+    /// that crashed mid-hold is replaced rather than mourned. Only a failure of
+    /// `spawn` itself backs off: a binary that cannot start will not start a
+    /// moment later either, while a child that merely died deserves its retry.
     pub fn start(&mut self) {
         if self.reap_if_exited() {
             return;
@@ -79,13 +121,8 @@ impl OverlayHost {
 
     /// Stops the overlay. Idempotent.
     pub fn stop(&mut self) {
-        // Dropping stdin is the child's cue to exit, but the kill makes the
-        // teardown deterministic and leaves no process behind on quit.
-        self.stdin = None;
         self.open = None;
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        if self.kill_child() {
             eprintln!("level=info event=profile_overlay_stopped");
         }
     }
@@ -97,18 +134,13 @@ impl OverlayHost {
         self.send(message);
     }
 
-    pub fn select(&mut self, selected: usize, page: usize) {
-        self.open = Some(OverlayMessage::Open { selected, page });
-        self.send(OverlayMessage::Select { selected, page });
-    }
-
     #[must_use]
     pub const fn is_running(&self) -> bool {
         self.child.is_some()
     }
 
     fn send(&mut self, message: OverlayMessage) {
-        let Some(stdin) = self.stdin.as_mut() else {
+        let Some(writer) = self.writer.as_ref() else {
             return;
         };
         let line = match OverlayEnvelope::new(message).to_line() {
@@ -118,14 +150,19 @@ impl OverlayHost {
                 return;
             }
         };
-        if let Err(error) = stdin
-            .write_all(line.as_bytes())
-            .and_then(|()| stdin.flush())
-        {
-            // The pipe broke, so the overlay is gone. Drop it here and let the
-            // next `start` bring a replacement up.
-            eprintln!("level=warn event=profile_overlay_write_failed error={error:?}");
-            self.discard_child();
+        match writer.sender.try_send(line) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                // The child has not read anything for dozens of messages. The
+                // latest wheel state is kept in `roster`/`open`, so a child
+                // that recovers is reseeded by the next `start`.
+                eprintln!("level=warn event=profile_overlay_queue_full");
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                // The writer hit a broken pipe, so the overlay is gone. Drop it
+                // here and let the next `start` bring a replacement up.
+                self.discard_child();
+            }
         }
     }
 
@@ -150,12 +187,27 @@ impl OverlayHost {
     }
 
     fn discard_child(&mut self) {
-        self.stdin = None;
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        self.kill_child();
+    }
+
+    /// Kills and reaps the child, if any. Returns whether one existed.
+    ///
+    /// The kill is what makes the teardown deterministic: it unblocks a writer
+    /// stuck in a full pipe (the write fails once the read end is gone), and it
+    /// leaves no process behind on quit. The writer thread is joined so a
+    /// spawn/kill cycle per hold cannot accumulate threads.
+    fn kill_child(&mut self) -> bool {
+        let Some(mut child) = self.child.take() else {
+            self.writer = None;
+            return false;
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(writer) = self.writer.take() {
+            drop(writer.sender);
+            let _ = writer.thread.join();
         }
-        self.next_launch = Some(Instant::now() + RELAUNCH_BACKOFF);
+        true
     }
 
     fn spawn(&mut self) -> Result<(), String> {
@@ -168,7 +220,7 @@ impl OverlayHost {
             // the same place as the menu app's.
             .spawn()
             .map_err(|error| error.to_string())?;
-        self.stdin = child.stdin.take();
+        self.writer = child.stdin.take().map(OverlayWriter::new);
         self.child = Some(child);
         Ok(())
     }
@@ -192,7 +244,7 @@ mod tests {
         assert!(!host.is_running());
         host.set_roster(vec!["Default".to_owned()], Some(0), 8);
         host.show(0, 0);
-        host.select(1, 0);
+        host.show(1, 0);
         host.stop();
         assert!(!host.is_running());
     }
@@ -219,7 +271,7 @@ mod tests {
                 page: 1
             })
         );
-        host.select(3, 1);
+        host.show(3, 1);
         assert_eq!(
             host.open,
             Some(OverlayMessage::Open {
@@ -239,5 +291,18 @@ mod tests {
         host.next_launch = Some(Instant::now() + RELAUNCH_BACKOFF);
         host.start();
         assert!(!host.is_running(), "the backoff must suppress the launch");
+    }
+
+    #[test]
+    fn discarding_a_dead_child_does_not_eat_the_next_launch() {
+        // Regression: a crashed child used to arm the failure backoff, so the
+        // `Opened` safety net two seconds later refused to spawn a replacement
+        // and the wheel stayed blank for that hold and the next.
+        let mut host = OverlayHost::new();
+        host.discard_child();
+        assert!(
+            host.next_launch.is_none(),
+            "only a failed spawn may back the host off"
+        );
     }
 }

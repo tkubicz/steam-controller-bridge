@@ -38,6 +38,11 @@ simplification — see [Why suppression must be exactly neutral](#why-suppressio
 It is also the right semantics: someone in a menu is not playing, so a trigger
 they happen to be holding should not keep firing.
 
+Desktop bindings on controls the wheel does not consume — the grips and the
+pads — stay live while it is open. That is deliberate: suppressing them would
+recreate on close exactly the fresh-edge leak the button latch below exists to
+prevent, for controls the wheel never reads in the first place.
+
 Two consequences are deliberate and worth knowing:
 
 - The hold itself is **not** suppressed. The game sees `Extra3` held for the
@@ -66,7 +71,13 @@ exactly neutral when the user lets go. Neither leaves the watchdog armed against
 a silent host.
 
 A forced close — a controller that disappeared — latches nothing, since no
-further report would ever arrive to clear it.
+further report would ever arrive to clear it. Closing the wheel by
+reconfiguring or disabling it is the opposite case: reports keep arriving, so
+the still-held controls (and a hold in flight) are latched and drain as usual.
+
+The latch also covers the bindings side: the trigger stays masked from
+desktop bindings while it is latched, so dismissing the wheel with a second
+Quick Access press cannot fire the very binding the wheel exists to protect.
 
 ## Why suppression must be exactly neutral
 
@@ -266,11 +277,16 @@ Newline-delimited JSON on the child's stdin, parent to child only:
 ```json
 {"v":1,"kind":"roster","names":["Default","Gaming"],"active":0,"sectors_per_page":8}
 {"v":1,"kind":"open","selected":1,"page":0}
-{"v":1,"kind":"select","selected":3,"page":0}
-{"v":1,"kind":"close"}
+{"v":1,"kind":"open","selected":3,"page":0}
 ```
 
-Closing the pipe is how the child learns the menu app has exited.
+A repeated `open` moves the highlight. There is no close message: a closed
+wheel is a killed process, and closing the pipe is how the child learns the
+menu app has exited.
+
+The parent never writes the pipe from its own thread: a dedicated writer
+thread owns the child's stdin, so a child wedged in window or GL setup can
+stall its own queue but never the menu app's event loop.
 
 ### Floating over a fullscreen game
 

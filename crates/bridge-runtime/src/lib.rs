@@ -628,22 +628,6 @@ impl BridgeHandle {
         self.request(|ack| RuntimeCommand::SetPickerRoster(roster, ack))
     }
 
-    /// Updates the profile wheel and waits until the runtime has accepted it.
-    ///
-    /// # Errors
-    /// Returns an error if the runtime thread has stopped.
-    pub fn set_picker_config(&self, config: Option<PickerConfig>) -> Result<(), RuntimeError> {
-        self.command(|ack| RuntimeCommand::SetPickerConfig(config, ack))
-    }
-
-    /// Updates the wheel's roster and waits until the runtime has accepted it.
-    ///
-    /// # Errors
-    /// Returns an error if the runtime thread has stopped.
-    pub fn set_picker_roster(&self, roster: PickerRoster) -> Result<(), RuntimeError> {
-        self.command(|ack| RuntimeCommand::SetPickerRoster(roster, ack))
-    }
-
     /// Requests an idempotent runtime start and waits until the request is accepted.
     ///
     /// # Errors
@@ -954,22 +938,44 @@ fn binding_status_for_profile(profile: Option<&BindingProfile>) -> DesktopBindin
 /// and what the user just chose. A `None` picker is the feature switched off,
 /// and every method then behaves as if the wheel does not exist.
 struct PickerRuntime {
+    /// Kept after the feature is switched off so a just-closed wheel's
+    /// still-held controls keep draining; [`PickerRuntime::observe`] hands a
+    /// disabled picker an empty roster, which can never arm.
     picker: Option<Picker>,
+    enabled: bool,
 }
 
 impl PickerRuntime {
     fn new(config: Option<PickerConfig>) -> Self {
         Self {
+            enabled: config.is_some(),
             picker: config.map(Picker::new),
         }
     }
 
-    /// Replaces the configuration. Returns whether an open wheel was closed,
-    /// which the caller must answer by clearing suppression and the overlay.
+    /// Replaces the configuration. Returns whether a wheel — open, or a hold
+    /// partway toward one — was cancelled, which the caller must answer by
+    /// dismissing the overlay.
+    ///
+    /// The picker itself latches whatever consumed controls are still held, so
+    /// the press that was aimed at the wheel cannot leak into the game or the
+    /// bindings engine; the caller keeps applying [`PickerRuntime::suppression`]
+    /// as usual and the latch drains on release.
     fn set_config(&mut self, config: Option<PickerConfig>) -> bool {
-        let was_open = self.is_open();
-        self.picker = config.map(Picker::new);
-        was_open
+        let was_active = self.picker.as_ref().is_some_and(Picker::owns_trigger);
+        self.enabled = config.is_some();
+        match (self.picker.as_mut(), config) {
+            (Some(picker), Some(config)) => picker.set_config(config),
+            (Some(picker), None) => {
+                // Re-applying the current configuration closes the wheel and
+                // latches the held controls without discarding the drain state.
+                let config = *picker.config();
+                picker.set_config(config);
+            }
+            (None, Some(config)) => self.picker = Some(Picker::new(config)),
+            (None, None) => {}
+        }
+        was_active
     }
 
     fn is_open(&self) -> bool {
@@ -992,6 +998,13 @@ impl PickerRuntime {
         input: &PickerInput,
         roster: PickerRoster,
     ) -> PickerEvents {
+        // A disabled picker still sees reports so its latch can drain, but an
+        // empty roster keeps it from ever arming again.
+        let roster = if self.enabled {
+            roster
+        } else {
+            PickerRoster::default()
+        };
         self.picker
             .as_mut()
             .map_or_else(PickerEvents::default, |picker| {
@@ -2965,10 +2978,14 @@ impl Supervisor {
                 }
                 RuntimeCommand::SetPickerConfig(config, ack) => {
                     self.config.profile_picker = config.map(PickerConfig::sanitized);
-                    // A reconfigured wheel is a closed wheel, so the game gets
-                    // its controls back and the frontend hides the overlay.
+                    // A reconfigured wheel is a closed wheel — and a cancelled
+                    // hold counts too, or the overlay spawned at `Preparing`
+                    // would outlive the hold it was spawned for. The picker
+                    // latches whatever is still held, so the suppression it
+                    // reports (not a blanket clear) is what hands the game its
+                    // controls back without leaking the in-flight press.
                     if picker.set_config(self.config.profile_picker) {
-                        engine.set_output_suppression(None);
+                        engine.set_output_suppression(picker.suppression());
                         self.emit_picker_event(PickerEvent::Dismissed);
                     }
                     let picker_status = picker_status(&self.config, false);
@@ -3644,8 +3661,17 @@ fn process_report(
         )
     })?;
     match engine.process_report(report.report_id, &report.data, started.elapsed(), output) {
-        Ok(ProcessOutcome::State { source, mapped, .. }) => {
-            let meaningful_activity = idle_activity.observe(started.elapsed(), &source, &mapped);
+        Ok(ProcessOutcome::State {
+            source,
+            mapped,
+            unsuppressed,
+            ..
+        }) => {
+            // Activity is judged on the unsuppressed state: steering the
+            // profile wheel pins `mapped` at neutral, and must not read as
+            // an idle controller to the automatic-shutdown clock.
+            let meaningful_activity =
+                idle_activity.observe(started.elapsed(), &source, &unsuppressed);
             record_lazy(recording, || {
                 RecordingEvent::decoded_steam_state(timestamp, &source)
             })?;
@@ -6173,6 +6199,188 @@ mod tests {
         assert_eq!(
             *keys.lock().unwrap(),
             ["key:F5:true".to_owned(), "key:F5:false".to_owned()]
+        );
+    }
+
+    #[test]
+    fn dismissing_with_a_second_quick_access_press_does_not_fire_its_binding() {
+        // Regression: the dismissing press returns the picker to Idle on the
+        // very report that carries the down edge. Without the latch-aware mask
+        // the bindings engine saw that edge as a fresh press and fired the
+        // binding the wheel exists to protect.
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut harness = PickerHarness::new(
+            quick_access_profile(),
+            Box::new(SharedDesktopSink(Arc::clone(&keys))),
+        );
+        let held = [SteamButton::QuickAccess];
+        harness.feed(Duration::ZERO, &picker_report(1, &[], (0, 0)), TEST_ROSTER);
+        harness.feed(
+            Duration::from_millis(10),
+            &picker_report(2, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        harness.feed(
+            Duration::from_millis(2_010),
+            &picker_report(3, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        assert!(harness.picker.is_open());
+
+        // Release, then press Quick Access again to cancel.
+        harness.feed(
+            Duration::from_millis(2_100),
+            &picker_report(4, &[], (0, 0)),
+            TEST_ROSTER,
+        );
+        harness.feed(
+            Duration::from_millis(2_200),
+            &picker_report(5, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        assert_eq!(harness.events.last(), Some(&PickerEvent::Dismissed));
+        assert!(
+            keys.lock().unwrap().is_empty(),
+            "cancelling the wheel must not fire the Quick Access binding"
+        );
+
+        // Still held: still nothing. Released: still nothing.
+        harness.feed(
+            Duration::from_millis(2_300),
+            &picker_report(6, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        harness.feed(
+            Duration::from_millis(2_400),
+            &picker_report(7, &[], (0, 0)),
+            TEST_ROSTER,
+        );
+        assert!(keys.lock().unwrap().is_empty());
+        assert!(harness.engine.output_suppression().is_none());
+
+        // A later deliberate tap fires the binding as normal.
+        harness.feed(
+            Duration::from_secs(3),
+            &picker_report(8, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        harness.feed(
+            Duration::from_millis(3_100),
+            &picker_report(9, &[], (0, 0)),
+            TEST_ROSTER,
+        );
+        assert_eq!(
+            *keys.lock().unwrap(),
+            ["key:F5:true".to_owned(), "key:F5:false".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_config_change_mid_hold_cancels_the_wheel_and_swallows_the_press() {
+        // Past the halfway mark the overlay child is already running, so the
+        // caller must be told the hold is off (it answers with `Dismissed`),
+        // and the withheld press must not become a fresh edge for the
+        // bindings engine.
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut harness = PickerHarness::new(
+            quick_access_profile(),
+            Box::new(SharedDesktopSink(Arc::clone(&keys))),
+        );
+        let held = [SteamButton::QuickAccess];
+        harness.feed(Duration::ZERO, &picker_report(1, &[], (0, 0)), TEST_ROSTER);
+        harness.feed(
+            Duration::from_millis(10),
+            &picker_report(2, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        harness.feed(
+            Duration::from_millis(1_200),
+            &picker_report(3, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        assert_eq!(harness.events, vec![PickerEvent::Preparing]);
+
+        assert!(
+            harness.picker.set_config(Some(PickerConfig {
+                hold: Duration::from_secs(3),
+                ..PickerConfig::default()
+            })),
+            "a cancelled hold must be reported so the overlay child is stopped"
+        );
+
+        // The press stays swallowed while held, and its release is not a tap.
+        harness.feed(
+            Duration::from_millis(1_300),
+            &picker_report(4, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        harness.feed(
+            Duration::from_millis(1_400),
+            &picker_report(5, &[], (0, 0)),
+            TEST_ROSTER,
+        );
+        assert_eq!(harness.events, vec![PickerEvent::Preparing]);
+        assert!(keys.lock().unwrap().is_empty());
+        assert!(harness.engine.output_suppression().is_none());
+    }
+
+    #[test]
+    fn disabling_the_wheel_while_open_keeps_held_controls_latched() {
+        // Switching the feature off is not allowed to hand the game or the
+        // bindings engine the buttons that were operating the wheel.
+        let keys = Arc::new(Mutex::new(Vec::new()));
+        let mut harness = PickerHarness::new(
+            quick_access_profile(),
+            Box::new(SharedDesktopSink(Arc::clone(&keys))),
+        );
+        let held = [SteamButton::QuickAccess];
+        harness.feed(Duration::ZERO, &picker_report(1, &[], (0, 0)), TEST_ROSTER);
+        harness.feed(
+            Duration::from_millis(10),
+            &picker_report(2, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        harness.feed(
+            Duration::from_millis(2_010),
+            &picker_report(3, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        assert!(harness.picker.is_open());
+
+        assert!(harness.picker.set_config(None));
+        harness.feed(
+            Duration::from_millis(2_100),
+            &picker_report(4, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        assert!(
+            keys.lock().unwrap().is_empty(),
+            "the held trigger must not become a fresh press when the wheel is disabled"
+        );
+        assert!(
+            harness.engine.output_suppression().is_some(),
+            "the held trigger stays withheld from the game until released"
+        );
+
+        // Released: everything drains. A fresh press is an ordinary binding
+        // press again, with no wheel to intercept it.
+        harness.feed(
+            Duration::from_millis(2_200),
+            &picker_report(5, &[], (0, 0)),
+            TEST_ROSTER,
+        );
+        assert!(harness.engine.output_suppression().is_none());
+        let events_before_press = harness.events.len();
+        harness.feed(
+            Duration::from_secs(3),
+            &picker_report(6, &held, (0, 0)),
+            TEST_ROSTER,
+        );
+        assert_eq!(*keys.lock().unwrap(), ["key:F5:true".to_owned()]);
+        assert_eq!(
+            harness.events.len(),
+            events_before_press,
+            "a disabled wheel must not arm or open again"
         );
     }
 

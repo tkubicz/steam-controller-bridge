@@ -30,7 +30,9 @@ When the profile wheel is enabled, it takes Quick Access over for the length of
 a hold. A Quick Access binding still fires on a short press: the press edge is
 withheld while the hold is being timed, and replayed as a tap if the button
 comes up before the wheel opens. Once the wheel is open the binding is not
-delivered at all. Nothing changes for L4, L5, R4, R5, or the pads, and nothing
+delivered at all — including for the press that closes it: a second Quick
+Access press cancels the wheel and stays masked until released, so cancelling
+can never fire the binding. Nothing changes for L4, L5, R4, R5, or the pads, and nothing
 changes at all while the wheel is disabled. At launch, the menu app queries Input Monitoring directly
 and uses `IOHIDRequestAccess` when macOS has not decided yet. Only after that
 grant is detected does it request Post Event and Accessibility access, before a

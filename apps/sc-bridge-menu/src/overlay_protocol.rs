@@ -14,6 +14,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Identifies the overlay's window so it can be found in `NSApp.windows()` and
 /// given the level and collection behaviour that float it over a fullscreen
 /// game. Nothing shows this string to the user: the window has no title bar.
+#[cfg(feature = "overlay")]
 pub const OVERLAY_WINDOW_TITLE: &str = "Steam Controller Bridge Profile Wheel";
 
 /// The command-line flag that runs this binary as the overlay.
@@ -28,12 +29,11 @@ pub enum OverlayMessage {
         active: Option<usize>,
         sectors_per_page: usize,
     },
-    /// Show the wheel with this sector highlighted.
+    /// Show the wheel with this sector highlighted, or move the highlight
+    /// while it is up. There is no message to hide the wheel: a closed wheel
+    /// is a killed process, so the child only ever learns of a close by its
+    /// stdin reaching end of file.
     Open { selected: usize, page: usize },
-    /// Move the highlight while the wheel is up.
-    Select { selected: usize, page: usize },
-    /// Hide the wheel, whether the user chose something or not.
-    Close,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +66,7 @@ impl OverlayEnvelope {
     ///
     /// # Errors
     /// Returns an error for malformed JSON or a version this build cannot read.
+    #[cfg(any(feature = "overlay", test))]
     pub fn from_line(line: &str) -> Result<Self, String> {
         let envelope: Self = serde_json::from_str(line).map_err(|error| error.to_string())?;
         if envelope.v != PROTOCOL_VERSION {
@@ -99,11 +100,10 @@ mod tests {
                 selected: 3,
                 page: 1,
             },
-            OverlayMessage::Select {
+            OverlayMessage::Open {
                 selected: 0,
                 page: 0,
             },
-            OverlayMessage::Close,
         ] {
             let envelope = OverlayEnvelope::new(message);
             let line = envelope.to_line().unwrap();
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn a_future_protocol_version_is_refused_rather_than_misread() {
-        let line = r#"{"v":99,"kind":"close"}"#;
+        let line = r#"{"v":99,"kind":"open","selected":0,"page":0}"#;
         assert!(OverlayEnvelope::from_line(line)
             .unwrap_err()
             .contains("unsupported overlay protocol version"));

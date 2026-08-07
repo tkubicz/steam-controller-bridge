@@ -43,8 +43,10 @@ pub const DEFAULT_TRACK_DEAD_ZONE: f32 = 0.35;
 /// A wheel needs at least two profiles to be worth opening.
 pub const MIN_ROSTER: usize = 2;
 
-/// The most events one [`Picker::update`] can produce.
-const MAX_EVENTS: usize = 4;
+/// The most events one [`Picker::update`] can produce: a `Selection` and the
+/// `Commit` or `Dismissed` that closed the wheel in the same report. Every
+/// other path emits at most one event.
+const MAX_EVENTS: usize = 2;
 
 /// Full-scale magnitude of a raw stick axis, matching `controller-mapper`.
 const AXIS_FULL_SCALE: f32 = 32767.0;
@@ -188,10 +190,9 @@ impl IntoIterator for PickerEvents {
     type Item = PickerEvent;
     type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<PickerEvent>, MAX_EVENTS>>;
 
-    fn into_iter(mut self) -> Self::IntoIter {
-        for slot in &mut self.events[self.len..] {
-            *slot = None;
-        }
+    fn into_iter(self) -> Self::IntoIter {
+        // Slots at `len..` are `None` by construction: `push` is the only
+        // writer and appends monotonically.
         self.events.into_iter().flatten()
     }
 }
@@ -211,14 +212,21 @@ enum Phase {
     },
 }
 
+/// Which stick is steering the selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stick {
+    Left,
+    Right,
+}
+
 #[derive(Debug)]
 pub struct Picker {
     config: PickerConfig,
     phase: Phase,
     previous: Option<SteamButtons>,
-    /// Whether a stick is currently steering the selection. Recentering the
-    /// stick clears this and leaves the selection where the user left it.
-    steering: bool,
+    /// The stick currently steering the selection, if any. Recentering it
+    /// clears this and leaves the selection where the user left it.
+    steering: Option<Stick>,
     /// Controls the wheel consumed that are still physically held after it
     /// closed. Cleared bit by bit as the user lets go. See [`Picker::suppression`].
     latched: SteamButtons,
@@ -228,6 +236,16 @@ pub struct Picker {
 /// as a side effect of operating it.
 const CONSUMED: [SteamButton; 5] = [TRIGGER, COMMIT, DISMISS, PAGE_PREVIOUS, PAGE_NEXT];
 
+const fn consumed_mask() -> u32 {
+    let mut mask = 0;
+    let mut index = 0;
+    while index < CONSUMED.len() {
+        mask |= bit(CONSUMED[index]);
+        index += 1;
+    }
+    mask
+}
+
 impl Picker {
     #[must_use]
     pub fn new(config: PickerConfig) -> Self {
@@ -235,7 +253,7 @@ impl Picker {
             config: config.sanitized(),
             phase: Phase::Idle,
             previous: None,
-            steering: false,
+            steering: None,
             latched: SteamButtons(0),
         }
     }
@@ -247,13 +265,28 @@ impl Picker {
 
     /// Replaces the configuration, closing the wheel if it is open.
     ///
-    /// The caller must treat this like [`Picker::close`]: suppression has to be
-    /// cleared and the overlay hidden, because no event is returned.
+    /// No event is returned, so the caller must hide the overlay itself. Unlike
+    /// [`Picker::close`], reports keep arriving afterwards: consumed controls
+    /// that are still physically held are latched, so the press that was aimed
+    /// at the wheel — or the hold that was arming it — cannot reach the game as
+    /// a fresh press the moment the wheel ceases to exist. The latch drains as
+    /// usual on the following updates, and [`Picker::suppression`] must keep
+    /// being applied for that to happen.
     pub fn set_config(&mut self, config: PickerConfig) {
         self.config = config.sanitized();
+        if let Some(previous) = self.previous {
+            let still_held = match self.phase {
+                // The wheel consumed all five controls.
+                Phase::Open { .. } => previous.0 & consumed_mask(),
+                // Only the trigger was withheld while the hold was timed; the
+                // rest of the pad was the game's.
+                Phase::Arming { .. } => previous.0 & bit(TRIGGER),
+                Phase::Idle => 0,
+            };
+            self.latched = SteamButtons(self.latched.0 | still_held);
+        }
         self.phase = Phase::Idle;
-        self.steering = false;
-        self.latched = SteamButtons(0);
+        self.steering = None;
     }
 
     #[must_use]
@@ -261,8 +294,9 @@ impl Picker {
         matches!(self.phase, Phase::Open { .. })
     }
 
-    #[must_use]
-    pub const fn is_arming(&self) -> bool {
+    /// Test-only introspection; the host distinguishes phases by events.
+    #[cfg(test)]
+    const fn is_arming(&self) -> bool {
         matches!(self.phase, Phase::Arming { .. })
     }
 
@@ -300,14 +334,18 @@ impl Picker {
         !matches!(self.phase, Phase::Idle)
     }
 
-    /// Hides the trigger from a button snapshot while the picker owns it.
+    /// Hides the trigger from a button snapshot while the picker owns it, and
+    /// while a press that closed the wheel is still latched.
     ///
-    /// Without this a Quick Access desktop binding would fire the moment the
-    /// hold starts. [`PickerEvent::TriggerTapped`] tells the host when to
-    /// deliver the binding after all.
+    /// Without the first a Quick Access desktop binding would fire the moment
+    /// the hold starts; [`PickerEvent::TriggerTapped`] tells the host when to
+    /// deliver the binding after all. Without the second, dismissing the wheel
+    /// with a second Quick Access press would hand the still-held trigger back
+    /// to the bindings engine as a fresh press — firing the very binding the
+    /// wheel exists to protect.
     #[must_use]
     pub fn mask_trigger(&self, buttons: SteamButtons) -> SteamButtons {
-        if self.owns_trigger() {
+        if self.owns_trigger() || self.latched.contains(TRIGGER) {
             SteamButtons(buttons.0 & !bit(TRIGGER))
         } else {
             buttons
@@ -323,7 +361,7 @@ impl Picker {
         let was_active = self.owns_trigger();
         self.phase = Phase::Idle;
         self.previous = None;
-        self.steering = false;
+        self.steering = None;
         // Nothing to hold back: the controller this would apply to is gone, and
         // a latch with no reports arriving would never clear.
         self.latched = SteamButtons(0);
@@ -375,7 +413,7 @@ impl Picker {
                     let page = selected_index / self.config.sectors_per_page;
                     let selected = selected_index % self.config.sectors_per_page;
                     self.phase = Phase::Open { selected, page };
-                    self.steering = false;
+                    self.steering = None;
                     events.push(PickerEvent::Opened { selected, page });
                 } else if !prepared && now.saturating_sub(since) >= self.config.hold / 2 {
                     self.phase = Phase::Arming {
@@ -414,7 +452,7 @@ impl Picker {
     ) {
         if !roster.is_openable() {
             self.phase = Phase::Idle;
-            self.steering = false;
+            self.steering = None;
             events.push(PickerEvent::Dismissed);
             return;
         }
@@ -444,36 +482,56 @@ impl Picker {
 
         if pressed(COMMIT) {
             self.phase = Phase::Idle;
-            self.steering = false;
+            self.steering = None;
             events.push(PickerEvent::Commit {
                 index: (page * per_page + selected).min(roster.len - 1),
             });
         } else if pressed(DISMISS) || pressed(TRIGGER) {
             self.phase = Phase::Idle;
-            self.steering = false;
+            self.steering = None;
             events.push(PickerEvent::Dismissed);
         }
     }
 
     /// Returns the sector a stick is pointing at, or `None` to hold the
     /// selection where it is.
+    ///
+    /// Either stick works, but a stick only gains control by crossing
+    /// [`PickerConfig::engage_dead_zone`] — whether from rest or by taking over
+    /// from the other stick. The steering stick keeps control down to
+    /// [`PickerConfig::track_dead_zone`], and a thumb resting on the other
+    /// stick inside that hysteresis band can never steal the wheel.
     fn steer(&mut self, input: &PickerInput, sectors: usize) -> Option<usize> {
-        let left = normalize(input.left_stick);
-        let right = normalize(input.right_stick);
-        // Either stick works; the one pushed further wins so resting on the
-        // other one cannot fight it.
-        let (x, y) = if magnitude(left) >= magnitude(right) {
-            left
-        } else {
-            right
+        let position = |stick: Stick| {
+            normalize(match stick {
+                Stick::Left => input.left_stick,
+                Stick::Right => input.right_stick,
+            })
         };
-        let magnitude = magnitude((x, y));
-        if magnitude >= self.config.engage_dead_zone {
-            self.steering = true;
-        } else if magnitude < self.config.track_dead_zone {
-            self.steering = false;
+        let deflection = |stick: Stick| magnitude(position(stick));
+        let further = if deflection(Stick::Left) >= deflection(Stick::Right) {
+            Stick::Left
+        } else {
+            Stick::Right
+        };
+        let engaged = deflection(further) >= self.config.engage_dead_zone;
+
+        match self.steering {
+            // The current stick keeps steering while it stays above the track
+            // dead zone; the other one takes over only by crossing engage.
+            Some(current) if deflection(current) >= self.config.track_dead_zone => {
+                if engaged && further != current {
+                    self.steering = Some(further);
+                }
+            }
+            _ => {
+                self.steering = engaged.then_some(further);
+            }
         }
-        self.steering.then(|| sector_for(x, y, sectors))
+        self.steering.map(|stick| {
+            let (x, y) = position(stick);
+            sector_for(x, y, sectors)
+        })
     }
 }
 
@@ -1397,8 +1455,264 @@ mod tests {
             ..PickerConfig::default()
         });
         assert!(!picker.is_open());
-        assert!(picker.suppression().is_none());
         assert_eq!(picker.config().hold, Duration::from_secs(3));
+
+        // The trigger was still physically down when the configuration change
+        // closed the wheel, so it stays withheld — from the game and from the
+        // bindings engine alike — until the user lets go. Reports keep arriving
+        // here, unlike a forced close, so the latch can drain normally.
+        let Some(OutputSuppression::Buttons(withheld)) = picker.suppression() else {
+            panic!("a still-held trigger must stay withheld across a config change");
+        };
+        assert!(withheld.contains(Button::Extra3));
+        assert_eq!(picker.mask_trigger(buttons(&[TRIGGER])), SteamButtons(0));
+
+        picker.update(ms(3_000), &input(&[]), ROSTER);
+        assert!(picker.suppression().is_none());
+        assert_eq!(
+            picker.mask_trigger(buttons(&[TRIGGER])),
+            buttons(&[TRIGGER])
+        );
+    }
+
+    #[test]
+    fn a_config_change_mid_hold_swallows_the_withheld_press() {
+        // Halfway through a hold the trigger has been masked from the bindings
+        // engine the whole time. The configuration change abandons the hold
+        // without an event, so the press must stay swallowed until release —
+        // unmasking it here would hand the engine a fresh down edge instead.
+        let mut picker = Picker::new(PickerConfig::default());
+        picker.update(ms(0), &input(&[]), ROSTER);
+        picker.update(ms(10), &input(&[TRIGGER]), ROSTER);
+        assert!(picker.is_arming());
+
+        picker.set_config(PickerConfig {
+            hold: Duration::from_secs(3),
+            ..PickerConfig::default()
+        });
+        assert!(!picker.is_arming());
+        assert_eq!(
+            picker.mask_trigger(buttons(&[TRIGGER])),
+            SteamButtons(0),
+            "the still-held press must not become a fresh edge"
+        );
+
+        // Releasing drains the latch; the next deliberate press is the host's.
+        assert!(picker.update(ms(1_000), &input(&[]), ROSTER).is_empty());
+        assert_eq!(
+            picker.mask_trigger(buttons(&[TRIGGER])),
+            buttons(&[TRIGGER])
+        );
+    }
+
+    #[test]
+    fn dismissing_with_the_trigger_keeps_its_binding_masked_until_release() {
+        // Regression: the second Quick Access press closes the wheel on its
+        // down edge, which returns the picker to Idle on that same report. The
+        // trigger must stay hidden from the bindings engine while latched, or
+        // cancelling the wheel fires the user's Quick Access binding.
+        let mut picker = opened(ROSTER);
+        picker.update(ms(2_100), &input(&[]), ROSTER);
+        let events: Vec<_> = picker
+            .update(ms(2_200), &input(&[TRIGGER]), ROSTER)
+            .into_iter()
+            .collect();
+        assert_eq!(events, vec![PickerEvent::Dismissed]);
+        assert!(!picker.owns_trigger());
+        assert_eq!(picker.mask_trigger(buttons(&[TRIGGER])), SteamButtons(0));
+
+        // Held for a few more reports: still masked.
+        picker.update(ms(2_250), &input(&[TRIGGER]), ROSTER);
+        assert_eq!(picker.mask_trigger(buttons(&[TRIGGER])), SteamButtons(0));
+
+        // Released and pressed again deliberately: the binding is back.
+        picker.update(ms(2_300), &input(&[]), ROSTER);
+        assert_eq!(
+            picker.mask_trigger(buttons(&[TRIGGER])),
+            buttons(&[TRIGGER])
+        );
+    }
+
+    #[test]
+    fn a_resting_thumb_inside_the_hysteresis_band_cannot_steal_the_wheel() {
+        // Regression: with one shared steering flag, a stick that never crossed
+        // the engage dead zone could take over the moment it was pushed a hair
+        // further than the stick that did — flipping the selection to the
+        // opposite side of the wheel because of a resting thumb.
+        let mut picker = opened(ROSTER);
+        picker.update(
+            ms(2_100),
+            &PickerInput {
+                left_stick: stick(0.0, 1.0),
+                ..PickerInput::default()
+            },
+            ROSTER,
+        );
+
+        // The left stick relaxes into the hysteresis band; the right thumb
+        // rests slightly further out but never crossed engage. The selection
+        // must stay with the left stick.
+        assert!(
+            picker
+                .update(
+                    ms(2_200),
+                    &PickerInput {
+                        left_stick: stick(0.0, 0.40),
+                        right_stick: stick(0.0, -0.45),
+                        ..PickerInput::default()
+                    },
+                    ROSTER,
+                )
+                .is_empty(),
+            "a stick that never engaged must not steer"
+        );
+
+        // Slammed past engage, the other stick does take over.
+        let events: Vec<_> = picker
+            .update(
+                ms(2_300),
+                &PickerInput {
+                    left_stick: stick(0.0, 0.40),
+                    right_stick: stick(0.0, -1.0),
+                    ..PickerInput::default()
+                },
+                ROSTER,
+            )
+            .into_iter()
+            .collect();
+        assert_eq!(
+            events,
+            vec![PickerEvent::Selection {
+                selected: 2,
+                page: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn a_stall_that_jumps_past_the_hold_still_opens_the_wheel() {
+        // A host that stalls between reports can present a `now` that is past
+        // the full hold without the halfway warning ever having fired. The
+        // wheel must open regardless; `Preparing` is an optimization, not a
+        // precondition.
+        let mut picker = Picker::new(PickerConfig::default());
+        picker.update(ms(0), &input(&[]), ROSTER);
+        picker.update(ms(10), &input(&[TRIGGER]), ROSTER);
+        let events: Vec<_> = picker
+            .update(ms(10_000), &input(&[TRIGGER]), ROSTER)
+            .into_iter()
+            .collect();
+        assert_eq!(
+            events,
+            vec![PickerEvent::Opened {
+                selected: 0,
+                page: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn a_roster_with_no_active_profile_opens_on_the_first_sector() {
+        let roster = PickerRoster::new(4, None);
+        let mut picker = Picker::new(PickerConfig::default());
+        picker.update(ms(0), &input(&[]), roster);
+        picker.update(ms(10), &input(&[TRIGGER]), roster);
+        let events: Vec<_> = picker
+            .update(ms(2_010), &input(&[TRIGGER]), roster)
+            .into_iter()
+            .collect();
+        assert_eq!(
+            events,
+            vec![PickerEvent::Opened {
+                selected: 0,
+                page: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_active_profile_clamps_to_the_last_sector() {
+        // The roster and the active index come from the host over a channel,
+        // so a stale pair must degrade to a sane selection, not a panic.
+        let roster = PickerRoster::new(4, Some(99));
+        let mut picker = Picker::new(PickerConfig::default());
+        picker.update(ms(0), &input(&[]), roster);
+        picker.update(ms(10), &input(&[TRIGGER]), roster);
+        let events: Vec<_> = picker
+            .update(ms(2_010), &input(&[TRIGGER]), roster)
+            .into_iter()
+            .collect();
+        assert_eq!(
+            events,
+            vec![PickerEvent::Opened {
+                selected: 3,
+                page: 0
+            }]
+        );
+    }
+
+    #[test]
+    fn a_shoulder_held_across_a_commit_is_withheld_until_released() {
+        let roster = PickerRoster::new(11, Some(0));
+        let mut picker = opened(roster);
+        picker.update(ms(2_100), &input(&[]), roster);
+        // Page with L1 still held while committing with A.
+        picker.update(ms(2_200), &input(&[PAGE_NEXT]), roster);
+        picker.update(ms(2_300), &input(&[PAGE_NEXT, COMMIT]), roster);
+        assert!(!picker.is_open());
+        let Some(OutputSuppression::Buttons(withheld)) = picker.suppression() else {
+            panic!("held consumed controls must stay withheld after the close");
+        };
+        assert!(withheld.contains(Button::RightShoulder));
+        assert!(withheld.contains(Button::South));
+    }
+
+    #[test]
+    fn latched_controls_are_released_one_at_a_time() {
+        // Dismiss with a second trigger press while A is also held: both are
+        // consumed controls, and each must come back to the game individually
+        // as the user lets go of it.
+        let mut picker = opened(ROSTER);
+        picker.update(ms(2_100), &input(&[]), ROSTER);
+        picker.update(ms(2_200), &input(&[COMMIT, TRIGGER]), ROSTER);
+        assert!(!picker.is_open());
+        let Some(OutputSuppression::Buttons(withheld)) = picker.suppression() else {
+            panic!("both held controls must be latched");
+        };
+        assert!(withheld.contains(Button::South));
+        assert!(withheld.contains(Button::Extra3));
+
+        // Let go of A first: only the trigger stays withheld.
+        picker.update(ms(2_300), &input(&[TRIGGER]), ROSTER);
+        let Some(OutputSuppression::Buttons(withheld)) = picker.suppression() else {
+            panic!("the still-held trigger must stay latched");
+        };
+        assert!(!withheld.contains(Button::South));
+        assert!(withheld.contains(Button::Extra3));
+
+        picker.update(ms(2_400), &input(&[]), ROSTER);
+        assert!(picker.suppression().is_none());
+    }
+
+    #[test]
+    fn inverted_dead_zones_clamp_track_below_engage() {
+        let config = PickerConfig {
+            engage_dead_zone: 0.2,
+            track_dead_zone: 0.5,
+            ..PickerConfig::default()
+        }
+        .sanitized();
+        assert_eq!(config.engage_dead_zone, 0.2);
+        assert_eq!(config.track_dead_zone, 0.2);
+    }
+
+    #[test]
+    fn geometry_backstops_hold_for_out_of_range_input() {
+        // Callers subtract one from `sectors_on_page`, so a page past the end
+        // must report one sector, never zero.
+        assert_eq!(sectors_on_page(3, 8, 9), 1);
+        assert_eq!(page_count(0, 8), 1);
+        assert_eq!(page_count(8, 0), 1);
     }
 
     #[test]

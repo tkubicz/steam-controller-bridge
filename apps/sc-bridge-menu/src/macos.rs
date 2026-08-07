@@ -183,10 +183,18 @@ fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
             if matches!(settings.version, 1 | 2 | SETTINGS_VERSION)
                 && settings
                     .idle_shutdown_minutes
-                    .is_none_or(|minutes| matches!(minutes, 5 | 10 | 15 | 30))
-                && OVERLAY_HOLD_CHOICES.contains(&settings.profile_overlay_hold_ms) =>
+                    .is_none_or(|minutes| matches!(minutes, 5 | 10 | 15 | 30)) =>
         {
             settings.version = SETTINGS_VERSION;
+            // A hand-edited hold falls back alone rather than dragging every
+            // other setting down with it.
+            if !OVERLAY_HOLD_CHOICES.contains(&settings.profile_overlay_hold_ms) {
+                eprintln!(
+                    "level=warn event=settings_invalid_overlay_hold value={} action=default",
+                    settings.profile_overlay_hold_ms
+                );
+                settings.profile_overlay_hold_ms = default_overlay_hold_ms();
+            }
             (settings, None)
         }
         Ok(settings) => (
@@ -294,6 +302,10 @@ struct MenuApp {
     overlay: OverlayHost,
     /// Wheel events from the runtime thread, drained on the main thread.
     picker_events: mpsc::Receiver<PickerEvent>,
+    /// Profile ids in the order last published to the wheel, so a
+    /// `Commit { index }` resolves against what the wheel showed even if the
+    /// store has changed since.
+    picker_roster_ids: Vec<String>,
 }
 
 impl MenuApp {
@@ -329,6 +341,11 @@ impl MenuApp {
             picker_roster: picker_roster(&binding_store, &settings.active_binding_profile),
             ..RuntimeConfig::default()
         };
+        let profile_ids = binding_store
+            .profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect();
         // The runtime thread hands wheel events over and wakes the event loop
         // immediately. Polling for them would add up to POLL_INTERVAL of lag
         // between letting go of Quick Access and the wheel appearing.
@@ -359,6 +376,8 @@ impl MenuApp {
             shutting_down: false,
             overlay: OverlayHost::new(),
             picker_events,
+            // Matches the roster just handed to the runtime in `config`.
+            picker_roster_ids: profile_ids,
         })
     }
 
@@ -717,7 +736,10 @@ impl MenuApp {
             }
             OVERLAY_ENABLED_ID => {
                 self.settings.profile_overlay_enabled = !self.settings.profile_overlay_enabled;
-                self.apply_picker_settings();
+                if !self.apply_picker_settings() {
+                    self.settings.profile_overlay_enabled = !self.settings.profile_overlay_enabled;
+                    self.update_setting_checkmarks();
+                }
                 self.sync_picker_roster();
             }
             _ if id.starts_with(BINDING_PROFILE_PREFIX) => {
@@ -731,8 +753,12 @@ impl MenuApp {
                 if !OVERLAY_HOLD_CHOICES.contains(&milliseconds) {
                     return;
                 }
+                let previous = self.settings.profile_overlay_hold_ms;
                 self.settings.profile_overlay_hold_ms = milliseconds;
-                self.apply_picker_settings();
+                if !self.apply_picker_settings() {
+                    self.settings.profile_overlay_hold_ms = previous;
+                    self.update_setting_checkmarks();
+                }
             }
             _ => {}
         }
@@ -768,20 +794,31 @@ impl MenuApp {
     }
 
     /// Applies a change to the wheel's configuration, everywhere it is needed.
-    fn apply_picker_settings(&mut self) {
-        if let Err(error) = self
+    ///
+    /// Returns whether the runtime accepted it. Nothing is persisted on a
+    /// refusal — the caller reverts its settings change, so the menu never
+    /// claims a wheel the running bridge does not have.
+    fn apply_picker_settings(&mut self) -> bool {
+        let accepted = match self
             .runtime
             .request_set_picker_config(self.settings.picker_config())
         {
-            eprintln!("cannot update the profile wheel: {error}");
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("cannot update the profile wheel: {error}");
+                false
+            }
+        };
+        if accepted {
+            if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+                eprintln!("cannot save profile wheel settings: {error}");
+            }
         }
         self.update_setting_checkmarks();
-        if let Err(error) = save_settings(&self.settings_path, &self.settings) {
-            eprintln!("cannot save profile wheel settings: {error}");
-        }
         if !self.settings.profile_overlay_enabled {
             self.overlay.stop();
         }
+        accepted
     }
 
     /// Republishes the profile list after the store or the active profile moved.
@@ -794,17 +831,26 @@ impl MenuApp {
         if let Err(error) = self.runtime.request_set_picker_roster(roster) {
             eprintln!("cannot publish the profile wheel roster: {error}");
         }
+        // The snapshot a later `Commit { index }` resolves against, taken at
+        // the same moment the runtime and the overlay learn this roster.
+        self.picker_roster_ids = self
+            .binding_store
+            .profiles
+            .iter()
+            .map(|profile| profile.id.clone())
+            .collect();
         let names = self
             .binding_store
             .profiles
             .iter()
             .map(|profile| profile.name.clone())
             .collect();
+        // `picker_config` is already sanitized; the default is for the wheel
+        // switched off, where the overlay still wants a plausible layout.
         let sectors = self
             .settings
             .picker_config()
             .unwrap_or_default()
-            .sanitized()
             .sectors_per_page;
         self.overlay.set_roster(names, roster.active, sectors);
     }
@@ -816,6 +862,16 @@ impl MenuApp {
     /// leaves it roughly a second to be ready -- several times what it needs --
     /// and means an ordinary Quick Access press never starts anything.
     fn handle_picker_event(&mut self, event: PickerEvent) {
+        // A queued event can be drained after a quit has begun or after the
+        // wheel was switched off; neither may resurrect the overlay process
+        // the teardown just killed.
+        if self.shutting_down {
+            return;
+        }
+        if !self.settings.profile_overlay_enabled {
+            self.overlay.stop();
+            return;
+        }
         match event {
             PickerEvent::Preparing => self.overlay.start(),
             PickerEvent::Opened { selected, page } => {
@@ -824,17 +880,16 @@ impl MenuApp {
                 self.overlay.start();
                 self.overlay.show(selected, page);
             }
-            PickerEvent::Selection { selected, page } => self.overlay.select(selected, page),
+            PickerEvent::Selection { selected, page } => self.overlay.show(selected, page),
             PickerEvent::Commit { index } => {
                 // Killing the process takes the window with it, which is both
                 // instant and the only way to leave nothing behind.
                 self.overlay.stop();
-                let Some(profile_id) = self
-                    .binding_store
-                    .profiles
-                    .get(index)
-                    .map(|profile| profile.id.clone())
-                else {
+                // Resolved against the roster the wheel was actually showing,
+                // not the live store: an external edit can reorder the store
+                // between the publish and the press, and an index into the
+                // wrong list would silently apply the wrong profile.
+                let Some(profile_id) = self.picker_roster_ids.get(index).cloned() else {
                     eprintln!("level=warn event=profile_wheel_index_unknown index={index}");
                     return;
                 };
@@ -1683,7 +1738,9 @@ mod tests {
     }
 
     #[test]
-    fn a_hold_duration_the_menu_cannot_offer_falls_back_to_defaults() {
+    fn a_hold_duration_the_menu_cannot_offer_falls_back_alone() {
+        // A hand-edited hold must not take idle shutdown, the active profile,
+        // and the enablement down with it; only the bad field resets.
         let path = temporary_settings_path("overlay-bad-hold");
         fs::write(
             &path,
@@ -1691,8 +1748,10 @@ mod tests {
         )
         .unwrap();
         let (settings, warning) = load_settings(&path);
-        assert_eq!(settings, AppSettings::default());
-        assert!(warning.is_some());
+        assert!(warning.is_none());
+        assert_eq!(settings.profile_overlay_hold_ms, default_overlay_hold_ms());
+        assert!(settings.profile_overlay_enabled);
+        assert_eq!(settings.idle_shutdown_minutes, None);
         let _ = fs::remove_file(path);
     }
 

@@ -69,7 +69,14 @@ fn average_us(nanoseconds: u128, count: u64) -> f64 {
 pub enum ProcessOutcome {
     State {
         source: SteamControllerState,
+        /// What the game sees: the mapped state with any output suppression
+        /// applied. The dedupe, the metrics, and the recording all use this.
         mapped: GamepadState,
+        /// The mapped state before suppression: what the user is doing with
+        /// the controller. Activity tracking reads this, so operating the
+        /// profile wheel — which pins `mapped` at neutral — does not count as
+        /// idle time.
+        unsuppressed: GamepadState,
         sent: bool,
     },
     Status(DecodedReport),
@@ -223,6 +230,7 @@ impl BridgeEngine {
                 self.neutralized = false;
                 let mapping_started = Instant::now();
                 let mut mapped = self.mapper.map(&source, 0.004);
+                let unsuppressed = mapped;
                 if let Some(suppression) = self.suppression {
                     suppression.apply(&mut mapped);
                 }
@@ -240,6 +248,7 @@ impl BridgeEngine {
                 ProcessOutcome::State {
                     source,
                     mapped,
+                    unsuppressed,
                     sent,
                 }
             }

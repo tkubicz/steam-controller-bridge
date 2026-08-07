@@ -58,10 +58,9 @@ impl OverlayState {
                 self.active = active;
                 self.sectors_per_page = sectors_per_page.max(1);
             }
-            OverlayMessage::Open { selected, page } | OverlayMessage::Select { selected, page } => {
+            OverlayMessage::Open { selected, page } => {
                 self.open = Some((selected, page));
             }
-            OverlayMessage::Close => self.open = None,
         }
     }
 
@@ -73,9 +72,10 @@ impl OverlayState {
         (&self.names[start..end], start)
     }
 
+    /// Delegated to the picker so the two sides can never disagree on how a
+    /// roster splits into pages.
     fn page_count(&self) -> usize {
-        let per_page = self.sectors_per_page.max(1);
-        self.names.len().div_ceil(per_page).max(1)
+        profile_picker::page_count(self.names.len(), self.sectors_per_page)
     }
 }
 
@@ -154,7 +154,6 @@ fn spawn_stdin_reader(state: Arc<Mutex<OverlayState>>, ctx: egui::Context) {
         // run the frame that handles the request, and the overlay would outlive
         // its parent with a window still on screen. There is nothing to flush.
         eprintln!("level=info event=overlay_parent_closed action=exit");
-        let _ = &ctx;
         std::process::exit(0);
     });
 }
@@ -257,6 +256,12 @@ impl eframe::App for ProfileOverlay {
             }
             set_wheel_alpha(wheel);
             self.log_native_window = wheel;
+            if wheel {
+                // The diagnostics below run a frame late, and only stdin
+                // traffic causes frames — so ask for one, or a wheel that is
+                // opened and immediately committed logs nothing.
+                ui.ctx().request_repaint();
+            }
         }
         if change.order_in {
             // Ordered in through AppKit rather than `ViewportCommand::Visible`,
@@ -517,12 +522,14 @@ fn paint_wheel(painter: &egui::Painter, rect: egui::Rect, state: &OverlayState) 
     let Some((selected, page)) = state.open else {
         return;
     };
-    painter.rect_filled(rect, 0.0, SCRIM);
-    let center = rect.center();
     let (entries, offset) = state.page_entries(page);
     if entries.is_empty() {
+        // A roster update can outrun the picker's page clamp by one report;
+        // painting nothing beats dimming the game under a wheel-less scrim.
         return;
     }
+    painter.rect_filled(rect, 0.0, SCRIM);
+    let center = rect.center();
 
     let sectors = entries.len();
     let selected = selected.min(sectors - 1);
@@ -584,17 +591,25 @@ fn paint_wedge(
     sectors: usize,
     selected: bool,
 ) {
+    let radius = if selected {
+        WHEEL_RADIUS + 10.0
+    } else {
+        WHEEL_RADIUS
+    };
+    let fill = if selected { ACCENT } else { SURFACE_RAISED };
+    if sectors <= 1 {
+        // A lone entry — the short last page of a roster like 9-of-8 — owns
+        // the whole wheel. Its "wedge" swept nearly a full turn, which is not
+        // convex and mistessellates; a disc is the same shape drawn honestly.
+        painter.circle_filled(center, radius, fill);
+        return;
+    }
     let arc = std::f32::consts::TAU / sectors_as_f32(sectors);
     let middle = arc * sectors_as_f32(index);
     let (start, end) = (
         middle - arc / 2.0 + WEDGE_GAP,
         middle + arc / 2.0 - WEDGE_GAP,
     );
-    let radius = if selected {
-        WHEEL_RADIUS + 10.0
-    } else {
-        WHEEL_RADIUS
-    };
 
     // A pie wedge shares the centre, so it stays convex for any sector count of
     // two or more and tessellates correctly. The hub hides the apex afterwards.
@@ -606,7 +621,7 @@ fn paint_wedge(
     }
     painter.add(egui::Shape::convex_polygon(
         points,
-        if selected { ACCENT } else { SURFACE_RAISED },
+        fill,
         egui::Stroke::NONE,
     ));
 }
@@ -856,7 +871,8 @@ mod tests {
     }
 
     #[test]
-    fn open_and_close_drive_visibility() {
+    fn open_drives_visibility_and_moves_the_highlight() {
+        // There is no close message: a closed wheel is a killed process.
         let mut state = roster(4, 8);
         assert!(state.open.is_none());
         state.apply(OverlayMessage::Open {
@@ -864,13 +880,11 @@ mod tests {
             page: 0,
         });
         assert_eq!(state.open, Some((2, 0)));
-        state.apply(OverlayMessage::Select {
+        state.apply(OverlayMessage::Open {
             selected: 3,
             page: 0,
         });
         assert_eq!(state.open, Some((3, 0)));
-        state.apply(OverlayMessage::Close);
-        assert!(state.open.is_none());
     }
 
     #[test]

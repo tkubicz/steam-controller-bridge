@@ -6,7 +6,10 @@ mod macos;
 // Its unit tests therefore run on macOS only.
 #[cfg(target_os = "macos")]
 mod model;
-#[cfg(all(target_os = "macos", feature = "overlay"))]
+// The host side only manages the child process, so it is compiled even
+// without the `overlay` feature — a featureless build's child simply reports
+// that it cannot render and exits, the same degradation the editor gets.
+#[cfg(target_os = "macos")]
 mod overlay_host;
 #[cfg(target_os = "macos")]
 mod overlay_protocol;
