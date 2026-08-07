@@ -69,6 +69,19 @@ cooldown. Immediate Puck placement uses typed `0x43` charge state and a
 supervisor-level one-shot latch; it is not represented as a zero-minute idle
 timeout.
 
+System sleep is handled by the runtime, because the runtime owns the hardware
+handles: `BridgeHandle::suspend_for_sleep` parks the XIAO at neutral, closes
+the serial port and HID sessions, and acknowledges only once they are gone;
+`request_resume_from_wake` lets discovery run again after a two-second settle
+so the CDC interface can finish re-enumerating. Serial I/O left in flight
+across a sleep/wake transition has panicked macOS's USB CDC-ACM kext (a NULL
+dereference in `com.apple.driver.usb.cdc` about two seconds after wake, twice,
+while the XIAO re-enumerated under an open, pinging port), so every frontend
+that can observe sleep must call the pair — the exposure is identical whether
+`sc-bridge-menu` or the `sc-bridge` CLI is hosting the runtime. Suspension is
+orthogonal to start/stop: a bridge the user stopped stays stopped after wake,
+and a running one resumes on its own.
+
 The HID session uses a bounded 1,024-byte report buffer. Automatic discovery
 opens only exact official Puck and direct Bluetooth vendor collections by
 stable identity and selects the unique source producing complete state

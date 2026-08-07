@@ -60,6 +60,11 @@ pub use status_log::{
 use idle_shutdown::IdleActivityTracker;
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_millis(500);
+/// How long after a system wake before hardware discovery may reopen ports.
+/// The XIAO's CDC interface re-enumerates for a couple of seconds after a
+/// wake, and touching it mid-setup is the window the sleep suspension exists
+/// to stay out of.
+const WAKE_SETTLE_DELAY: Duration = Duration::from_secs(2);
 const MIN_STABLE_CONTROLLER_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_STABLE_CONTROLLER_SCAN_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_DISCOVERY_REPORTS_PER_CANDIDATE: usize = 4;
@@ -485,6 +490,10 @@ enum RuntimeCommand {
     EnableDesktopBindings(CommandAck),
     SetPickerConfig(Option<PickerConfig>, CommandAck),
     SetPickerRoster(PickerRoster, CommandAck),
+    /// Park the device and close every hardware handle ahead of system sleep.
+    SuspendForSleep(CommandAck),
+    /// Let discovery run again after a system wake.
+    ResumeFromWake(CommandAck),
 }
 
 /// Where picker events go. Called on the runtime thread, so it must not block.
@@ -626,6 +635,33 @@ impl BridgeHandle {
     /// Returns an error if the runtime thread has stopped.
     pub fn request_set_picker_roster(&self, roster: PickerRoster) -> Result<(), RuntimeError> {
         self.request(|ack| RuntimeCommand::SetPickerRoster(roster, ack))
+    }
+
+    /// Parks the controller at neutral, closes the serial port and HID
+    /// handles, and returns only once that teardown has completed.
+    ///
+    /// For the frontend's system-sleep hook. The port must be **closed before
+    /// the machine sleeps**: serial I/O left in flight across a sleep/wake
+    /// transition has panicked macOS's USB CDC driver while the XIAO
+    /// re-enumerated. The bridge stays suspended — regardless of its
+    /// start/stop setting — until [`BridgeHandle::request_resume_from_wake`].
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread stops or the teardown fails.
+    pub fn suspend_for_sleep(&self) -> Result<(), RuntimeError> {
+        self.command(RuntimeCommand::SuspendForSleep)
+    }
+
+    /// Lets the bridge look for its hardware again after a system wake.
+    ///
+    /// Discovery waits [`WAKE_SETTLE_DELAY`](self) first, so the USB stack has
+    /// time to finish re-enumerating the XIAO before anything reopens it. A
+    /// bridge the user had stopped stays stopped.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has stopped.
+    pub fn request_resume_from_wake(&self) -> Result<(), RuntimeError> {
+        self.request(RuntimeCommand::ResumeFromWake)
     }
 
     /// Requests an idempotent runtime start and waits until the request is accepted.
@@ -1889,6 +1925,11 @@ struct Supervisor {
     desktop_bindings: DesktopBindingsWorker,
     commands: Receiver<RuntimeCommand>,
     desired_running: bool,
+    /// System sleep is imminent or in progress: every hardware handle is
+    /// closed and stays closed, whatever `desired_running` says.
+    suspended: bool,
+    /// Hardware discovery holds off until this instant after a system wake.
+    wake_settle: Option<Instant>,
     shutdown_requested: bool,
     pending_stop_acks: Vec<CommandAck>,
     pending_shutdown_acks: Vec<CommandAck>,
@@ -1918,6 +1959,8 @@ impl Supervisor {
             desktop_bindings,
             commands,
             desired_running: true,
+            suspended: false,
+            wake_settle: None,
             shutdown_requested: false,
             pending_stop_acks: Vec::new(),
             pending_shutdown_acks: Vec::new(),
@@ -1953,15 +1996,29 @@ impl Supervisor {
                 acknowledge_all(&mut self.pending_stop_acks);
                 break;
             }
-            if !self.desired_running {
+            if !self.desired_running || self.suspended {
                 drop(retained_output.take());
                 self.clear_controller_discovery();
                 if self.current_state() != RuntimeState::Error {
-                    self.transition(RuntimeState::Stopped, "Bridge stopped", None);
+                    let detail = if self.suspended {
+                        "Suspended for system sleep"
+                    } else {
+                        "Bridge stopped"
+                    };
+                    self.transition(RuntimeState::Stopped, detail, None);
                 }
                 acknowledge_all(&mut self.pending_stop_acks);
                 self.wait_for_command();
                 continue;
+            }
+
+            if let Some(until) = self.wake_settle {
+                let now = Instant::now();
+                if now < until {
+                    self.wait_or_command(until.saturating_duration_since(now));
+                    continue;
+                }
+                self.wake_settle = None;
             }
 
             if !matches!(
@@ -2071,12 +2128,23 @@ impl Supervisor {
                     self.clear_hardware_status();
                     self.shutdown_requested = true;
                 }
+                Ok((ActiveExit::Suspended, _)) => {
+                    retained_output = None;
+                    self.clear_hardware_status();
+                    self.transition(RuntimeState::Stopped, "Suspended for system sleep", None);
+                }
                 Ok((ActiveExit::StoppedWithAck(ack), _)) => {
                     retained_output = None;
                     self.clear_hardware_status();
                     let _ = ack.send(Ok(()));
                     self.desired_running = false;
                     self.transition(RuntimeState::Stopped, "Bridge stopped", None);
+                }
+                Ok((ActiveExit::SuspendedWithAck(ack), _)) => {
+                    retained_output = None;
+                    self.clear_hardware_status();
+                    let _ = ack.send(Ok(()));
+                    self.transition(RuntimeState::Stopped, "Suspended for system sleep", None);
                 }
                 Ok((ActiveExit::ShutdownWithAck(ack), _)) => {
                     retained_output = None;
@@ -2862,6 +2930,21 @@ impl Supervisor {
                 self.clear_hardware_status();
                 self.pending_stop_acks.push(ack);
             }
+            RuntimeCommand::SuspendForSleep(ack) => {
+                self.suspended = true;
+                self.wake_settle = None;
+                self.transition(RuntimeState::Stopping, "Suspending for system sleep", None);
+                self.clear_hardware_status();
+                // Acknowledged with the stop acks, after every handle is gone.
+                self.pending_stop_acks.push(ack);
+            }
+            RuntimeCommand::ResumeFromWake(ack) => {
+                if self.suspended {
+                    self.suspended = false;
+                    self.wake_settle = Some(Instant::now() + WAKE_SETTLE_DELAY);
+                }
+                let _ = ack.send(Ok(()));
+            }
             RuntimeCommand::Shutdown(ack) => {
                 self.desired_running = false;
                 self.shutdown_requested = true;
@@ -2938,6 +3021,18 @@ impl Supervisor {
                     self.desired_running = false;
                     // The active loop acknowledges after its neutral-before-release cleanup.
                     return Some(ActiveExit::StoppedWithAck(ack));
+                }
+                RuntimeCommand::SuspendForSleep(ack) => {
+                    self.suspended = true;
+                    self.wake_settle = None;
+                    // Same cleanup as a stop: the device is parked at neutral
+                    // and every handle is closed before the ack lets the
+                    // caller's sleep handler return.
+                    return Some(ActiveExit::SuspendedWithAck(ack));
+                }
+                RuntimeCommand::ResumeFromWake(ack) => {
+                    // Already awake and running; nothing to resume.
+                    let _ = ack.send(Ok(()));
                 }
                 RuntimeCommand::Shutdown(ack) => {
                     self.desired_running = false;
@@ -3493,8 +3588,10 @@ enum ActiveExit {
     },
     Stopped,
     Shutdown,
+    Suspended,
     StoppedWithAck(CommandAck),
     ShutdownWithAck(CommandAck),
+    SuspendedWithAck(CommandAck),
 }
 
 impl ActiveExit {
@@ -3507,6 +3604,10 @@ impl ActiveExit {
             Self::ShutdownWithAck(ack) => {
                 let _ = ack.send(desktop_result);
                 Self::Shutdown
+            }
+            Self::SuspendedWithAck(ack) => {
+                let _ = ack.send(desktop_result);
+                Self::Suspended
             }
             other => {
                 if let Err(error) = desktop_result {
