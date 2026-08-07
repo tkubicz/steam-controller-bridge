@@ -1084,6 +1084,10 @@ impl DesktopBindingsRuntime {
         }
     }
 
+    fn needs_tick(&self) -> bool {
+        self.sink.is_some() && self.engine.as_ref().is_some_and(BindingEngine::needs_tick)
+    }
+
     fn take_discard_pending_feedback(&mut self) -> bool {
         std::mem::take(&mut self.discard_pending_feedback)
     }
@@ -1398,17 +1402,27 @@ impl DesktopWorkerMailbox {
         Ok(())
     }
 
-    fn take_batch(&self, timeout: Duration) -> VecDeque<DesktopWorkerMessage> {
+    fn take_batch(&self, timeout: Option<Duration>) -> VecDeque<DesktopWorkerMessage> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.messages.is_empty() && state.accepting {
-            let (returned, _) = self
-                .wake
-                .wait_timeout(state, timeout)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state = returned;
+            state = match timeout {
+                Some(timeout) => {
+                    let (returned, _) = self
+                        .wake
+                        .wait_timeout_while(state, timeout, |state| {
+                            state.messages.is_empty() && state.accepting
+                        })
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    returned
+                }
+                None => self
+                    .wake
+                    .wait_while(state, |state| state.messages.is_empty() && state.accepting)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            };
         }
         state.snapshot_count = 0;
         state.previous_transition_mask = None;
@@ -1722,7 +1736,8 @@ fn run_desktop_bindings_worker(
     let mut shutdown = false;
     let mut applied_generation = mailbox.generation();
     while !shutdown {
-        let messages = mailbox.take_batch(RUNTIME_POLL_INTERVAL);
+        let timeout = runtime.needs_tick().then_some(RUNTIME_POLL_INTERVAL);
+        let messages = mailbox.take_batch(timeout);
         for message in messages {
             match message {
                 DesktopWorkerMessage::Snapshot(snapshot) => {
@@ -1781,7 +1796,7 @@ fn run_desktop_bindings_worker(
                 break;
             }
         }
-        if !shutdown {
+        if !shutdown && runtime.needs_tick() {
             runtime.tick(started.elapsed());
             if runtime.take_discard_pending_feedback() {
                 outputs.discard_feedback();
@@ -4884,7 +4899,7 @@ mod tests {
             DesktopSnapshotPublish::Published
         );
 
-        let messages = mailbox.take_batch(Duration::ZERO);
+        let messages = mailbox.take_batch(Some(Duration::ZERO));
         let snapshots = messages
             .into_iter()
             .map(|message| match message {
@@ -4937,7 +4952,7 @@ mod tests {
             DesktopSnapshotPublish::Overflowed
         );
 
-        let mut messages = mailbox.take_batch(Duration::ZERO);
+        let mut messages = mailbox.take_batch(Some(Duration::ZERO));
         assert!(matches!(
             messages.pop_front(),
             Some(DesktopWorkerMessage::ReplaceProfile { .. })
@@ -4991,6 +5006,40 @@ mod tests {
         );
         assert!(!recovered.discard_pending_feedback);
         assert_eq!(outputs.take().feedback, PadFeedbackRequest::NONE);
+    }
+
+    #[test]
+    fn desktop_worker_mailbox_waits_indefinitely_until_work_arrives() {
+        let mailbox = Arc::new(DesktopWorkerMailbox::default());
+        let worker_mailbox = Arc::clone(&mailbox);
+        let outputs = DesktopWorkerOutputs::default();
+        let (started, started_receiver) = mpsc::channel();
+        let (completed, completed_receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            started.send(()).unwrap();
+            let messages = worker_mailbox.take_batch(None);
+            completed.send(messages.len()).unwrap();
+        });
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+
+        thread::sleep(RUNTIME_POLL_INTERVAL * 3);
+        assert!(matches!(
+            completed_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        assert!(mailbox
+            .push_control(&outputs, DesktopWorkerMessage::Enable { ack: None }, false)
+            .is_ok());
+        assert_eq!(
+            completed_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap(),
+            1
+        );
+        handle.join().unwrap();
     }
 
     struct FakeDiscoverySession {
@@ -6345,10 +6394,13 @@ mod tests {
             ..desktop_snapshot(steam_controller_protocol::SteamButtons::default())
         };
 
+        assert!(!bindings.needs_tick());
         let _ = bindings.observe(snapshot(0, false), Duration::ZERO);
         let _ = bindings.observe(snapshot(0, true), Duration::from_millis(1));
         let _ = bindings.observe(snapshot(768, true), Duration::from_millis(21));
+        assert!(!bindings.needs_tick());
         let _ = bindings.observe(snapshot(0, false), Duration::from_millis(22));
+        assert!(bindings.needs_tick());
         bindings.tick(Duration::from_millis(72));
 
         assert_eq!(

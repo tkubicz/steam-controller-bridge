@@ -995,6 +995,21 @@ impl BindingEngine {
         self.key_counts.len() + self.mouse_counts.len()
     }
 
+    /// Reports whether time-based output must continue without a new snapshot.
+    ///
+    /// Callers may sleep indefinitely while this is false because button and
+    /// direct pad output are entirely snapshot-driven. It becomes true only
+    /// while released left-pad scroll momentum still needs periodic ticks.
+    #[must_use]
+    pub fn needs_tick(&self) -> bool {
+        self.previous_mask.is_some()
+            && !self.left_pad.touched
+            && !self.left_pad.blocked
+            && self.profile.pads.left_scroll.enabled
+            && self.profile.pads.left_scroll.momentum
+            && self.left_pad.scroll_last_update.is_some()
+    }
+
     /// Observes a button-only snapshot and emits its binding edges.
     ///
     /// The first snapshot is a non-emitting baseline. Any sink error triggers a
@@ -1078,12 +1093,7 @@ impl BindingEngine {
     /// # Errors
     /// Returns a desktop-input injection failure after clearing pending motion.
     pub fn tick(&mut self, now: Duration, sink: &mut dyn DesktopInputSink) -> Result<(), String> {
-        if self.previous_mask.is_none()
-            || self.left_pad.touched
-            || self.left_pad.blocked
-            || !self.profile.pads.left_scroll.enabled
-            || !self.profile.pads.left_scroll.momentum
-        {
+        if !self.needs_tick() {
             return Ok(());
         }
         if let Err(error) = advance_scroll_momentum(&mut self.left_pad, now, sink) {
@@ -2691,6 +2701,81 @@ mod tests {
             .skip(1)
             .all(|event| event.starts_with("scroll:")));
         assert_eq!(with_momentum.last(), Some(&"scroll:1:0".to_owned()));
+    }
+
+    #[test]
+    fn ticks_are_needed_only_while_released_scroll_momentum_is_pending() {
+        let mut profile = BindingProfile::default();
+        profile.pads.left_scroll.enabled = true;
+        profile.pads.left_scroll.feedback.enabled = false;
+        let mut engine = BindingEngine::new(profile);
+        let mut sink = MockSink::default();
+        let neutral = SteamButtons::default();
+
+        assert!(!engine.needs_tick());
+        engine
+            .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
+            .unwrap();
+        assert!(!engine.needs_tick());
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, Some((0, 0)), None),
+                Duration::from_millis(1),
+                &mut sink,
+            )
+            .unwrap();
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, Some((768, 0)), None),
+                Duration::from_millis(21),
+                &mut sink,
+            )
+            .unwrap();
+        assert!(!engine.needs_tick());
+
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, None),
+                Duration::from_millis(22),
+                &mut sink,
+            )
+            .unwrap();
+        assert!(engine.needs_tick());
+
+        for time_ms in (32..=2_032).step_by(10) {
+            engine
+                .tick(Duration::from_millis(time_ms), &mut sink)
+                .unwrap();
+            if !engine.needs_tick() {
+                break;
+            }
+        }
+        assert!(!engine.needs_tick());
+
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, Some((0, 0)), None),
+                Duration::from_millis(2_101),
+                &mut sink,
+            )
+            .unwrap();
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, Some((768, 0)), None),
+                Duration::from_millis(2_121),
+                &mut sink,
+            )
+            .unwrap();
+        engine
+            .observe_snapshot(
+                pad_snapshot(neutral, None, None),
+                Duration::from_millis(2_122),
+                &mut sink,
+            )
+            .unwrap();
+        assert!(engine.needs_tick());
+        engine.disconnect(&mut sink).unwrap();
+        assert!(!engine.needs_tick());
     }
 
     #[test]
