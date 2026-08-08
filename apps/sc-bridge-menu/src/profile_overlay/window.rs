@@ -1,5 +1,5 @@
 use super::{
-    MainThreadMarker, NSApplication, NSEvent, NSPopUpMenuWindowLevel, NSScreen, NSWindow,
+    MainThreadMarker, NSApplication, NSEvent, NSScreen, NSScreenSaverWindowLevel, NSWindow,
     NSWindowCollectionBehavior, OnceLock, Retained, OVERLAY_WINDOW_TITLE,
 };
 
@@ -34,7 +34,7 @@ pub(super) fn configure_native_window() {
         return;
     };
     let _ = CONFIGURED.set(());
-    window.setLevel(NSPopUpMenuWindowLevel);
+    window.setLevel(overlay_window_level());
     window.setCollectionBehavior(
         // `CanJoinAllSpaces` puts the wheel on whatever Space the game is on,
         // and `FullScreenAuxiliary` lets it coexist with a fullscreen window
@@ -50,6 +50,15 @@ pub(super) fn configure_native_window() {
     // wheel opens. See `Presentation` for why it is not simply kept hidden.
     window.setAlphaValue(0.0);
     eprintln!("level=info event=overlay_window_configured");
+}
+
+/// Sits one layer above applications that present games at screen-saver level.
+///
+/// Ordinary fullscreen windows remain at the normal level, but Boosteroid uses
+/// `NSScreenSaverWindowLevel` (1000) for its streaming surface. A pop-up-menu
+/// window (101) is therefore ordered correctly but still hidden behind it.
+pub(super) fn overlay_window_level() -> isize {
+    NSScreenSaverWindowLevel + 1
 }
 
 /// Shows or hides the wheel without ordering the window out.

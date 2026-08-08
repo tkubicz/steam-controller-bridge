@@ -199,6 +199,13 @@ impl MenuApp {
         }
     }
 
+    pub(super) fn flush_overlay_diagnostics(&mut self) {
+        let diagnostics = self.overlay.drain_diagnostics();
+        if let Err(error) = self.logger.write_diagnostics(&diagnostics) {
+            eprintln!("cannot write overlay diagnostics: {error}");
+        }
+    }
+
     /// Tears the overlay down when it can no longer be wanted.
     ///
     /// Starting is driven entirely by the wheel's own events, so this never

@@ -416,6 +416,7 @@ impl MenuApp {
         }
         self.shutting_down = true;
         self.overlay.stop();
+        self.flush_overlay_diagnostics();
         if let Some(mut child) = self.about_child.take() {
             let _ = child.kill();
             let _ = child.wait();
