@@ -11,7 +11,16 @@ pub const XIAO_USB_VENDOR_ID: u16 = 0x045e;
 pub const XIAO_USB_PRODUCT_ID: u16 = 0x028e;
 pub const XIAO_USB_MANUFACTURER: &str = "Lynxware";
 pub const XIAO_USB_PRODUCT: &str = "Steam Controller Bridge";
+/// Oldest firmware revision the host considers current. Hand-maintained:
+/// raise it only when the bridge depends on newer firmware behavior, so a
+/// working older board is not nagged to reflash after app-only releases.
+pub const MINIMUM_FIRMWARE_REVISION: u16 = 1;
+/// How long after Ready the firmware gets to deliver its `DeviceInfo` report
+/// before the connection is classified as pre-versioning firmware.
+const FIRMWARE_REPORT_GRACE: Duration = Duration::from_secs(2);
+const DEVICE_INFO_FORMAT: u8 = 1;
 const SERIAL_SERVICE_MIN_INTERVAL: Duration = Duration::from_millis(10);
+const HANDSHAKE_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialDeviceInfo {
@@ -77,6 +86,55 @@ pub enum SerialStatus {
     Ready,
     Unhealthy,
     Disconnected,
+}
+
+/// What the firmware has reported about itself on this connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FirmwareVersion {
+    /// Still inside the post-handshake reporting grace window.
+    #[default]
+    Pending,
+    /// The firmware's hand-maintained monotonic revision.
+    Reported(u16),
+    /// A device-info report arrived in a format this build does not
+    /// understand — firmware newer than the host, never a firmware-update
+    /// recommendation.
+    UnsupportedFormat(u8),
+    /// A report used the current format but omitted required fields.
+    Malformed,
+    /// The grace window elapsed without a report: the firmware predates
+    /// version reporting.
+    Unreported,
+}
+
+impl FirmwareVersion {
+    #[must_use]
+    pub const fn revision(self) -> Option<u16> {
+        match self {
+            Self::Reported(revision) => Some(revision),
+            Self::Pending | Self::UnsupportedFormat(_) | Self::Malformed | Self::Unreported => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn update_recommended(self) -> bool {
+        match self {
+            Self::Unreported | Self::Malformed => true,
+            Self::Reported(revision) => revision < MINIMUM_FIRMWARE_REVISION,
+            Self::Pending | Self::UnsupportedFormat(_) => false,
+        }
+    }
+}
+
+fn parse_device_info(payload: &[u8]) -> FirmwareVersion {
+    match payload {
+        // Trailing bytes are future extensions and deliberately ignored.
+        [DEVICE_INFO_FORMAT, low, high, ..] => {
+            FirmwareVersion::Reported(u16::from_le_bytes([*low, *high]))
+        }
+        [DEVICE_INFO_FORMAT, ..] | [] => FirmwareVersion::Malformed,
+        [format, ..] => FirmwareVersion::UnsupportedFormat(*format),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -152,6 +210,8 @@ pub struct SerialConnection<T> {
     last_state: Option<GamepadState>,
     last_state_sent: Option<Duration>,
     pending_feedback: Option<OutputFeedback>,
+    ready_at: Option<Duration>,
+    firmware: FirmwareVersion,
     metrics: SerialMetrics,
 }
 
@@ -183,6 +243,8 @@ impl<T: ByteTransport> SerialConnection<T> {
             last_state: None,
             last_state_sent: None,
             pending_feedback: None,
+            ready_at: None,
+            firmware: FirmwareVersion::default(),
             metrics: SerialMetrics::default(),
         };
         connection.write_message(Message::Hello {
@@ -195,6 +257,10 @@ impl<T: ByteTransport> SerialConnection<T> {
     #[must_use]
     pub const fn status(&self) -> SerialStatus {
         self.status
+    }
+    #[must_use]
+    pub const fn firmware(&self) -> FirmwareVersion {
+        self.firmware
     }
     #[must_use]
     pub const fn metrics(&self) -> SerialMetrics {
@@ -238,7 +304,7 @@ impl<T: ByteTransport> SerialConnection<T> {
                     match decoded {
                         Ok(frame) => {
                             self.metrics.packets_received += 1;
-                            self.handle_message(&frame.message)?;
+                            self.handle_message(&frame.message, now)?;
                         }
                         Err(error) => {
                             self.metrics.framing_failures += 1;
@@ -267,6 +333,13 @@ impl<T: ByteTransport> SerialConnection<T> {
         {
             self.status = SerialStatus::Disconnected;
             return Err(SerialError::HandshakeTimeout);
+        }
+        if self.firmware == FirmwareVersion::Pending && self.status == SerialStatus::Ready {
+            if let Some(ready_at) = self.ready_at {
+                if now.saturating_sub(ready_at) >= FIRMWARE_REPORT_GRACE {
+                    self.firmware = FirmwareVersion::Unreported;
+                }
+            }
         }
         if let Some((_, sent)) = self.pending_ping {
             if now.saturating_sub(sent) >= self.config.pong_timeout {
@@ -313,12 +386,13 @@ impl<T: ByteTransport> SerialConnection<T> {
         self.write_message(Message::Neutral)
     }
 
-    fn handle_message(&mut self, message: &Message) -> Result<(), SerialError> {
+    fn handle_message(&mut self, message: &Message, now: Duration) -> Result<(), SerialError> {
         match message {
             Message::HelloResponse { selected_version }
                 if *selected_version == PROTOCOL_VERSION =>
             {
                 self.status = SerialStatus::Ready;
+                self.ready_at = Some(now);
             }
             Message::HelloResponse { selected_version } => {
                 self.status = SerialStatus::Disconnected;
@@ -331,6 +405,9 @@ impl<T: ByteTransport> SerialConnection<T> {
                     .is_some_and(|(expected, _)| expected == *nonce) =>
             {
                 self.pending_ping = None;
+            }
+            Message::DeviceInfo(payload) => {
+                self.firmware = parse_device_info(payload);
             }
             Message::Rumble {
                 low_frequency,
@@ -509,6 +586,12 @@ impl SerialOutput {
             SerialConnection::new(NativeTransport(port), self.config, Duration::ZERO)?;
         while connection.status() == SerialStatus::Handshaking {
             connection.poll(self.clock.elapsed())?;
+            if connection.status() == SerialStatus::Handshaking {
+                // NativeTransport deliberately avoids a blocking read during
+                // normal service. Yield here so an unresponsive exact-match
+                // device cannot spin a core for the handshake timeout.
+                std::thread::sleep(HANDSHAKE_POLL_INTERVAL);
+            }
         }
         if let Some(state) = self.desired_state {
             connection.queue_state(state)?;
@@ -598,6 +681,10 @@ impl GamepadOutput for SerialOutput {
         self.connection
             .as_mut()
             .and_then(SerialConnection::take_feedback)
+    }
+
+    fn firmware_version(&self) -> Option<FirmwareVersion> {
+        self.connection.as_ref().map(SerialConnection::firmware)
     }
 
     fn diagnostics(&self) -> OutputDiagnostics {
@@ -932,6 +1019,105 @@ mod tests {
             2
         );
         assert!(matches!(sent.last(), Some(Message::Neutral)));
+    }
+
+    #[test]
+    fn firmware_reports_parse_and_tolerate_trailing_bytes() {
+        let transport = MockTransport {
+            reads: VecDeque::from([
+                response(Message::HelloResponse {
+                    selected_version: 1,
+                }),
+                response(Message::DeviceInfo(vec![1, 3, 0])),
+            ]),
+            writes: Vec::new(),
+        };
+        let mut connection =
+            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+        assert_eq!(connection.firmware(), FirmwareVersion::Pending);
+        connection.poll(Duration::ZERO).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        assert_eq!(connection.firmware(), FirmwareVersion::Reported(3));
+        assert_eq!(connection.firmware().revision(), Some(3));
+        assert!(!connection.firmware().update_recommended());
+
+        assert_eq!(
+            parse_device_info(&[1, 7, 1, 0xaa, 0xbb]),
+            FirmwareVersion::Reported(263)
+        );
+    }
+
+    #[test]
+    fn unsupported_and_malformed_device_info_remain_distinct() {
+        assert_eq!(
+            parse_device_info(&[2, 9, 9]),
+            FirmwareVersion::UnsupportedFormat(2)
+        );
+        assert_eq!(
+            parse_device_info(&[2]),
+            FirmwareVersion::UnsupportedFormat(2)
+        );
+        assert_eq!(parse_device_info(&[1]), FirmwareVersion::Malformed);
+        assert_eq!(parse_device_info(&[]), FirmwareVersion::Malformed);
+        assert!(!FirmwareVersion::UnsupportedFormat(2).update_recommended());
+        assert!(FirmwareVersion::Malformed.update_recommended());
+        assert!(!FirmwareVersion::Pending.update_recommended());
+    }
+
+    #[test]
+    fn silence_after_ready_becomes_unreported_only_past_the_grace() {
+        let transport = MockTransport {
+            reads: VecDeque::from([response(Message::HelloResponse {
+                selected_version: 1,
+            })]),
+            writes: Vec::new(),
+        };
+        let mut connection =
+            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+        // The grace clock starts at Ready, not at connection creation.
+        connection.poll(Duration::from_millis(500)).unwrap();
+        assert_eq!(connection.firmware(), FirmwareVersion::Pending);
+        connection
+            .poll(Duration::from_millis(499) + FIRMWARE_REPORT_GRACE)
+            .unwrap();
+        assert_eq!(connection.firmware(), FirmwareVersion::Pending);
+        connection
+            .poll(Duration::from_millis(500) + FIRMWARE_REPORT_GRACE)
+            .unwrap();
+        assert_eq!(connection.firmware(), FirmwareVersion::Unreported);
+        assert!(connection.firmware().update_recommended());
+    }
+
+    #[test]
+    fn a_late_report_replaces_unreported() {
+        let transport = MockTransport {
+            reads: VecDeque::from([response(Message::HelloResponse {
+                selected_version: 1,
+            })]),
+            writes: Vec::new(),
+        };
+        let mut connection =
+            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        connection.poll(FIRMWARE_REPORT_GRACE).unwrap();
+        assert_eq!(connection.firmware(), FirmwareVersion::Unreported);
+        connection
+            .transport
+            .reads
+            .push_back(response(Message::DeviceInfo(vec![1, 2, 0])));
+        connection.poll(FIRMWARE_REPORT_GRACE).unwrap();
+        assert_eq!(connection.firmware(), FirmwareVersion::Reported(2));
+    }
+
+    #[test]
+    fn the_minimum_revision_bounds_the_update_recommendation() {
+        assert!(
+            FirmwareVersion::Reported(MINIMUM_FIRMWARE_REVISION.saturating_sub(1))
+                .update_recommended()
+                || MINIMUM_FIRMWARE_REVISION == 0
+        );
+        assert!(!FirmwareVersion::Reported(MINIMUM_FIRMWARE_REVISION).update_recommended());
+        assert!(!FirmwareVersion::Reported(MINIMUM_FIRMWARE_REVISION + 1).update_recommended());
     }
 
     #[test]

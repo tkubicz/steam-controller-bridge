@@ -4,6 +4,7 @@
 //! serial failures are separate columns on purpose: folding them into one
 //! "errors" figure is what made the old display impossible to act on.
 
+use bridge_output::{FirmwareVersion, GamepadOutput};
 use eframe::egui;
 
 use crate::{OutputChoice, Visualizer};
@@ -61,6 +62,31 @@ impl Visualizer {
                     diagnostic_cell(ui, "State refreshes", metrics.state_refreshes);
                     diagnostic_cell(ui, "Rumble received", metrics.rumble_commands_received);
                     diagnostic_cell(ui, "Rumble coalesced", metrics.rumble_commands_coalesced);
+                }
+                if let Some(firmware) = self
+                    .serial
+                    .as_ref()
+                    .and_then(GamepadOutput::firmware_version)
+                {
+                    match firmware {
+                        FirmwareVersion::Reported(revision) => {
+                            diagnostic_cell(ui, "Firmware", format_args!("rev {revision}"));
+                        }
+                        FirmwareVersion::Pending => diagnostic_cell(ui, "Firmware", "pending"),
+                        FirmwareVersion::Unreported => {
+                            diagnostic_cell(ui, "Firmware", "unreported");
+                        }
+                        FirmwareVersion::UnsupportedFormat(format) => {
+                            diagnostic_cell(
+                                ui,
+                                "Firmware",
+                                format_args!("unsupported format {format}"),
+                            );
+                        }
+                        FirmwareVersion::Malformed => {
+                            diagnostic_cell(ui, "Firmware", "malformed");
+                        }
+                    }
                 }
             }
         });

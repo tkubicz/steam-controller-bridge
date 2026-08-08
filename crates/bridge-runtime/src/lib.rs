@@ -33,6 +33,9 @@ pub(crate) use desktop::{
 pub(crate) use picker::PickerRuntime;
 pub(crate) use runtime::{picker_status, CommandAck, RuntimeCommand};
 pub use runtime::{BridgeHandle, BridgeRuntime, PickerEventSink};
+// Re-exported so frontends can render firmware status without depending on
+// bridge-output directly.
+pub use bridge_output::{FirmwareVersion, MINIMUM_FIRMWARE_REVISION};
 pub(crate) use supervisor::Supervisor;
 #[cfg(test)]
 #[allow(clippy::wildcard_imports)]

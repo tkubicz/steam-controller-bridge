@@ -26,11 +26,31 @@ The CRC is CRC-16/CCITT-FALSE with polynomial `0x1021`, initial value `0xffff`, 
 | 4 | Neutral | empty |
 | 5 | Ping | nonce `u32` |
 | 6 | Pong | nonce `u32` |
-| 7 | DeviceInfo | implementation-defined bytes, at most 256 |
+| 7 | DeviceInfo | device-info payload below, at most 256 bytes |
 | 8 | Rumble | low-frequency `u16`, high-frequency `u16` |
 | 255 | Error | code `u16`, followed by optional detail bytes |
 
 Unknown message type values are returned as opaque messages so newer messages can be ignored safely. Known messages with invalid lengths are rejected. Frames whose protocol version is not exactly 1 are rejected; version range selection happens through `Hello` before ordinary traffic.
+
+## Device info payload
+
+Firmware sends one `DeviceInfo` frame to the host after every successful Hello
+negotiation, retried until the CDC transmit queue accepts it. `DeviceInfo` is
+the one deliberately length-agnostic message: hosts and firmware that predate
+it ignore it entirely, so both legacy pairings stay compatible.
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 1 | Device-info format, currently `1` |
+| 1 | 2 | Firmware revision, `u16` little-endian, hand-maintained monotonic |
+
+Receivers accept payloads longer than three bytes and ignore the trailing
+bytes, so fields can be appended without a format bump. An unknown format byte
+is classified as firmware newer than the host and is never treated as
+outdated. A current-format payload shorter than three bytes is malformed and
+prompts a reflash instead of being mistaken for a future format. Firmware that
+never sends `DeviceInfo` predates version reporting and is reported as such
+after a short host-side grace period.
 
 ## Gamepad state payload
 

@@ -335,6 +335,25 @@ fn menu_logger_writes_periodic_snapshots_without_a_revision_change() {
 }
 
 #[test]
+fn menu_logger_writes_overlay_diagnostics_with_timestamps() {
+    let path = temporary_log_path("overlay-diagnostics");
+    let _ = fs::remove_file(&path);
+    let mut logger = test_logger(path.clone());
+    logger
+        .write_diagnostics(&[
+            "level=info event=profile_overlay_started".to_owned(),
+            "level=info event=overlay_window_shown level=1001".to_owned(),
+        ])
+        .unwrap();
+
+    let text = fs::read_to_string(&path).unwrap();
+    assert_eq!(text.matches("timestamp=").count(), 2);
+    assert!(text.contains("event=profile_overlay_started"));
+    assert!(text.contains("event=overlay_window_shown level=1001"));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn rotation_keeps_an_error_change_and_snapshot_in_the_same_file() {
     let path = temporary_log_path("rotation");
     let rotated = path.with_extension("log.1");
@@ -448,6 +467,7 @@ fn diagnostics_never_expose_a_whole_device_serial() {
             path: Some("/dev/cu.usbmodem11201".to_owned()),
             usb_serial: Some("5E6EF905E5468F85".to_owned()),
             handshake_complete: true,
+            firmware: bridge_runtime::FirmwareVersion::Reported(1),
         },
         ..BridgeStatus::default()
     });

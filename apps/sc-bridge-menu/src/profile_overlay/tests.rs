@@ -1,5 +1,5 @@
 use super::wheel::point_on_wheel;
-use super::window::{choose_screen, index_of_frame, screen_containing, Rect};
+use super::window::{choose_screen, index_of_frame, overlay_window_level, screen_containing, Rect};
 use super::*;
 
 fn roster(count: usize, sectors_per_page: usize) -> OverlayState {
@@ -16,6 +16,12 @@ fn roster(count: usize, sectors_per_page: usize) -> OverlayState {
 /// second at a negative origin -- the case that breaks any code assuming
 /// screen coordinates start at zero.
 const LEFT_OF_PRIMARY: [Rect; 2] = [(0.0, 0.0, 2560.0, 1440.0), (-1920.0, 0.0, 1920.0, 1080.0)];
+
+#[test]
+fn the_overlay_clears_screen_saver_level_game_windows() {
+    assert_eq!(overlay_window_level(), NSScreenSaverWindowLevel + 1);
+    assert!(overlay_window_level() > NSScreenSaverWindowLevel);
+}
 
 #[test]
 fn a_point_resolves_to_the_screen_it_falls_in() {

@@ -108,6 +108,7 @@ struct MenuItems {
     input: MenuItem,
     controller: MenuItem,
     xiao: MenuItem,
+    firmware: MenuItem,
     battery: MenuItem,
     haptics: MenuItem,
     bindings: MenuItem,
@@ -305,6 +306,7 @@ impl ApplicationHandler for MenuApp {
         // Also drained here so a wake-up that arrives between passes is never
         // left sitting in the channel.
         self.drain_picker_events();
+        self.flush_overlay_diagnostics();
         if Instant::now() >= self.next_poll {
             if self.picker_roster_dirty {
                 // A publish the runtime failed to acknowledge left the wheel

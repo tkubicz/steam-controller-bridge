@@ -11,7 +11,8 @@ use eframe::egui;
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
-    NSApplication, NSEvent, NSPopUpMenuWindowLevel, NSScreen, NSWindow, NSWindowCollectionBehavior,
+    NSApplication, NSEvent, NSScreen, NSScreenSaverWindowLevel, NSWindow,
+    NSWindowCollectionBehavior,
 };
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 

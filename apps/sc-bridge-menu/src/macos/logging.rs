@@ -63,7 +63,25 @@ impl StatusLogger {
         for record in records {
             let _ = writeln!(batch, "timestamp={timestamp} {record}");
         }
-        let batch = bounded_log_batch(batch);
+        self.write_batch(&batch)
+    }
+
+    pub(super) fn write_diagnostics(&mut self, diagnostics: &[String]) -> Result<(), String> {
+        if diagnostics.is_empty() {
+            return Ok(());
+        }
+        let timestamp = unix_timestamp();
+        let mut batch = String::new();
+        for diagnostic in diagnostics {
+            let _ = writeln!(batch, "timestamp={timestamp} {diagnostic}");
+        }
+        self.write_batch(&batch)
+    }
+
+    fn write_batch(&mut self, batch: &str) -> Result<(), String> {
+        let mut combined = self.pending_batch.take().unwrap_or_default();
+        combined.push_str(batch);
+        let batch = bounded_log_batch(combined);
         if let Err(error) = write_log_batch(&self.path, &batch) {
             self.pending_batch = Some(batch);
             return Err(error);
@@ -72,14 +90,10 @@ impl StatusLogger {
     }
 
     pub(super) fn flush_pending(&mut self) -> Result<(), String> {
-        let Some(batch) = self.pending_batch.take() else {
+        if self.pending_batch.is_none() {
             return Ok(());
-        };
-        if let Err(error) = write_log_batch(&self.path, &batch) {
-            self.pending_batch = Some(batch);
-            return Err(error);
         }
-        Ok(())
+        self.write_batch("")
     }
 }
 

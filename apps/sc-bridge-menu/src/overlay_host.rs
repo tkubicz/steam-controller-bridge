@@ -7,9 +7,9 @@
 //! game's Space is not free to the compositor, and the wheel is up for a few
 //! seconds at a time, so it does not get to exist the rest of the time.
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,10 @@ const RELAUNCH_BACKOFF: Duration = Duration::from_secs(5);
 /// loop — the case the writer thread exists to keep off the main thread.
 const WRITER_QUEUE_CAPACITY: usize = 64;
 
+/// Overlay diagnostics are sparse, but the child is still a separate process
+/// and must not be able to grow the menu app's memory without bound.
+const DIAGNOSTIC_QUEUE_CAPACITY: usize = 256;
+
 /// Owns the pipe to the child so the main thread never blocks on it.
 ///
 /// A pipe write blocks once the kernel buffer fills, and the child only starts
@@ -35,7 +39,7 @@ struct OverlayWriter {
 }
 
 impl OverlayWriter {
-    fn new(mut stdin: std::process::ChildStdin) -> Self {
+    fn new(mut stdin: std::process::ChildStdin, diagnostics: SyncSender<String>) -> Self {
         let (sender, receiver) = std::sync::mpsc::sync_channel::<String>(WRITER_QUEUE_CAPACITY);
         let thread = std::thread::spawn(move || {
             while let Ok(line) = receiver.recv() {
@@ -43,7 +47,9 @@ impl OverlayWriter {
                     .write_all(line.as_bytes())
                     .and_then(|()| stdin.flush())
                 {
-                    eprintln!("level=warn event=profile_overlay_write_failed error={error:?}");
+                    let _ = diagnostics.try_send(format!(
+                        "level=warn event=profile_overlay_write_failed error={error:?}"
+                    ));
                     return;
                 }
             }
@@ -55,15 +61,34 @@ impl OverlayWriter {
     }
 }
 
-#[derive(Default)]
 pub struct OverlayHost {
     child: Option<Child>,
     writer: Option<OverlayWriter>,
+    stderr_thread: Option<JoinHandle<()>>,
     /// Replayed to a freshly started child so it knows what to draw.
     roster: Option<OverlayMessage>,
     /// Whether the wheel was open when the child last went away.
     open: Option<OverlayMessage>,
     next_launch: Option<Instant>,
+    diagnostic_sender: SyncSender<String>,
+    diagnostic_receiver: Receiver<String>,
+}
+
+impl Default for OverlayHost {
+    fn default() -> Self {
+        let (diagnostic_sender, diagnostic_receiver) =
+            std::sync::mpsc::sync_channel(DIAGNOSTIC_QUEUE_CAPACITY);
+        Self {
+            child: None,
+            writer: None,
+            stderr_thread: None,
+            roster: None,
+            open: None,
+            next_launch: None,
+            diagnostic_sender,
+            diagnostic_receiver,
+        }
+    }
 }
 
 impl OverlayHost {
@@ -105,7 +130,7 @@ impl OverlayHost {
         match self.spawn() {
             Ok(()) => {
                 self.next_launch = None;
-                eprintln!("level=info event=profile_overlay_started");
+                self.record_diagnostic("level=info event=profile_overlay_started");
                 // A child that replaced a crashed one has to be told what the
                 // world looks like before it can draw anything.
                 if let Some(roster) = self.roster.clone() {
@@ -119,7 +144,9 @@ impl OverlayHost {
             }
             Err(error) => {
                 self.next_launch = Some(Instant::now() + RELAUNCH_BACKOFF);
-                eprintln!("level=warn event=profile_overlay_start_failed error={error:?}");
+                self.record_diagnostic(format!(
+                    "level=warn event=profile_overlay_start_failed error={error:?}"
+                ));
             }
         }
     }
@@ -128,7 +155,7 @@ impl OverlayHost {
     pub fn stop(&mut self) {
         self.open = None;
         if self.kill_child() {
-            eprintln!("level=info event=profile_overlay_stopped");
+            self.record_diagnostic("level=info event=profile_overlay_stopped");
         }
     }
 
@@ -147,6 +174,16 @@ impl OverlayHost {
         self.child.is_some()
     }
 
+    /// Removes all diagnostics currently waiting to be written by the menu
+    /// app's single log writer.
+    pub fn drain_diagnostics(&self) -> Vec<String> {
+        self.diagnostic_receiver.try_iter().collect()
+    }
+
+    fn record_diagnostic(&self, line: impl Into<String>) {
+        let _ = self.diagnostic_sender.try_send(line.into());
+    }
+
     fn send(&mut self, message: OverlayMessage) -> bool {
         let Some(writer) = self.writer.as_ref() else {
             return false;
@@ -154,7 +191,9 @@ impl OverlayHost {
         let line = match OverlayEnvelope::new(message).to_line() {
             Ok(line) => line,
             Err(error) => {
-                eprintln!("level=warn event=overlay_message_unserializable error={error:?}");
+                self.record_diagnostic(format!(
+                    "level=warn event=overlay_message_unserializable error={error:?}"
+                ));
                 return false;
             }
         };
@@ -164,7 +203,7 @@ impl OverlayHost {
                 // A live child with a full queue is wedged. Retaining it would
                 // make every later `start` return early and permanently lose
                 // the cached latest state, so force a fresh process.
-                eprintln!("level=warn event=profile_overlay_queue_full");
+                self.record_diagnostic("level=warn event=profile_overlay_queue_full");
                 self.discard_child();
                 false
             }
@@ -185,12 +224,16 @@ impl OverlayHost {
         match child.try_wait() {
             Ok(None) => true,
             Ok(Some(status)) => {
-                eprintln!("level=warn event=profile_overlay_exited status={status:?}");
+                self.record_diagnostic(format!(
+                    "level=warn event=profile_overlay_exited status={status:?}"
+                ));
                 self.discard_child();
                 false
             }
             Err(error) => {
-                eprintln!("level=warn event=profile_overlay_wait_failed error={error:?}");
+                self.record_diagnostic(format!(
+                    "level=warn event=profile_overlay_wait_failed error={error:?}"
+                ));
                 self.discard_child();
                 false
             }
@@ -218,6 +261,9 @@ impl OverlayHost {
             drop(writer.sender);
             let _ = writer.thread.join();
         }
+        if let Some(thread) = self.stderr_thread.take() {
+            let _ = thread.join();
+        }
         existed
     }
 
@@ -232,11 +278,24 @@ impl OverlayHost {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            // stderr is inherited so the overlay's structured log lines land in
-            // the same place as the menu app's.
+            // Read stderr back into the parent so StatusLogger remains the only
+            // process writing and rotating the application log.
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| error.to_string())?;
-        self.writer = child.stdin.take().map(OverlayWriter::new);
+        self.writer = child
+            .stdin
+            .take()
+            .map(|stdin| OverlayWriter::new(stdin, self.diagnostic_sender.clone()));
+        self.stderr_thread = child.stderr.take().map(|stderr| {
+            let diagnostics = self.diagnostic_sender.clone();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stderr).lines() {
+                    let Ok(line) = line else { return };
+                    let _ = diagnostics.try_send(line);
+                }
+            })
+        });
         self.child = Some(child);
         Ok(())
     }
@@ -352,5 +411,24 @@ mod tests {
             assert!(!host.is_running());
             assert!(host.writer.is_none());
         }
+    }
+
+    #[test]
+    fn child_stderr_and_host_lifecycle_events_are_collected() {
+        let mut host = OverlayHost::new();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "echo 'level=info event=overlay_test_child' >&2"]);
+        host.spawn_command(&mut command).unwrap();
+        assert!(host.child.as_mut().unwrap().wait().unwrap().success());
+        assert!(!host.reap_if_exited());
+
+        let diagnostics = host.drain_diagnostics();
+        assert!(diagnostics
+            .iter()
+            .any(|line| line == "level=info event=overlay_test_child"));
+        assert!(diagnostics
+            .iter()
+            .any(|line| line.contains("event=profile_overlay_exited")));
+        assert!(host.stderr_thread.is_none());
     }
 }

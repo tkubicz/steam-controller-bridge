@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "firmware_version.h"
+
 namespace scbridge {
 namespace {
 
@@ -20,12 +22,14 @@ BridgeSession::BridgeSession(SessionSink& sink)
     : sink_(sink),
       cdc_connected_(false),
       negotiated_(false),
+      device_info_pending_(false),
       sequence_valid_(false),
       faulted_(false),
       data_watchdog_armed_(false),
       hid_pending_(true),
       pending_is_safety_neutral_(true),
       deferred_active_pending_(false),
+      last_queued_hid_valid_(false),
       rumble_pending_(true),
       rumble_pending_is_safety_zero_(true),
       rumble_pending_is_refresh_(false),
@@ -38,6 +42,7 @@ BridgeSession::BridgeSession(SessionSink& sink)
       last_rumble_tx_ms_(0),
       pending_hid_(neutral_report()),
       deferred_active_(neutral_report()),
+      last_queued_hid_(neutral_report()),
       desired_rumble_(zero_rumble()),
       pending_rumble_(zero_rumble()),
       deferred_rumble_(zero_rumble()),
@@ -55,6 +60,10 @@ void BridgeSession::on_cdc_disconnected() {
 }
 
 void BridgeSession::on_hid_mounted() {
+  // A freshly (re)mounted USB host has accepted no report, so the queue cache
+  // no longer describes its endpoint and the neutral below must reach the wire
+  // for the driver to publish the controller.
+  last_queued_hid_valid_ = false;
   force_neutral(true);
   force_rumble_zero();
 }
@@ -75,6 +84,9 @@ void BridgeSession::on_frame(const Frame& frame, uint32_t now_ms) {
       negotiated_ =
           send_message(MessageType::HelloResponse, &selected, 1);
     }
+    // Queued behind the HelloResponse rather than sent inline: the CDC TX
+    // queue is shallow, and the loop's tick retries until it accepts.
+    device_info_pending_ = negotiated_;
     return;
   }
 
@@ -138,23 +150,32 @@ void BridgeSession::tick(uint32_t now_ms) {
     force_neutral(true);
     force_rumble_zero();
   }
+  service_device_info();
   service_rumble(now_ms);
 }
 
 void BridgeSession::mark_hid_report_sent() {
-  if (pending_is_safety_neutral_ && deferred_active_pending_) {
-    pending_hid_ = deferred_active_;
-    pending_is_safety_neutral_ = false;
-    deferred_active_pending_ = false;
-    hid_pending_ = true;
+  if (!hid_pending_) {
     return;
   }
+  // xinput_usb::send succeeding means TinyUSB accepted the endpoint transfer,
+  // not that the host has already polled it. A USB reset/remount invalidates
+  // this cache and unconditionally queues a fresh neutral baseline.
+  last_queued_hid_ = pending_hid_;
+  last_queued_hid_valid_ = true;
+  const bool was_safety_neutral = pending_is_safety_neutral_;
   hid_pending_ = false;
   pending_is_safety_neutral_ = false;
+  if (was_safety_neutral && deferred_active_pending_) {
+    const CanonicalGamepadReport deferred = deferred_active_;
+    deferred_active_pending_ = false;
+    queue_hid(deferred, false);
+  }
 }
 
 void BridgeSession::reset_session(bool keep_connection) {
   negotiated_ = false;
+  device_info_pending_ = false;
   sequence_valid_ = false;
   consecutive_errors_ = 0;
   faulted_ = false;
@@ -212,9 +233,32 @@ void BridgeSession::queue_hid(const CanonicalGamepadReport& report,
   if (safety) {
     deferred_active_pending_ = false;
   }
+  if (last_queued_hid_valid_ && report == last_queued_hid_) {
+    // The USB endpoint has already accepted this report, so nothing needs the
+    // wire; this also cancels an older unsent change the report reverts.
+    // Resending an identical neutral would register as gamepad input on macOS
+    // and abort the very sleep a CDC teardown belongs to.
+    hid_pending_ = false;
+    pending_is_safety_neutral_ = false;
+    ++diagnostics_.suppressed_hid_duplicates;
+    return;
+  }
   pending_hid_ = report;
   hid_pending_ = true;
   pending_is_safety_neutral_ = safety;
+}
+
+void BridgeSession::service_device_info() {
+  if (!negotiated_ || !device_info_pending_) {
+    return;
+  }
+  uint8_t payload[kDeviceInfoPayloadSize];
+  payload[0] = kDeviceInfoFormat;
+  payload[1] = static_cast<uint8_t>(kFirmwareRevision);
+  payload[2] = static_cast<uint8_t>(kFirmwareRevision >> 8U);
+  if (send_message(MessageType::DeviceInfo, payload, sizeof(payload))) {
+    device_info_pending_ = false;
+  }
 }
 
 void BridgeSession::queue_rumble(const RumbleFeedback& rumble, bool safety) {
@@ -304,7 +348,7 @@ RumbleFeedback BridgeSession::zero_rumble() {
 bool BridgeSession::report_is_neutral(
     const CanonicalGamepadReport& report) {
   const CanonicalGamepadReport neutral = neutral_report();
-  return memcmp(&report, &neutral, sizeof(report)) == 0;
+  return report == neutral;
 }
 
 bool BridgeSession::rumble_is_active(const RumbleFeedback& rumble) {

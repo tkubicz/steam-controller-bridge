@@ -344,6 +344,12 @@ fn core_status_changes(
     );
     push_change(
         changes,
+        "xiao_firmware",
+        &previous.xiao.firmware,
+        &current.xiao.firmware,
+    );
+    push_change(
+        changes,
         "battery",
         &previous.battery_percent,
         &current.battery_percent,
@@ -753,6 +759,7 @@ mod tests {
         current.source.connected = true;
         current.xiao.path = Some("/dev/cu.usbmodem1".to_owned());
         current.xiao.handshake_complete = true;
+        current.xiao.firmware = bridge_output::FirmwareVersion::Reported(3);
         current.lizard.suppressed = true;
         current.haptics.state = crate::HapticsState::Active;
         current.bindings.state = crate::DesktopBindingsState::Ready;
@@ -768,6 +775,7 @@ mod tests {
         for field in [
             "source_connected=",
             "xiao_path=",
+            "xiao_firmware=Pending->Reported(3)",
             "lizard_suppressed=",
             "haptics_state=",
             "bindings_state=",
@@ -779,6 +787,24 @@ mod tests {
         ] {
             assert!(text.contains(field), "missing {field} from {text}");
         }
+    }
+
+    #[test]
+    fn a_missing_firmware_report_is_a_change_record_not_an_error() {
+        let initial = BridgeStatus::default();
+        let mut tracker = StatusLogTracker::default();
+        let _ = tracker.observe(Duration::ZERO, &initial);
+        let mut current = initial;
+        current.revision = 1;
+        current.xiao.firmware = bridge_output::FirmwareVersion::Unreported;
+        let records = tracker.observe(Duration::from_secs(1), &current);
+        assert_eq!(records.len(), 1);
+        let text = records[0].to_string();
+        assert!(text.contains("xiao_firmware=Pending->Unreported"), "{text}");
+        assert!(!matches!(
+            records[0].kind(),
+            StatusLogRecordKind::Snapshot(StatusSnapshotReason::Error)
+        ));
     }
 
     #[test]
