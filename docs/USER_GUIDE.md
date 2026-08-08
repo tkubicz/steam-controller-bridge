@@ -123,7 +123,9 @@ Update recommended" line means the board runs firmware older than this app
 depends on — including any board that predates version reporting entirely.
 The bridge keeps working, but reflash the current UF2 (above, or the matching
 release asset) to pick up firmware-side fixes. "Firmware: Newer than this app"
-means the board was flashed from a newer release than the app and is fine.
+means the board was flashed from a newer release than the app and is fine. A
+"Reflash recommended" line means the board sent an incomplete version report;
+install the current UF2 again.
 
 Connect the XIAO with a data-capable USB-C cable and list its port:
 

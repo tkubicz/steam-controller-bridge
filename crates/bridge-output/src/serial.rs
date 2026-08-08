@@ -20,6 +20,7 @@ pub const MINIMUM_FIRMWARE_REVISION: u16 = 1;
 const FIRMWARE_REPORT_GRACE: Duration = Duration::from_secs(2);
 const DEVICE_INFO_FORMAT: u8 = 1;
 const SERIAL_SERVICE_MIN_INTERVAL: Duration = Duration::from_millis(10);
+const HANDSHAKE_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SerialDeviceInfo {
@@ -96,9 +97,11 @@ pub enum FirmwareVersion {
     /// The firmware's hand-maintained monotonic revision.
     Reported(u16),
     /// A device-info report arrived in a format this build does not
-    /// understand — firmware newer than the host, never an update
+    /// understand — firmware newer than the host, never a firmware-update
     /// recommendation.
-    Unrecognized,
+    UnsupportedFormat(u8),
+    /// A report used the current format but omitted required fields.
+    Malformed,
     /// The grace window elapsed without a report: the firmware predates
     /// version reporting.
     Unreported,
@@ -109,16 +112,16 @@ impl FirmwareVersion {
     pub const fn revision(self) -> Option<u16> {
         match self {
             Self::Reported(revision) => Some(revision),
-            Self::Pending | Self::Unrecognized | Self::Unreported => None,
+            Self::Pending | Self::UnsupportedFormat(_) | Self::Malformed | Self::Unreported => None,
         }
     }
 
     #[must_use]
     pub const fn update_recommended(self) -> bool {
         match self {
-            Self::Unreported => true,
+            Self::Unreported | Self::Malformed => true,
             Self::Reported(revision) => revision < MINIMUM_FIRMWARE_REVISION,
-            Self::Pending | Self::Unrecognized => false,
+            Self::Pending | Self::UnsupportedFormat(_) => false,
         }
     }
 }
@@ -129,7 +132,8 @@ fn parse_device_info(payload: &[u8]) -> FirmwareVersion {
         [DEVICE_INFO_FORMAT, low, high, ..] => {
             FirmwareVersion::Reported(u16::from_le_bytes([*low, *high]))
         }
-        _ => FirmwareVersion::Unrecognized,
+        [DEVICE_INFO_FORMAT, ..] | [] => FirmwareVersion::Malformed,
+        [format, ..] => FirmwareVersion::UnsupportedFormat(*format),
     }
 }
 
@@ -582,6 +586,12 @@ impl SerialOutput {
             SerialConnection::new(NativeTransport(port), self.config, Duration::ZERO)?;
         while connection.status() == SerialStatus::Handshaking {
             connection.poll(self.clock.elapsed())?;
+            if connection.status() == SerialStatus::Handshaking {
+                // NativeTransport deliberately avoids a blocking read during
+                // normal service. Yield here so an unresponsive exact-match
+                // device cannot spin a core for the handshake timeout.
+                std::thread::sleep(HANDSHAKE_POLL_INTERVAL);
+            }
         }
         if let Some(state) = self.desired_state {
             connection.queue_state(state)?;
@@ -1038,11 +1048,19 @@ mod tests {
     }
 
     #[test]
-    fn unknown_device_info_is_unrecognized_and_never_warns() {
-        assert_eq!(parse_device_info(&[2, 9, 9]), FirmwareVersion::Unrecognized);
-        assert_eq!(parse_device_info(&[1]), FirmwareVersion::Unrecognized);
-        assert_eq!(parse_device_info(&[]), FirmwareVersion::Unrecognized);
-        assert!(!FirmwareVersion::Unrecognized.update_recommended());
+    fn unsupported_and_malformed_device_info_remain_distinct() {
+        assert_eq!(
+            parse_device_info(&[2, 9, 9]),
+            FirmwareVersion::UnsupportedFormat(2)
+        );
+        assert_eq!(
+            parse_device_info(&[2]),
+            FirmwareVersion::UnsupportedFormat(2)
+        );
+        assert_eq!(parse_device_info(&[1]), FirmwareVersion::Malformed);
+        assert_eq!(parse_device_info(&[]), FirmwareVersion::Malformed);
+        assert!(!FirmwareVersion::UnsupportedFormat(2).update_recommended());
+        assert!(FirmwareVersion::Malformed.update_recommended());
         assert!(!FirmwareVersion::Pending.update_recommended());
     }
 

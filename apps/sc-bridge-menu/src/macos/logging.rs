@@ -90,14 +90,10 @@ impl StatusLogger {
     }
 
     pub(super) fn flush_pending(&mut self) -> Result<(), String> {
-        let Some(batch) = self.pending_batch.take() else {
+        if self.pending_batch.is_none() {
             return Ok(());
-        };
-        if let Err(error) = write_log_batch(&self.path, &batch) {
-            self.pending_batch = Some(batch);
-            return Err(error);
         }
-        Ok(())
+        self.write_batch("")
     }
 }
 

@@ -133,7 +133,8 @@ fn firmware_label(status: &BridgeStatus) -> String {
         }
         FirmwareVersion::Reported(revision) => format!("Firmware: rev {revision}"),
         FirmwareVersion::Unreported => format!("{WARNING} Firmware: Update recommended"),
-        FirmwareVersion::Unrecognized => "Firmware: Newer than this app".to_owned(),
+        FirmwareVersion::UnsupportedFormat(_) => "Firmware: Newer than this app".to_owned(),
+        FirmwareVersion::Malformed => format!("{WARNING} Firmware: Reflash recommended"),
         FirmwareVersion::Pending => "Firmware: Unknown".to_owned(),
     }
 }
@@ -431,19 +432,24 @@ mod tests {
 
     #[test]
     fn firmware_lines_warn_only_below_the_minimum_and_never_change_the_icon() {
+        let minimum = bridge_runtime::MINIMUM_FIRMWARE_REVISION;
         let cases = [
-            (FirmwareVersion::Pending, "Firmware: Unknown"),
+            (FirmwareVersion::Pending, "Firmware: Unknown".to_owned()),
             (
-                FirmwareVersion::Reported(bridge_runtime::MINIMUM_FIRMWARE_REVISION),
-                "Firmware: rev 1",
+                FirmwareVersion::Reported(minimum),
+                format!("Firmware: rev {minimum}"),
             ),
             (
                 FirmwareVersion::Unreported,
-                "⚠ Firmware: Update recommended",
+                "⚠ Firmware: Update recommended".to_owned(),
             ),
             (
-                FirmwareVersion::Unrecognized,
-                "Firmware: Newer than this app",
+                FirmwareVersion::UnsupportedFormat(2),
+                "Firmware: Newer than this app".to_owned(),
+            ),
+            (
+                FirmwareVersion::Malformed,
+                "⚠ Firmware: Reflash recommended".to_owned(),
             ),
         ];
         for (firmware, expected) in cases {

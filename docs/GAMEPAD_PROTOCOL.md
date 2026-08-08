@@ -45,11 +45,12 @@ it ignore it entirely, so both legacy pairings stay compatible.
 | 1 | 2 | Firmware revision, `u16` little-endian, hand-maintained monotonic |
 
 Receivers accept payloads longer than three bytes and ignore the trailing
-bytes, so fields can be appended without a format bump. A payload with an
-unknown format byte, or one shorter than three bytes, is classified as present
-but unparseable — firmware newer than the host — and is never treated as
-outdated. Firmware that never sends `DeviceInfo` predates version reporting
-and is reported as such after a short host-side grace period.
+bytes, so fields can be appended without a format bump. An unknown format byte
+is classified as firmware newer than the host and is never treated as
+outdated. A current-format payload shorter than three bytes is malformed and
+prompts a reflash instead of being mistaken for a future format. Firmware that
+never sends `DeviceInfo` predates version reporting and is reported as such
+after a short host-side grace period.
 
 ## Gamepad state payload
 

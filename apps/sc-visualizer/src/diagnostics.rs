@@ -76,8 +76,15 @@ impl Visualizer {
                         FirmwareVersion::Unreported => {
                             diagnostic_cell(ui, "Firmware", "unreported");
                         }
-                        FirmwareVersion::Unrecognized => {
-                            diagnostic_cell(ui, "Firmware", "unrecognized");
+                        FirmwareVersion::UnsupportedFormat(format) => {
+                            diagnostic_cell(
+                                ui,
+                                "Firmware",
+                                format_args!("unsupported format {format}"),
+                            );
+                        }
+                        FirmwareVersion::Malformed => {
+                            diagnostic_cell(ui, "Firmware", "malformed");
                         }
                     }
                 }

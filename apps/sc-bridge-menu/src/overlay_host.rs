@@ -9,7 +9,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -177,13 +177,7 @@ impl OverlayHost {
     /// Removes all diagnostics currently waiting to be written by the menu
     /// app's single log writer.
     pub fn drain_diagnostics(&self) -> Vec<String> {
-        let mut diagnostics = Vec::new();
-        loop {
-            match self.diagnostic_receiver.try_recv() {
-                Ok(line) => diagnostics.push(line),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return diagnostics,
-            }
-        }
+        self.diagnostic_receiver.try_iter().collect()
     }
 
     fn record_diagnostic(&self, line: impl Into<String>) {

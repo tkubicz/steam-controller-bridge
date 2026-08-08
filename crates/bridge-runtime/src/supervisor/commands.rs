@@ -290,13 +290,16 @@ impl Supervisor {
         let Some(reported) = output.output.firmware_version() else {
             return;
         };
-        let mut previous = reported;
-        self.update_status(|status| {
-            previous = status.xiao.firmware;
+        {
+            let mut status = self
+                .status
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if status.xiao.firmware == reported {
+                return;
+            }
             status.xiao.firmware = reported;
-        });
-        if previous == reported {
-            return;
+            status.revision = status.revision.wrapping_add(1);
         }
         if reported.update_recommended() {
             eprintln!(
