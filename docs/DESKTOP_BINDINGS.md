@@ -9,7 +9,7 @@ and requires no protocol-v1 or XIAO firmware change.
 
 ## Menu app
 
-Open `Bindings -> Edit Bindings…` to create, duplicate, rename, delete, and edit
+Open `Profiles -> Edit Profiles…` to create, duplicate, rename, delete, and edit
 profiles. Profile IDs never change when a display name is renamed. Save writes
 the validated store atomically; Cancel discards the editor copy. The running
 menu app reloads a valid replacement and keeps the previous store if a partial

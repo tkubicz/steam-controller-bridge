@@ -396,8 +396,8 @@ suitable for gameplay.
 ### Extra-button and pad desktop bindings
 
 The menu app can bind L4, L5, R4, R5, and Quick Access to keyboard chords or
-left/right/middle/back/forward mouse buttons. Choose `Bindings -> Edit
-Bindings…`, create or edit a profile, and Save. At launch the app automatically
+left/right/middle/back/forward mouse buttons. Choose `Profiles -> Edit
+Profiles…`, create or edit a profile, and Save. At launch the app automatically
 requests Input Monitoring directly, even when no controller is attached. Once
 macOS reports that grant, it requests Post Event and Accessibility access before
 a profile needs any bindings, avoiding simultaneous system prompts. This adds

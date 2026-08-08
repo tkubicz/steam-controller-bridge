@@ -7,7 +7,8 @@ license.workspace = true
 publish = false
 
 [features]
-default = ["editor", "overlay"]
+default = ["about", "editor", "overlay"]
+about = ["dep:eframe", "dep:ui-theme"]
 editor = ["dep:eframe", "dep:ui-theme", "dep:controller-art"]
 overlay = ["dep:eframe", "dep:ui-theme"]
 

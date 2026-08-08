@@ -56,6 +56,7 @@ objc2-io-kit = { version = "0.3.2", default-features = false, features = ["std",
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSApplication",
+    "NSRunningApplication",
     "NSButton",
     "NSControl",
     "NSEvent",
@@ -67,6 +68,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSStatusItem",
     "NSView",
     "NSWindow",
+    "libc",
 ] }
 
 [profile.release]
