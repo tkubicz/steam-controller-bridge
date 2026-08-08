@@ -90,9 +90,9 @@ pub fn configure_ui(ctx: &egui::Context) {
     ctx.set_visuals(visuals);
 }
 
+#[cfg(target_os = "macos")]
 fn configured_font_definitions() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
-    #[cfg(target_os = "macos")]
     for (name, path, family) in [
         (
             SF_PRO_FONT_NAME,
@@ -116,6 +116,12 @@ fn configured_font_definitions() -> egui::FontDefinitions {
     fonts
 }
 
+#[cfg(not(target_os = "macos"))]
+fn configured_font_definitions() -> egui::FontDefinitions {
+    egui::FontDefinitions::default()
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn prepend_system_font(
     fonts: &mut egui::FontDefinitions,
     name: &str,
