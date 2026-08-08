@@ -132,6 +132,29 @@ fn failed_settings_rename_preserves_the_target_and_removes_the_temporary_file() 
 }
 
 #[test]
+fn save_settings_sweeps_stale_temporaries_from_earlier_crashes() {
+    let directory = std::env::temp_dir().join(format!(
+        "steam-controller-bridge-settings-sweep-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("settings.json");
+    let stale = directory.join("settings.json.999.123456.0.tmp");
+    fs::write(&stale, b"{}").unwrap();
+    let unrelated = directory.join("bindings.json");
+    fs::write(&unrelated, b"{}").unwrap();
+
+    save_settings(&path, &AppSettings::default()).unwrap();
+
+    assert!(!stale.exists(), "stale temporaries must be swept");
+    assert!(unrelated.exists(), "unrelated files must be preserved");
+    assert_eq!(load_settings(&path), (AppSettings::default(), None));
+
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
 fn version_one_settings_migrate_without_losing_shutdown_choices() {
     let path = temporary_settings_path("migration");
     fs::write(

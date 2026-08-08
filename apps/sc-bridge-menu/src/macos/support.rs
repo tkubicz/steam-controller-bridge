@@ -245,11 +245,39 @@ pub(super) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
     }
 }
 
+/// Best-effort removal of temporaries left behind when an earlier save died
+/// between write and rename; nothing else ever deletes them. May also sweep a
+/// concurrent saver's in-flight temporary, which makes that save fail loudly
+/// rather than letting two writers race over the same file.
+fn remove_stale_settings_temporaries(directory: &Path, target: &Path) {
+    let Some(target_name) = target.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let prefix = format!("{target_name}.");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let is_temporary = name.starts_with(&prefix)
+            && Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"));
+        if is_temporary {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 pub(super) fn save_settings(path: &Path, settings: &AppSettings) -> Result<(), String> {
     let directory = path
         .parent()
         .ok_or_else(|| format!("settings path '{}' has no parent", path.display()))?;
     fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    remove_stale_settings_temporaries(directory, path);
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());

@@ -1,3 +1,5 @@
+use crate::model::{KeyboardKey, Modifier, MouseButton};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum OutputKey {
     Modifier(Modifier),
@@ -37,4 +39,3 @@ pub trait DesktopInputSink {
     /// Returns an error if the platform cannot inject the scroll.
     fn scroll(&mut self, x: i32, y: i32) -> Result<(), String>;
 }
-use crate::model::{KeyboardKey, Modifier, MouseButton};
