@@ -152,7 +152,7 @@ pub fn run() -> Result<(), String> {
         "Steam Controller Bridge Bindings",
         options,
         Box::new(move |creation| {
-            configure_visuals(&creation.egui_ctx);
+            ui_theme::configure_ui(&creation.egui_ctx);
             Ok(Box::new(BindingsEditor::new(path, store)))
         }),
     )
@@ -815,37 +815,6 @@ fn mouse_button_editor(ui: &mut egui::Ui, control: BindableControl, button: &mut
             .small()
             .color(MUTED_TEXT),
     );
-}
-
-/// egui's bundled fonts have ⌘ but not ⌃, ⌥ or ⇧, which would leave binding
-/// summaries full of replacement boxes. Appending a macOS system font that does
-/// have them keeps the rest of the interface on egui's own typeface.
-fn configure_modifier_glyphs(ctx: &egui::Context) {
-    const CANDIDATES: [&str; 3] = [
-        "/System/Library/Fonts/Keyboard.ttf",
-        "/System/Library/Fonts/SFNS.ttf",
-        "/System/Library/Fonts/Apple Symbols.ttf",
-    ];
-    let Some(bytes) = CANDIDATES.iter().find_map(|path| std::fs::read(path).ok()) else {
-        return;
-    };
-    let mut fonts = egui::FontDefinitions::default();
-    let name = "mac-modifier-symbols".to_owned();
-    fonts.font_data.insert(
-        name.clone(),
-        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-    );
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        fonts.families.entry(family).or_default().push(name.clone());
-    }
-    ctx.set_fonts(fonts);
-}
-
-fn configure_visuals(ctx: &egui::Context) {
-    // The palette itself is shared with the overlay and the visualizer; only the
-    // modifier glyph font is specific to this window.
-    configure_modifier_glyphs(ctx);
-    ui_theme::configure_visuals(ctx);
 }
 
 fn selection_description(selection: EditorSelection) -> &'static str {

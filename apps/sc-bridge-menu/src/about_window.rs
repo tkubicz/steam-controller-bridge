@@ -1,9 +1,7 @@
 use eframe::egui;
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSApplication;
-use ui_theme::{
-    configure_visuals, ACCENT, BORDER, MUTED_TEXT, ON_ACCENT, PANEL, SURFACE, SURFACE_RAISED, TEXT,
-};
+use ui_theme::{ACCENT, BORDER, MUTED_TEXT, ON_ACCENT, PANEL, SURFACE, SURFACE_RAISED, TEXT};
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
 const WINDOW_TITLE: &str = "About Steam Controller Bridge";
@@ -16,8 +14,6 @@ const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
 const BUNDLE_VERSION: &str = include_str!("../../../version.txt");
 const APP_ICON: &[u8] = include_bytes!("../../../packaging/macos/AppIcon.png");
 const GITHUB_MARK: &[u8] = include_bytes!("../../../packaging/macos/GitHubMark.png");
-const MACOS_SYSTEM_FONT_PATH: &str = "/System/Library/Fonts/SFNS.ttf";
-const MACOS_SYSTEM_FONT_NAME: &str = "SF Pro";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -79,8 +75,7 @@ pub fn run() -> Result<(), String> {
 }
 
 fn configure_about_style(ctx: &egui::Context) {
-    configure_visuals(ctx);
-    install_macos_system_font(ctx);
+    ui_theme::configure_ui(ctx);
     let theme = ctx.theme();
     let mut style = (*ctx.style_of(theme)).clone();
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
@@ -91,28 +86,7 @@ fn configure_about_style(ctx: &egui::Context) {
     style
         .text_styles
         .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
-    // Egui's dark-mode default prioritizes maximum edge sharpness. A gentler
-    // gamma curve retains grayscale coverage around SF Pro glyphs, which more
-    // closely matches Core Text on macOS and avoids stair-stepped diagonals.
-    style.visuals.text_options.color_transfer_function =
-        egui::epaint::FontColorTransferFunction::Gamma(0.7);
     ctx.set_style_of(theme, style);
-}
-
-fn install_macos_system_font(ctx: &egui::Context) {
-    let Ok(bytes) = std::fs::read(MACOS_SYSTEM_FONT_PATH) else {
-        eprintln!("level=warn event=about_system_font_unavailable path={MACOS_SYSTEM_FONT_PATH:?}");
-        return;
-    };
-    let mut fonts = egui::FontDefinitions::default();
-    fonts.font_data.insert(
-        MACOS_SYSTEM_FONT_NAME.to_owned(),
-        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-    );
-    if let Some(proportional) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-        proportional.insert(0, MACOS_SYSTEM_FONT_NAME.to_owned());
-    }
-    ctx.set_fonts(fonts);
 }
 
 #[allow(deprecated)] // `activate()` requires macOS 14; the app supports macOS 13.
