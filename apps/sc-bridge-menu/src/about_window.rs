@@ -516,14 +516,22 @@ mod tests {
         let releases = parse_changelog(CHANGELOG);
         let current = releases.first().expect("at least one release");
         assert!(current.title.plain().starts_with(BUNDLE_VERSION.trim()));
-        assert!(current
-            .sections
-            .iter()
-            .any(|section| section.title == "Features"));
+        // A fix-only release has no Features section, so only require that
+        // some section exists and none renders as an empty card.
+        assert!(!current.sections.is_empty());
         assert!(current
             .sections
             .iter()
             .all(|section| !section.notes.is_empty()));
+    }
+
+    #[test]
+    fn embedded_images_decode_as_png() {
+        for (name, bytes) in [("AppIcon", APP_ICON), ("GitHubMark", GITHUB_MARK)] {
+            let image = eframe::icon_data::from_png_bytes(bytes)
+                .unwrap_or_else(|error| panic!("{name} must stay a valid PNG: {error}"));
+            assert!(image.width > 0 && image.height > 0);
+        }
     }
 
     #[test]
