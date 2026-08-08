@@ -256,6 +256,27 @@ impl<W: Write> RecordingWriter<W> {
     /// Returns [`RecordingError`] for unsupported versions, decreasing timestamps,
     /// serialization failures, or writer I/O failures.
     pub fn write_event(&mut self, event: &RecordingEvent) -> Result<(), RecordingError> {
+        self.write_event_data(event)?;
+        self.flush()?;
+        self.last_timestamp_us = Some(event.timestamp_us);
+        Ok(())
+    }
+
+    /// Writes one JSONL event without forcing the underlying writer to flush.
+    /// Background capture paths can batch durable flushes without changing the
+    /// default synchronous writer contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecordingError`] for unsupported versions, decreasing
+    /// timestamps, serialization failures, or writer I/O failures.
+    pub fn write_event_buffered(&mut self, event: &RecordingEvent) -> Result<(), RecordingError> {
+        self.write_event_data(event)?;
+        self.last_timestamp_us = Some(event.timestamp_us);
+        Ok(())
+    }
+
+    fn write_event_data(&mut self, event: &RecordingEvent) -> Result<(), RecordingError> {
         if event.version != FORMAT_VERSION {
             return Err(RecordingError::UnsupportedVersion(event.version));
         }
@@ -270,9 +291,16 @@ impl<W: Write> RecordingWriter<W> {
         }
         serde_json::to_writer(&mut self.writer, event)?;
         self.writer.write_all(b"\n")?;
-        self.writer.flush()?;
-        self.last_timestamp_us = Some(event.timestamp_us);
         Ok(())
+    }
+
+    /// Flushes every previously accepted buffered event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error from the underlying writer.
+    pub fn flush(&mut self) -> Result<(), RecordingError> {
+        self.writer.flush().map_err(RecordingError::Io)
     }
 
     pub fn into_inner(self) -> W {

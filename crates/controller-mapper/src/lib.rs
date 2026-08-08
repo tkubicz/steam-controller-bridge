@@ -183,9 +183,9 @@ impl ControllerMapper {
         };
         state.right_x = normalize_axis(right_x);
         state.right_y = normalize_axis(right_y);
-        let trigger_scale = f32::from(self.config.trigger_full_scale);
-        state.left_trigger = (f32::from(input.left_trigger) / trigger_scale).clamp(0.0, 1.0);
-        state.right_trigger = (f32::from(input.right_trigger) / trigger_scale).clamp(0.0, 1.0);
+        state.left_trigger = normalize_trigger(input.left_trigger, self.config.trigger_full_scale);
+        state.right_trigger =
+            normalize_trigger(input.right_trigger, self.config.trigger_full_scale);
         state
     }
 }
@@ -285,8 +285,21 @@ fn map_hat(input: &SteamControllerState) -> HatState {
     }
 }
 
-fn normalize_axis(value: i16) -> f32 {
+/// Normalizes one signed controller axis to the mapper's input range.
+#[must_use]
+pub fn normalize_axis(value: i16) -> f32 {
     (f32::from(value) / 32767.0).clamp(-1.0, 1.0)
+}
+
+/// Normalizes trigger travel against the profile's physical full-pull value.
+/// A zero scale is treated as neutral for diagnostic callers; mapper profiles
+/// reject it during validation.
+#[must_use]
+pub fn normalize_trigger(value: u16, full_scale: u16) -> f32 {
+    if full_scale == 0 {
+        return 0.0;
+    }
+    (f32::from(value) / f32::from(full_scale)).clamp(0.0, 1.0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -639,7 +639,9 @@ shasum -a 256 -c SHA256SUMS.txt
 ### The controller did not turn off automatically
 
 - Confirm the bridge uses serial output and the XIAO is ready. Replay, dump,
-  file, and mock modes never power off hardware.
+  file, and mock modes never power off hardware, and `sc-bridge` refuses to
+  start if `--idle-shutdown` or `--puck-dock-action` is combined with one of
+  them rather than quietly ignoring the request.
 - Inspect `Auto shutdown` in the menu or copied diagnostics. `Off` means the
   timeout is `Never` and Puck placement is disabled.
 - For idle shutdown, confirm no button, pad/grip touch, stick, or trigger is

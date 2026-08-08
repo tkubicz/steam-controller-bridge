@@ -273,8 +273,15 @@ macOS may reject protected keyboard/gamepad collections with an IOKit `not permi
 ![sc-visualizer showing raw, decoded, and mapped controller state side by side](docs/images/visualizer.png)
 -->
 
-After identifying the desired HID collection with `sc-probe`, open the live
-visualizer with the same snapshot index:
+The visualizer finds a supported controller on its own, so it usually needs no
+arguments. It keeps looking while none is present, so you can start it first and
+plug the controller in afterwards:
+
+```bash
+cargo run -p sc-visualizer
+```
+
+To pin it to one collection from `sc-probe list` instead of discovering one:
 
 ```bash
 cargo run -p sc-visualizer -- --index 0

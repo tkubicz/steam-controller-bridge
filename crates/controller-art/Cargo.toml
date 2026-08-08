@@ -1,0 +1,17 @@
+[package]
+name = "controller-art"
+version = "1.4.0"
+edition.workspace = true
+license.workspace = true
+# Not published to crates.io; distribution is GitHub releases only.
+publish = false
+
+[dependencies]
+# Deliberately no `desktop-bindings` or `steam-controller-protocol`: this crate
+# draws a controller, it does not know what a binding or a report bit is. Each
+# consumer owns its own adapter into `Control`.
+eframe.workspace = true
+ui-theme = { path = "../ui-theme" }
+
+[lints]
+workspace = true

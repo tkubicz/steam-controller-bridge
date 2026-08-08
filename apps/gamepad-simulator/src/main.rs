@@ -1,6 +1,6 @@
-use std::env;
 use std::fs::File;
 use std::io::{self, BufRead};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -8,9 +8,69 @@ use std::time::{Duration, Instant};
 use bridge_output::{
     DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput, SerialConfig, SerialOutput,
 };
+use clap::{Parser, ValueEnum};
 use gamepad_simulator::{apply_keyboard_command, automated_sequence};
 use gamepad_state::GamepadState;
 use recording::RecordingOutput;
+
+/// Drives any output backend with synthetic gamepad states.
+#[derive(Debug, Clone, Parser)]
+#[command(name = "gamepad-simulator", version, about, long_about = None)]
+struct Cli {
+    /// Type control names on stdin, or run a fixed sequence.
+    #[arg(value_enum)]
+    mode: Mode,
+
+    /// Output backend.
+    #[arg(long, value_enum, default_value_t = OutputArg::Dump)]
+    output: OutputArg,
+
+    /// Required by `--output file` and `--output recording`. Note this app
+    /// spells it `--file`, where sc-bridge and sc-replay use `--output-file`.
+    #[arg(long, value_name = "PATH")]
+    file: Option<PathBuf>,
+
+    /// Required by `--output serial`.
+    #[arg(long, value_name = "PATH")]
+    port: Option<String>,
+
+    /// Serial baud rate.
+    #[arg(long, value_name = "N", default_value_t = 115_200)]
+    baud: u32,
+
+    /// Log serial frame bytes.
+    #[arg(long)]
+    serial_log: bool,
+
+    /// Automated cycles.
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    cycles: u32,
+
+    /// Delay between states; 0 sends as fast as the backend allows.
+    #[arg(long, value_name = "N", default_value_t = 50)]
+    interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Mode {
+    Keyboard,
+    Automated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutputArg {
+    /// `compact` remains accepted as a long-standing synonym.
+    #[value(alias = "compact")]
+    Dump,
+    Pretty,
+    Json,
+    Raw,
+    File,
+    /// Writes a replayable JSONL recording.
+    Recording,
+    Mock,
+    Serial,
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -20,19 +80,14 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() || args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_help();
-        return Ok(());
-    }
-    let mode = args[0].as_str();
-    let output_name = value_after(&args, "--output").unwrap_or("dump");
-    let mut output = make_output(output_name, &args)?;
-    match mode {
-        "automated" => {
-            let interval_ms = parse_value(&args, "--interval-ms", 50_u64)?;
-            let cycles = parse_value(&args, "--cycles", 1_u32)?;
-            for _ in 0..cycles {
+    let cli = Cli::parse();
+    // The mode is validated by clap before this point, so an unknown mode can
+    // no longer create or truncate an output file on its way to failing.
+    let mut output = make_output(&cli)?;
+    match cli.mode {
+        Mode::Automated => {
+            let interval_ms = cli.interval_ms;
+            for _ in 0..cli.cycles {
                 for state in automated_sequence(32) {
                     output
                         .send_state(&state)
@@ -44,12 +99,7 @@ fn run() -> Result<(), String> {
             }
             output.send_neutral().map_err(|error| error.to_string())?;
         }
-        "keyboard" => keyboard_mode(&mut *output)?,
-        other => {
-            return Err(format!(
-                "unknown mode '{other}' (expected keyboard or automated)"
-            ))
-        }
+        Mode::Keyboard => keyboard_mode(&mut *output)?,
     }
     Ok(())
 }
@@ -100,52 +150,34 @@ fn service_delay(output: &mut dyn GamepadOutput, duration: Duration) -> Result<(
     }
 }
 
-fn make_output(name: &str, args: &[String]) -> Result<Box<dyn GamepadOutput>, String> {
-    let file = value_after(args, "--file");
-    match name {
-        "dump" | "compact" => Ok(Box::new(DumpOutput::new(io::stdout(), DumpFormat::Compact))),
-        "pretty" => Ok(Box::new(DumpOutput::new(io::stdout(), DumpFormat::Pretty))),
-        "json" => Ok(Box::new(DumpOutput::new(io::stdout(), DumpFormat::Json))),
-        "raw" => Ok(Box::new(DumpOutput::new(io::stdout(), DumpFormat::Raw))),
-        "file" => Ok(Box::new(
+fn make_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
+    let file = cli.file.as_deref();
+    Ok(match cli.output {
+        OutputArg::Dump => Box::new(DumpOutput::new(io::stdout(), DumpFormat::Compact)),
+        OutputArg::Pretty => Box::new(DumpOutput::new(io::stdout(), DumpFormat::Pretty)),
+        OutputArg::Json => Box::new(DumpOutput::new(io::stdout(), DumpFormat::Json)),
+        OutputArg::Raw => Box::new(DumpOutput::new(io::stdout(), DumpFormat::Raw)),
+        OutputArg::Mock => Box::new(MockOutput::default()),
+        OutputArg::File => Box::new(
             FileOutput::create(file.ok_or("--output file requires --file PATH")?)
                 .map_err(|error| error.to_string())?,
-        )),
-        "recording" => Ok(Box::new(RecordingOutput::new(
+        ),
+        OutputArg::Recording => Box::new(RecordingOutput::new(
             File::create(file.ok_or("--output recording requires --file PATH")?)
                 .map_err(|error| error.to_string())?,
-        ))),
-        "mock" => Ok(Box::new(MockOutput::default())),
-        "serial" => Ok(Box::new(
+        )),
+        OutputArg::Serial => Box::new(
             SerialOutput::open(
-                value_after(args, "--port").ok_or("--output serial requires --port PATH")?,
-                parse_value(args, "--baud", 115_200_u32)?,
+                cli.port
+                    .as_deref()
+                    .ok_or("--output serial requires --port PATH")?,
+                cli.baud,
                 SerialConfig {
-                    packet_logging: args.iter().any(|arg| arg == "--serial-log"),
+                    packet_logging: cli.serial_log,
                     ..SerialConfig::default()
                 },
             )
             .map_err(|error| error.to_string())?,
-        )),
-        other => Err(format!("unknown output '{other}'")),
-    }
-}
-
-fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    args.iter()
-        .position(|arg| arg == flag)
-        .and_then(|index| args.get(index + 1))
-        .map(String::as_str)
-}
-
-fn parse_value<T: std::str::FromStr>(args: &[String], flag: &str, default: T) -> Result<T, String> {
-    value_after(args, flag).map_or(Ok(default), |value| {
-        value
-            .parse()
-            .map_err(|_| format!("invalid value for {flag}: {value}"))
+        ),
     })
-}
-
-fn print_help() {
-    println!("gamepad-simulator <keyboard|automated> [options]\n\nOptions:\n  --output <dump|pretty|json|raw|file|recording|mock|serial>\n  --file PATH              Required by file/recording output\n  --port PATH              Required by serial output\n  --baud N                 Serial baud rate (default: 115200)\n  --serial-log             Log serial frame bytes\n  --cycles N               Automated cycles (default: 1)\n  --interval-ms N          Delay between states (default: 50)\n  -h, --help");
 }

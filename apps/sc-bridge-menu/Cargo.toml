@@ -8,7 +8,7 @@ publish = false
 
 [features]
 default = ["editor", "overlay"]
-editor = ["dep:eframe", "dep:ui-theme"]
+editor = ["dep:eframe", "dep:ui-theme", "dep:controller-art"]
 overlay = ["dep:eframe", "dep:ui-theme"]
 
 [dependencies]
@@ -24,6 +24,8 @@ steam-controller-device = { path = "../../crates/steam-controller-device" }
 [target.'cfg(target_os = "macos")'.dependencies]
 eframe = { workspace = true, optional = true }
 ui-theme = { path = "../../crates/ui-theme", optional = true }
+# Only the editor draws a controller; the overlay does not.
+controller-art = { path = "../../crates/controller-art", optional = true }
 tiny-skia.workspace = true
 tray-icon.workspace = true
 winit.workspace = true

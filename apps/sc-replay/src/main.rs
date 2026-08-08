@@ -1,6 +1,6 @@
-use std::env;
 use std::fs::File;
 use std::io::{self, BufReader, Write};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -8,7 +8,73 @@ use std::time::Duration;
 use bridge_output::{
     DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput, SerialConfig, SerialOutput,
 };
+use clap::{Parser, ValueEnum};
 use recording::{ReplayOptions, ReplaySession, ReplayTiming, KIND_MAPPED_GAMEPAD_STATE};
+
+/// Replays a recorded session through any output backend.
+#[derive(Debug, Clone, Parser)]
+#[command(name = "sc-replay", version, about, long_about = None)]
+// Four independent switches is what this CLI has; grouping them into a
+// sub-struct to satisfy the lint would only make the flags harder to find.
+#[allow(clippy::struct_excessive_bools)]
+struct Cli {
+    /// Recording to replay.
+    #[arg(value_name = "RECORDING")]
+    recording: PathBuf,
+
+    /// Playback speed.
+    #[arg(long, value_name = "N", default_value_t = 1.0)]
+    speed: f64,
+
+    /// Ignore recorded timing.
+    #[arg(long)]
+    deterministic: bool,
+
+    /// Advance mapped states with Enter. Takes precedence over --loop.
+    #[arg(long)]
+    step: bool,
+
+    /// Replay repeatedly.
+    #[arg(long = "loop")]
+    repeat: bool,
+
+    /// Start at or after this timestamp.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    seek_us: u64,
+
+    /// Output backend.
+    #[arg(long, value_enum, default_value_t = OutputArg::Dump)]
+    output: OutputArg,
+
+    /// Required by `--output file`.
+    #[arg(long, value_name = "PATH")]
+    output_file: Option<PathBuf>,
+
+    /// Required by `--output serial`.
+    #[arg(long, value_name = "PATH")]
+    port: Option<String>,
+
+    /// Serial baud rate.
+    #[arg(long, value_name = "N", default_value_t = 115_200)]
+    baud: u32,
+
+    /// Log serial frame bytes.
+    #[arg(long)]
+    serial_log: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutputArg {
+    /// `compact` remains accepted as a long-standing synonym.
+    #[value(alias = "compact")]
+    Dump,
+    Pretty,
+    Json,
+    Raw,
+    File,
+    Mock,
+    Serial,
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -18,37 +84,28 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() || args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        print_help();
-        return Ok(());
-    }
-
-    let input_path = &args[0];
+    let cli = Cli::parse();
+    let path = &cli.recording;
     let session = ReplaySession::read(BufReader::new(
-        File::open(input_path).map_err(|error| format!("cannot open '{input_path}': {error}"))?,
+        File::open(path).map_err(|error| format!("cannot open '{}': {error}", path.display()))?,
     ))
     .map_err(|error| error.to_string())?;
-    let output_name = value_after(&args, "--output").unwrap_or("dump");
-    let mut output = make_output(output_name, &args)?;
-    let speed = parse_value(&args, "--speed", 1.0_f64)?;
-    let seek_timestamp_us = parse_value(&args, "--seek-us", 0_u64)?;
-    let deterministic = args.iter().any(|arg| arg == "--deterministic");
-    let step = args.iter().any(|arg| arg == "--step");
-    let repeat = args.iter().any(|arg| arg == "--loop");
+    let mut output = make_output(&cli)?;
+    let seek_timestamp_us = cli.seek_us;
 
-    if step {
+    if cli.step {
         play_step(&session, &mut *output, seek_timestamp_us)?;
         return Ok(());
     }
 
+    let repeat = cli.repeat;
     let options = ReplayOptions {
-        timing: if deterministic {
+        timing: if cli.deterministic {
             ReplayTiming::Immediate
         } else {
             ReplayTiming::RealTime
         },
-        speed,
+        speed: cli.speed,
         seek_timestamp_us,
     };
     loop {
@@ -115,50 +172,33 @@ fn read_line_with_service(output: &mut dyn GamepadOutput) -> Result<String, Stri
     }
 }
 
-fn make_output(name: &str, args: &[String]) -> Result<Box<dyn GamepadOutput>, String> {
-    let file = value_after(args, "--output-file");
-    match name {
-        "dump" | "compact" => Ok(Box::new(DumpOutput::new(io::stdout(), DumpFormat::Compact))),
-        "pretty" => Ok(Box::new(DumpOutput::new(io::stdout(), DumpFormat::Pretty))),
-        "json" => Ok(Box::new(DumpOutput::new(io::stdout(), DumpFormat::Json))),
-        "raw" => Ok(Box::new(DumpOutput::new(io::stdout(), DumpFormat::Raw))),
-        "file" => Ok(Box::new(
-            FileOutput::create(file.ok_or("--output file requires --output-file PATH")?)
-                .map_err(|error| error.to_string())?,
-        )),
-        "mock" => Ok(Box::new(MockOutput::default())),
-        "serial" => Ok(Box::new(
+fn make_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
+    Ok(match cli.output {
+        OutputArg::Dump => Box::new(DumpOutput::new(io::stdout(), DumpFormat::Compact)),
+        OutputArg::Pretty => Box::new(DumpOutput::new(io::stdout(), DumpFormat::Pretty)),
+        OutputArg::Json => Box::new(DumpOutput::new(io::stdout(), DumpFormat::Json)),
+        OutputArg::Raw => Box::new(DumpOutput::new(io::stdout(), DumpFormat::Raw)),
+        OutputArg::Mock => Box::new(MockOutput::default()),
+        OutputArg::File => Box::new(
+            FileOutput::create(
+                cli.output_file
+                    .as_deref()
+                    .ok_or("--output file requires --output-file PATH")?,
+            )
+            .map_err(|error| error.to_string())?,
+        ),
+        OutputArg::Serial => Box::new(
             SerialOutput::open(
-                value_after(args, "--port").ok_or("--output serial requires --port PATH")?,
-                parse_value(args, "--baud", 115_200_u32)?,
+                cli.port
+                    .as_deref()
+                    .ok_or("--output serial requires --port PATH")?,
+                cli.baud,
                 SerialConfig {
-                    packet_logging: args.iter().any(|arg| arg == "--serial-log"),
+                    packet_logging: cli.serial_log,
                     ..SerialConfig::default()
                 },
             )
             .map_err(|error| error.to_string())?,
-        )),
-        other => Err(format!("unknown output '{other}'")),
-    }
-}
-
-fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-    args.iter()
-        .position(|arg| arg == flag)
-        .and_then(|index| args.get(index + 1))
-        .map(String::as_str)
-}
-
-fn parse_value<T: std::str::FromStr>(args: &[String], flag: &str, default: T) -> Result<T, String> {
-    value_after(args, flag).map_or(Ok(default), |value| {
-        value
-            .parse()
-            .map_err(|_| format!("invalid value for {flag}: {value}"))
+        ),
     })
-}
-
-fn print_help() {
-    println!(
-        "sc-replay RECORDING [options]\n\nOptions:\n  --speed N                Playback speed (default: 1.0)\n  --deterministic          Ignore recorded timing\n  --step                   Advance mapped states with Enter\n  --loop                   Replay repeatedly\n  --seek-us N              Start at or after timestamp N\n  --output <dump|pretty|json|raw|file|mock|serial>\n  --output-file PATH       Required by file output\n  --port PATH              Required by serial output\n  --baud N                 Serial baud rate (default: 115200)\n  --serial-log             Log serial frame bytes\n  -h, --help"
-    );
 }

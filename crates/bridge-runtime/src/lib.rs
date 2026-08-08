@@ -43,13 +43,23 @@ use steam_controller_device::{
     masked_serial, ControllerEnumerator, ControllerTransport, DeviceError, DeviceEvent,
     HidDeviceInfo, HidSession, LizardModeHeartbeat, RawHidReport,
 };
+use steam_controller_discovery::{
+    choose_unique_active, inventory_scan_interval as controller_inventory_scan_interval,
+    next_stable_scan_interval as next_stable_controller_scan_interval, same_controller_collection,
+    ControllerDiscoveryState, MIN_STABLE_SCAN_INTERVAL as MIN_STABLE_CONTROLLER_SCAN_INTERVAL,
+};
+#[cfg(test)]
+use steam_controller_discovery::{
+    ControllerProbeSession, ControllerReconcileMetrics,
+    MAX_REPORTS_PER_PROBE as MAX_DISCOVERY_REPORTS_PER_CANDIDATE,
+    MAX_STABLE_SCAN_INTERVAL as MAX_STABLE_CONTROLLER_SCAN_INTERVAL,
+};
 
 // Frontends render status without depending on the device crate directly.
 pub use steam_controller_device::masked_serial as mask_serial_for_display;
 use steam_controller_protocol::{
     ConnectionState, DecodedReport, PadHapticGain, PadHapticSide, SteamButton, SteamButtons,
-    SteamControllerDecoder, EXTENDED_INPUT_REPORT_ID, EXTENDED_INPUT_REPORT_SIZE, INPUT_REPORT_ID,
-    INPUT_REPORT_SIZE,
+    EXTENDED_INPUT_REPORT_ID, EXTENDED_INPUT_REPORT_SIZE, INPUT_REPORT_ID, INPUT_REPORT_SIZE,
 };
 
 mod status_log;
@@ -72,9 +82,6 @@ const SLEEP_TEARDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(25);
 /// wake, and touching it mid-setup is the window the sleep suspension exists
 /// to stay out of.
 const WAKE_SETTLE_DELAY: Duration = Duration::from_secs(2);
-const MIN_STABLE_CONTROLLER_SCAN_INTERVAL: Duration = Duration::from_secs(2);
-const MAX_STABLE_CONTROLLER_SCAN_INTERVAL: Duration = Duration::from_secs(10);
-const MAX_DISCOVERY_REPORTS_PER_CANDIDATE: usize = 4;
 const ACTIVE_SLOT_TIMEOUT: Duration = Duration::from_secs(1);
 const INPUT_MAILBOX_CAPACITY: usize = 64;
 const DESKTOP_INPUT_MAILBOX_CAPACITY: usize = 64;
@@ -2616,7 +2623,7 @@ impl Supervisor {
                 error: self.controller_discovery.current_errors(&probe.failures),
             },
             Ok(Some(selected)) => {
-                let selected_info = self.controller_discovery.candidate(selected).info.clone();
+                let selected_info = self.controller_discovery.candidate(selected).info().clone();
                 if self.source_on_cooldown(&selected_info) {
                     return Discovery::Wait {
                         detail:
@@ -2625,12 +2632,11 @@ impl Supervisor {
                         error: None,
                     };
                 }
-                let candidate = self.controller_discovery.select(selected);
-                let info = candidate.info;
+                let (info, session) = self.controller_discovery.select(selected).into_parts();
                 self.update_source_discovered(&info, true);
                 Discovery::Ready(ActiveControllerSource {
                     info,
-                    session: candidate.session,
+                    session,
                     controller_seen: true,
                 })
             }
@@ -2651,11 +2657,11 @@ impl Supervisor {
                         let candidate = self.controller_discovery.candidate(*index);
                         if global_indices_available {
                             controller_source_description(
-                                candidate.enumeration_index,
-                                &candidate.info,
+                                candidate.enumeration_index(),
+                                candidate.info(),
                             )
                         } else {
-                            controller_source_identity(&candidate.info)
+                            controller_source_identity(candidate.info())
                         }
                     })
                     .collect::<Vec<_>>()
@@ -3460,35 +3466,6 @@ impl Supervisor {
     }
 }
 
-trait ControllerProbeSession {
-    fn poll_for_discovery(&mut self, timeout: Duration) -> Result<Option<DeviceEvent>, String>;
-}
-
-impl ControllerProbeSession for HidSession {
-    fn poll_for_discovery(&mut self, timeout: Duration) -> Result<Option<DeviceEvent>, String> {
-        self.poll(timeout).map_err(|error| error.to_string())
-    }
-}
-
-struct ControllerCandidate<S> {
-    enumeration_index: usize,
-    info: HidDeviceInfo,
-    session: S,
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-struct ControllerReconcileMetrics {
-    opened: usize,
-    reused: usize,
-    removed: usize,
-    failures: usize,
-}
-
-struct ControllerProbe {
-    active_indices: Vec<usize>,
-    failures: Vec<String>,
-}
-
 struct IndexedControllerDiscoveryState {
     info: Option<HidDeviceInfo>,
     next_scan: Instant,
@@ -3551,245 +3528,8 @@ impl IndexedControllerDiscoveryState {
     }
 }
 
-// Keep inactive collections open until the HID inventory changes. Reopening all
-// Puck slots for every probe creates native reader threads repeatedly and, on
-// macOS, leaves IOHID-owned report buffers retained by the main run loop.
-struct ControllerDiscoveryState<S> {
-    candidates: Vec<ControllerCandidate<S>>,
-    next_scan: Instant,
-    stable_scan_interval: Duration,
-    supported_devices_seen: bool,
-    open_failures: Vec<String>,
-    scan_error: Option<String>,
-}
-
-impl<S> ControllerDiscoveryState<S> {
-    fn new() -> Self {
-        Self {
-            candidates: Vec::new(),
-            next_scan: Instant::now(),
-            stable_scan_interval: MIN_STABLE_CONTROLLER_SCAN_INTERVAL,
-            supported_devices_seen: false,
-            open_failures: Vec::new(),
-            scan_error: None,
-        }
-    }
-
-    fn scan_due(&self) -> bool {
-        Instant::now() >= self.next_scan
-    }
-
-    fn refresh(
-        &mut self,
-        discovered: Result<Vec<(usize, HidDeviceInfo)>, String>,
-        mut open: impl FnMut(usize, &HidDeviceInfo) -> Result<S, String>,
-    ) -> ControllerReconcileMetrics {
-        let Ok(discovered) = discovered else {
-            self.scan_error = discovered.err();
-            self.stable_scan_interval = MIN_STABLE_CONTROLLER_SCAN_INTERVAL;
-            self.next_scan = Instant::now()
-                + controller_inventory_scan_interval(
-                    !self.candidates.is_empty(),
-                    self.stable_scan_interval,
-                );
-            return ControllerReconcileMetrics::default();
-        };
-
-        self.scan_error = None;
-        self.supported_devices_seen = !discovered.is_empty();
-        self.open_failures.clear();
-
-        let old_count = self.candidates.len();
-        let mut existing: Vec<_> = self.candidates.drain(..).map(Some).collect();
-        let mut reconciled = Vec::with_capacity(discovered.len());
-        let mut metrics = ControllerReconcileMetrics::default();
-
-        for (enumeration_index, info) in discovered {
-            let existing_index = existing.iter().position(|candidate| {
-                candidate
-                    .as_ref()
-                    .is_some_and(|candidate| same_controller_collection(&candidate.info, &info))
-            });
-            if let Some(existing_index) = existing_index {
-                let mut candidate = existing[existing_index]
-                    .take()
-                    .expect("matched candidate exists");
-                candidate.enumeration_index = enumeration_index;
-                candidate.info = info;
-                reconciled.push(candidate);
-                metrics.reused += 1;
-                continue;
-            }
-
-            match open(enumeration_index, &info) {
-                Ok(session) => {
-                    reconciled.push(ControllerCandidate {
-                        enumeration_index,
-                        info,
-                        session,
-                    });
-                    metrics.opened += 1;
-                }
-                Err(error) => {
-                    self.open_failures.push(error);
-                    metrics.failures += 1;
-                }
-            }
-        }
-
-        metrics.removed = old_count.saturating_sub(metrics.reused);
-        self.candidates = reconciled;
-        let inventory_changed = metrics.opened > 0 || metrics.removed > 0 || metrics.failures > 0;
-        self.stable_scan_interval = if inventory_changed {
-            MIN_STABLE_CONTROLLER_SCAN_INTERVAL
-        } else {
-            next_stable_controller_scan_interval(self.stable_scan_interval)
-        };
-        self.next_scan = Instant::now()
-            + controller_inventory_scan_interval(
-                !self.candidates.is_empty(),
-                self.stable_scan_interval,
-            );
-        metrics
-    }
-
-    fn clear(&mut self) {
-        self.candidates.clear();
-        self.next_scan = Instant::now();
-        self.stable_scan_interval = MIN_STABLE_CONTROLLER_SCAN_INTERVAL;
-        self.supported_devices_seen = false;
-        self.open_failures.clear();
-        self.scan_error = None;
-    }
-
-    fn is_empty(&self) -> bool {
-        self.candidates.is_empty()
-    }
-
-    fn supported_devices_seen(&self) -> bool {
-        self.supported_devices_seen
-    }
-
-    fn scan_error(&self) -> Option<&str> {
-        self.scan_error.as_deref()
-    }
-
-    fn current_errors(&self, probe_failures: &[String]) -> Option<String> {
-        let errors = self
-            .scan_error
-            .iter()
-            .chain(&self.open_failures)
-            .chain(probe_failures)
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        (!errors.is_empty()).then(|| errors.join("; "))
-    }
-
-    fn candidate(&self, index: usize) -> &ControllerCandidate<S> {
-        &self.candidates[index]
-    }
-
-    fn resolve_global_indices(&mut self, devices: &[HidDeviceInfo]) -> Result<(), String> {
-        let resolved = self
-            .candidates
-            .iter()
-            .map(|candidate| {
-                devices
-                    .iter()
-                    .position(|info| same_controller_collection(&candidate.info, info))
-                    .ok_or_else(|| {
-                        format!(
-                            "cannot resolve the global index for {}",
-                            controller_source_identity(&candidate.info)
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        for (candidate, index) in self.candidates.iter_mut().zip(resolved) {
-            candidate.enumeration_index = index;
-        }
-        Ok(())
-    }
-
-    fn select(&mut self, index: usize) -> ControllerCandidate<S> {
-        let selected = self.candidates.swap_remove(index);
-        self.clear();
-        selected
-    }
-}
-
-impl<S: ControllerProbeSession> ControllerDiscoveryState<S> {
-    fn probe(&mut self) -> ControllerProbe {
-        let mut decoder = SteamControllerDecoder::new();
-        let mut active_indices = Vec::new();
-        let mut failures = Vec::new();
-        for (index, candidate) in self.candidates.iter_mut().enumerate() {
-            for _ in 0..MAX_DISCOVERY_REPORTS_PER_CANDIDATE {
-                match candidate.session.poll_for_discovery(Duration::ZERO) {
-                    Ok(Some(DeviceEvent::Report(report)))
-                        if is_valid_controller_state(&mut decoder, &report) =>
-                    {
-                        active_indices.push(index);
-                        break;
-                    }
-                    Ok(Some(_)) => {}
-                    Ok(None) => break,
-                    Err(error) => {
-                        failures.push(format!(
-                            "{}: {error}",
-                            controller_source_identity(&candidate.info)
-                        ));
-                        break;
-                    }
-                }
-            }
-        }
-        ControllerProbe {
-            active_indices,
-            failures,
-        }
-    }
-}
-
-fn controller_inventory_scan_interval(
-    has_open_candidates: bool,
-    stable_scan_interval: Duration,
-) -> Duration {
-    if has_open_candidates {
-        stable_scan_interval
-    } else {
-        DISCOVERY_INTERVAL
-    }
-}
-
-fn next_stable_controller_scan_interval(current: Duration) -> Duration {
-    current
-        .saturating_mul(2)
-        .min(MAX_STABLE_CONTROLLER_SCAN_INTERVAL)
-}
-
 fn controller_discovery_loop_delay(elapsed: Duration) -> Duration {
     DISCOVERY_INTERVAL.saturating_sub(elapsed)
-}
-
-fn same_controller_collection(left: &HidDeviceInfo, right: &HidDeviceInfo) -> bool {
-    let same_stable_serial = left
-        .serial_number
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .zip(
-            right
-                .serial_number
-                .as_deref()
-                .filter(|value| !value.is_empty()),
-        )
-        .is_some_and(|(left, right)| left == right);
-    (left.path == right.path || same_stable_serial)
-        && left.vendor_id == right.vendor_id
-        && left.product_id == right.product_id
-        && left.usage_page == right.usage_page
-        && left.usage == right.usage
-        && left.interface_number == right.interface_number
 }
 
 enum Discovery<T> {
@@ -3925,14 +3665,6 @@ fn xiao_ambiguity_message<T>(valid: &[(SerialDeviceInfo, T)]) -> String {
     format!("multiple valid XIAO bridges found: {ports}; restart with --port PATH")
 }
 
-fn choose_unique_active(active_indices: &[usize]) -> Result<Option<usize>, Vec<usize>> {
-    match active_indices {
-        [] => Ok(None),
-        [selected] => Ok(Some(*selected)),
-        multiple => Err(multiple.to_vec()),
-    }
-}
-
 fn controller_source_description(enumeration_index: usize, info: &HidDeviceInfo) -> String {
     format!(
         "index {enumeration_index} {}",
@@ -3969,14 +3701,6 @@ fn ownership_guidance(error: &DeviceError) -> String {
         "{error}. Fully quit Steam and other controller tools; if Steam's ipcserver remains, \
          stop its LaunchAgent manually"
     )
-}
-
-fn is_valid_controller_state(decoder: &mut SteamControllerDecoder, report: &RawHidReport) -> bool {
-    is_latest_state_report(report.report_id)
-        && matches!(
-            decoder.decode(report.report_id, &report.data),
-            Ok(DecodedReport::ControllerState(_))
-        )
 }
 
 fn is_latest_state_report(report_id: u8) -> bool {
@@ -5602,6 +5326,15 @@ mod tests {
             transport: "USB".to_owned(),
             dropped_reports: 0,
         }
+    }
+
+    /// Exactly one active source, or the runtime refuses to guess. This is what
+    /// stops a four-collection Puck from being opened on the wrong interface.
+    #[test]
+    fn a_unique_active_source_is_required() {
+        assert_eq!(choose_unique_active(&[]), Ok(None));
+        assert_eq!(choose_unique_active(&[3]), Ok(Some(3)));
+        assert_eq!(choose_unique_active(&[1, 2]), Err(vec![1, 2]));
     }
 
     #[test]
@@ -7697,11 +7430,11 @@ mod tests {
             }
         );
         assert_eq!(next_session, 2);
-        assert_eq!(discovery.stable_scan_interval, Duration::from_secs(4));
-        assert_eq!(discovery.candidate(0).enumeration_index, 12);
-        assert_eq!(discovery.candidate(0).session, 2);
-        assert_eq!(discovery.candidate(1).enumeration_index, 13);
-        assert_eq!(discovery.candidate(1).session, 1);
+        assert_eq!(discovery.stable_scan_interval(), Duration::from_secs(4));
+        assert_eq!(discovery.candidate(0).enumeration_index(), 12);
+        assert_eq!(*discovery.candidate(0).session(), 2);
+        assert_eq!(discovery.candidate(1).enumeration_index(), 13);
+        assert_eq!(*discovery.candidate(1).session(), 1);
     }
 
     #[test]
@@ -7745,8 +7478,8 @@ mod tests {
             }
         );
         assert_eq!(next_session, 3);
-        assert_eq!(discovery.candidate(0).session, 2);
-        assert_eq!(discovery.candidate(1).session, 3);
+        assert_eq!(*discovery.candidate(0).session(), 2);
+        assert_eq!(*discovery.candidate(1).session(), 3);
     }
 
     #[test]
@@ -7777,8 +7510,8 @@ mod tests {
         global[6] = puck;
         discovery.resolve_global_indices(&global).unwrap();
 
-        assert_eq!(discovery.candidate(0).enumeration_index, 6);
-        assert_eq!(discovery.candidate(1).enumeration_index, 3);
+        assert_eq!(discovery.candidate(0).enumeration_index(), 6);
+        assert_eq!(discovery.candidate(1).enumeration_index(), 3);
     }
 
     #[test]
@@ -7809,8 +7542,8 @@ mod tests {
         assert!(discovery
             .resolve_global_indices(&incomplete_global)
             .is_err());
-        assert_eq!(discovery.candidate(0).enumeration_index, 0);
-        assert_eq!(discovery.candidate(1).enumeration_index, 1);
+        assert_eq!(discovery.candidate(0).enumeration_index(), 0);
+        assert_eq!(discovery.candidate(1).enumeration_index(), 1);
     }
 
     #[test]
@@ -7949,39 +7682,6 @@ mod tests {
         assert!(puck_description.contains("index 43 Puck"));
         assert!(bluetooth_description.contains("index 58 Bluetooth"));
         assert!(bluetooth_description.contains("interface -1"));
-    }
-
-    #[test]
-    fn only_complete_controller_states_mark_a_slot_active() {
-        let report = |report_id, data: Vec<u8>| RawHidReport {
-            timestamp: Duration::ZERO,
-            report_id,
-            data,
-            source_device_id: "slot".to_owned(),
-            transport: "USB".to_owned(),
-            dropped_reports: 0,
-        };
-        let mut decoder = SteamControllerDecoder::new();
-        let mut state = vec![0; steam_controller_protocol::INPUT_REPORT_SIZE];
-        state[0] = INPUT_REPORT_ID;
-        assert!(is_valid_controller_state(
-            &mut decoder,
-            &report(INPUT_REPORT_ID, state)
-        ));
-
-        let mut battery = vec![0; 15];
-        battery[0] = steam_controller_protocol::BATTERY_REPORT_ID;
-        assert!(!is_valid_controller_state(
-            &mut decoder,
-            &report(steam_controller_protocol::BATTERY_REPORT_ID, battery)
-        ));
-        assert!(!is_valid_controller_state(
-            &mut decoder,
-            &report(INPUT_REPORT_ID, vec![INPUT_REPORT_ID])
-        ));
-        assert!(!is_latest_state_report(
-            steam_controller_protocol::BATTERY_REPORT_ID
-        ));
     }
 
     #[test]

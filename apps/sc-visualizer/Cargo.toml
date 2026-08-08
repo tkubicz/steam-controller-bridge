@@ -9,12 +9,15 @@ publish = false
 [dependencies]
 controller-mapper = { path = "../../crates/controller-mapper" }
 bridge-output = { path = "../../crates/bridge-output" }
+clap.workspace = true
 eframe = { workspace = true, features = ["wayland", "x11"] }
 gamepad-state = { path = "../../crates/gamepad-state" }
 recording = { path = "../../crates/recording" }
 serde_json.workspace = true
+steam-controller-discovery = { path = "../../crates/steam-controller-discovery" }
 steam-controller-device = { path = "../../crates/steam-controller-device" }
 steam-controller-protocol = { path = "../../crates/steam-controller-protocol" }
+controller-art = { path = "../../crates/controller-art" }
 ui-theme = { path = "../../crates/ui-theme" }
 
 [lints]
