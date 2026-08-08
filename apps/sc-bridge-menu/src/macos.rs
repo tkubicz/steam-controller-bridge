@@ -17,7 +17,9 @@ use desktop_bindings::{
     request_input_monitoring_access, request_post_event_access, BindingStore, PermissionState,
 };
 use objc2::{rc::Retained, MainThreadMarker};
-use objc2_app_kit::{NSImage, NSStatusBarButton};
+use objc2_app_kit::{
+    NSApplicationActivationOptions, NSImage, NSRunningApplication, NSStatusBarButton,
+};
 use serde::{Deserialize, Serialize};
 use tiny_skia::{
     FillRule, LineCap, LineJoin, Paint, Path as SkiaPath, PathBuilder, Pixmap, Stroke, Transform,
@@ -43,8 +45,11 @@ const SETTINGS_ID: &str = "input-monitoring";
 const ACCESSIBILITY_ID: &str = "accessibility";
 const ENABLE_BINDINGS_ID: &str = "enable-bindings";
 const EDIT_BINDINGS_ID: &str = "edit-bindings";
+const PROFILES_MENU_LABEL: &str = "Profiles";
+const EDIT_PROFILES_LABEL: &str = "Edit Profiles…";
 const BINDING_PROFILE_PREFIX: &str = "binding-profile:";
 const LOGS_ID: &str = "open-logs";
+const ABOUT_ID: &str = "about";
 const QUIT_ID: &str = "quit";
 const IDLE_NEVER_ID: &str = "idle-never";
 const IDLE_5_ID: &str = "idle-5";
@@ -400,6 +405,11 @@ struct MenuApp {
     picker_roster_dirty: bool,
     /// Spawned bindings editors, reaped on the status poll once they exit.
     editor_children: Vec<std::process::Child>,
+    /// The dedicated About window runs in one child process because eframe and
+    /// the menu host each own a native event loop. Keeping a single child also
+    /// makes repeated About clicks focus the existing window instead of
+    /// stacking copies.
+    about_child: Option<std::process::Child>,
 }
 
 impl MenuApp {
@@ -477,6 +487,7 @@ impl MenuApp {
             picker_roster_publishes: 0,
             picker_roster_dirty: false,
             editor_children: Vec::new(),
+            about_child: None,
         })
     }
 
@@ -500,8 +511,9 @@ impl MenuApp {
             MenuItem::with_id(ACCESSIBILITY_ID, "Open Accessibility Settings", true, None);
         let enable_bindings =
             MenuItem::with_id(ENABLE_BINDINGS_ID, "Request Permissions…", true, None);
-        let edit_bindings = MenuItem::with_id(EDIT_BINDINGS_ID, "Edit Bindings…", true, None);
+        let edit_profiles = MenuItem::with_id(EDIT_BINDINGS_ID, EDIT_PROFILES_LABEL, true, None);
         let logs = MenuItem::with_id(LOGS_ID, "Open Log Folder", true, None);
+        let about = MenuItem::with_id(ABOUT_ID, "About", true, None);
         let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
         let idle_shutdown = vec![
             (
@@ -613,7 +625,7 @@ impl MenuApp {
         .map_err(|error| error.to_string())?;
         let binding_profiles =
             binding_profile_menu_items(&self.binding_store, &self.settings.active_binding_profile);
-        let bindings_submenu = Submenu::new("Bindings", true);
+        let bindings_submenu = Submenu::new(PROFILES_MENU_LABEL, true);
         for (_, item) in &binding_profiles {
             bindings_submenu
                 .append(item)
@@ -623,7 +635,7 @@ impl MenuApp {
             .append(&PredefinedMenuItem::separator())
             .map_err(|error| error.to_string())?;
         bindings_submenu
-            .append(&edit_bindings)
+            .append(&edit_profiles)
             .map_err(|error| error.to_string())?;
         // Everything that asks macOS for a permission, or sends you to the
         // pane that grants it, lives together rather than being scattered
@@ -639,7 +651,7 @@ impl MenuApp {
             ],
         )
         .map_err(|error| error.to_string())?;
-        let separators: [PredefinedMenuItem; 6] =
+        let separators: [PredefinedMenuItem; 7] =
             std::array::from_fn(|_| PredefinedMenuItem::separator());
         let menu = Menu::with_items(&[
             &bridge,
@@ -663,10 +675,12 @@ impl MenuApp {
             &separators[4],
             &bindings_submenu,
             &overlay_submenu,
+            &separators[5],
             &permissions_submenu,
             &copy,
             &logs,
-            &separators[5],
+            &about,
+            &separators[6],
             &quit,
         ])
         .map_err(|error| error.to_string())?;
@@ -745,6 +759,25 @@ impl MenuApp {
             self.last_model = Some(model);
         }
         self.last_revision = status.revision;
+    }
+
+    fn show_about(&mut self) {
+        if let Some(child) = self.about_child.as_mut() {
+            match child.try_wait() {
+                Ok(None) => {
+                    if !activate_child_application(child) {
+                        eprintln!("level=warn event=about_window_focus_deferred");
+                    }
+                    return;
+                }
+                Ok(Some(_)) | Err(_) => self.about_child = None,
+            }
+        }
+
+        match launch_about_window() {
+            Ok(child) => self.about_child = Some(child),
+            Err(error) => eprintln!("cannot launch About window: {error}"),
+        }
     }
 
     #[allow(clippy::too_many_lines)] // One dispatch table; splitting it hides the menu's shape.
@@ -828,6 +861,7 @@ impl MenuApp {
                     eprintln!("cannot open log folder: {error}");
                 }
             }
+            ABOUT_ID => self.show_about(),
             QUIT_ID => {
                 self.shutdown();
                 event_loop.exit();
@@ -868,6 +902,10 @@ impl MenuApp {
         }
         self.shutting_down = true;
         self.overlay.stop();
+        if let Some(mut child) = self.about_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         if let Err(error) = self.runtime.shutdown() {
             eprintln!("bridge shutdown failed: {error}");
         }
@@ -1162,7 +1200,7 @@ impl MenuApp {
         self.binding_store = store;
         self.bindings_file_fingerprint = fingerprint;
         if let Err(error) = self.rebuild_bindings_submenu() {
-            eprintln!("cannot rebuild Bindings menu: {error}");
+            eprintln!("cannot rebuild Profiles menu: {error}");
         }
         // Profiles may have been added, renamed, or deleted, so the wheel needs
         // both the new count and the new names.
@@ -1185,7 +1223,7 @@ impl MenuApp {
         // The permission items live in their own submenu, so this one only
         // carries the profiles and the editor.
         let separator = PredefinedMenuItem::separator();
-        let edit = MenuItem::with_id(EDIT_BINDINGS_ID, "Edit Bindings…", true, None);
+        let edit = MenuItem::with_id(EDIT_BINDINGS_ID, EDIT_PROFILES_LABEL, true, None);
         for item in [&separator as &dyn tray_icon::menu::IsMenuItem, &edit] {
             items
                 .bindings_submenu
@@ -1407,6 +1445,13 @@ impl ApplicationHandler for MenuApp {
             }
             self.editor_children
                 .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
+            if self
+                .about_child
+                .as_mut()
+                .is_some_and(|child| !matches!(child.try_wait(), Ok(None)))
+            {
+                self.about_child = None;
+            }
             self.reload_bindings_if_changed();
             self.observe_permission_grants();
             self.refresh_status();
@@ -1730,6 +1775,32 @@ fn open_privacy_pane(pane: PrivacyPane) {
     if let Err(error) = open_path(privacy_pane_url(pane)) {
         eprintln!("cannot open {pane:?} settings: {error}");
     }
+}
+
+fn launch_about_window() -> Result<std::process::Child, String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    Command::new(executable)
+        .arg("--about")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| error.to_string())
+}
+
+#[allow(deprecated)] // Required on macOS 13; the replacement API starts at macOS 14.
+fn activate_child_application(child: &std::process::Child) -> bool {
+    let Ok(pid) = i32::try_from(child.id()) else {
+        return false;
+    };
+    let Some(application) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+    else {
+        return false;
+    };
+    application.activateWithOptions(
+        NSApplicationActivationOptions::ActivateAllWindows
+            | NSApplicationActivationOptions::ActivateIgnoringOtherApps,
+    )
 }
 
 /// Spawns the editor process. The caller keeps the child so it can be reaped

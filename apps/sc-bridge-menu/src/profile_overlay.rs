@@ -110,6 +110,7 @@ pub fn run() -> Result<(), String> {
         OVERLAY_WINDOW_TITLE,
         options,
         Box::new(move |creation| {
+            ui_theme::configure_ui(&creation.egui_ctx);
             spawn_stdin_reader(reader_state, creation.egui_ctx.clone());
             Ok(Box::new(ProfileOverlay {
                 state,

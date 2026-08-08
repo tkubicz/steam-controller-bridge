@@ -52,7 +52,7 @@ fn main() -> eframe::Result {
         "Steam Controller Visualizer",
         options,
         Box::new(move |creation| {
-            ui_theme::configure_visuals(&creation.egui_ctx);
+            ui_theme::configure_ui(&creation.egui_ctx);
             Ok(Box::new(Visualizer::new(source)))
         }),
     )

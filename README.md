@@ -162,7 +162,7 @@ feedback. The menu app
 requests Input Monitoring directly when macOS has not decided yet. Only after
 that grant is detected does it request Post Event and Accessibility access, so
 the TCC requests remain ordered even when no controller is attached.
-Open `Bindings -> Edit Bindings…` to save a profile. Settings shortcuts remain
+Open `Profiles -> Edit Profiles…` to save a profile. Settings shortcuts remain
 available for a previously denied request. CLI use is deliberately paired:
 
 ```bash
@@ -334,8 +334,9 @@ lines. `Idle Shutdown` offers Never/5/10/15/30-minute choices, and `Turn Off
 When Placed on Puck` controls the independent immediate-dock action. Both are
 applied live and saved under `~/Library/Application Support/Steam Controller
 Bridge/`. The menu-bar icon distinguishes Off, On but waiting, Controller ready,
-and Action required states. The dynamic `Bindings` submenu selects profiles,
-launches the editor, and opens Accessibility settings. `Profile Wheel` enables
+and Action required states. The dynamic `Profiles` submenu selects profiles and
+launches the editor; permission shortcuts live in the separate `Permissions`
+submenu. `Profile Wheel` enables
 an in-game radial switcher: hold Quick Access, point either stick at a profile,
 press A to apply or B to cancel. It floats over native-fullscreen and
 borderless-windowed games, is off by default because it takes Quick Access over,
@@ -343,11 +344,12 @@ and is documented in [docs/PROFILE_OVERLAY.md](docs/PROFILE_OVERLAY.md).
 Friendly problem summaries stay bounded; use
 `Copy Full Error`, `Copy Diagnostics`, or the rotated log folder for the
 complete technical detail. Start/Stop, Input Monitoring settings, and Quit are
-also available. Logs write concise `status_change` records immediately, full
-`status_snapshot` records at startup and every five minutes, and an immediate
-full snapshot when an error or failure appears. This source-built application
-is not notarized; release signing, a DMG, and Launch at Login remain future
-work.
+also available. `About` opens a dedicated foreground window with a project
+summary, GitHub link, packaged version, and browsable release notes. Logs write
+concise `status_change` records immediately, full `status_snapshot` records at
+startup and every five minutes, and an immediate full snapshot when an error or
+failure appears. This source-built application is not notarized; release
+signing, a DMG, and Launch at Login remain future work.
 
 ## Known limitations
 

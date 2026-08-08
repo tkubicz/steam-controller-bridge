@@ -194,10 +194,11 @@ retain the complete context.
 The template icon reflects the whole usable path: an x badge means Off,
 ellipsis means On but waiting for hardware, a check means the controller
 source and XIAO are both ready, and an exclamation mark means Action required.
-The app starts the runtime automatically and exposes Start, Stop, Input
-Monitoring settings, a dynamic Bindings profile submenu/editor, Accessibility
-settings, log folder, and Quit. Binding failures have their own
-ready/permission/degraded status and never stop gamepad output.
+The app starts the runtime automatically and exposes Start, Stop, a dynamic
+Profiles submenu/editor, Profile Wheel settings, permission shortcuts, a
+dedicated About window with a project summary, GitHub link, packaged version,
+and browsable release notes, the log folder, and Quit. Binding failures have
+their own ready/permission/degraded status and never stop gamepad output.
 
 Structured status transitions are written with bounded rotation under
 `~/Library/Logs/Steam Controller Bridge/`. Meaningful transitions use concise

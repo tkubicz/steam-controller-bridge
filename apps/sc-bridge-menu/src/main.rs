@@ -1,3 +1,5 @@
+#[cfg(all(target_os = "macos", feature = "about"))]
+mod about_window;
 #[cfg(all(target_os = "macos", feature = "editor"))]
 mod bindings_editor;
 #[cfg(target_os = "macos")]
@@ -18,13 +20,24 @@ mod profile_overlay;
 
 #[cfg(target_os = "macos")]
 fn main() {
+    let mut about = false;
     let mut editor = false;
     let mut overlay = false;
     for argument in std::env::args() {
+        about |= argument == "--about";
         editor |= argument == "--bindings-editor";
         overlay |= argument == overlay_protocol::OVERLAY_ARGUMENT;
     }
-    let result = if editor {
+    let result = if about {
+        #[cfg(feature = "about")]
+        {
+            about_window::run()
+        }
+        #[cfg(not(feature = "about"))]
+        {
+            Err("this build has no About window".to_owned())
+        }
+    } else if editor {
         #[cfg(feature = "editor")]
         {
             bindings_editor::run()
