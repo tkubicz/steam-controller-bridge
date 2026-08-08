@@ -1,0 +1,427 @@
+#[allow(
+    clippy::wildcard_imports,
+    reason = "tray construction and dispatch share the menu app's private item vocabulary"
+)]
+use super::*;
+
+impl MenuApp {
+    #[allow(clippy::too_many_lines)] // Native menu construction keeps item ownership and order together.
+    pub(super) fn create_tray(&mut self) -> Result<(), String> {
+        let bridge = MenuItem::new("Bridge: Starting", false, None);
+        let status = MenuItem::new("Status: Looking for hardware", false, None);
+        let input = MenuItem::new("Input: Discovering", false, None);
+        let controller = MenuItem::new("Controller: Not connected", false, None);
+        let xiao = MenuItem::new("XIAO: Discovering", false, None);
+        let battery = MenuItem::new("Battery: Unknown", false, None);
+        let haptics = MenuItem::new("Haptics: Idle", false, None);
+        let bindings = MenuItem::new("Bindings: Disabled", false, None);
+        let automatic_shutdown = MenuItem::new("Auto shutdown: Idle 0:00 / 15:00", false, None);
+        let problem = MenuItem::new("Problem: None", false, None);
+        let run_toggle = MenuItem::with_id(RUN_TOGGLE_ID, "Start Bridge", false, None);
+        let copy_error = MenuItem::with_id(COPY_ERROR_ID, "Copy Full Error", false, None);
+        let copy = MenuItem::with_id(COPY_ID, "Copy Diagnostics", true, None);
+        let settings = MenuItem::with_id(SETTINGS_ID, "Open Input Monitoring Settings", true, None);
+        let accessibility =
+            MenuItem::with_id(ACCESSIBILITY_ID, "Open Accessibility Settings", true, None);
+        let enable_bindings =
+            MenuItem::with_id(ENABLE_BINDINGS_ID, "Request Permissions…", true, None);
+        let edit_profiles = MenuItem::with_id(EDIT_BINDINGS_ID, EDIT_PROFILES_LABEL, true, None);
+        let logs = MenuItem::with_id(LOGS_ID, "Open Log Folder", true, None);
+        let about = MenuItem::with_id(ABOUT_ID, "About", true, None);
+        let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
+        let idle_shutdown = vec![
+            (
+                None,
+                CheckMenuItem::with_id(
+                    IDLE_NEVER_ID,
+                    "Never",
+                    true,
+                    self.settings.idle_shutdown_minutes.is_none(),
+                    None,
+                ),
+            ),
+            (
+                Some(5),
+                CheckMenuItem::with_id(
+                    IDLE_5_ID,
+                    "5 minutes",
+                    true,
+                    self.settings.idle_shutdown_minutes == Some(5),
+                    None,
+                ),
+            ),
+            (
+                Some(10),
+                CheckMenuItem::with_id(
+                    IDLE_10_ID,
+                    "10 minutes",
+                    true,
+                    self.settings.idle_shutdown_minutes == Some(10),
+                    None,
+                ),
+            ),
+            (
+                Some(15),
+                CheckMenuItem::with_id(
+                    IDLE_15_ID,
+                    "15 minutes",
+                    true,
+                    self.settings.idle_shutdown_minutes == Some(15),
+                    None,
+                ),
+            ),
+            (
+                Some(30),
+                CheckMenuItem::with_id(
+                    IDLE_30_ID,
+                    "30 minutes",
+                    true,
+                    self.settings.idle_shutdown_minutes == Some(30),
+                    None,
+                ),
+            ),
+        ];
+        let idle_submenu = Submenu::with_items(
+            "Idle Shutdown",
+            true,
+            &idle_shutdown
+                .iter()
+                .map(|(_, item)| item as &dyn tray_icon::menu::IsMenuItem)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| error.to_string())?;
+        let puck_dock = CheckMenuItem::with_id(
+            PUCK_DOCK_ID,
+            "Turn Off When Placed on Puck",
+            true,
+            self.settings.power_off_on_puck,
+            None,
+        );
+        let overlay_enabled = CheckMenuItem::with_id(
+            OVERLAY_ENABLED_ID,
+            "Hold Quick Access for Profile Wheel",
+            true,
+            self.settings.profile_overlay_enabled,
+            None,
+        );
+        let overlay_hold: Vec<(u64, CheckMenuItem)> = OVERLAY_HOLD_CHOICES
+            .into_iter()
+            .map(|milliseconds| {
+                (
+                    milliseconds,
+                    CheckMenuItem::with_id(
+                        format!("{OVERLAY_HOLD_PREFIX}{milliseconds}"),
+                        format!("{} seconds", milliseconds / 1_000),
+                        true,
+                        self.settings.profile_overlay_hold_ms == milliseconds,
+                        None,
+                    ),
+                )
+            })
+            .collect();
+        let overlay_hold_submenu = Submenu::with_items(
+            "Hold Duration",
+            true,
+            &overlay_hold
+                .iter()
+                .map(|(_, item)| item as &dyn tray_icon::menu::IsMenuItem)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| error.to_string())?;
+        let overlay_submenu = Submenu::with_items(
+            "Profile Wheel",
+            true,
+            &[
+                &overlay_enabled as &dyn tray_icon::menu::IsMenuItem,
+                &overlay_hold_submenu,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        let binding_profiles =
+            binding_profile_menu_items(&self.binding_store, &self.settings.active_binding_profile);
+        let bindings_submenu = Submenu::new(PROFILES_MENU_LABEL, true);
+        for (_, item) in &binding_profiles {
+            bindings_submenu
+                .append(item)
+                .map_err(|error| error.to_string())?;
+        }
+        bindings_submenu
+            .append(&PredefinedMenuItem::separator())
+            .map_err(|error| error.to_string())?;
+        bindings_submenu
+            .append(&edit_profiles)
+            .map_err(|error| error.to_string())?;
+        // Everything that asks macOS for a permission, or sends you to the
+        // pane that grants it, lives together rather than being scattered
+        // through the menu.
+        let permissions_submenu = Submenu::with_items(
+            "Permissions",
+            true,
+            &[
+                &enable_bindings,
+                &PredefinedMenuItem::separator(),
+                &settings,
+                &accessibility,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        let separators: [PredefinedMenuItem; 7] =
+            std::array::from_fn(|_| PredefinedMenuItem::separator());
+        let menu = Menu::with_items(&[
+            &bridge,
+            &status,
+            &separators[0],
+            &controller,
+            &input,
+            &xiao,
+            &battery,
+            &haptics,
+            &bindings,
+            &separators[1],
+            &problem,
+            &copy_error,
+            &separators[2],
+            &run_toggle,
+            &separators[3],
+            &automatic_shutdown,
+            &idle_submenu,
+            &puck_dock,
+            &separators[4],
+            &bindings_submenu,
+            &overlay_submenu,
+            &separators[5],
+            &permissions_submenu,
+            &copy,
+            &logs,
+            &about,
+            &separators[6],
+            &quit,
+        ])
+        .map_err(|error| error.to_string())?;
+        let tray = TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_tooltip("Steam Controller Bridge")
+            .with_icon(template_icon(TrayState::Waiting)?)
+            .with_icon_as_template(true)
+            .build()
+            .map_err(|error| error.to_string())?;
+        let tray_icons = NativeTrayIcons::capture(&tray)?;
+        self.items = Some(MenuItems {
+            bridge,
+            status,
+            input,
+            controller,
+            xiao,
+            battery,
+            haptics,
+            bindings,
+            automatic_shutdown,
+            problem,
+            run_toggle,
+            copy_error,
+            idle_shutdown,
+            puck_dock,
+            bindings_submenu,
+            binding_profiles,
+            overlay_enabled,
+            overlay_hold,
+        });
+        self.tray_icons = Some(tray_icons);
+        self.tray = Some(tray);
+        self.refresh_status();
+        Ok(())
+    }
+
+    pub(super) fn refresh_status(&mut self) {
+        let status = self.runtime.status();
+        if let Err(error) = self.logger.write_status(&status) {
+            eprintln!("cannot write menu-app diagnostics: {error}");
+        }
+        self.sync_overlay_process(&status);
+        if status.revision == self.last_revision {
+            return;
+        }
+        let model = MenuModel::from_status(&status);
+        let icon_changed = self
+            .last_model
+            .as_ref()
+            .is_none_or(|previous| previous.tray_state != model.tray_state);
+        if self.last_model.as_ref() != Some(&model) {
+            if let Some(items) = &self.items {
+                items.bridge.set_text(&model.bridge);
+                items.status.set_text(&model.status);
+                items.input.set_text(&model.input);
+                items.controller.set_text(&model.controller);
+                items.xiao.set_text(&model.xiao);
+                items.battery.set_text(&model.battery);
+                items.haptics.set_text(&model.haptics);
+                items.bindings.set_text(&model.bindings);
+                items.automatic_shutdown.set_text(&model.automatic_shutdown);
+                items.problem.set_text(&model.problem);
+                items.run_toggle.set_text(model.run_action.label());
+                items.run_toggle.set_enabled(model.run_enabled);
+                items.copy_error.set_enabled(model.has_error);
+            }
+            if let Some(tray) = &self.tray {
+                if icon_changed {
+                    if let Some(icons) = &self.tray_icons {
+                        icons.install(model.tray_state);
+                    }
+                }
+                let _ = tray.set_tooltip(Some(model.tray_state.tooltip()));
+            }
+            self.last_model = Some(model);
+        }
+        self.last_revision = status.revision;
+    }
+
+    pub(super) fn show_about(&mut self) {
+        if let Some(child) = self.about_child.as_mut() {
+            match child.try_wait() {
+                Ok(None) => {
+                    if !activate_child_application(child) {
+                        eprintln!("level=warn event=about_window_focus_deferred");
+                    }
+                    return;
+                }
+                Ok(Some(_)) | Err(_) => self.about_child = None,
+            }
+        }
+
+        match launch_about_window() {
+            Ok(child) => self.about_child = Some(child),
+            Err(error) => eprintln!("cannot launch About window: {error}"),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)] // One dispatch table; splitting it hides the menu's shape.
+    pub(super) fn handle_menu_event(&mut self, id: &str, event_loop: &ActiveEventLoop) {
+        match id {
+            RUN_TOGGLE_ID => {
+                // One control: what it does depends on what the bridge is
+                // doing, which is what its label already says.
+                let starts = self
+                    .last_model
+                    .as_ref()
+                    .is_none_or(|model| model.run_action == RunAction::Start);
+                let result = if starts {
+                    self.runtime.request_start()
+                } else {
+                    self.runtime.request_stop()
+                };
+                if let Err(error) = result {
+                    let action = if starts { "start" } else { "stop" };
+                    eprintln!("cannot {action} bridge: {error}");
+                }
+            }
+            IDLE_NEVER_ID | IDLE_5_ID | IDLE_10_ID | IDLE_15_ID | IDLE_30_ID => {
+                let minutes = match id {
+                    IDLE_NEVER_ID => None,
+                    IDLE_5_ID => Some(5),
+                    IDLE_10_ID => Some(10),
+                    IDLE_15_ID => Some(15),
+                    IDLE_30_ID => Some(30),
+                    _ => unreachable!(),
+                };
+                let timeout = minutes.map(|minutes| Duration::from_secs(minutes * 60));
+                if let Err(error) = self.runtime.request_set_idle_shutdown_timeout(timeout) {
+                    eprintln!("cannot update idle shutdown: {error}");
+                } else {
+                    self.settings.idle_shutdown_minutes = minutes;
+                    self.update_setting_checkmarks();
+                    if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+                        eprintln!("cannot save menu settings: {error}");
+                    }
+                }
+            }
+            PUCK_DOCK_ID => {
+                self.settings.power_off_on_puck = !self.settings.power_off_on_puck;
+                let action = if self.settings.power_off_on_puck {
+                    PuckDockAction::PowerOff
+                } else {
+                    PuckDockAction::LeaveOn
+                };
+                if let Err(error) = self.runtime.request_set_puck_dock_action(action) {
+                    self.settings.power_off_on_puck = !self.settings.power_off_on_puck;
+                    eprintln!("cannot update Puck dock action: {error}");
+                } else if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+                    eprintln!("cannot save menu settings: {error}");
+                }
+                self.update_setting_checkmarks();
+            }
+            COPY_ERROR_ID => {
+                if let Some(error) = self.runtime.status().last_error {
+                    if let Err(copy_error) = copy_text(&error) {
+                        eprintln!("cannot copy full error: {copy_error}");
+                    }
+                }
+            }
+            COPY_ID => {
+                if let Err(error) = copy_diagnostics(&self.runtime.status()) {
+                    eprintln!("cannot copy diagnostics: {error}");
+                }
+            }
+            SETTINGS_ID => open_privacy_pane(PrivacyPane::InputMonitoring),
+            ACCESSIBILITY_ID => open_privacy_pane(PrivacyPane::Accessibility),
+            ENABLE_BINDINGS_ID => {
+                self.request_permissions_in_order(true);
+            }
+            EDIT_BINDINGS_ID => match launch_bindings_editor() {
+                Ok(child) => self.editor_children.push(child),
+                Err(error) => eprintln!("cannot launch bindings editor: {error}"),
+            },
+            LOGS_ID => {
+                if let Err(error) = open_path(&self.logger.directory.to_string_lossy()) {
+                    eprintln!("cannot open log folder: {error}");
+                }
+            }
+            ABOUT_ID => self.show_about(),
+            QUIT_ID => {
+                self.shutdown();
+                event_loop.exit();
+            }
+            OVERLAY_ENABLED_ID => {
+                self.settings.profile_overlay_enabled = !self.settings.profile_overlay_enabled;
+                if !self.apply_picker_settings() {
+                    self.settings.profile_overlay_enabled = !self.settings.profile_overlay_enabled;
+                    self.update_setting_checkmarks();
+                }
+                self.sync_picker_roster();
+            }
+            _ if id.starts_with(BINDING_PROFILE_PREFIX) => {
+                let profile_id = &id[BINDING_PROFILE_PREFIX.len()..];
+                self.select_binding_profile(profile_id);
+            }
+            _ if id.starts_with(OVERLAY_HOLD_PREFIX) => {
+                let Ok(milliseconds) = id[OVERLAY_HOLD_PREFIX.len()..].parse::<u64>() else {
+                    return;
+                };
+                if !OVERLAY_HOLD_CHOICES.contains(&milliseconds) {
+                    return;
+                }
+                let previous = self.settings.profile_overlay_hold_ms;
+                self.settings.profile_overlay_hold_ms = milliseconds;
+                if !self.apply_picker_settings() {
+                    self.settings.profile_overlay_hold_ms = previous;
+                    self.update_setting_checkmarks();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn shutdown(&mut self) {
+        if self.shutting_down {
+            return;
+        }
+        self.shutting_down = true;
+        self.overlay.stop();
+        if let Some(mut child) = self.about_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Err(error) = self.runtime.shutdown() {
+            eprintln!("bridge shutdown failed: {error}");
+        }
+    }
+}
