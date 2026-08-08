@@ -37,6 +37,13 @@ The refresh interval is independent of the one-second Ping health check. Pings
 prove the bidirectional session is responsive but deliberately do not keep the
 firmware's 100 ms controller-data watchdog alive.
 
+Refreshes maintain the firmware's watchdog lease without necessarily producing
+USB input: the firmware forwards a gamepad report only when the canonical
+report differs from the last one it delivered over USB. This applies to forced
+safety neutrals too — a disconnect or Hello while the delivered state is
+already neutral is silent on the USB side, which keeps CDC teardown during
+macOS sleep entry from registering as user activity.
+
 ## Reverse rumble lease
 
 Updated firmware returns `Rumble { low_frequency, high_frequency }` frames

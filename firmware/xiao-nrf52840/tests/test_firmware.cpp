@@ -362,23 +362,36 @@ void test_session_negotiation_sequence_and_watchdog() {
   assert(session.diagnostics().watchdog_neutrals == 1);
   session.mark_hid_report_sent();
 
+  // A gap while the delivered view is already neutral forces no duplicate
+  // neutral onto the wire; the frame's own state goes straight out.
   session.on_frame(state_frame(5, 9, 3000), 120);
   assert(session.diagnostics().sequence_gaps == 1);
-  assert(session.pending_hid_report().buttons == 0);
-  session.mark_hid_report_sent();
   assert(session.hid_report_pending());
   assert(session.pending_hid_report().buttons == 9);
+  session.mark_hid_report_sent();
+
+  // A gap while the delivered view is active keeps neutral-before-active:
+  // the safety neutral transmits first, the frame's state follows.
+  session.on_frame(state_frame(9, 7, 1000), 121);
+  assert(session.diagnostics().sequence_gaps == 2);
+  assert(session.hid_report_pending());
+  assert(session.pending_hid_report().buttons == 0);
+  assert(session.pending_hid_report().hat == 8);
+  session.mark_hid_report_sent();
+  assert(session.hid_report_pending());
+  assert(session.pending_hid_report().buttons == 7);
+  session.mark_hid_report_sent();
 
   Frame ping{};
   ping.version = 1;
   ping.message_type = static_cast<uint8_t>(MessageType::Ping);
-  ping.sequence = 6;
+  ping.sequence = 10;
   ping.payload_length = 4;
   ping.payload[0] = 0x78;
   ping.payload[1] = 0x56;
   ping.payload[2] = 0x34;
   ping.payload[3] = 0x12;
-  session.on_frame(ping, 121);
+  session.on_frame(ping, 122);
   const Frame pong = decode_single(sink.writes.back());
   assert(pong.message_type ==
          static_cast<uint8_t>(MessageType::Pong));
@@ -455,9 +468,163 @@ void test_fault_and_disconnect_neutralize() {
   assert(session.faulted());
   assert(session.hid_report_pending());
   session.mark_hid_report_sent();
+  const uint32_t suppressed_before =
+      session.diagnostics().suppressed_hid_duplicates;
   session.on_cdc_disconnected();
   assert(!session.cdc_connected());
+  // The disconnect's safety neutral matches the delivered view, so the host
+  // sees no gamepad input: closing the CDC port on sleep entry must not
+  // wake the machine (the v1.4.0 insomnia regression).
+  assert(!session.hid_report_pending());
+  assert(session.diagnostics().suppressed_hid_duplicates ==
+         suppressed_before + 1);
+}
+
+void test_identical_refreshes_suppress_hid_but_feed_watchdog() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session, 0xffff);
+
+  session.on_frame(state_frame(0, 3, 2000), 0);
   assert(session.hid_report_pending());
+  session.mark_hid_report_sent();
+
+  // The host refreshes an unchanged active state every 25 ms; none of the
+  // refreshes may queue USB input, yet each must keep the 100 ms watchdog
+  // fed across several nominal periods.
+  const uint32_t suppressed_before =
+      session.diagnostics().suppressed_hid_duplicates;
+  for (uint16_t i = 1; i <= 8; ++i) {
+    const uint32_t now = static_cast<uint32_t>(i) * 25U;
+    session.on_frame(state_frame(i, 3, 2000), now);
+    session.tick(now);
+    assert(!session.hid_report_pending());
+  }
+  assert(session.diagnostics().watchdog_neutrals == 0);
+  assert(session.diagnostics().suppressed_hid_duplicates ==
+         suppressed_before + 8);
+
+  // Stopping the refreshes still forces the neutral at the deadline.
+  session.tick(299);
+  assert(!session.hid_report_pending());
+  session.tick(300);
+  assert(session.diagnostics().watchdog_neutrals == 1);
+  assert(session.hid_report_pending());
+  assert(session.pending_hid_report().buttons == 0);
+  assert(session.pending_hid_report().hat == 8);
+  session.mark_hid_report_sent();
+
+  // Repeated ordinary neutrals after the delivered neutral stay silent.
+  session.on_frame(state_frame(9, 0, 0), 301);
+  assert(!session.hid_report_pending());
+}
+
+void test_cdc_teardown_and_reconnect_stay_silent_when_neutral() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session);
+
+  const uint32_t suppressed_before =
+      session.diagnostics().suppressed_hid_duplicates;
+  // macOS closing the port on sleep entry: a DTR drop with the pad already
+  // neutral must not emit USB input.
+  session.on_cdc_disconnected();
+  assert(!session.hid_report_pending());
+  // Reconnect and a fresh Hello after wake are equally silent.
+  session.on_cdc_connected(1000);
+  assert(!session.hid_report_pending());
+  negotiate(session);
+  assert(!session.hid_report_pending());
+  assert(session.diagnostics().suppressed_hid_duplicates ==
+         suppressed_before + 3);
+
+  // Real input that changes the view still transmits immediately.
+  session.on_frame(state_frame(1, 1, 500), 1001);
+  assert(session.hid_report_pending());
+  assert(session.pending_hid_report().buttons == 1);
+}
+
+void test_usb_remount_retransmits_the_safety_neutral() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  assert(!session.hid_report_pending());
+  // Identical bytes, but a re-enumerated host has seen nothing: every mount
+  // must put the baseline neutral back on the wire so the driver publishes
+  // the controller.
+  session.on_hid_mounted();
+  assert(session.hid_report_pending());
+  assert(session.pending_hid_report().buttons == 0);
+  assert(session.pending_hid_report().hat == 8);
+  session.mark_hid_report_sent();
+  session.on_hid_mounted();
+  assert(session.hid_report_pending());
+  session.mark_hid_report_sent();
+}
+
+void test_unsent_changes_coalesce_and_cancel() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session, 0xffff);
+
+  session.on_frame(state_frame(0, 3, 1000), 0);
+  session.on_frame(state_frame(1, 5, 2000), 1);
+  assert(session.hid_report_pending());
+  assert(session.pending_hid_report().buttons == 5);
+  // Returning to the delivered view cancels the unsent change outright.
+  session.on_frame(state_frame(2, 0, 0), 2);
+  assert(!session.hid_report_pending());
+
+  // A change after the cancellation still transmits.
+  session.on_frame(state_frame(3, 6, 700), 3);
+  assert(session.hid_report_pending());
+  assert(session.pending_hid_report().buttons == 6);
+}
+
+void test_deferred_state_matching_the_neutral_is_not_resent() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session, 0xffff);
+  session.on_frame(state_frame(0, 9, 3000), 0);
+  session.mark_hid_report_sent();
+
+  // A sequence gap on a frame that itself carries neutral: the safety
+  // neutral transmits (the delivered view is active), and the deferred
+  // ordinary neutral then matches the delivered view and must not follow.
+  session.on_frame(state_frame(5, 0, 0), 1);
+  assert(session.diagnostics().sequence_gaps == 1);
+  assert(session.hid_report_pending());
+  assert(session.pending_hid_report().buttons == 0);
+  session.mark_hid_report_sent();
+  assert(!session.hid_report_pending());
+}
+
+void test_failed_sends_do_not_advance_the_delivered_view() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session, 0xffff);
+
+  session.on_frame(state_frame(0, 3, 1000), 0);
+  assert(session.hid_report_pending());
+  // The sketch only marks after xinput_usb::send succeeds; until then the
+  // same state must stay pending rather than being treated as a duplicate.
+  session.on_frame(state_frame(1, 3, 1000), 1);
+  assert(session.hid_report_pending());
+  assert(session.pending_hid_report().buttons == 3);
+  session.mark_hid_report_sent();
+  session.on_frame(state_frame(2, 3, 1000), 2);
+  assert(!session.hid_report_pending());
 }
 
 }  // namespace
@@ -472,6 +639,12 @@ int main() {
   test_session_negotiation_sequence_and_watchdog();
   test_rumble_latest_refresh_and_safety_zero();
   test_fault_and_disconnect_neutralize();
+  test_identical_refreshes_suppress_hid_but_feed_watchdog();
+  test_cdc_teardown_and_reconnect_stay_silent_when_neutral();
+  test_usb_remount_retransmits_the_safety_neutral();
+  test_unsent_changes_coalesce_and_cancel();
+  test_deferred_state_matching_the_neutral_is_not_resent();
+  test_failed_sends_do_not_advance_the_delivered_view();
   puts("firmware native tests passed");
   return 0;
 }

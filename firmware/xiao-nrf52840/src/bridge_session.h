@@ -42,6 +42,7 @@ struct SessionDiagnostics {
   uint32_t watchdog_neutrals;
   uint32_t rumble_feedback_frames;
   uint32_t rumble_feedback_refreshes;
+  uint32_t suppressed_hid_duplicates;
 };
 
 class SessionSink {
@@ -80,6 +81,7 @@ class BridgeSession {
   void force_neutral(bool safety);
   void force_rumble_zero();
   void queue_hid(const CanonicalGamepadReport& report, bool safety);
+  void set_pending(const CanonicalGamepadReport& report, bool safety);
   void queue_rumble(const RumbleFeedback& rumble, bool safety);
   void service_rumble(uint32_t now_ms);
   bool send_message(MessageType type, const uint8_t* payload,
@@ -98,6 +100,7 @@ class BridgeSession {
   bool hid_pending_;
   bool pending_is_safety_neutral_;
   bool deferred_active_pending_;
+  bool delivered_hid_valid_;
   bool rumble_pending_;
   bool rumble_pending_is_safety_zero_;
   bool rumble_pending_is_refresh_;
@@ -110,6 +113,7 @@ class BridgeSession {
   uint32_t last_rumble_tx_ms_;
   CanonicalGamepadReport pending_hid_;
   CanonicalGamepadReport deferred_active_;
+  CanonicalGamepadReport delivered_hid_;
   RumbleFeedback desired_rumble_;
   RumbleFeedback pending_rumble_;
   RumbleFeedback deferred_rumble_;

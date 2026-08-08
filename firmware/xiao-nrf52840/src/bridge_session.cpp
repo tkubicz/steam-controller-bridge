@@ -26,6 +26,7 @@ BridgeSession::BridgeSession(SessionSink& sink)
       hid_pending_(true),
       pending_is_safety_neutral_(true),
       deferred_active_pending_(false),
+      delivered_hid_valid_(false),
       rumble_pending_(true),
       rumble_pending_is_safety_zero_(true),
       rumble_pending_is_refresh_(false),
@@ -38,6 +39,7 @@ BridgeSession::BridgeSession(SessionSink& sink)
       last_rumble_tx_ms_(0),
       pending_hid_(neutral_report()),
       deferred_active_(neutral_report()),
+      delivered_hid_(neutral_report()),
       desired_rumble_(zero_rumble()),
       pending_rumble_(zero_rumble()),
       deferred_rumble_(zero_rumble()),
@@ -55,6 +57,10 @@ void BridgeSession::on_cdc_disconnected() {
 }
 
 void BridgeSession::on_hid_mounted() {
+  // A freshly (re)mounted USB host has received no report, so the delivered
+  // cache no longer describes its view and the neutral below must reach the
+  // wire for the driver to publish the controller.
+  delivered_hid_valid_ = false;
   force_neutral(true);
   force_rumble_zero();
 }
@@ -142,15 +148,19 @@ void BridgeSession::tick(uint32_t now_ms) {
 }
 
 void BridgeSession::mark_hid_report_sent() {
-  if (pending_is_safety_neutral_ && deferred_active_pending_) {
-    pending_hid_ = deferred_active_;
-    pending_is_safety_neutral_ = false;
-    deferred_active_pending_ = false;
-    hid_pending_ = true;
+  if (!hid_pending_) {
     return;
   }
+  delivered_hid_ = pending_hid_;
+  delivered_hid_valid_ = true;
+  const bool was_safety_neutral = pending_is_safety_neutral_;
   hid_pending_ = false;
   pending_is_safety_neutral_ = false;
+  if (was_safety_neutral && deferred_active_pending_) {
+    const CanonicalGamepadReport deferred = deferred_active_;
+    deferred_active_pending_ = false;
+    set_pending(deferred, false);
+  }
 }
 
 void BridgeSession::reset_session(bool keep_connection) {
@@ -211,6 +221,23 @@ void BridgeSession::queue_hid(const CanonicalGamepadReport& report,
   }
   if (safety) {
     deferred_active_pending_ = false;
+  }
+  set_pending(report, safety);
+}
+
+void BridgeSession::set_pending(const CanonicalGamepadReport& report,
+                                bool safety) {
+  if (delivered_hid_valid_ &&
+      memcmp(&report, &delivered_hid_, sizeof(report)) == 0) {
+    // The host's view already matches this report, so nothing needs the
+    // wire; this also cancels an older unsent change the report reverts.
+    // Safety events guarantee the *delivered* state, not a transmission:
+    // resending an identical neutral would register as gamepad input on
+    // macOS and abort the very sleep a CDC teardown belongs to.
+    hid_pending_ = false;
+    pending_is_safety_neutral_ = false;
+    ++diagnostics_.suppressed_hid_duplicates;
+    return;
   }
   pending_hid_ = report;
   hid_pending_ = true;

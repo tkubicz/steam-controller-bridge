@@ -82,6 +82,17 @@ HID report. A separate two-second hardware watchdog resets the MCU if the main
 loop stalls. The host refreshes unchanged active states every 25 ms, leaving
 margin inside the firmware's 100 ms data watchdog.
 
+The firmware tracks the last HID report actually delivered over USB and
+suppresses any queued report — forced safety neutrals included — whose content
+matches it. Safety events guarantee the *delivered* state, not a transmission:
+serial refreshes feed the 100 ms lease without generating USB input, and a
+host-side CDC teardown (for example macOS closing the port on system-sleep
+entry) produces no gamepad activity when the pad is already neutral, so it can
+no longer be mistaken for user input that aborts the sleep. The delivered
+cache is invalidated on every USB mount, so a freshly enumerated host always
+receives its baseline neutral. This behavior lives in firmware: XIAOs flashed
+before it must be reflashed to pick it up.
+
 Nonzero rumble changes are returned immediately and refreshed every 25 ms as a
 host-side lease. HID mount, CDC DTR loss, USB unmount, a new Hello, parser/session
 reset, watchdog expiry, and reboot clear rumble and prioritize a zero feedback
