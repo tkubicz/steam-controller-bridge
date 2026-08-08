@@ -737,8 +737,8 @@ fn clamping_to_the_unit_circle_caps_magnitude_without_turning() {
             (x * cy - y * cx).abs() < 1e-5,
             "{x},{y} was turned to {cx},{cy}"
         );
-        assert!(cx.is_sign_positive() == x.is_sign_positive());
-        assert!(cy.is_sign_positive() == y.is_sign_positive());
+        assert_eq!(cx.is_sign_positive(), x.is_sign_positive());
+        assert_eq!(cy.is_sign_positive(), y.is_sign_positive());
     }
 
     // Non-finite input neutralizes rather than propagating NaN into a position.
