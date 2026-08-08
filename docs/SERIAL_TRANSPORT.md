@@ -39,10 +39,12 @@ firmware's 100 ms controller-data watchdog alive.
 
 Refreshes maintain the firmware's watchdog lease without necessarily producing
 USB input: the firmware forwards a gamepad report only when the canonical
-report differs from the last one it delivered over USB. This applies to forced
-safety neutrals too — a disconnect or Hello while the delivered state is
-already neutral is silent on the USB side, which keeps CDC teardown during
-macOS sleep entry from registering as user activity.
+report differs from the last one successfully queued on the USB endpoint. This
+applies to forced safety neutrals too — a disconnect or Hello after a neutral
+has already been queued is silent on the USB side, which keeps CDC teardown
+during macOS sleep entry from registering as user activity. Endpoint acceptance
+does not prove that the host polled the report; USB remount invalidates the
+cache and unconditionally queues a fresh neutral baseline.
 
 ## Reverse rumble lease
 

@@ -26,7 +26,7 @@ BridgeSession::BridgeSession(SessionSink& sink)
       hid_pending_(true),
       pending_is_safety_neutral_(true),
       deferred_active_pending_(false),
-      delivered_hid_valid_(false),
+      last_queued_hid_valid_(false),
       rumble_pending_(true),
       rumble_pending_is_safety_zero_(true),
       rumble_pending_is_refresh_(false),
@@ -39,7 +39,7 @@ BridgeSession::BridgeSession(SessionSink& sink)
       last_rumble_tx_ms_(0),
       pending_hid_(neutral_report()),
       deferred_active_(neutral_report()),
-      delivered_hid_(neutral_report()),
+      last_queued_hid_(neutral_report()),
       desired_rumble_(zero_rumble()),
       pending_rumble_(zero_rumble()),
       deferred_rumble_(zero_rumble()),
@@ -57,10 +57,10 @@ void BridgeSession::on_cdc_disconnected() {
 }
 
 void BridgeSession::on_hid_mounted() {
-  // A freshly (re)mounted USB host has received no report, so the delivered
-  // cache no longer describes its view and the neutral below must reach the
-  // wire for the driver to publish the controller.
-  delivered_hid_valid_ = false;
+  // A freshly (re)mounted USB host has accepted no report, so the queue cache
+  // no longer describes its endpoint and the neutral below must reach the wire
+  // for the driver to publish the controller.
+  last_queued_hid_valid_ = false;
   force_neutral(true);
   force_rumble_zero();
 }
@@ -151,15 +151,18 @@ void BridgeSession::mark_hid_report_sent() {
   if (!hid_pending_) {
     return;
   }
-  delivered_hid_ = pending_hid_;
-  delivered_hid_valid_ = true;
+  // xinput_usb::send succeeding means TinyUSB accepted the endpoint transfer,
+  // not that the host has already polled it. A USB reset/remount invalidates
+  // this cache and unconditionally queues a fresh neutral baseline.
+  last_queued_hid_ = pending_hid_;
+  last_queued_hid_valid_ = true;
   const bool was_safety_neutral = pending_is_safety_neutral_;
   hid_pending_ = false;
   pending_is_safety_neutral_ = false;
   if (was_safety_neutral && deferred_active_pending_) {
     const CanonicalGamepadReport deferred = deferred_active_;
     deferred_active_pending_ = false;
-    set_pending(deferred, false);
+    queue_hid(deferred, false);
   }
 }
 
@@ -222,18 +225,11 @@ void BridgeSession::queue_hid(const CanonicalGamepadReport& report,
   if (safety) {
     deferred_active_pending_ = false;
   }
-  set_pending(report, safety);
-}
-
-void BridgeSession::set_pending(const CanonicalGamepadReport& report,
-                                bool safety) {
-  if (delivered_hid_valid_ &&
-      memcmp(&report, &delivered_hid_, sizeof(report)) == 0) {
-    // The host's view already matches this report, so nothing needs the
+  if (last_queued_hid_valid_ && report == last_queued_hid_) {
+    // The USB endpoint has already accepted this report, so nothing needs the
     // wire; this also cancels an older unsent change the report reverts.
-    // Safety events guarantee the *delivered* state, not a transmission:
-    // resending an identical neutral would register as gamepad input on
-    // macOS and abort the very sleep a CDC teardown belongs to.
+    // Resending an identical neutral would register as gamepad input on macOS
+    // and abort the very sleep a CDC teardown belongs to.
     hid_pending_ = false;
     pending_is_safety_neutral_ = false;
     ++diagnostics_.suppressed_hid_duplicates;
@@ -331,7 +327,7 @@ RumbleFeedback BridgeSession::zero_rumble() {
 bool BridgeSession::report_is_neutral(
     const CanonicalGamepadReport& report) {
   const CanonicalGamepadReport neutral = neutral_report();
-  return memcmp(&report, &neutral, sizeof(report)) == 0;
+  return report == neutral;
 }
 
 bool BridgeSession::rumble_is_active(const RumbleFeedback& rumble) {

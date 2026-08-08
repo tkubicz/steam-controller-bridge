@@ -30,6 +30,14 @@ struct CanonicalGamepadReport {
   int16_t right_y;
   uint16_t left_trigger;
   uint16_t right_trigger;
+
+  bool operator==(const CanonicalGamepadReport& other) const {
+    return buttons == other.buttons && hat == other.hat &&
+           left_x == other.left_x && left_y == other.left_y &&
+           right_x == other.right_x && right_y == other.right_y &&
+           left_trigger == other.left_trigger &&
+           right_trigger == other.right_trigger;
+  }
 };
 #pragma pack(pop)
 
@@ -81,7 +89,6 @@ class BridgeSession {
   void force_neutral(bool safety);
   void force_rumble_zero();
   void queue_hid(const CanonicalGamepadReport& report, bool safety);
-  void set_pending(const CanonicalGamepadReport& report, bool safety);
   void queue_rumble(const RumbleFeedback& rumble, bool safety);
   void service_rumble(uint32_t now_ms);
   bool send_message(MessageType type, const uint8_t* payload,
@@ -100,7 +107,7 @@ class BridgeSession {
   bool hid_pending_;
   bool pending_is_safety_neutral_;
   bool deferred_active_pending_;
-  bool delivered_hid_valid_;
+  bool last_queued_hid_valid_;
   bool rumble_pending_;
   bool rumble_pending_is_safety_zero_;
   bool rumble_pending_is_refresh_;
@@ -113,7 +120,7 @@ class BridgeSession {
   uint32_t last_rumble_tx_ms_;
   CanonicalGamepadReport pending_hid_;
   CanonicalGamepadReport deferred_active_;
-  CanonicalGamepadReport delivered_hid_;
+  CanonicalGamepadReport last_queued_hid_;
   RumbleFeedback desired_rumble_;
   RumbleFeedback pending_rumble_;
   RumbleFeedback deferred_rumble_;

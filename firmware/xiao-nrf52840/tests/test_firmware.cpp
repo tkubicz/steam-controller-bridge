@@ -480,6 +480,22 @@ void test_fault_and_disconnect_neutralize() {
          suppressed_before + 1);
 }
 
+void test_active_cdc_disconnect_queues_safety_neutral() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session);
+  session.on_frame(state_frame(1, 7, 1500), 1);
+  session.mark_hid_report_sent();
+
+  session.on_cdc_disconnected();
+  assert(!session.cdc_connected());
+  assert(session.hid_report_pending());
+  assert(session.pending_hid_report().buttons == 0);
+  assert(session.pending_hid_report().hat == 8);
+}
+
 void test_identical_refreshes_suppress_hid_but_feed_watchdog() {
   CapturingSink sink;
   BridgeSession session(sink);
@@ -608,7 +624,7 @@ void test_deferred_state_matching_the_neutral_is_not_resent() {
   assert(!session.hid_report_pending());
 }
 
-void test_failed_sends_do_not_advance_the_delivered_view() {
+void test_rejected_sends_do_not_advance_the_queue_cache() {
   CapturingSink sink;
   BridgeSession session(sink);
   session.on_cdc_connected(0);
@@ -617,8 +633,9 @@ void test_failed_sends_do_not_advance_the_delivered_view() {
 
   session.on_frame(state_frame(0, 3, 1000), 0);
   assert(session.hid_report_pending());
-  // The sketch only marks after xinput_usb::send succeeds; until then the
-  // same state must stay pending rather than being treated as a duplicate.
+  // The sketch only marks after xinput_usb::send accepts the transfer; an
+  // immediately rejected send must stay pending rather than being treated as
+  // a duplicate.
   session.on_frame(state_frame(1, 3, 1000), 1);
   assert(session.hid_report_pending());
   assert(session.pending_hid_report().buttons == 3);
@@ -639,12 +656,13 @@ int main() {
   test_session_negotiation_sequence_and_watchdog();
   test_rumble_latest_refresh_and_safety_zero();
   test_fault_and_disconnect_neutralize();
+  test_active_cdc_disconnect_queues_safety_neutral();
   test_identical_refreshes_suppress_hid_but_feed_watchdog();
   test_cdc_teardown_and_reconnect_stay_silent_when_neutral();
   test_usb_remount_retransmits_the_safety_neutral();
   test_unsent_changes_coalesce_and_cancel();
   test_deferred_state_matching_the_neutral_is_not_resent();
-  test_failed_sends_do_not_advance_the_delivered_view();
+  test_rejected_sends_do_not_advance_the_queue_cache();
   puts("firmware native tests passed");
   return 0;
 }
