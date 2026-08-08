@@ -4,6 +4,8 @@
 )]
 use super::*;
 
+use bridge_output::MINIMUM_FIRMWARE_REVISION;
+
 impl Supervisor {
     pub(super) fn service_idle_commands(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
@@ -278,6 +280,32 @@ impl Supervisor {
             status.battery_charge_state = None;
             status.lizard = LizardStatus::default();
         });
+    }
+
+    /// Copies the output's current firmware report into `XiaoStatus`, logging
+    /// each transition once. Skips backends without a live device connection,
+    /// so a torn-down serial session keeps the last known value until the
+    /// existing output-lost reset clears it.
+    pub(super) fn refresh_xiao_firmware(&self, output: &OutputSession) {
+        let Some(reported) = output.output.firmware_version() else {
+            return;
+        };
+        let mut previous = reported;
+        self.update_status(|status| {
+            previous = status.xiao.firmware;
+            status.xiao.firmware = reported;
+        });
+        if previous == reported {
+            return;
+        }
+        if reported.update_recommended() {
+            eprintln!(
+                "level=warn event=xiao_firmware_outdated firmware={reported:?} \
+                 minimum={MINIMUM_FIRMWARE_REVISION}"
+            );
+        } else {
+            eprintln!("level=info event=xiao_firmware firmware={reported:?}");
+        }
     }
 
     pub(super) fn update_status(&self, update: impl FnOnce(&mut BridgeStatus)) -> bool {

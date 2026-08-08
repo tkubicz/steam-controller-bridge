@@ -467,6 +467,7 @@ fn diagnostics_never_expose_a_whole_device_serial() {
             path: Some("/dev/cu.usbmodem11201".to_owned()),
             usb_serial: Some("5E6EF905E5468F85".to_owned()),
             handshake_complete: true,
+            firmware: bridge_runtime::FirmwareVersion::Reported(1),
         },
         ..BridgeStatus::default()
     });

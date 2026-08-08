@@ -108,6 +108,7 @@ struct MenuItems {
     input: MenuItem,
     controller: MenuItem,
     xiao: MenuItem,
+    firmware: MenuItem,
     battery: MenuItem,
     haptics: MenuItem,
     bindings: MenuItem,

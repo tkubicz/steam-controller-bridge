@@ -99,6 +99,20 @@ reset, watchdog expiry, and reboot clear rumble and prioritize a zero feedback
 command after negotiation. Rumble never refreshes the 100 ms controller-input
 watchdog and does not compete with a pending neutral input report.
 
+## Firmware revision
+
+`src/firmware_version.h` holds `kFirmwareRevision`, a hand-maintained
+monotonic counter independent of release numbering. After every successful
+Hello negotiation the firmware queues one protocol `DeviceInfo` frame carrying
+it, retried until the CDC transmit queue accepts it; hosts and firmware that
+predate the message ignore it, so mixed pairings stay compatible.
+
+Bump `kFirmwareRevision` in the same commit as any behavior-affecting firmware
+change. Raise the host's `MINIMUM_FIRMWARE_REVISION`
+(`crates/bridge-output/src/serial.rs`) only when the bridge depends on the new
+behavior — that constant is what turns an older revision into the menu bar's
+"Update recommended" nudge.
+
 The active-low RGB LED indicates:
 
 - slow blue: CDC disconnected;

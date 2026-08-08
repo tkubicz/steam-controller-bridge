@@ -90,6 +90,7 @@ class BridgeSession {
   void force_rumble_zero();
   void queue_hid(const CanonicalGamepadReport& report, bool safety);
   void queue_rumble(const RumbleFeedback& rumble, bool safety);
+  void service_device_info();
   void service_rumble(uint32_t now_ms);
   bool send_message(MessageType type, const uint8_t* payload,
                     uint16_t payload_length);
@@ -101,6 +102,7 @@ class BridgeSession {
   SessionSink& sink_;
   bool cdc_connected_;
   bool negotiated_;
+  bool device_info_pending_;
   bool sequence_valid_;
   bool faulted_;
   bool data_watchdog_armed_;

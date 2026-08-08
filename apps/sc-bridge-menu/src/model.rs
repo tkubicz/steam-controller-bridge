@@ -1,5 +1,6 @@
 use bridge_runtime::{
-    AutomaticShutdownPhase, BridgeStatus, DesktopBindingsState, PuckDockAction, RuntimeState,
+    AutomaticShutdownPhase, BridgeStatus, DesktopBindingsState, FirmwareVersion, PuckDockAction,
+    RuntimeState,
 };
 
 const MAX_PROBLEM_CHARS: usize = 48;
@@ -54,6 +55,7 @@ pub struct MenuModel {
     pub input: String,
     pub controller: String,
     pub xiao: String,
+    pub firmware: String,
     pub battery: String,
     pub haptics: String,
     pub bindings: String,
@@ -96,6 +98,7 @@ impl MenuModel {
                     "Not detected"
                 }
             ),
+            firmware: firmware_label(status),
             battery: status.battery_percent.map_or_else(
                 || "Battery: Unknown".to_owned(),
                 |percent| format!("Battery: {percent}%"),
@@ -117,6 +120,21 @@ impl MenuModel {
             run_enabled: starts || !matches!(status.state, RuntimeState::Stopping),
             permission_required: status.bindings.state == DesktopBindingsState::PermissionRequired,
         }
+    }
+}
+
+/// A warning here never flips the tray icon or the Problem line: the bridge
+/// still works on old firmware, so the nudge stays inside the hardware block.
+fn firmware_label(status: &BridgeStatus) -> String {
+    let firmware = status.xiao.firmware;
+    match firmware {
+        FirmwareVersion::Reported(revision) if firmware.update_recommended() => {
+            format!("{WARNING} Firmware: rev {revision} · Update recommended")
+        }
+        FirmwareVersion::Reported(revision) => format!("Firmware: rev {revision}"),
+        FirmwareVersion::Unreported => format!("{WARNING} Firmware: Update recommended"),
+        FirmwareVersion::Unrecognized => "Firmware: Newer than this app".to_owned(),
+        FirmwareVersion::Pending => "Firmware: Unknown".to_owned(),
     }
 }
 
@@ -351,6 +369,7 @@ mod tests {
                 path: Some("/dev/cu.usbmodem-example".to_owned()),
                 usb_serial: Some("redacted".to_owned()),
                 handshake_complete: true,
+                firmware: FirmwareVersion::Reported(1),
             },
             ..BridgeStatus::default()
         }
@@ -408,6 +427,50 @@ mod tests {
         let stopping = state_of(RuntimeState::Stopping);
         assert_eq!(stopping.run_action, RunAction::Stop);
         assert!(!stopping.run_enabled);
+    }
+
+    #[test]
+    fn firmware_lines_warn_only_below_the_minimum_and_never_change_the_icon() {
+        let cases = [
+            (FirmwareVersion::Pending, "Firmware: Unknown"),
+            (
+                FirmwareVersion::Reported(bridge_runtime::MINIMUM_FIRMWARE_REVISION),
+                "Firmware: rev 1",
+            ),
+            (
+                FirmwareVersion::Unreported,
+                "⚠ Firmware: Update recommended",
+            ),
+            (
+                FirmwareVersion::Unrecognized,
+                "Firmware: Newer than this app",
+            ),
+        ];
+        for (firmware, expected) in cases {
+            let mut status = ready_status(ControllerTransport::Bluetooth);
+            status.xiao.firmware = firmware;
+            let model = MenuModel::from_status(&status);
+            assert_eq!(model.firmware, expected);
+            assert_eq!(
+                model.firmware.starts_with(WARNING),
+                firmware.update_recommended()
+            );
+            // Old firmware still works: the nudge must not read as an error.
+            assert!(!model.has_error);
+            assert_eq!(model.tray_state, TrayState::Ready);
+        }
+    }
+
+    #[test]
+    fn an_outdated_reported_revision_names_the_revision_it_warns_about() {
+        // Reachable once MINIMUM_FIRMWARE_REVISION exceeds 1; pinned here so
+        // the label shape is already settled.
+        let mut status = ready_status(ControllerTransport::Bluetooth);
+        status.xiao.firmware = FirmwareVersion::Reported(0);
+        let model = MenuModel::from_status(&status);
+        if FirmwareVersion::Reported(0).update_recommended() {
+            assert_eq!(model.firmware, "⚠ Firmware: rev 0 · Update recommended");
+        }
     }
 
     #[test]

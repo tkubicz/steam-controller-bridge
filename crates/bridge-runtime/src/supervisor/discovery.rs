@@ -77,11 +77,16 @@ impl Supervisor {
         };
         let (info, output) = valid.swap_remove(selected_index);
         self.preferred_xiao_serial.clone_from(&info.serial_number);
+        // DeviceInfo can land in the same read burst as the HelloResponse
+        // during the blocking handshake, so read it rather than assume
+        // Pending.
+        let firmware = output.firmware_version().unwrap_or_default();
         self.update_status(|status| {
             status.xiao = XiaoStatus {
                 path: Some(info.path.clone()),
                 usb_serial: info.serial_number.clone(),
                 handshake_complete: true,
+                firmware,
             };
         });
         eprintln!(

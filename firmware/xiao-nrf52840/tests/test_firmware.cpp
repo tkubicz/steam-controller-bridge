@@ -1,5 +1,6 @@
 #include "bridge_protocol.h"
 #include "bridge_session.h"
+#include "firmware_version.h"
 #include "xinput_gamepad.h"
 
 #include <assert.h>
@@ -644,6 +645,107 @@ void test_rejected_sends_do_not_advance_the_queue_cache() {
   assert(!session.hid_report_pending());
 }
 
+size_t device_info_count(const CapturingSink& sink) {
+  size_t count = 0;
+  for (const auto& bytes : sink.writes) {
+    if (decode_single(bytes).message_type ==
+        static_cast<uint8_t>(MessageType::DeviceInfo)) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+Frame last_device_info(const CapturingSink& sink) {
+  Frame found{};
+  bool present = false;
+  for (const auto& bytes : sink.writes) {
+    const Frame frame = decode_single(bytes);
+    if (frame.message_type ==
+        static_cast<uint8_t>(MessageType::DeviceInfo)) {
+      found = frame;
+      present = true;
+    }
+  }
+  assert(present);
+  return found;
+}
+
+void test_device_info_reported_once_after_negotiation() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session);
+  // Deferred to the tick so the HelloResponse always leaves first.
+  assert(device_info_count(sink) == 0);
+  session.tick(0);
+  assert(device_info_count(sink) == 1);
+
+  const Frame info = last_device_info(sink);
+  assert(info.payload_length == scbridge::kDeviceInfoPayloadSize);
+  assert(info.payload[0] == scbridge::kDeviceInfoFormat);
+  assert(info.payload[1] ==
+         static_cast<uint8_t>(scbridge::kFirmwareRevision));
+  assert(info.payload[2] ==
+         static_cast<uint8_t>(scbridge::kFirmwareRevision >> 8U));
+
+  session.tick(1);
+  session.tick(50);
+  assert(device_info_count(sink) == 1);
+}
+
+void test_device_info_retries_when_sink_rejects() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session);
+
+  sink.reject_next_write = true;
+  session.tick(0);
+  assert(device_info_count(sink) == 0);
+  session.tick(1);
+  assert(device_info_count(sink) == 1);
+}
+
+void test_device_info_not_sent_before_negotiation() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  session.tick(5);
+  assert(device_info_count(sink) == 0);
+}
+
+void test_device_info_resent_after_re_hello() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session);
+  session.tick(0);
+  assert(device_info_count(sink) == 1);
+
+  negotiate(session, 100);
+  session.tick(1);
+  assert(device_info_count(sink) == 2);
+}
+
+void test_device_info_cleared_by_disconnect() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session);
+  // Disconnect before the tick that would have sent it: the report belongs
+  // to the dead session and must not leak into the next one.
+  session.on_cdc_disconnected();
+  session.on_cdc_connected(5);
+  session.tick(6);
+  assert(device_info_count(sink) == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -663,6 +765,11 @@ int main() {
   test_unsent_changes_coalesce_and_cancel();
   test_deferred_state_matching_the_neutral_is_not_resent();
   test_rejected_sends_do_not_advance_the_queue_cache();
+  test_device_info_reported_once_after_negotiation();
+  test_device_info_retries_when_sink_rejects();
+  test_device_info_not_sent_before_negotiation();
+  test_device_info_resent_after_re_hello();
+  test_device_info_cleared_by_disconnect();
   puts("firmware native tests passed");
   return 0;
 }

@@ -190,6 +190,11 @@ impl Supervisor {
                         self.update_status(|status| {
                             status.xiao = XiaoStatus::default();
                         });
+                    } else if let Some(session) = retained_output.as_ref() {
+                        // The firmware's DeviceInfo usually lands after
+                        // discovery published XiaoStatus; keep it current
+                        // while no controller is present.
+                        self.refresh_xiao_firmware(session);
                     }
                     let delay =
                         controller_discovery_loop_delay(controller_discovery_started.elapsed());

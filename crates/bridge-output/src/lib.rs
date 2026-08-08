@@ -9,9 +9,10 @@ use gamepad_state::GamepadState;
 
 mod serial;
 pub use serial::{
-    available_serial_devices, available_serial_ports, ByteTransport, SerialConfig,
+    available_serial_devices, available_serial_ports, ByteTransport, FirmwareVersion, SerialConfig,
     SerialConnection, SerialDeviceInfo, SerialError, SerialMetrics, SerialOutput, SerialStatus,
-    XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
+    MINIMUM_FIRMWARE_REVISION, XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID,
+    XIAO_USB_VENDOR_ID,
 };
 
 #[derive(Debug)]
@@ -85,6 +86,14 @@ pub trait GamepadOutput {
     #[must_use]
     fn diagnostics(&self) -> OutputDiagnostics {
         OutputDiagnostics::default()
+    }
+
+    /// What the connected firmware has reported about itself, for backends
+    /// with an identifiable device on the other end. `None` when the backend
+    /// has no device or no live connection.
+    #[must_use]
+    fn firmware_version(&self) -> Option<FirmwareVersion> {
+        None
     }
 }
 
@@ -258,6 +267,9 @@ impl<O: GamepadOutput> GamepadOutput for ChangedOnly<O> {
     }
     fn diagnostics(&self) -> OutputDiagnostics {
         self.inner.diagnostics()
+    }
+    fn firmware_version(&self) -> Option<FirmwareVersion> {
+        self.inner.firmware_version()
     }
 }
 

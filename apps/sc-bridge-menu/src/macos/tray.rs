@@ -12,6 +12,7 @@ impl MenuApp {
         let input = MenuItem::new("Input: Discovering", false, None);
         let controller = MenuItem::new("Controller: Not connected", false, None);
         let xiao = MenuItem::new("XIAO: Discovering", false, None);
+        let firmware = MenuItem::new("Firmware: Unknown", false, None);
         let battery = MenuItem::new("Battery: Unknown", false, None);
         let haptics = MenuItem::new("Haptics: Idle", false, None);
         let bindings = MenuItem::new("Bindings: Disabled", false, None);
@@ -174,6 +175,7 @@ impl MenuApp {
             &controller,
             &input,
             &xiao,
+            &firmware,
             &battery,
             &haptics,
             &bindings,
@@ -212,6 +214,7 @@ impl MenuApp {
             input,
             controller,
             xiao,
+            firmware,
             battery,
             haptics,
             bindings,
@@ -253,6 +256,7 @@ impl MenuApp {
                 items.input.set_text(&model.input);
                 items.controller.set_text(&model.controller);
                 items.xiao.set_text(&model.xiao);
+                items.firmware.set_text(&model.firmware);
                 items.battery.set_text(&model.battery);
                 items.haptics.set_text(&model.haptics);
                 items.bindings.set_text(&model.bindings);

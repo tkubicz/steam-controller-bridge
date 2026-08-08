@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "firmware_version.h"
+
 namespace scbridge {
 namespace {
 
@@ -20,6 +22,7 @@ BridgeSession::BridgeSession(SessionSink& sink)
     : sink_(sink),
       cdc_connected_(false),
       negotiated_(false),
+      device_info_pending_(false),
       sequence_valid_(false),
       faulted_(false),
       data_watchdog_armed_(false),
@@ -81,6 +84,9 @@ void BridgeSession::on_frame(const Frame& frame, uint32_t now_ms) {
       negotiated_ =
           send_message(MessageType::HelloResponse, &selected, 1);
     }
+    // Queued behind the HelloResponse rather than sent inline: the CDC TX
+    // queue is shallow, and the loop's tick retries until it accepts.
+    device_info_pending_ = negotiated_;
     return;
   }
 
@@ -144,6 +150,7 @@ void BridgeSession::tick(uint32_t now_ms) {
     force_neutral(true);
     force_rumble_zero();
   }
+  service_device_info();
   service_rumble(now_ms);
 }
 
@@ -168,6 +175,7 @@ void BridgeSession::mark_hid_report_sent() {
 
 void BridgeSession::reset_session(bool keep_connection) {
   negotiated_ = false;
+  device_info_pending_ = false;
   sequence_valid_ = false;
   consecutive_errors_ = 0;
   faulted_ = false;
@@ -238,6 +246,19 @@ void BridgeSession::queue_hid(const CanonicalGamepadReport& report,
   pending_hid_ = report;
   hid_pending_ = true;
   pending_is_safety_neutral_ = safety;
+}
+
+void BridgeSession::service_device_info() {
+  if (!negotiated_ || !device_info_pending_) {
+    return;
+  }
+  uint8_t payload[kDeviceInfoPayloadSize];
+  payload[0] = kDeviceInfoFormat;
+  payload[1] = static_cast<uint8_t>(kFirmwareRevision);
+  payload[2] = static_cast<uint8_t>(kFirmwareRevision >> 8U);
+  if (send_message(MessageType::DeviceInfo, payload, sizeof(payload))) {
+    device_info_pending_ = false;
+  }
 }
 
 void BridgeSession::queue_rumble(const RumbleFeedback& rumble, bool safety) {
