@@ -15,7 +15,7 @@ pub const XIAO_USB_PRODUCT: &str = "Steam Controller Bridge";
 /// raise it only when the bridge depends on newer firmware behavior, so a
 /// working older board is not nagged to reflash after app-only releases.
 pub const MINIMUM_FIRMWARE_REVISION: u16 = 1;
-/// How long after Ready the firmware gets to deliver its DeviceInfo report
+/// How long after Ready the firmware gets to deliver its `DeviceInfo` report
 /// before the connection is classified as pre-versioning firmware.
 const FIRMWARE_REPORT_GRACE: Duration = Duration::from_secs(2);
 const DEVICE_INFO_FORMAT: u8 = 1;
@@ -1060,7 +1060,7 @@ mod tests {
         connection.poll(Duration::from_millis(500)).unwrap();
         assert_eq!(connection.firmware(), FirmwareVersion::Pending);
         connection
-            .poll(Duration::from_millis(500) + FIRMWARE_REPORT_GRACE - Duration::from_millis(1))
+            .poll(Duration::from_millis(499) + FIRMWARE_REPORT_GRACE)
             .unwrap();
         assert_eq!(connection.firmware(), FirmwareVersion::Pending);
         connection
