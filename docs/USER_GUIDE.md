@@ -455,13 +455,29 @@ For opt-in CLI use, both arguments are required:
 
 Replay rejects these arguments. Profiles can independently enable the right pad
 as a relative pointer and the left pad as two-axis smooth scrolling. Both are
-off by default. Each pad also has optional Low/Medium/High movement feedback.
-The three strengths are deliberately subtle at -36/-30/-24 dB and use sparse
-movement-only texture ticks rather than coarse vibration pulses. Their cadence
-increases with finger speed. Left-pad scrolling accelerates with swipe speed,
+off by default. Each pad also has Low/Medium/High feedback, enabled at Medium
+by default, for physical clicks and movement. The three strengths are
+deliberately subtle at -36/-30/-24 dB and use finite ticks rather than coarse
+vibration pulses. Movement cadence increases with finger speed. Left-pad
+scrolling accelerates with swipe speed,
 has a configurable 25%-300% base speed, and offers momentum after release;
 speed defaults to 100% and momentum defaults on.
-Pad clicks, pressure actions, gestures, trigger clicks, and configurable stick
+Each pad's physical click can also be bound to a key chord or mouse button; the
+click fires even when that pad's pointer or scroll function is disabled. While
+a pad is pressed its motion is frozen — pressing a pad physically rolls
+the fingertip, and without the freeze that roll would jerk the pointer — so
+clicks land reliably anywhere on the pad, including edges and corners. The
+stationary deadzone grows near the rim, where the raw capacitive coordinates
+are noisier, and the freeze engages on finger pressure before the switch
+actually clicks. To drag with the click held, move deliberately past the drag
+threshold; a pause does not cancel the drag, and release discards the
+fingertip's pressure tail before normal motion resumes. The right pad's pointer
+speed is configurable per profile (25%-300%) on top of the reference lizard
+mode's measured linear transfer. Each physical pad-click press
+emits one feedback tick even if its pointer or scroll function is disabled.
+Holding and releasing do not repeat it, and the pad feedback setting controls
+both click and movement ticks.
+Pressure actions, gestures, trigger clicks, and configurable stick
 clicks are not part of this milestone. See
 [Desktop bindings](DESKTOP_BINDINGS.md) for schema and edge behavior.
 

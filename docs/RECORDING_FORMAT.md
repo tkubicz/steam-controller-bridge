@@ -29,6 +29,9 @@ Known kinds are:
 - `device_disconnected`
 - `raw_hid`
 - `decoded_steam_state`
+- `decoded_lizard_mouse`
+- `host_pointer`
+- `capture_metadata`
 - `mapped_gamepad_state`
 - `warning`
 - `error`
@@ -39,6 +42,21 @@ Unknown kinds are valid v1 events. Readers preserve their JSON payloads and repl
 `raw_hid` contains `report_id` as an unsigned byte and `bytes` as standard padded base64. Live captures also include `source_device_id`, `transport`, and `dropped_reports`; older or synthetic v1 events may omit these additive fields. Full collection metadata is stored in each corresponding `device_connected` event.
 
 `decoded_steam_state` contains the typed Steam Controller 2 state produced from a validated `0x45` or `0x42` report. It includes buttons, triggers, both sticks, both pads and pressures, IMU timestamp, acceleration, gyro, and the complete original report bytes. The recording library can decode it back into `SteamControllerState` without depending on HID access.
+
+`decoded_lizard_mouse` contains the validated six-byte `0x40` report as typed
+button bits, signed X/Y deltas, signed vertical/horizontal wheel deltas, and the
+complete original bytes.
+
+`host_pointer` is a passive macOS HID-event-tap observation. It records the
+mouse/drag/button/scroll event kind, Core Graphics delta fields, global cursor
+location, and point-scroll deltas. It is absent from older recordings and from
+captures made without the required Input Monitoring access.
+
+`capture_metadata` records the lab/tool version, OS version and build, selected
+path-sorted controller index and collection identity, transport, capture mode,
+display geometry/scales, mouse scaling, and optional final validity. A capture
+that overflowed its queue, lost the controller, or lost its event tap finishes
+with `valid: false` and an `invalid_reason` rather than silently omitting data.
 
 `mapped_gamepad_state` contains:
 

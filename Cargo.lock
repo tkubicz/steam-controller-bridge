@@ -2988,6 +2988,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "sc-lizard-lab"
+version = "1.4.0"
+dependencies = [
+ "clap",
+ "core-foundation 0.10.1",
+ "core-graphics 0.25.0",
+ "ctrlc",
+ "desktop-bindings",
+ "recording",
+ "serde",
+ "serde_json",
+ "steam-controller-device",
+ "steam-controller-discovery",
+ "steam-controller-protocol",
+]
+
+[[package]]
 name = "sc-probe"
 version = "1.4.0"
 dependencies = [

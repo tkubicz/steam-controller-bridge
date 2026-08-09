@@ -546,7 +546,7 @@ mod tests {
                     &mut output
                 )
                 .unwrap(),
-            ProcessOutcome::Status(DecodedReport::LizardMouse { .. })
+            ProcessOutcome::Status(DecodedReport::LizardMouse(_))
         ));
         assert_eq!(engine.metrics().decode_failures, 0);
         assert!(matches!(

@@ -96,6 +96,23 @@ Bits 30 and 31 are not assigned to physical SC2 controls by OpenPuck.
 
 OpenPuck's published table labels bits 28 and 29 as grip-touch signals, while current `0x42` firmware comments note they may be always-on status bits in that extended variant. The decoder exposes the documented bits and retains the raw report; mapping must keep them out of ordinary button output until local captures confirm their behavior.
 
+## Lizard mouse report layout
+
+The controller's HID descriptor and captured packets define the six-byte
+`0x40` report as:
+
+| Offset | Size | Meaning |
+| ---: | ---: | --- |
+| `0x00` | 1 | Report ID, `0x40` |
+| `0x01` | 1 | Mouse button bitmap |
+| `0x02` | 1 | Relative X, `i8` |
+| `0x03` | 1 | Relative Y, `i8` |
+| `0x04` | 1 | Vertical wheel, `i8` |
+| `0x05` | 1 | Horizontal wheel, `i8` |
+
+`LizardMouseReport` exposes every signed field and retains all six bytes. The
+decoder only observes this report; it never injects or replays its button bits.
+
 ## Decoder behavior
 
 - Exact sizes are required for every known report ID.

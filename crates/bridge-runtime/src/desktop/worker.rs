@@ -84,7 +84,7 @@ impl DesktopBindingsWorker {
     pub(crate) fn replace_profile(&self, profile: Option<BindingProfile>, ack: CommandAck) {
         self.enqueue_control(
             DesktopWorkerMessage::ReplaceProfile {
-                profile,
+                profile: profile.map(Box::new),
                 ack: Some(ack),
             },
             true,
@@ -226,7 +226,7 @@ pub(crate) fn run_desktop_bindings_worker(
                 // a barrier — observe the pre-command status and even write it
                 // back over the newer one.
                 DesktopWorkerMessage::ReplaceProfile { profile, ack } => {
-                    let result = runtime.replace_profile(profile);
+                    let result = runtime.replace_profile(profile.map(|profile| *profile));
                     if let Some(update) = runtime.take_status_update() {
                         publish_desktop_binding_status(status, update);
                     }

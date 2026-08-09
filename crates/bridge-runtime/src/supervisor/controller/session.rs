@@ -308,23 +308,7 @@ pub(crate) fn process_report(
             })?;
             Ok(ReportEffect::ControllerState {
                 meaningful_activity,
-                desktop_input: DesktopInputSnapshot {
-                    buttons: source.buttons,
-                    left_pad: PadSample {
-                        x: source.left_pad_x,
-                        y: source.left_pad_y,
-                        pressure: source.left_pad_pressure,
-                        touched: source.left_pad_touched,
-                        pressed: source.left_pad_pressed,
-                    },
-                    right_pad: PadSample {
-                        x: source.right_pad_x,
-                        y: source.right_pad_y,
-                        pressure: source.right_pad_pressure,
-                        touched: source.right_pad_touched,
-                        pressed: source.right_pad_pressed,
-                    },
-                },
+                desktop_input: DesktopInputSnapshot::from(&source),
                 picker_input: PickerInput {
                     buttons: source.buttons,
                     left_stick: (source.left_stick_x, source.left_stick_y),

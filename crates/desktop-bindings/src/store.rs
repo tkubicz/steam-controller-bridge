@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    BindingProfile, ControlBindings, PadBindings, BINDINGS_VERSION, MAX_PROFILES,
-    MAX_PROFILE_NAME_CHARS, MAX_SCROLL_SPEED_PERCENT, MIN_SCROLL_SPEED_PERCENT,
+    BindingProfile, ControlBindings, PadBindings, BINDINGS_VERSION, MAX_PAD_SPEED_PERCENT,
+    MAX_PROFILES, MAX_PROFILE_NAME_CHARS, MIN_PAD_SPEED_PERCENT,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,12 +65,16 @@ impl BindingStore {
             if !names.insert(profile.name.to_lowercase()) {
                 return Err(format!("duplicate profile name {:?}", profile.name));
             }
-            let scroll_speed = profile.pads.left_scroll.speed_percent;
-            if !(MIN_SCROLL_SPEED_PERCENT..=MAX_SCROLL_SPEED_PERCENT).contains(&scroll_speed) {
-                return Err(format!(
-                    "profile {:?} scroll speed must be between {MIN_SCROLL_SPEED_PERCENT}% and {MAX_SCROLL_SPEED_PERCENT}%",
-                    profile.name
-                ));
+            for (kind, speed) in [
+                ("scroll", profile.pads.left_scroll.speed_percent),
+                ("pointer", profile.pads.right_mouse.speed_percent),
+            ] {
+                if !(MIN_PAD_SPEED_PERCENT..=MAX_PAD_SPEED_PERCENT).contains(&speed) {
+                    return Err(format!(
+                        "profile {:?} {kind} speed must be between {MIN_PAD_SPEED_PERCENT}% and {MAX_PAD_SPEED_PERCENT}%",
+                        profile.name
+                    ));
+                }
             }
         }
         Ok(())
@@ -225,7 +229,7 @@ pub fn parse_store(bytes: &[u8]) -> Result<BindingStore, String> {
 fn parse_store_with_migration(bytes: &[u8]) -> Result<(BindingStore, bool), String> {
     let mut store: BindingStore =
         serde_json::from_slice(bytes).map_err(|error| format!("invalid bindings JSON: {error}"))?;
-    let migrated = matches!(store.version, 1 | 2);
+    let migrated = matches!(store.version, 1..=3);
     if migrated {
         store.version = BINDINGS_VERSION;
     }

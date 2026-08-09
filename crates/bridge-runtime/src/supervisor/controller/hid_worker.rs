@@ -184,7 +184,7 @@ impl TransitionReportMailbox {
     }
 }
 
-pub(crate) fn raw_desktop_transition_mask(report: &RawHidReport) -> Option<u8> {
+pub(crate) fn raw_desktop_transition_mask(report: &RawHidReport) -> Option<u16> {
     let valid_size = match report.report_id {
         INPUT_REPORT_ID => report.data.len() == INPUT_REPORT_SIZE,
         EXTENDED_INPUT_REPORT_ID => report.data.len() == EXTENDED_INPUT_REPORT_SIZE,

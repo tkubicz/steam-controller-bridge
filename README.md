@@ -158,7 +158,7 @@ bindings without changing the XIAO firmware or serial protocol. Profiles can
 independently enable the right pad as a relative pointer and the left pad as
 accelerated smooth two-axis scrolling with configurable speed and optional
 release momentum; both pads are off by default and offer configurable movement
-feedback. The menu app
+and physical-click feedback. The menu app
 requests Input Monitoring directly when macOS has not decided yet. Only after
 that grant is detected does it request Post Event and Accessibility access, so
 the TCC requests remain ordered even when no controller is attached.
@@ -267,6 +267,31 @@ The session reports disconnects and automatically attempts to reopen the same co
 
 macOS may reject protected keyboard/gamepad collections with an IOKit `not permitted` error until the terminal or Codex host has Input Monitoring permission. Listing and metadata inspection do not require opening the collection.
 
+## Lizard mouse comparison lab
+
+`sc-lizard-lab` captures the controller's original lizard-mode mouse reports
+without sending the bridge's lizard-off heartbeat, then analyzes or compares
+them against the current mouse-only `BindingEngine`:
+
+```bash
+cargo run -p sc-lizard-lab -- capture --output lizard.jsonl --guided
+cargo run -p sc-lizard-lab -- analyze lizard.jsonl --output analysis.json
+cargo run -p sc-lizard-lab -- compare lizard.jsonl --output comparison.json
+cargo run -p sc-lizard-lab -- replay lizard.jsonl --source reference --output dump
+```
+
+Capture auto-detects the unique active controller using the same shared
+discovery as the bridge and visualizer; `--index N` remains an explicit
+multi-controller/debug override. Capture is macOS-only and needs Input
+Monitoring because it installs a passive HID-entry event tap. It uses an
+8,192-event bounded queue and a timestamp reorder window; overflow, disconnect,
+and tap disable explicitly invalidate the file.
+Do not use another mouse or trackpad during a guided run. Analysis, comparison,
+and textual replay are portable and also accept older visualizer JSONL files.
+Desktop replay must be explicitly requested with `--output desktop`; it injects
+pointer motion only and never replays lizard keyboard or mouse-button actions.
+See [the lab guide](docs/LIZARD_MOUSE_LAB.md).
+
 ## Visualizer
 
 <!-- Uncomment once the asset is captured; see docs/images/README.md
@@ -292,7 +317,7 @@ error diagnostics; edits the mapping filters; and records raw, decoded, mapped,
 lifecycle, and marker events to JSONL. It supports mock and negotiated serial
 output.
 
-See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [serial transport](docs/SERIAL_TRANSPORT.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [desktop bindings](docs/DESKTOP_BINDINGS.md), [recording format](docs/RECORDING_FORMAT.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
+See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [serial transport](docs/SERIAL_TRANSPORT.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [desktop bindings](docs/DESKTOP_BINDINGS.md), [lizard mouse lab](docs/LIZARD_MOUSE_LAB.md), [recording format](docs/RECORDING_FORMAT.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
 
 Firmware setup, native tests, UF2/DFU builds, flashing, recovery, LED states,
 and hardware validation are documented in
@@ -382,9 +407,9 @@ signing, a DMG, and Launch at Login remain future work.
   lock excludes other project tools only; Steam's persistent
   `com.valvesoftware.steam.ipctool` LaunchAgent must be booted out before play.
 - Standard Xbox button and axis mapping remains fixed. Desktop bindings cover
-  L4/L5/R4/R5/Quick Access plus fixed right-pad pointer and left-pad scroll
-  roles; pad clicks, pressure actions, gestures, trigger clicks, and stick
-  clicks are not configurable in this milestone. macOS has native function-key
+  L4/L5/R4/R5/Quick Access and the two pad clicks plus fixed right-pad pointer
+  and left-pad scroll roles; pressure actions, gestures, trigger clicks, and
+  stick clicks are not configurable in this milestone. macOS has native function-key
   identities only through F20, and Enigo does not expose macOS
   play/previous/next media events, so those portable entries degrade bindings
   with an explicit error instead of emitting a different key.

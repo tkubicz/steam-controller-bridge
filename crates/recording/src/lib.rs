@@ -10,17 +10,79 @@ use bridge_output::{GamepadOutput, OutputError};
 use gamepad_state::{GamepadButtons, GamepadState, HatState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use steam_controller_protocol::SteamControllerState;
+use steam_controller_protocol::{LizardMouseReport, SteamControllerState};
 
 pub const FORMAT_VERSION: u32 = 1;
 pub const KIND_DEVICE_CONNECTED: &str = "device_connected";
 pub const KIND_DEVICE_DISCONNECTED: &str = "device_disconnected";
 pub const KIND_RAW_HID: &str = "raw_hid";
 pub const KIND_DECODED_STEAM_STATE: &str = "decoded_steam_state";
+pub const KIND_DECODED_LIZARD_MOUSE: &str = "decoded_lizard_mouse";
+pub const KIND_HOST_POINTER: &str = "host_pointer";
+pub const KIND_CAPTURE_METADATA: &str = "capture_metadata";
 pub const KIND_MAPPED_GAMEPAD_STATE: &str = "mapped_gamepad_state";
 pub const KIND_WARNING: &str = "warning";
 pub const KIND_ERROR: &str = "error";
 pub const KIND_MARKER: &str = "marker";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptureMetadata {
+    pub tool_version: String,
+    pub platform: String,
+    pub os_version: String,
+    pub os_build: String,
+    pub controller_index: usize,
+    pub source_device_id: String,
+    pub transport: String,
+    pub capture_mode: String,
+    #[serde(default)]
+    pub displays: Vec<DisplayMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mouse_scaling: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DisplayMetadata {
+    pub id: u32,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub scale: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostPointerEventKind {
+    Moved,
+    LeftDragged,
+    RightDragged,
+    OtherDragged,
+    LeftDown,
+    LeftUp,
+    RightDown,
+    RightUp,
+    OtherDown,
+    OtherUp,
+    Scroll,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostPointerEvent {
+    pub event_kind: HostPointerEventKind,
+    pub delta_x: i64,
+    pub delta_y: i64,
+    pub location_x: f64,
+    pub location_y: f64,
+    #[serde(default)]
+    pub scroll_x: i64,
+    #[serde(default)]
+    pub scroll_y: i64,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecordingEvent {
@@ -105,6 +167,39 @@ impl RecordingEvent {
         Self::from_payload(timestamp_us, KIND_DECODED_STEAM_STATE, state)
     }
 
+    /// Constructs a typed lizard-mode mouse event.
+    ///
+    /// # Errors
+    /// Returns [`RecordingError`] when payload serialization fails.
+    pub fn decoded_lizard_mouse(
+        timestamp_us: u64,
+        report: &LizardMouseReport,
+    ) -> Result<Self, RecordingError> {
+        Self::from_payload(timestamp_us, KIND_DECODED_LIZARD_MOUSE, report)
+    }
+
+    /// Constructs a passive host-pointer observation.
+    ///
+    /// # Errors
+    /// Returns [`RecordingError`] when payload serialization fails.
+    pub fn host_pointer(
+        timestamp_us: u64,
+        event: &HostPointerEvent,
+    ) -> Result<Self, RecordingError> {
+        Self::from_payload(timestamp_us, KIND_HOST_POINTER, event)
+    }
+
+    /// Constructs a capture-environment or final-validity event.
+    ///
+    /// # Errors
+    /// Returns [`RecordingError`] when payload serialization fails.
+    pub fn capture_metadata(
+        timestamp_us: u64,
+        metadata: &CaptureMetadata,
+    ) -> Result<Self, RecordingError> {
+        Self::from_payload(timestamp_us, KIND_CAPTURE_METADATA, metadata)
+    }
+
     /// Constructs an event from any serializable typed payload.
     ///
     /// # Errors
@@ -158,6 +253,40 @@ impl RecordingEvent {
     /// Returns [`RecordingError`] when the event kind or fields are invalid.
     pub fn decode_steam_state(&self) -> Result<SteamControllerState, RecordingError> {
         if self.kind != KIND_DECODED_STEAM_STATE {
+            return Err(RecordingError::UnexpectedKind(self.kind.clone()));
+        }
+        Ok(serde_json::from_value(self.payload.clone())?)
+    }
+
+    /// Decodes a typed lizard-mode mouse event.
+    ///
+    /// # Errors
+    /// Returns [`RecordingError`] when the kind or payload is invalid.
+    pub fn decode_lizard_mouse(&self) -> Result<LizardMouseReport, RecordingError> {
+        self.decode_payload(KIND_DECODED_LIZARD_MOUSE)
+    }
+
+    /// Decodes a passive host-pointer observation.
+    ///
+    /// # Errors
+    /// Returns [`RecordingError`] when the kind or payload is invalid.
+    pub fn decode_host_pointer(&self) -> Result<HostPointerEvent, RecordingError> {
+        self.decode_payload(KIND_HOST_POINTER)
+    }
+
+    /// Decodes capture environment or validity metadata.
+    ///
+    /// # Errors
+    /// Returns [`RecordingError`] when the kind or payload is invalid.
+    pub fn decode_capture_metadata(&self) -> Result<CaptureMetadata, RecordingError> {
+        self.decode_payload(KIND_CAPTURE_METADATA)
+    }
+
+    fn decode_payload<T: for<'de> Deserialize<'de>>(
+        &self,
+        expected_kind: &str,
+    ) -> Result<T, RecordingError> {
+        if self.kind != expected_kind {
             return Err(RecordingError::UnexpectedKind(self.kind.clone()));
         }
         Ok(serde_json::from_value(self.payload.clone())?)
@@ -595,6 +724,63 @@ mod tests {
         writer.write_event(&mapped).unwrap();
         let parsed = read_events(Cursor::new(writer.into_inner())).unwrap();
         assert_eq!(parsed, vec![raw, mapped]);
+    }
+
+    #[test]
+    fn additive_lizard_pointer_and_metadata_events_round_trip_in_v1() {
+        let lizard = LizardMouseReport {
+            buttons: 3,
+            x: -12,
+            y: 34,
+            vertical_wheel: -1,
+            horizontal_wheel: 2,
+            raw_report: vec![0x40, 3, 0xf4, 34, 0xff, 2],
+        };
+        let pointer = HostPointerEvent {
+            event_kind: HostPointerEventKind::LeftDragged,
+            delta_x: -9,
+            delta_y: 7,
+            location_x: 123.5,
+            location_y: 456.25,
+            scroll_x: 0,
+            scroll_y: 0,
+        };
+        let metadata = CaptureMetadata {
+            tool_version: "test".to_owned(),
+            platform: "macos".to_owned(),
+            os_version: "15.0".to_owned(),
+            os_build: "24A".to_owned(),
+            controller_index: 2,
+            source_device_id: "collection".to_owned(),
+            transport: "USB".to_owned(),
+            capture_mode: "guided".to_owned(),
+            displays: vec![DisplayMetadata {
+                id: 1,
+                x: 0.0,
+                y: 0.0,
+                width: 1920.0,
+                height: 1080.0,
+                scale: 2.0,
+            }],
+            mouse_scaling: Some(1.0),
+            valid: Some(true),
+            invalid_reason: None,
+        };
+        let events = vec![
+            RecordingEvent::decoded_lizard_mouse(1, &lizard).unwrap(),
+            RecordingEvent::host_pointer(2, &pointer).unwrap(),
+            RecordingEvent::capture_metadata(3, &metadata).unwrap(),
+        ];
+        let mut writer = RecordingWriter::new(Vec::new());
+        for event in &events {
+            assert_eq!(event.version, FORMAT_VERSION);
+            writer.write_event(event).unwrap();
+        }
+        let parsed = read_events(Cursor::new(writer.into_inner())).unwrap();
+        assert_eq!(parsed, events);
+        assert_eq!(parsed[0].decode_lizard_mouse().unwrap(), lizard);
+        assert_eq!(parsed[1].decode_host_pointer().unwrap(), pointer);
+        assert_eq!(parsed[2].decode_capture_metadata().unwrap(), metadata);
     }
 
     #[test]

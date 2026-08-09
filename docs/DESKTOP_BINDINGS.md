@@ -1,11 +1,14 @@
 # Desktop bindings
 
-The macOS bridge can map L4, L5, R4, R5, and Quick Access to held keyboard
-chords or left/right/middle/back/forward mouse buttons. It can also use the
-right pad for relative pointer movement and the left pad for two-axis smooth
-scrolling. Stick clicks remain ordinary Xbox controls; trigger clicks, pad
-clicks, pressure actions, and gestures are not mapped. The feature is host-side
-and requires no protocol-v1 or XIAO firmware change.
+The macOS bridge can map L4, L5, R4, R5, Quick Access, and the left and right
+pad clicks to held keyboard chords or left/right/middle/back/forward mouse
+buttons. It can also use the right pad for relative pointer movement and the
+left pad for two-axis smooth scrolling; a pad's click binding fires
+independently of whether that pad function is enabled. While a pad is held
+clicked its motion is frozen (see below), so the click action lands without
+disturbing the pointer or scroll position. Stick clicks remain ordinary
+Xbox controls; trigger clicks, pressure actions, and gestures are not mapped.
+The feature is host-side and requires no protocol-v1 or XIAO firmware change.
 
 ## Menu app
 
@@ -50,16 +53,41 @@ Profiles live at:
 ```
 
 Fresh stores contain one all-unbound `Default` profile. Both pad functions are
-off by default. Enabling a pad also enables Medium feedback by default; each
-pad's feedback can be disabled or set to Low (-36 dB), Medium (-30 dB), or
-High (-24 dB) independently. Pad motion first crosses a recentered 192-count
-radial deadzone, preventing stationary coordinate drift from moving the cursor
-or scrolling. Feedback uses side-specific `0x82` microticks after 768 counts of
+off by default. Pad feedback defaults to Medium and produces one finite tick
+on each physical click even when the pointer or scroll function is disabled;
+it can be disabled or set to Low (-36 dB), Medium (-30 dB), or High (-24 dB)
+independently for each side. Right-pad pointer motion uses the captured lizard
+mode's larger anchored stationary envelope: 2,560 counts at pad center, growing
+to 3,584 at the rim, and re-parks after a 100 ms window without 384–768 counts
+of position-aware net progress. Left-pad scrolling retains its more responsive 192-count center
+envelope, growing to 2,048 counts at the edge, and its 150 ms stop window. A
+resting finger's bounded wander around its anchor emits nothing; intentional
+travel forwards only the excess beyond the current envelope.
+
+A pad press freezes that pad's motion. The supplied raw capture shows the
+reported centroid wandering hundreds to thousands of counts as a fingertip
+flattens and rolls. The freeze keys on analog pressure as well as the click bit:
+the 1,600-count pressure crossing led the click bit by roughly 29-153 ms in the
+recorded right-pad presses, so it catches most of the approach roll. A light
+press that never actuates the switch also freezes, with hysteresis on the way
+out. The physical press edge establishes a fresh drag anchor; deliberately
+travelling more than 2,800 counts from there enters a drag. A paused drag uses
+the smaller stop-progress envelope when it resumes instead of requiring the
+full contact or drag threshold again. Physical release immediately cancels drag motion and
+scroll momentum, suppresses residual pressure until it drops below the exit
+threshold, and guards motion for 250 ms so the un-flattening tail stays silent.
+
+Pointer movement follows the measured lizard-mode linear transfer of 128 raw
+counts per pointer pixel, multiplied only by the per-profile 25%-300% Pointer
+speed setting. The lab capture records both raw `0x40` reference output and
+passive host cursor events; final feel remains a physical acceptance check.
+Feedback tracks accepted finger travel and uses side-specific
+`0x82` microticks after 768 counts of
 net two-dimensional displacement. Its minimum interval scales from 450 ms for
 slow travel to 80 ms for fast travel, so faster movement produces a denser
-texture without allowing a stationary finger to tick. Reversing stationary
-coordinate noise cancels instead of creating feedback, and rate-limited ticks
-are discarded rather than delayed.
+texture without allowing a stationary finger to tick. Parked or press-frozen
+coordinate noise is discarded before feedback accounting, and rate-limited
+ticks are discarded rather than delayed.
 
 Left-pad scrolling uses pixel-level smooth scroll events. Swipe velocity adds
 up to 3x acceleration, the profile's 25%-300% speed setting scales the result,
@@ -67,24 +95,37 @@ and optional momentum decays after touch release. Speed defaults to 100% and
 momentum defaults on; neither setting has any effect until left-pad scrolling
 itself is enabled.
 
-The version-3 schema
+The version-4 schema
 supports 1-32 profiles, trimmed unique names, letters, digits, F1-F24,
 navigation/editing keys, punctuation, numpad keys, common media keys, the four
 standard modifiers, and five mouse buttons. Modifier-only and raw-keycode
 bindings are not representable. Enigo/macOS exposes native F1-F20 and volume
 keys but no F21-F24 or play/previous/next media identities; using those portable
 entries reports a binding-only degraded error rather than substituting another
-key.
+key. A physical pad-click rising edge emits exactly one tick at that pad's
+configured feedback strength. Holding or releasing it emits no additional
+tick, and disabling pad feedback suppresses both click and movement ticks.
 
-Version-1 and version-2 stores are migrated atomically without changing profile
-IDs, names, button bindings, or existing pad enablement and feedback. The pad
-section is:
+Version-1 through version-3 stores are migrated atomically without changing
+profile IDs, names, button bindings, or existing pad enablement and feedback;
+pad clicks start unbound. Pad click bindings live beside the button bindings as
+`left_pad_click` and `right_pad_click` and use the same action shapes:
+
+```json
+"bindings": {
+  "left_pad_click": { "kind": "key_chord", "key": "F5", "modifiers": ["command"] },
+  "right_pad_click": { "kind": "mouse_button", "button": "middle" }
+}
+```
+
+The pad section is:
 
 ```json
 "pads": {
   "right_mouse": {
     "enabled": false,
-    "feedback": { "enabled": true, "strength": "medium" }
+    "feedback": { "enabled": true, "strength": "medium" },
+    "speed_percent": 100
   },
   "left_scroll": {
     "enabled": false,

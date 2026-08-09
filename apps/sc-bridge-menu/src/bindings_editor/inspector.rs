@@ -32,8 +32,10 @@ pub(super) fn selection_description(selection: EditorSelection) -> &'static str 
         EditorSelection::Button(BindableControl::R4) => "Upper right rear grip",
         EditorSelection::Button(BindableControl::R5) => "Lower right rear grip",
         EditorSelection::Button(BindableControl::QuickAccess) => "Front Quick Access button",
-        EditorSelection::Pad(PadSide::Left) => "Two-axis smooth desktop scrolling",
-        EditorSelection::Pad(PadSide::Right) => "Relative desktop pointer movement",
+        EditorSelection::Button(BindableControl::LeftPadClick) => "Left trackpad click",
+        EditorSelection::Button(BindableControl::RightPadClick) => "Right trackpad click",
+        EditorSelection::Pad(PadSide::Left) => "Two-axis smooth desktop scrolling, bindable click",
+        EditorSelection::Pad(PadSide::Right) => "Relative desktop pointer movement, bindable click",
     }
 }
 
@@ -66,9 +68,11 @@ pub(super) fn binding_summary(action: Option<&BindingAction>) -> String {
 pub(super) fn pad_feedback_editor(ui: &mut egui::Ui, feedback: &mut PadFeedbackConfig) {
     ui.checkbox(&mut feedback.enabled, "Pad feedback");
     ui.label(
-        egui::RichText::new("Emit subtle ticks that become faster as your finger moves faster.")
-            .small()
-            .color(MUTED_TEXT),
+        egui::RichText::new(
+            "Emit a click tick and subtle movement ticks that become faster with motion.",
+        )
+        .small()
+        .color(MUTED_TEXT),
     );
     ui.add_space(12.0);
     ui.add_enabled_ui(feedback.enabled, |ui| {

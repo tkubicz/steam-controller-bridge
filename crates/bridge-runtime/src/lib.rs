@@ -55,9 +55,11 @@ use bridge_output::{
     available_serial_devices, DumpOutput, FileOutput, GamepadOutput, MockOutput, OutputFeedback,
     SerialDeviceInfo, SerialOutput,
 };
+#[cfg(test)]
+use desktop_bindings::PadSample;
 use desktop_bindings::{
     bindable_mask, BindingEngine, BindingProfile, DesktopInputSink, DesktopInputSnapshot,
-    PadFeedbackRequest, PadSample,
+    PadFeedbackRequest,
 };
 use gamepad_state::OutputSuppression;
 #[cfg(target_os = "macos")]
