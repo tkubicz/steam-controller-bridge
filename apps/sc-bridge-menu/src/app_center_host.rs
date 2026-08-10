@@ -2,6 +2,7 @@ use std::io::{BufReader, Write as _};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use bridge_runtime::FirmwareVersion;
 
@@ -15,6 +16,7 @@ const REQUEST_CAPACITY: usize = 16;
 const COMMAND_CAPACITY: usize = 16;
 const DIAGNOSTIC_CAPACITY: usize = 256;
 const MAX_DIAGNOSTIC_LINE_BYTES: usize = 16 * 1024;
+const GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionRequest {
@@ -322,7 +324,21 @@ impl AppCenterHost {
         if self.suspension_owner.is_some() {
             return Err("firmware installation is still active".to_owned());
         }
-        self.discard_child();
+        if self.child.is_none() {
+            return Ok(());
+        }
+        self.send_command(&AppCenterCommand::Close)?;
+        let deadline = Instant::now() + GRACEFUL_STOP_TIMEOUT;
+        while Instant::now() < deadline {
+            if self.reap() {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = self.diagnostic_sender.try_send(
+            "level=warn event=app_center_detached reason=graceful_stop_timeout".to_owned(),
+        );
+        self.detach_child();
         Ok(())
     }
 
@@ -348,6 +364,18 @@ impl AppCenterHost {
         if let Some(thread) = self.stderr_thread.take() {
             let _ = thread.join();
         }
+        self.generation = None;
+        self.last_firmware = None;
+    }
+
+    fn detach_child(&mut self) {
+        drop(self.child.take());
+        if let Some(writer) = self.writer.take() {
+            drop(writer.sender);
+            drop(writer.thread);
+        }
+        drop(self.reader_thread.take());
+        drop(self.stderr_thread.take());
         self.generation = None;
         self.last_firmware = None;
     }
@@ -429,5 +457,27 @@ mod tests {
         assert!(host.stop().is_err());
         host.complete_suspension_recovery();
         assert!(!host.suspension_recovery_needed());
+    }
+
+    #[test]
+    fn stop_requests_a_graceful_child_close() {
+        let marker =
+            std::env::temp_dir().join(format!("app-center-graceful-stop-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let mut host = AppCenterHost::new();
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "IFS= read -r line; case \"$line\" in *close*) : > \"$1\";; esac",
+            "app-center-test",
+        ]);
+        command.arg(&marker);
+        host.spawn_command(&mut command).unwrap();
+
+        host.stop().unwrap();
+
+        assert!(marker.exists());
+        assert!(host.child.is_none());
+        let _ = std::fs::remove_file(marker);
     }
 }

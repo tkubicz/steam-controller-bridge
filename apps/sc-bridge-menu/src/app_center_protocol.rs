@@ -126,6 +126,7 @@ impl AppCenterPage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppCenterCommand {
+    Close,
     Navigate {
         page: AppCenterPage,
         firmware: FirmwareStatus,
@@ -230,6 +231,12 @@ mod tests {
         assert_eq!(
             read::<AppCenterCommand>(&mut Cursor::new(encode(&response).unwrap())).unwrap(),
             Some(response)
+        );
+
+        assert_eq!(
+            read::<AppCenterCommand>(&mut Cursor::new(encode(AppCenterCommand::Close).unwrap()))
+                .unwrap(),
+            Some(AppCenterCommand::Close)
         );
     }
 

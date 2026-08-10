@@ -1,7 +1,11 @@
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use crate::temporary::unique_temporary_path;
 use crate::{
@@ -36,6 +40,7 @@ pub enum DownloadError {
     Curl(String),
     TooLarge { maximum: u64, actual: u64 },
     InvalidAssetName,
+    Cancelled,
 }
 
 impl std::fmt::Display for DownloadError {
@@ -47,6 +52,7 @@ impl std::fmt::Display for DownloadError {
                 write!(formatter, "download is {actual} bytes; limit is {maximum}")
             }
             Self::InvalidAssetName => write!(formatter, "invalid release asset name"),
+            Self::Cancelled => write!(formatter, "update download cancelled"),
         }
     }
 }
@@ -60,7 +66,9 @@ impl From<io::Error> for DownloadError {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct LatestReleaseClient;
+pub struct LatestReleaseClient {
+    cancellation: Option<Arc<AtomicBool>>,
+}
 
 pub trait ReleaseSource {
     fn fetch_metadata(&self, directory: &Path) -> Result<(Vec<u8>, Vec<u8>), DownloadError>;
@@ -74,12 +82,29 @@ pub trait ReleaseSource {
 }
 
 impl LatestReleaseClient {
+    #[must_use]
+    pub fn cancellable(cancellation: Arc<AtomicBool>) -> Self {
+        Self {
+            cancellation: Some(cancellation),
+        }
+    }
+
     pub fn fetch_metadata(&self, directory: &Path) -> Result<(Vec<u8>, Vec<u8>), DownloadError> {
         fs::create_dir_all(directory)?;
         let manifest = directory.join(MANIFEST_ASSET);
         let signatures = directory.join(SIGNATURES_ASSET);
-        download_to_path(&latest_asset_url(MANIFEST_ASSET)?, &manifest, 128 * 1024)?;
-        download_to_path(&latest_asset_url(SIGNATURES_ASSET)?, &signatures, 16 * 1024)?;
+        download_to_path_cancellable(
+            &latest_asset_url(MANIFEST_ASSET)?,
+            &manifest,
+            128 * 1024,
+            self.cancellation.as_deref(),
+        )?;
+        download_to_path_cancellable(
+            &latest_asset_url(SIGNATURES_ASSET)?,
+            &signatures,
+            16 * 1024,
+            self.cancellation.as_deref(),
+        )?;
         Ok((fs::read(manifest)?, fs::read(signatures)?))
     }
 
@@ -96,7 +121,12 @@ impl LatestReleaseClient {
         let url = format!(
             "https://github.com/{UPDATE_REPOSITORY}/releases/download/{release_tag}/{name}"
         );
-        download_to_path(&url, destination, maximum_size)
+        download_to_path_cancellable(
+            &url,
+            destination,
+            maximum_size,
+            self.cancellation.as_deref(),
+        )
     }
 }
 
@@ -208,6 +238,15 @@ pub fn download_to_path(
     destination: &Path,
     maximum_size: u64,
 ) -> Result<(), DownloadError> {
+    download_to_path_cancellable(url, destination, maximum_size, None)
+}
+
+fn download_to_path_cancellable(
+    url: &str,
+    destination: &Path,
+    maximum_size: u64,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(), DownloadError> {
     let parent = destination
         .parent()
         .ok_or_else(|| io::Error::other("download destination has no parent"))?;
@@ -219,13 +258,20 @@ pub fn download_to_path(
             .unwrap_or_else(|| std::ffi::OsStr::new("update")),
         "download",
     );
-    let output = Command::new("/usr/bin/curl")
+    let mut command = Command::new("/usr/bin/curl");
+    command
         .args(CURL_DOWNLOAD_ARGS)
         .arg(maximum_size.to_string())
         .arg("--output")
         .arg(&temporary)
-        .arg(url)
-        .output()?;
+        .arg(url);
+    let output = match cancellable_output(&mut command, cancellation) {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+    };
     if !output.status.success() {
         let _ = fs::remove_file(&temporary);
         return Err(DownloadError::Curl(
@@ -242,6 +288,25 @@ pub fn download_to_path(
     }
     fs::rename(&temporary, destination)?;
     Ok(())
+}
+
+fn cancellable_output(
+    command: &mut Command,
+    cancellation: Option<&AtomicBool>,
+) -> Result<Output, DownloadError> {
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    loop {
+        if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(DownloadError::Cancelled);
+        }
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map_err(DownloadError::Io);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +338,28 @@ mod tests {
         assert!(CURL_DOWNLOAD_ARGS
             .windows(2)
             .any(|arguments| arguments == ["--max-redirs", "5"]));
+    }
+
+    #[test]
+    fn cancellation_reaps_a_spawned_download_process() {
+        let cancelled = AtomicBool::new(true);
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 10"]);
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            cancellable_output(&mut command, Some(&cancelled)),
+            Err(DownloadError::Cancelled)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn cancellable_processes_preserve_exit_status_and_diagnostics() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf diagnostic >&2"]);
+        let output = cancellable_output(&mut command, None).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stderr, b"diagnostic");
     }
 
     enum MetadataReply {

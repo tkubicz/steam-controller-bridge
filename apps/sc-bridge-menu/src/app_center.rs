@@ -221,8 +221,10 @@ impl AppCenter {
 
     fn check_catalog(&mut self, ctx: egui::Context) {
         let sender = self.sender.clone();
+        self.cancel.store(false, Ordering::Release);
+        let cancel = Arc::clone(&self.cancel);
         self.worker = Some(thread::spawn(move || {
-            let _ = sender.send(WorkerEvent::Catalog(Box::new(fetch_catalog())));
+            let _ = sender.send(WorkerEvent::Catalog(Box::new(fetch_catalog(&cancel))));
             ctx.request_repaint();
         }));
     }
@@ -238,10 +240,12 @@ impl AppCenter {
         }
         self.activity = Activity::Busy { can_cancel: false };
         self.status_tone = StatusTone::Info;
+        self.cancel.store(false, Ordering::Release);
         "Downloading and validating the application…".clone_into(&mut self.status);
         let sender = self.sender.clone();
+        let cancel = Arc::clone(&self.cancel);
         self.worker = Some(thread::spawn(move || {
-            let result = download_and_stage_application(&manifest);
+            let result = download_and_stage_application(&manifest, &cancel);
             let _ = sender.send(WorkerEvent::Application(result));
             ctx.request_repaint();
         }));
@@ -264,7 +268,7 @@ impl AppCenter {
         let session_active = Arc::clone(&self.firmware_session_active);
         self.worker = Some(thread::spawn(move || {
             let result = (|| {
-                let path = download_firmware(&manifest)?;
+                let path = download_firmware(&manifest, &cancel)?;
                 if cancel.load(Ordering::Acquire) {
                     return Err("firmware update cancelled".to_owned());
                 }
@@ -421,6 +425,7 @@ impl AppCenter {
     fn drain_host_commands(&mut self) {
         while let Ok(command) = self.host_commands.try_recv() {
             match command {
+                AppCenterCommand::Close => self.request_close(),
                 AppCenterCommand::Navigate { page, firmware } => {
                     self.firmware = firmware;
                     if self.firmware_write_started {
@@ -435,6 +440,17 @@ impl AppCenter {
                     // Responses are routed to the worker waiting in HostClient.
                 }
             }
+        }
+    }
+
+    fn request_close(&mut self) {
+        self.close_when_idle = true;
+        self.cancel.store(true, Ordering::Release);
+        if !must_defer_close(
+            self.activity,
+            self.firmware_session_active.load(Ordering::Acquire),
+        ) {
+            self.activity = Activity::Closing;
         }
     }
 
@@ -579,8 +595,7 @@ impl eframe::App for AppCenter {
         {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.close_when_idle = true;
-            self.cancel.store(true, Ordering::Release);
+            self.request_close();
             if self.firmware_session_active.load(Ordering::Acquire) {
                 self.page = AppCenterPage::Updates;
                 "Firmware verification is still in progress. Keep the board connected."

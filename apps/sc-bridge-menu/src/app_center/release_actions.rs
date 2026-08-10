@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use release_updater::{
     ensure_release_artifact, installed_macos_version, refresh_catalog_if_due, stage_application,
@@ -11,14 +13,23 @@ fn cache() -> Result<ReleaseCache, String> {
     ReleaseCache::for_current_user().map_err(|error| error.to_string())
 }
 
-pub(super) fn fetch_catalog() -> Result<ReleaseManifestV1, String> {
+pub(super) fn fetch_catalog(cancellation: &Arc<AtomicBool>) -> Result<ReleaseManifestV1, String> {
     let (keys, cache) = update_context()?;
-    refresh_catalog_if_due(&LatestReleaseClient, &cache, &keys, CHECK_INTERVAL)
+    refresh_catalog_if_due(
+        &LatestReleaseClient::cancellable(Arc::clone(cancellation)),
+        &cache,
+        &keys,
+        CHECK_INTERVAL,
+    )
 }
 
 pub(super) fn download_and_stage_application(
     manifest: &ReleaseManifestV1,
+    cancellation: &Arc<AtomicBool>,
 ) -> Result<PathBuf, String> {
+    if cancellation.load(Ordering::Acquire) {
+        return Err("application update cancelled".to_owned());
+    }
     if installed_macos_version()? < manifest.minimum_macos {
         return Err(format!(
             "This release requires macOS {} or newer.",
@@ -28,11 +39,14 @@ pub(super) fn download_and_stage_application(
     let cache = cache()?;
     let artifact = &manifest.application.artifact;
     let path = ensure_release_artifact(
-        &LatestReleaseClient,
+        &LatestReleaseClient::cancellable(Arc::clone(cancellation)),
         &cache,
         &manifest.release_tag,
         artifact,
     )?;
+    if cancellation.load(Ordering::Acquire) {
+        return Err("application update cancelled".to_owned());
+    }
     let staged = stage_application(
         &path,
         &manifest.application,
@@ -41,11 +55,14 @@ pub(super) fn download_and_stage_application(
     Ok(staged.bundle_path)
 }
 
-pub(super) fn download_firmware(manifest: &ReleaseManifestV1) -> Result<PathBuf, String> {
+pub(super) fn download_firmware(
+    manifest: &ReleaseManifestV1,
+    cancellation: &Arc<AtomicBool>,
+) -> Result<PathBuf, String> {
     let cache = cache()?;
     let artifact = &manifest.firmware.artifact;
     ensure_release_artifact(
-        &LatestReleaseClient,
+        &LatestReleaseClient::cancellable(Arc::clone(cancellation)),
         &cache,
         &manifest.release_tag,
         artifact,

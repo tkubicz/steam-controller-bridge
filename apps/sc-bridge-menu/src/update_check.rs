@@ -60,7 +60,7 @@ impl UpdateChecker {
                 remove_obsolete_application_cache(&cache, &artifact);
             }
             let _ = sender.send(refresh_catalog_if_due(
-                &LatestReleaseClient,
+                &LatestReleaseClient::default(),
                 &cache,
                 &keys,
                 CHECK_INTERVAL,
