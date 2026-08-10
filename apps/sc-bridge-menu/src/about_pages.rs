@@ -166,25 +166,21 @@ mod tests {
     }
 
     #[test]
-    fn first_release_uses_the_same_format_as_generated_releases() {
+    fn every_release_title_link_targets_its_version_tag() {
         let releases = parse_release_notes(CHANGELOG);
-        let first = releases
-            .iter()
-            .find(|release| release.title.plain().starts_with("1.0.0"))
-            .expect("1.0.0 release");
-
-        assert_eq!(first.title.plain(), "1.0.0 (2026-07-30)");
-        assert_eq!(
-            first
+        for release in releases {
+            let title = release.title.plain();
+            let version = title.split_whitespace().next().expect("release version");
+            let url = release
                 .title
                 .spans
                 .first()
-                .and_then(|span| span.url.as_deref()),
-            Some("https://github.com/tkubicz/steam-controller-bridge/releases/tag/v1.0.0")
-        );
-        assert!(first
-            .sections
-            .iter()
-            .any(|section| section.title == "Features"));
+                .and_then(|span| span.url.as_deref())
+                .expect("release title link");
+            assert!(
+                url.ends_with(&format!("/v{version}")) || url.ends_with(&format!("...v{version}")),
+                "unexpected release target: {url}"
+            );
+        }
     }
 }

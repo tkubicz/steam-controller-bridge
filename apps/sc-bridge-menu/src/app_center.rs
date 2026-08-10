@@ -1042,24 +1042,27 @@ impl DemoMode {
 }
 
 fn demo_manifest(_mode: DemoMode) -> ReleaseManifestV1 {
-    let application_version = Version::new(1, 6, 0);
+    let running = running_version();
+    let application_version = Version::new(running.major, running.minor + 1, 0);
+    let release_tag = format!("v{application_version}");
     ReleaseManifestV1 {
         schema_version: 1,
-        release_tag: "v1.6.0".to_owned(),
+        release_tag: release_tag.clone(),
         application_version: application_version.clone(),
         minimum_macos: Version::new(13, 0, 0),
-        release_notes: r"## [1.6.0](https://github.com/tkubicz/steam-controller-bridge/releases/tag/v1.6.0) (2026-08-10)
+        release_notes: format!(
+            r"## [{application_version}](https://github.com/tkubicz/steam-controller-bridge/releases/tag/{release_tag})
 
 ### Features
 
-* **updater:** add signed application and XIAO firmware updates ([#42](https://github.com/tkubicz/steam-controller-bridge/pull/42))
+* **updater:** preview signed application and XIAO firmware updates
 * **menu:** make update status and recovery actions easier to understand
 
 ### Bug Fixes
 
 * **firmware:** verify the exact revision after reconnecting
 * **menu:** keep release notes readable at every window size"
-            .to_owned(),
+        ),
         application: ApplicationRelease {
             bundle_identifier: APPLICATION_BUNDLE_ID.to_owned(),
             version: application_version.clone(),

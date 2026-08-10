@@ -11,8 +11,7 @@ on:
 
 # One run per pull request: a new push, or an edit to the title or description,
 # supersedes the run it replaces. Runs on `main` are never cancelled, and a
-# `workflow_dispatch` run groups by ref rather than pull request, so the release
-# branch's explicitly dispatched run stands on its own.
+# `workflow_dispatch` runs group by ref rather than pull request.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -24,6 +23,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Test the title validator
         run: python3 tools/check-pr-title.py --self-test
+      - name: Check generated changelog for duplicate entries
+        run: |
+          python3 tools/check-changelog.py --self-test
+          python3 tools/check-changelog.py
       - name: Validate pull-request title
         if: github.event_name == 'pull_request'
         env:

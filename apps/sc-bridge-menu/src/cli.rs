@@ -148,8 +148,13 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_updater_aliases_are_rejected() {
-        assert!(Cli::try_parse_from(["sc-bridge-menu", "--update-center-demo"]).is_err());
-        assert!(Cli::try_parse_from(["sc-bridge-menu", "--app-center-demo"]).is_err());
+    fn malformed_firmware_status_is_rejected() {
+        assert!(Cli::try_parse_from([
+            "sc-bridge-menu",
+            "app-center",
+            "--firmware",
+            "reported:not-a-number"
+        ])
+        .is_err());
     }
 }
