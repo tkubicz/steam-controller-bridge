@@ -377,11 +377,12 @@ mod platform;
 #[cfg(target_os = "macos")]
 pub use platform::{enumerate, ControllerEnumerator, HidSession};
 
-/// Returns an unsupported-platform error on non-macOS hosts.
-///
-/// # Errors
-///
-/// Always returns [`DeviceError::UnsupportedPlatform`].
+/// Non-macOS live-HID stub. Every fallible stub in this section returns
+/// [`DeviceError::UnsupportedPlatform`] without touching hardware.
+#[allow(
+    clippy::missing_errors_doc,
+    reason = "documented by the non-macOS stub contract"
+)]
 #[cfg(not(target_os = "macos"))]
 pub fn enumerate() -> Result<Vec<HidDeviceInfo>, DeviceError> {
     Err(DeviceError::UnsupportedPlatform)
@@ -391,39 +392,23 @@ pub fn enumerate() -> Result<Vec<HidDeviceInfo>, DeviceError> {
 pub struct ControllerEnumerator;
 
 #[cfg(not(target_os = "macos"))]
+#[allow(
+    clippy::missing_errors_doc,
+    reason = "documented by the non-macOS stub contract"
+)]
 impl ControllerEnumerator {
-    /// Returns an unsupported-platform error on non-macOS hosts.
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`DeviceError::UnsupportedPlatform`].
     pub fn new() -> Result<Self, DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
 
-    /// Returns an unsupported-platform error on non-macOS hosts.
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`DeviceError::UnsupportedPlatform`].
     pub fn enumerate(&mut self) -> Result<Vec<HidDeviceInfo>, DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
 
-    /// Returns an unsupported-platform error on non-macOS hosts.
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`DeviceError::UnsupportedPlatform`].
     pub fn enumerate_all(&mut self) -> Result<Vec<HidDeviceInfo>, DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
 
-    /// Returns an unsupported-platform error without opening anything.
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`DeviceError::UnsupportedPlatform`].
     pub fn open(&self, _info: &HidDeviceInfo) -> Result<HidSession, DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
@@ -433,59 +418,31 @@ impl ControllerEnumerator {
 pub struct HidSession;
 
 #[cfg(not(target_os = "macos"))]
+#[allow(
+    clippy::missing_errors_doc,
+    reason = "documented by the non-macOS stub contract"
+)]
 impl HidSession {
-    /// Returns an unsupported-platform error on non-macOS hosts.
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`DeviceError::UnsupportedPlatform`].
     pub fn open_index(_index: usize) -> Result<Self, DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
 
-    /// Returns an unsupported-platform error on non-macOS hosts.
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`DeviceError::UnsupportedPlatform`].
     pub fn open_info(_info: &HidDeviceInfo) -> Result<Self, DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
 
-    /// Returns an unsupported-platform error on non-macOS hosts.
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`DeviceError::UnsupportedPlatform`].
     pub fn poll(&mut self, _timeout: Duration) -> Result<Option<DeviceEvent>, DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
 
-    /// Returns an unsupported-platform error without attempting a feature
-    /// write.
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`DeviceError::UnsupportedPlatform`].
     pub fn suppress_lizard_mode(&self) -> Result<(), DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
 
-    /// Returns an unsupported-platform error without attempting an output
-    /// write.
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`DeviceError::UnsupportedPlatform`].
     pub fn set_rumble(&self, _low_frequency: u16, _high_frequency: u16) -> Result<(), DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
 
-    /// Returns an unsupported-platform error without attempting an output write.
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`DeviceError::UnsupportedPlatform`].
     pub fn pad_haptic_tick(
         &self,
         _side: steam_controller_protocol::PadHapticSide,
@@ -494,11 +451,6 @@ impl HidSession {
         Err(DeviceError::UnsupportedPlatform)
     }
 
-    /// Returns an unsupported-platform error without attempting a feature write.
-    ///
-    /// # Errors
-    ///
-    /// Always returns [`DeviceError::UnsupportedPlatform`].
     pub fn power_off(&self) -> Result<(), DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
