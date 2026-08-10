@@ -58,7 +58,7 @@ pub struct MenuModel {
     pub firmware: String,
     pub battery: String,
     pub haptics: String,
-    pub bindings: String,
+    pub current_profile: String,
     pub automatic_shutdown: String,
     pub problem: String,
     pub has_error: bool,
@@ -104,7 +104,7 @@ impl MenuModel {
                 |percent| format!("Battery: {percent}%"),
             ),
             haptics: format!("Haptics: {:?}", status.haptics.state),
-            bindings: bindings_label(status),
+            current_profile: current_profile_label(status),
             automatic_shutdown: automatic_shutdown_label(status),
             problem: status.last_error.as_deref().map_or_else(
                 || "Problem: None".to_owned(),
@@ -139,7 +139,7 @@ fn firmware_label(status: &BridgeStatus) -> String {
     }
 }
 
-fn bindings_label(status: &BridgeStatus) -> String {
+fn current_profile_label(status: &BridgeStatus) -> String {
     let profile = status
         .bindings
         .active_profile_name
@@ -152,9 +152,9 @@ fn bindings_label(status: &BridgeStatus) -> String {
         DesktopBindingsState::Degraded => "Degraded",
     };
     if status.bindings.state == DesktopBindingsState::PermissionRequired {
-        return format!("{WARNING} Bindings: {profile} · {state}");
+        return format!("{WARNING} Current Profile: {profile} · {state}");
     }
-    format!("Bindings: {profile} · {state}")
+    format!("Current Profile: {profile} · {state}")
 }
 
 fn automatic_shutdown_label(status: &BridgeStatus) -> String {
@@ -401,7 +401,7 @@ mod tests {
         assert!(running.run_enabled);
         assert_eq!(running.battery, "Battery: 87%");
         assert_eq!(running.haptics, "Haptics: Active");
-        assert_eq!(running.bindings, "Bindings: None · Disabled");
+        assert_eq!(running.current_profile, "Current Profile: None · Disabled");
         assert_eq!(running.automatic_shutdown, "Auto shutdown: Off");
     }
 
@@ -513,7 +513,7 @@ mod tests {
             let model = MenuModel::from_status(&status);
             assert_eq!(model.permission_required, flagged, "{state:?}");
             assert_eq!(
-                model.bindings.starts_with(WARNING),
+                model.current_profile.starts_with(WARNING),
                 flagged,
                 "the warning mark should appear only when a permission is missing: {state:?}",
             );
@@ -532,7 +532,10 @@ mod tests {
             ..bridge_runtime::DesktopBindingsStatus::default()
         };
         let model = MenuModel::from_status(&status);
-        assert_eq!(model.bindings, "⚠ Bindings: Gaming · Permission required");
+        assert_eq!(
+            model.current_profile,
+            "⚠ Current Profile: Gaming · Permission required"
+        );
         assert!(model.permission_required);
         assert_eq!(model.tray_state, TrayState::Ready);
         assert!(!model.has_error);

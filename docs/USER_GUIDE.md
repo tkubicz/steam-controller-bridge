@@ -1,6 +1,7 @@
 # Steam Controller 2 Bridge User Guide
 
-This guide covers the current source-build workflow on macOS. The bridge reads
+This guide covers the packaged macOS application first, followed by development
+and recovery procedures. The bridge reads
 a **Steam Controller 2 (2026)** and exposes a conventional physical USB gamepad
 through a Seeed Studio XIAO nRF52840.
 
@@ -57,9 +58,10 @@ rumble, tones, or scripted haptics.
 - One non-Sense Seeed Studio XIAO nRF52840.
 - A USB-C data cable for the XIAO and, in Puck mode, another data connection for
   the Puck. Charge-only cables will not work.
-- The project source checkout.
-- Xcode command-line tools, Rust, Homebrew, and Arduino CLI for the current
-  source/firmware build workflow.
+
+You do not need the project source, Terminal, Rust, Homebrew, or Arduino CLI for
+the normal packaged-app and Update Center workflow. Those tools are needed only
+for development and deep recovery later in this guide.
 
 The intended connection is:
 
@@ -72,7 +74,71 @@ Steam Controller 2 → Bluetooth ─────┘                         ↓
                                             browser or streaming service
 ```
 
-## 1. Install build tools
+## 1. Install the packaged application
+
+Download `steam-controller-bridge-macos.zip` from the latest GitHub release,
+expand it, and move `Steam Controller Bridge.app` to `/Applications`. The app is
+currently ad-hoc signed rather than notarized, so follow
+[Opening an unnotarized build](#opening-an-unnotarized-build) on first launch.
+
+Settings live under Application Support and survive replacing the application.
+macOS may nevertheless ask you to grant Input Monitoring or Accessibility again
+after replacement because v1 does not yet use Developer ID signing.
+
+## 2. Use the Update Center
+
+Choose **Check for Updates…** from the menu-bar app. The label changes to
+**Updates Available…** after the daily signed-metadata check discovers a newer
+application or firmware revision. The check ignores draft and prerelease builds
+and does not download either artifact.
+
+When an application update is available:
+
+1. Read the signed release notes and choose **Download Application Update**.
+2. Wait while the archive's size and SHA-256, bundle identity and version, and
+   strict code signature are verified in an isolated staging directory.
+3. Choose **Show New App and Applications**.
+4. Choose **Quit Bridge for Replacement**. The bridge neutralizes controller
+   output and releases HID and serial devices before quitting.
+5. In Finder, drag the new app into Applications, choose **Replace**, and launch
+   it. If Gatekeeper intervenes, right-click the app and choose **Open**.
+
+If replacement is postponed, the verified archive and staged app remain cached
+for retry. A source build or an app whose bundle metadata does not match the
+running version can inspect and download a release, but guided replacement is
+disabled. A newer installed app is never downgraded to the stable release.
+
+Application updates take priority. If both components are outdated, replace and
+relaunch the app first; the firmware button remains disabled until the new app
+re-evaluates compatibility.
+
+### Install or update XIAO firmware
+
+Connect exactly one non-Sense Seeed XIAO nRF52840 with a data-capable cable, then
+choose **Install/Update Firmware**. The same revision can be reinstalled for
+recovery, but a board reporting a newer revision is never downgraded.
+
+The Update Center verifies the cached or downloaded UF2, asks the running bridge
+to neutralize output and release hardware, tries automatic 1200-baud bootloader
+entry, validates `INFO_UF2.TXT` and the UF2 family, writes and flushes the file,
+then waits for a fresh protocol handshake. Success is shown only after the board
+reports the exact signed revision. The bridge restarts automatically after
+success, cancellation, or a bounded failure when it was running beforehand.
+
+If automatic entry does not work, double-tap RESET while the Update Center says
+it is waiting for the bootloader. You may cancel until writing begins. Once the
+write starts, leave the board connected until verification or the 30-second
+failure bound. Error text distinguishes extra/wrong boards, cable or reset
+problems, copy failure, reconnect timeout, and revision mismatch. The last
+verified UF2 stays cached for an offline reinstall.
+
+## Development and recovery workflow
+
+The remaining build, Makefile, checksum, Arduino CLI, and manual UF2 instructions
+are retained for contributors and for recovery when the guided path cannot
+complete.
+
+### Install build tools
 
 Install Apple's command-line tools if they are not already present:
 
@@ -95,7 +161,7 @@ cargo build --release --workspace
 
 The commands used below will then be available in `target/release/`.
 
-## 2. Build and flash the XIAO
+### Build and flash the XIAO manually
 
 Install the pinned Seeed nRF52 core, run portable firmware tests, and create the
 firmware artifacts:

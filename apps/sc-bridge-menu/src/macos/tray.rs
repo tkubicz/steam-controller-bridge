@@ -15,11 +15,11 @@ impl MenuApp {
         let firmware = MenuItem::new("Firmware: Unknown", false, None);
         let battery = MenuItem::new("Battery: Unknown", false, None);
         let haptics = MenuItem::new("Haptics: Idle", false, None);
-        let bindings = MenuItem::new("Bindings: Disabled", false, None);
+        let current_profile = MenuItem::new("Current Profile: None · Disabled", false, None);
         let automatic_shutdown = MenuItem::new("Auto shutdown: Idle 0:00 / 15:00", false, None);
         let problem = MenuItem::new("Problem: None", false, None);
         let run_toggle = MenuItem::with_id(RUN_TOGGLE_ID, "Start Bridge", false, None);
-        let copy_error = MenuItem::with_id(COPY_ERROR_ID, "Copy Full Error", false, None);
+        let copy_error = MenuItem::with_id(COPY_ERROR_ID, "Copy Full Error", true, None);
         let copy = MenuItem::with_id(COPY_ID, "Copy Diagnostics", true, None);
         let settings = MenuItem::with_id(SETTINGS_ID, "Open Input Monitoring Settings", true, None);
         let accessibility =
@@ -28,6 +28,7 @@ impl MenuApp {
             MenuItem::with_id(ENABLE_BINDINGS_ID, "Request Permissions…", true, None);
         let edit_profiles = MenuItem::with_id(EDIT_BINDINGS_ID, EDIT_PROFILES_LABEL, true, None);
         let logs = MenuItem::with_id(LOGS_ID, "Open Log Folder", true, None);
+        let updates = MenuItem::with_id(UPDATES_ID, "Check for Updates…", true, None);
         let about = MenuItem::with_id(ABOUT_ID, "About", true, None);
         let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
         let idle_shutdown = vec![
@@ -98,6 +99,15 @@ impl MenuApp {
             self.settings.power_off_on_puck,
             None,
         );
+        let shutdown_submenu = Submenu::with_items(
+            "Shutdown Settings",
+            true,
+            &[
+                &idle_submenu as &dyn tray_icon::menu::IsMenuItem,
+                &puck_dock,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
         let overlay_enabled = CheckMenuItem::with_id(
             OVERLAY_ENABLED_ID,
             "Hold Quick Access for Profile Wheel",
@@ -152,25 +162,33 @@ impl MenuApp {
         bindings_submenu
             .append(&edit_profiles)
             .map_err(|error| error.to_string())?;
-        // Everything that asks macOS for a permission, or sends you to the
-        // pane that grants it, lives together rather than being scattered
-        // through the menu.
-        let permissions_submenu = Submenu::with_items(
-            "Permissions",
+        bindings_submenu
+            .append(&PredefinedMenuItem::separator())
+            .map_err(|error| error.to_string())?;
+        bindings_submenu
+            .append(&overlay_submenu)
+            .map_err(|error| error.to_string())?;
+        let troubleshooting_submenu = Submenu::with_items(
+            "Troubleshooting",
             true,
             &[
                 &enable_bindings,
                 &PredefinedMenuItem::separator(),
                 &settings,
                 &accessibility,
+                &PredefinedMenuItem::separator(),
+                &copy,
+                &logs,
             ],
         )
         .map_err(|error| error.to_string())?;
-        let separators: [PredefinedMenuItem; 7] =
+        let separators: [PredefinedMenuItem; 6] =
             std::array::from_fn(|_| PredefinedMenuItem::separator());
-        let menu = Menu::with_items(&[
+        let copy_error_visible = self.runtime.status().last_error.is_some();
+        let mut root_items: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![
             &bridge,
             &status,
+            &run_toggle,
             &separators[0],
             &controller,
             &input,
@@ -178,28 +196,28 @@ impl MenuApp {
             &firmware,
             &battery,
             &haptics,
-            &bindings,
             &separators[1],
             &problem,
-            &copy_error,
+        ];
+        if copy_error_visible {
+            root_items.push(&copy_error);
+        }
+        root_items.extend([
+            &troubleshooting_submenu as &dyn tray_icon::menu::IsMenuItem,
             &separators[2],
-            &run_toggle,
-            &separators[3],
             &automatic_shutdown,
-            &idle_submenu,
-            &puck_dock,
-            &separators[4],
+            &shutdown_submenu,
+            &separators[3],
+            &current_profile,
             &bindings_submenu,
-            &overlay_submenu,
-            &separators[5],
-            &permissions_submenu,
-            &copy,
-            &logs,
+            &separators[4],
+            &updates,
             &about,
-            &separators[6],
+            &separators[5],
             &quit,
-        ])
-        .map_err(|error| error.to_string())?;
+        ]);
+        let menu = Menu::with_items(&root_items).map_err(|error| error.to_string())?;
+        let menu_handle = menu.clone();
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("Steam Controller Bridge")
@@ -209,6 +227,7 @@ impl MenuApp {
             .map_err(|error| error.to_string())?;
         let tray_icons = NativeTrayIcons::capture(&tray)?;
         self.items = Some(MenuItems {
+            menu: menu_handle,
             bridge,
             status,
             input,
@@ -217,15 +236,18 @@ impl MenuApp {
             firmware,
             battery,
             haptics,
-            bindings,
+            current_profile,
             automatic_shutdown,
             problem,
             run_toggle,
             copy_error,
+            copy_error_visible,
+            updates,
             idle_shutdown,
             puck_dock,
             bindings_submenu,
             binding_profiles,
+            overlay_submenu,
             overlay_enabled,
             overlay_hold,
         });
@@ -237,6 +259,21 @@ impl MenuApp {
 
     pub(super) fn refresh_status(&mut self) {
         let status = self.runtime.status();
+        #[cfg(feature = "updater")]
+        {
+            self.update_checker.poll();
+            let available = self.update_checker.available(status.xiao.firmware);
+            if self.last_update_available != Some(available) {
+                self.last_update_available = Some(available);
+                if let Some(items) = &self.items {
+                    items.updates.set_text(if available {
+                        "Updates Available…"
+                    } else {
+                        "Check for Updates…"
+                    });
+                }
+            }
+        }
         if let Err(error) = self.logger.write_status(&status) {
             eprintln!("cannot write menu-app diagnostics: {error}");
         }
@@ -250,7 +287,7 @@ impl MenuApp {
             .as_ref()
             .is_none_or(|previous| previous.tray_state != model.tray_state);
         if self.last_model.as_ref() != Some(&model) {
-            if let Some(items) = &self.items {
+            if let Some(items) = self.items.as_mut() {
                 items.bridge.set_text(&model.bridge);
                 items.status.set_text(&model.status);
                 items.input.set_text(&model.input);
@@ -259,12 +296,39 @@ impl MenuApp {
                 items.firmware.set_text(&model.firmware);
                 items.battery.set_text(&model.battery);
                 items.haptics.set_text(&model.haptics);
-                items.bindings.set_text(&model.bindings);
+                items.current_profile.set_text(&model.current_profile);
                 items.automatic_shutdown.set_text(&model.automatic_shutdown);
                 items.problem.set_text(&model.problem);
                 items.run_toggle.set_text(model.run_action.label());
                 items.run_toggle.set_enabled(model.run_enabled);
-                items.copy_error.set_enabled(model.has_error);
+                if items.copy_error_visible != model.has_error {
+                    let result: Result<(), String> = if model.has_error {
+                        let problem_position = items
+                            .menu
+                            .items()
+                            .iter()
+                            .position(|item| item.id() == items.problem.id());
+                        problem_position
+                            .ok_or_else(|| "Problem menu item is missing".to_owned())
+                            .and_then(|position| {
+                                items
+                                    .menu
+                                    .insert(&items.copy_error, position + 1)
+                                    .map_err(|error| error.to_string())
+                            })
+                    } else {
+                        items
+                            .menu
+                            .remove(&items.copy_error)
+                            .map_err(|error| error.to_string())
+                    };
+                    match result {
+                        Ok(()) => items.copy_error_visible = model.has_error,
+                        Err(error) => {
+                            eprintln!("cannot update Copy Full Error visibility: {error}");
+                        }
+                    }
+                }
             }
             if let Some(tray) = &self.tray {
                 if icon_changed {
@@ -380,6 +444,12 @@ impl MenuApp {
                 }
             }
             ABOUT_ID => self.show_about(),
+            UPDATES_ID => {
+                let firmware = self.runtime.status().xiao.firmware;
+                if let Err(error) = self.update_host.launch(firmware) {
+                    eprintln!("cannot launch Update Center: {error}");
+                }
+            }
             QUIT_ID => {
                 self.shutdown();
                 event_loop.exit();
@@ -420,6 +490,7 @@ impl MenuApp {
         }
         self.shutting_down = true;
         self.overlay.stop();
+        self.update_host.stop();
         self.flush_overlay_diagnostics();
         if let Some(mut child) = self.about_child.take() {
             let _ = child.kill();
@@ -427,6 +498,52 @@ impl MenuApp {
         }
         if let Err(error) = self.runtime.shutdown() {
             eprintln!("bridge shutdown failed: {error}");
+        }
+    }
+
+    pub(super) fn handle_update_requests(&mut self, event_loop: &ActiveEventLoop) {
+        let requests: Vec<_> = self.update_host.drain().collect();
+        for request in requests {
+            let response = match request {
+                UpdateRequest::SuspendBridge => {
+                    let resume_after = self
+                        .last_model
+                        .as_ref()
+                        .is_some_and(|model| model.run_action == RunAction::Stop);
+                    match self.runtime.stop() {
+                        Ok(()) => {
+                            self.update_host.set_suspended(resume_after);
+                            UpdateResponse::Suspended { resume_after }
+                        }
+                        Err(error) => UpdateResponse::Error {
+                            message: format!("Bridge could not release its devices: {error}"),
+                        },
+                    }
+                }
+                UpdateRequest::ResumeBridge => {
+                    let restart = self.update_host.clear_suspended();
+                    if restart {
+                        match self.runtime.request_start() {
+                            Ok(()) => UpdateResponse::Resumed,
+                            Err(error) => UpdateResponse::Error {
+                                message: format!("Bridge could not restart: {error}"),
+                            },
+                        }
+                    } else {
+                        UpdateResponse::Resumed
+                    }
+                }
+                UpdateRequest::QuitForReplacement => {
+                    let response = UpdateResponse::Quitting;
+                    let _ = self.update_host.respond(&response);
+                    self.shutdown();
+                    event_loop.exit();
+                    continue;
+                }
+            };
+            if let Err(error) = self.update_host.respond(&response) {
+                eprintln!("cannot answer Update Center: {error}");
+            }
         }
     }
 }

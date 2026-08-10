@@ -17,16 +17,26 @@ mod overlay_host;
 mod overlay_protocol;
 #[cfg(all(target_os = "macos", feature = "overlay"))]
 mod profile_overlay;
+#[cfg(all(target_os = "macos", feature = "updater"))]
+mod update_center;
+#[cfg(all(target_os = "macos", feature = "updater"))]
+mod update_check;
+#[cfg(target_os = "macos")]
+mod update_host;
+#[cfg(target_os = "macos")]
+mod update_protocol;
 
 #[cfg(target_os = "macos")]
 fn main() {
     let mut about = false;
     let mut editor = false;
     let mut overlay = false;
+    let mut updater = false;
     for argument in std::env::args() {
         about |= argument == "--about";
         editor |= argument == "--bindings-editor";
         overlay |= argument == overlay_protocol::OVERLAY_ARGUMENT;
+        updater |= argument == update_protocol::UPDATE_CENTER_ARGUMENT;
     }
     let result = if about {
         #[cfg(feature = "about")]
@@ -54,6 +64,15 @@ fn main() {
         #[cfg(not(feature = "overlay"))]
         {
             Err("this build has no profile overlay".to_owned())
+        }
+    } else if updater {
+        #[cfg(feature = "updater")]
+        {
+            update_center::run()
+        }
+        #[cfg(not(feature = "updater"))]
+        {
+            Err("this build has no Update Center".to_owned())
         }
     } else {
         macos::run()

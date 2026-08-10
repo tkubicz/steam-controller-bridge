@@ -34,6 +34,10 @@ use winit::window::WindowId;
 
 use crate::model::{MenuModel, RunAction, TrayState};
 use crate::overlay_host::OverlayHost;
+#[cfg(feature = "updater")]
+use crate::update_check::UpdateChecker;
+use crate::update_host::UpdateHost;
+use crate::update_protocol::{UpdateRequest, UpdateResponse};
 
 mod icons;
 mod logging;
@@ -73,6 +77,7 @@ const EDIT_PROFILES_LABEL: &str = "Edit Profiles…";
 const BINDING_PROFILE_PREFIX: &str = "binding-profile:";
 const LOGS_ID: &str = "open-logs";
 const ABOUT_ID: &str = "about";
+const UPDATES_ID: &str = "updates";
 const QUIT_ID: &str = "quit";
 const IDLE_NEVER_ID: &str = "idle-never";
 const IDLE_5_ID: &str = "idle-5";
@@ -103,6 +108,7 @@ pub fn run() -> Result<(), String> {
 }
 
 struct MenuItems {
+    menu: Menu,
     bridge: MenuItem,
     status: MenuItem,
     input: MenuItem,
@@ -111,15 +117,22 @@ struct MenuItems {
     firmware: MenuItem,
     battery: MenuItem,
     haptics: MenuItem,
-    bindings: MenuItem,
+    current_profile: MenuItem,
     automatic_shutdown: MenuItem,
     problem: MenuItem,
     run_toggle: MenuItem,
     copy_error: MenuItem,
+    copy_error_visible: bool,
+    #[cfg_attr(
+        not(feature = "updater"),
+        expect(dead_code, reason = "only the updater feature rewrites the label")
+    )]
+    updates: MenuItem,
     idle_shutdown: Vec<(Option<u64>, CheckMenuItem)>,
     puck_dock: CheckMenuItem,
     bindings_submenu: Submenu,
     binding_profiles: Vec<(String, CheckMenuItem)>,
+    overlay_submenu: Submenu,
     overlay_enabled: CheckMenuItem,
     overlay_hold: Vec<(u64, CheckMenuItem)>,
 }
@@ -186,6 +199,11 @@ struct MenuApp {
     /// makes repeated About clicks focus the existing window instead of
     /// stacking copies.
     about_child: Option<std::process::Child>,
+    update_host: UpdateHost,
+    #[cfg(feature = "updater")]
+    update_checker: UpdateChecker,
+    #[cfg(feature = "updater")]
+    last_update_available: Option<bool>,
 }
 
 impl MenuApp {
@@ -264,6 +282,11 @@ impl MenuApp {
             picker_roster_dirty: false,
             editor_children: Vec::new(),
             about_child: None,
+            update_host: UpdateHost::new(),
+            #[cfg(feature = "updater")]
+            update_checker: UpdateChecker::new(),
+            #[cfg(feature = "updater")]
+            last_update_available: None,
         })
     }
 }
@@ -321,6 +344,12 @@ impl ApplicationHandler for MenuApp {
                 .is_some_and(|child| !matches!(child.try_wait(), Ok(None)))
             {
                 self.about_child = None;
+            }
+            self.handle_update_requests(event_loop);
+            if self.update_host.reap() && self.update_host.clear_suspended() {
+                if let Err(error) = self.runtime.request_start() {
+                    eprintln!("cannot restart bridge after Update Center exit: {error}");
+                }
             }
             self.reload_bindings_if_changed();
             self.observe_permission_grants();

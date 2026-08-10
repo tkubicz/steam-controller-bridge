@@ -171,9 +171,31 @@ jobs:
           ref: ${{ needs.release_please.outputs.release_sha }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Build and ad-hoc sign menu-bar application
-        run: ./tools/build-macos-app.sh
+        env:
+          # Public verification keys are safe repository/environment variables.
+          # Use key-id=base64;next-key=base64 during staged rotation.
+          SC_BRIDGE_UPDATE_PUBLIC_KEYS: ${{ vars.UPDATE_SIGNING_PUBLIC_KEYS }}
+          SC_BRIDGE_UPDATE_PUBLIC_KEY_B64: ${{ vars.UPDATE_SIGNING_PRIMARY_PUBLIC_KEY_B64 }}
+          UPDATE_SIGNING_KEY_ID: ${{ vars.UPDATE_SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          test -n "${SC_BRIDGE_UPDATE_PUBLIC_KEYS}"
+          test -n "${SC_BRIDGE_UPDATE_PUBLIC_KEY_B64}"
+          test -n "${UPDATE_SIGNING_KEY_ID}"
+          case ";${SC_BRIDGE_UPDATE_PUBLIC_KEYS};" in
+            *";${UPDATE_SIGNING_KEY_ID}=${SC_BRIDGE_UPDATE_PUBLIC_KEY_B64};"*) ;;
+            *) echo "primary signing key is not embedded in the application" >&2; exit 1 ;;
+          esac
+          ./tools/build-macos-app.sh
       - name: Archive application bundle
-        run: ditto -c -k --sequesterRsrc --keepParent "dist/Steam Controller Bridge.app" steam-controller-bridge-macos.zip
+        run: |
+          set -euo pipefail
+          /usr/bin/codesign --verify --deep --strict "dist/Steam Controller Bridge.app"
+          ditto -c -k --sequesterRsrc --keepParent "dist/Steam Controller Bridge.app" steam-controller-bridge-macos.zip
+          mkdir archive-check
+          ditto -x -k steam-controller-bridge-macos.zip archive-check
+          test "$(find archive-check -maxdepth 1 -name '*.app' -type d | wc -l | tr -d ' ')" = 1
+          /usr/bin/codesign --verify --deep --strict "archive-check/Steam Controller Bridge.app"
       - uses: actions/upload-artifact@v7
         with:
           name: macos-app
@@ -183,19 +205,52 @@ jobs:
     needs: [release_please, validate, firmware, macos-app]
     if: needs.release_please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
+    # Protect this environment with required reviewers and limit its secrets to
+    # this job. Missing or mismatched key material fails before upload.
+    environment: release-signing
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release_please.outputs.release_sha }}
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/download-artifact@v7
         with:
           path: artifacts
-      - name: Collect and checksum release files
+      - name: Collect release files
         run: |
           set -euo pipefail
           mkdir -p release
           mv artifacts/firmware/steam-controller-bridge-xiao-nrf52840.uf2 release/
           mv artifacts/firmware/steam-controller-bridge-xiao-nrf52840-dfu.zip release/
           mv artifacts/macos-app/steam-controller-bridge-macos.zip release/
+      - name: Generate and sign unified update manifest
+        env:
+          RELEASE_BODY: ${{ needs.release_please.outputs.release_body }}
+          RELEASE_TAG: ${{ needs.release_please.outputs.tag_name }}
+          SC_BRIDGE_UPDATE_PRIVATE_KEY_B64: ${{ secrets.UPDATE_SIGNING_PRIVATE_KEY_B64 }}
+          SC_BRIDGE_UPDATE_PUBLIC_KEY_B64: ${{ vars.UPDATE_SIGNING_PRIMARY_PUBLIC_KEY_B64 }}
+          SC_BRIDGE_UPDATE_ADDITIONAL_PRIVATE_KEYS: ${{ secrets.UPDATE_SIGNING_ADDITIONAL_PRIVATE_KEYS }}
+          UPDATE_SIGNING_KEY_ID: ${{ vars.UPDATE_SIGNING_KEY_ID }}
+        run: |
+          set -euo pipefail
+          test -n "${SC_BRIDGE_UPDATE_PRIVATE_KEY_B64}"
+          test -n "${SC_BRIDGE_UPDATE_PUBLIC_KEY_B64}"
+          test -n "${UPDATE_SIGNING_KEY_ID}"
+          printf '%s\n' "${RELEASE_BODY}" > release-notes.md
+          cargo run --locked -p release-updater --bin release-manifest -- \
+            --release-tag "${RELEASE_TAG}" \
+            --version "$(tr -d '[:space:]' < version.txt)" \
+            --release-notes release-notes.md \
+            --application release/steam-controller-bridge-macos.zip \
+            --firmware release/steam-controller-bridge-xiao-nrf52840.uf2 \
+            --firmware-header firmware/xiao-nrf52840/src/firmware_version.h \
+            --output release \
+            --key-id "${UPDATE_SIGNING_KEY_ID}"
+      - name: Checksum every release asset
+        run: |
+          set -euo pipefail
           cd release
           sha256sum steam-controller-bridge-* > SHA256SUMS.txt
           sha256sum --check SHA256SUMS.txt

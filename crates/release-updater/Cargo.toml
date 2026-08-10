@@ -1,0 +1,20 @@
+[package]
+name = "release-updater"
+version = "1.4.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+base64.workspace = true
+bridge-output = { path = "../bridge-output" }
+clap.workspace = true
+ed25519-dalek.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+serialport.workspace = true
+
+[lints]
+workspace = true
