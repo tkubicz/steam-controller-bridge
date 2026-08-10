@@ -4,7 +4,7 @@
 //! mouse, no focus. That is what lets the window be click-through and
 //! non-activating, so it can sit over a game without the game noticing.
 
-use std::io::BufRead;
+use std::io::BufReader;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use eframe::egui;
@@ -16,7 +16,10 @@ use objc2_app_kit::{
 };
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
-use crate::overlay_protocol::{OverlayEnvelope, OverlayMessage, OVERLAY_WINDOW_TITLE};
+use crate::line_protocol::read_bounded_line;
+use crate::overlay_protocol::{
+    OverlayEnvelope, OverlayMessage, MAX_OVERLAY_LINE_BYTES, OVERLAY_WINDOW_TITLE,
+};
 use ui_theme::{ACCENT, MUTED_TEXT, ON_ACCENT, SURFACE, SURFACE_RAISED, TEXT};
 
 mod wheel;
@@ -140,11 +143,17 @@ pub fn run() -> Result<(), String> {
 /// Reads the parent's commands on a background thread and wakes the UI.
 fn spawn_stdin_reader(state: Arc<Mutex<OverlayState>>, ctx: egui::Context) {
     std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            let Ok(line) = line else { break };
-            if line.trim().is_empty() {
-                continue;
-            }
+        let mut input = BufReader::new(std::io::stdin());
+        loop {
+            let line = match read_bounded_line(&mut input, MAX_OVERLAY_LINE_BYTES) {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(error) => {
+                    eprintln!("level=warn event=overlay_message_rejected error={error:?}");
+                    break;
+                }
+            };
+            let line = String::from_utf8_lossy(&line);
             match OverlayEnvelope::from_line(&line) {
                 Ok(envelope) => {
                     lock(&state).apply(envelope.message);

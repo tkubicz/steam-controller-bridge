@@ -11,6 +11,8 @@ mod bindings_editor;
 #[cfg(target_os = "macos")]
 mod cli;
 #[cfg(target_os = "macos")]
+mod line_protocol;
+#[cfg(target_os = "macos")]
 mod macos;
 // Only `macos` renders the model, so a non-macOS build would see it as dead code.
 // Its unit tests therefore run on macOS only.

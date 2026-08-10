@@ -1,9 +1,10 @@
 use std::io::{BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use release_updater::{
@@ -22,7 +23,8 @@ use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
 use crate::about_pages::AboutContent;
 use crate::app_center_protocol::{
-    encode, read, AppCenterCommand, AppCenterPage, FirmwareStatus, UpdateRequest, UpdateResponse,
+    encode, read, AppCenterCommand, AppCenterPage, FirmwareStatus, UpdateOperation, UpdateRequest,
+    UpdateResponse, UpdateResult,
 };
 use crate::cli::{AppCenterArgs, DemoMode};
 use crate::update_check::{running_version, update_context, CHECK_INTERVAL};
@@ -35,6 +37,7 @@ const WINDOW_TITLE: &str = "Steam Controller Bridge";
 const APP_ICON: &[u8] = include_bytes!("../../../packaging/macos/AppIcon.png");
 const WINDOW_SIZE: [f32; 2] = [760.0, 680.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [640.0, 540.0];
+const HOST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub fn run(arguments: AppCenterArgs) -> Result<(), String> {
     let demo = arguments.demo;
@@ -76,6 +79,7 @@ struct HostClient {
     output: Arc<Mutex<std::io::Stdout>>,
     responses: Arc<Mutex<mpsc::Receiver<UpdateResponse>>>,
     request_gate: Arc<Mutex<()>>,
+    next_request_id: Arc<AtomicU64>,
 }
 
 impl HostClient {
@@ -92,7 +96,10 @@ impl HostClient {
                         AppCenterCommand::UpdateResponse(response) => {
                             response_sender.send(response).is_ok()
                         }
-                        command => command_sender.send(command).is_ok(),
+                        command => match command_sender.try_send(command) {
+                            Ok(()) | Err(mpsc::TrySendError::Full(_)) => true,
+                            Err(mpsc::TrySendError::Disconnected(_)) => false,
+                        },
                     };
                     if !sent {
                         break;
@@ -106,17 +113,19 @@ impl HostClient {
                 output: Arc::new(Mutex::new(std::io::stdout())),
                 responses: Arc::new(Mutex::new(responses)),
                 request_gate: Arc::new(Mutex::new(())),
+                next_request_id: Arc::new(AtomicU64::new(1)),
             },
             commands,
         )
     }
 
-    fn request(&self, request: UpdateRequest) -> Result<UpdateResponse, String> {
+    fn request(&self, operation: UpdateOperation) -> Result<(), String> {
         let _request = self
             .request_gate
             .lock()
             .map_err(|_| "app window IPC failed")?;
-        let encoded = encode(request)?;
+        let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let encoded = encode(UpdateRequest { id, operation })?;
         {
             let mut output = self.output.lock().map_err(|_| "app window IPC failed")?;
             output
@@ -124,16 +133,42 @@ impl HostClient {
                 .and_then(|()| output.flush())
                 .map_err(|error| error.to_string())?;
         }
-        let response = self
-            .responses
-            .lock()
-            .map_err(|_| "app window IPC failed")?
-            .recv()
-            .map_err(|_| "app window host response is unavailable")?;
-        if let UpdateResponse::Error { message } = &response {
-            return Err(message.clone());
+        let deadline = Instant::now() + HOST_RESPONSE_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err("app window host response timed out".to_owned());
+            }
+            let response = self
+                .responses
+                .lock()
+                .map_err(|_| "app window IPC failed")?
+                .recv_timeout(remaining)
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => {
+                        "app window host response timed out".to_owned()
+                    }
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        "app window host response is unavailable".to_owned()
+                    }
+                })?;
+            if response.id != id {
+                continue;
+            }
+            return validate_update_result(operation, response.result);
         }
-        Ok(response)
+    }
+}
+
+fn validate_update_result(operation: UpdateOperation, result: UpdateResult) -> Result<(), String> {
+    match (operation, result) {
+        (_, UpdateResult::Error { message }) => Err(message),
+        (UpdateOperation::SuspendBridge, UpdateResult::Suspended)
+        | (UpdateOperation::ResumeBridge, UpdateResult::Resumed)
+        | (UpdateOperation::QuitForReplacement, UpdateResult::Quitting) => Ok(()),
+        (_, result) => Err(format!(
+            "app window host returned an unexpected response: {result:?}"
+        )),
     }
 }
 
@@ -166,6 +201,7 @@ struct AppCenter {
     host_commands: mpsc::Receiver<AppCenterCommand>,
     catalog_status: CatalogStatus,
     firmware_write_started: bool,
+    firmware_session_active: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -267,6 +303,7 @@ impl AppCenter {
                 CatalogStatus::NotRequested
             },
             firmware_write_started: false,
+            firmware_session_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -312,10 +349,15 @@ impl AppCenter {
         let sender = self.sender.clone();
         let host = self.host.clone();
         let cancel = Arc::clone(&self.cancel);
+        let session_active = Arc::clone(&self.firmware_session_active);
         thread::spawn(move || {
             let result = (|| {
                 let path = download_firmware(&manifest)?;
-                host.request(UpdateRequest::SuspendBridge)?;
+                if let Err(error) = host.request(UpdateOperation::SuspendBridge) {
+                    let _ = host.request(UpdateOperation::ResumeBridge);
+                    return Err(error);
+                }
+                session_active.store(true, Ordering::Release);
                 let flash_result = flash_firmware(
                     &path,
                     &manifest.firmware,
@@ -327,7 +369,8 @@ impl AppCenter {
                     },
                 )
                 .map_err(|error| error.to_string());
-                let resume_result = host.request(UpdateRequest::ResumeBridge).map(|_| ());
+                let resume_result = host.request(UpdateOperation::ResumeBridge);
+                session_active.store(false, Ordering::Release);
                 flash_result.and(resume_result)
             })();
             let _ = sender.send(WorkerEvent::Firmware(result));
@@ -347,7 +390,7 @@ impl AppCenter {
         let sender = self.sender.clone();
         let host = self.host.clone();
         thread::spawn(move || {
-            let result = host.request(UpdateRequest::QuitForReplacement).map(|_| ());
+            let result = host.request(UpdateOperation::QuitForReplacement);
             let _ = sender.send(WorkerEvent::Quit(result));
             ctx.request_repaint();
         });
@@ -580,7 +623,8 @@ impl eframe::App for AppCenter {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
         self.drain_host_commands();
-        if self.firmware_write_started && ui.ctx().input(|input| input.viewport().close_requested())
+        if self.firmware_session_active.load(Ordering::Acquire)
+            && ui.ctx().input(|input| input.viewport().close_requested())
         {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -1137,5 +1181,22 @@ mod tests {
         assert!(status.retry_if_failed());
         assert_eq!(status, CatalogStatus::NotRequested);
         assert!(status.begin_if_needed(AppCenterPage::Updates));
+    }
+
+    #[test]
+    fn host_responses_must_match_the_requested_operation() {
+        assert!(
+            validate_update_result(UpdateOperation::SuspendBridge, UpdateResult::Suspended).is_ok()
+        );
+        assert!(
+            validate_update_result(UpdateOperation::SuspendBridge, UpdateResult::Resumed).is_err()
+        );
+        assert!(validate_update_result(
+            UpdateOperation::QuitForReplacement,
+            UpdateResult::Error {
+                message: "refused".to_owned()
+            }
+        )
+        .is_err());
     }
 }

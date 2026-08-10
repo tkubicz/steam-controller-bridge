@@ -200,9 +200,10 @@ impl MenuApp {
     }
 
     pub(super) fn flush_overlay_diagnostics(&mut self) {
-        let diagnostics = self.overlay.drain_diagnostics();
+        let mut diagnostics = self.overlay.drain_diagnostics();
+        diagnostics.extend(self.app_center_host.drain_diagnostics());
         if let Err(error) = self.logger.write_diagnostics(&diagnostics) {
-            eprintln!("cannot write overlay diagnostics: {error}");
+            eprintln!("cannot write child-process diagnostics: {error}");
         }
     }
 

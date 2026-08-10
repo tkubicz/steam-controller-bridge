@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use bridge_runtime::FirmwareVersion;
 
+use crate::line_protocol::read_bounded_line;
+
 pub const MAX_IPC_LINE_BYTES: usize = 4 * 1024;
 const IPC_PROTOCOL_VERSION: u32 = 1;
 
@@ -15,9 +17,17 @@ struct Envelope<T> {
     message: T,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub type RequestId = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRequest {
+    pub id: RequestId,
+    pub operation: UpdateOperation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum UpdateRequest {
+pub enum UpdateOperation {
     SuspendBridge,
     ResumeBridge,
     QuitForReplacement,
@@ -113,7 +123,7 @@ impl AppCenterPage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppCenterCommand {
     Navigate {
@@ -126,10 +136,16 @@ pub enum AppCenterCommand {
     UpdateResponse(UpdateResponse),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateResponse {
+    pub id: RequestId,
+    pub result: UpdateResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum UpdateResponse {
-    Suspended { resume_after: bool },
+pub enum UpdateResult {
+    Suspended,
     Resumed,
     Quitting,
     Error { message: String },
@@ -149,39 +165,17 @@ pub fn encode<T: Serialize>(message: T) -> Result<Vec<u8>, String> {
 }
 
 pub fn read<T: DeserializeOwned>(reader: &mut impl BufRead) -> Result<Option<T>, String> {
-    let mut line = Vec::with_capacity(MAX_IPC_LINE_BYTES);
-    loop {
-        let available = reader.fill_buf().map_err(|error| error.to_string())?;
-        if available.is_empty() {
-            return if line.is_empty() {
-                Ok(None)
-            } else {
-                Err("app window IPC ended inside a message".to_owned())
-            };
-        }
-        if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
-            if line.len() + newline > MAX_IPC_LINE_BYTES {
-                return Err("app window IPC message exceeds its bound".to_owned());
-            }
-            line.extend_from_slice(&available[..newline]);
-            reader.consume(newline + 1);
-            let envelope: Envelope<T> =
-                serde_json::from_slice(&line).map_err(|error| error.to_string())?;
-            if envelope.version != IPC_PROTOCOL_VERSION {
-                return Err(format!(
-                    "unsupported app window IPC version {}",
-                    envelope.version
-                ));
-            }
-            return Ok(Some(envelope.message));
-        }
-        if line.len() + available.len() > MAX_IPC_LINE_BYTES {
-            return Err("app window IPC message exceeds its bound".to_owned());
-        }
-        line.extend_from_slice(available);
-        let consumed = available.len();
-        reader.consume(consumed);
+    let Some(line) = read_bounded_line(reader, MAX_IPC_LINE_BYTES)? else {
+        return Ok(None);
+    };
+    let envelope: Envelope<T> = serde_json::from_slice(&line).map_err(|error| error.to_string())?;
+    if envelope.version != IPC_PROTOCOL_VERSION {
+        return Err(format!(
+            "unsupported app window IPC version {}",
+            envelope.version
+        ));
     }
+    Ok(Some(envelope.message))
 }
 
 #[cfg(test)]
@@ -191,10 +185,14 @@ mod tests {
 
     #[test]
     fn protocol_is_versioned_and_bounded_before_allocation_grows() {
-        let encoded = encode(UpdateRequest::SuspendBridge).unwrap();
+        let request = UpdateRequest {
+            id: 7,
+            operation: UpdateOperation::SuspendBridge,
+        };
+        let encoded = encode(request).unwrap();
         assert!(matches!(
-            read(&mut Cursor::new(encoded)).unwrap(),
-            Some(UpdateRequest::SuspendBridge)
+            read::<UpdateRequest>(&mut Cursor::new(encoded)).unwrap(),
+            Some(decoded) if decoded == request
         ));
         let oversized = vec![b'x'; MAX_IPC_LINE_BYTES + 1];
         assert!(read::<UpdateRequest>(&mut Cursor::new(oversized)).is_err());
@@ -224,6 +222,15 @@ mod tests {
                 firmware: FirmwareStatus::Reported(7)
             })
         ));
+
+        let response = AppCenterCommand::UpdateResponse(UpdateResponse {
+            id: 42,
+            result: UpdateResult::Resumed,
+        });
+        assert_eq!(
+            read::<AppCenterCommand>(&mut Cursor::new(encode(&response).unwrap())).unwrap(),
+            Some(response)
+        );
     }
 
     #[test]

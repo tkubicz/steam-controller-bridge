@@ -447,8 +447,9 @@ impl MenuApp {
             ABOUT_ID => self.show_app_center(AppCenterPage::About),
             UPDATES_ID => self.show_app_center(AppCenterPage::Updates),
             QUIT_ID => {
-                self.shutdown();
-                event_loop.exit();
+                if self.shutdown() {
+                    event_loop.exit();
+                }
             }
             OVERLAY_ENABLED_ID => {
                 self.settings.profile_overlay_enabled = !self.settings.profile_overlay_enabled;
@@ -480,62 +481,82 @@ impl MenuApp {
         }
     }
 
-    pub(super) fn shutdown(&mut self) {
+    pub(super) fn shutdown(&mut self) -> bool {
         if self.shutting_down {
-            return;
+            return true;
+        }
+        if self.app_center_host.firmware_session_active() {
+            eprintln!("level=warn event=quit_deferred reason=firmware_update_active");
+            if let Some(child) = self.app_center_host.child() {
+                let _ = activate_child_application(child);
+            }
+            return false;
         }
         self.shutting_down = true;
         self.overlay.stop();
-        self.app_center_host.stop();
+        let _ = self.app_center_host.stop();
         self.flush_overlay_diagnostics();
         if let Err(error) = self.runtime.shutdown() {
             eprintln!("bridge shutdown failed: {error}");
         }
+        true
     }
 
     pub(super) fn handle_update_requests(&mut self, event_loop: &ActiveEventLoop) {
-        let requests: Vec<_> = self.app_center_host.drain().collect();
-        for request in requests {
-            let response = match request {
-                UpdateRequest::SuspendBridge => {
-                    let resume_after = self
-                        .last_model
-                        .as_ref()
-                        .is_some_and(|model| model.run_action == RunAction::Stop);
-                    match self.runtime.stop() {
-                        Ok(()) => {
-                            self.app_center_host.set_suspended(resume_after);
-                            UpdateResponse::Suspended { resume_after }
+        for session_request in self.app_center_host.drain() {
+            let UpdateRequest { id, operation } = session_request.request;
+            let result = match operation {
+                UpdateOperation::SuspendBridge => match self.runtime.suspend_for_update() {
+                    Ok(()) => match self
+                        .app_center_host
+                        .claim_suspension(session_request.generation)
+                    {
+                        Ok(()) => UpdateResult::Suspended,
+                        Err(error) => {
+                            let _ = self.runtime.resume_from_update();
+                            UpdateResult::Error { message: error }
                         }
-                        Err(error) => UpdateResponse::Error {
-                            message: format!("Bridge could not release its devices: {error}"),
-                        },
-                    }
-                }
-                UpdateRequest::ResumeBridge => {
-                    let restart = self.app_center_host.clear_suspended();
-                    if restart {
-                        match self.runtime.request_start() {
-                            Ok(()) => UpdateResponse::Resumed,
-                            Err(error) => UpdateResponse::Error {
-                                message: format!("Bridge could not restart: {error}"),
-                            },
-                        }
-                    } else {
-                        UpdateResponse::Resumed
-                    }
-                }
-                UpdateRequest::QuitForReplacement => {
-                    let response = UpdateResponse::Quitting;
-                    let _ = self.app_center_host.respond(&response);
-                    self.shutdown();
-                    event_loop.exit();
-                    continue;
-                }
+                    },
+                    Err(error) => UpdateResult::Error {
+                        message: format!("Bridge could not release its devices: {error}"),
+                    },
+                },
+                UpdateOperation::ResumeBridge => match self.runtime.resume_from_update() {
+                    Ok(()) => match self
+                        .app_center_host
+                        .release_suspension(session_request.generation)
+                    {
+                        Ok(()) => UpdateResult::Resumed,
+                        Err(error) => UpdateResult::Error { message: error },
+                    },
+                    Err(error) => UpdateResult::Error {
+                        message: format!("Bridge could not resume: {error}"),
+                    },
+                },
+                UpdateOperation::QuitForReplacement => UpdateResult::Quitting,
             };
-            if let Err(error) = self.app_center_host.respond(&response) {
+            let response = UpdateResponse { id, result };
+            if let Err(error) = self
+                .app_center_host
+                .respond(session_request.generation, &response)
+            {
                 eprintln!("cannot answer app window: {error}");
             }
+            if operation == UpdateOperation::QuitForReplacement && self.shutdown() {
+                event_loop.exit();
+                return;
+            }
+        }
+    }
+
+    pub(super) fn recover_app_center_suspension(&mut self) {
+        self.app_center_host.reap();
+        if !self.app_center_host.suspension_recovery_needed() {
+            return;
+        }
+        match self.runtime.resume_from_update() {
+            Ok(()) => self.app_center_host.complete_suspension_recovery(),
+            Err(error) => eprintln!("cannot recover bridge after app window exit: {error}"),
         }
     }
 }

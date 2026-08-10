@@ -33,7 +33,9 @@ use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::window::WindowId;
 
 use crate::app_center_host::AppCenterHost;
-use crate::app_center_protocol::{AppCenterPage, UpdateRequest, UpdateResponse};
+use crate::app_center_protocol::{
+    AppCenterPage, UpdateOperation, UpdateRequest, UpdateResponse, UpdateResult,
+};
 use crate::model::{MenuModel, RunAction, TrayState};
 use crate::overlay_host::OverlayHost;
 #[cfg(feature = "updater")]
@@ -292,7 +294,7 @@ impl ApplicationHandler for MenuApp {
         if self.tray.is_none() {
             if let Err(error) = self.create_tray() {
                 eprintln!("cannot create menu-bar icon: {error}");
-                self.shutdown();
+                let _ = self.shutdown();
                 event_loop.exit();
                 return;
             }
@@ -319,6 +321,7 @@ impl ApplicationHandler for MenuApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.recover_app_center_suspension();
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             self.handle_menu_event(event.id.as_ref(), event_loop);
         }
@@ -335,11 +338,6 @@ impl ApplicationHandler for MenuApp {
             self.editor_children
                 .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
             self.handle_update_requests(event_loop);
-            if self.app_center_host.reap() && self.app_center_host.clear_suspended() {
-                if let Err(error) = self.runtime.request_start() {
-                    eprintln!("cannot restart bridge after app window exit: {error}");
-                }
-            }
             self.reload_bindings_if_changed();
             self.observe_permission_grants();
             self.refresh_status();
@@ -349,6 +347,6 @@ impl ApplicationHandler for MenuApp {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        self.shutdown();
+        let _ = self.shutdown();
     }
 }
