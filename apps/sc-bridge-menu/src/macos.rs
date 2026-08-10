@@ -108,6 +108,7 @@ pub fn run() -> Result<(), String> {
 }
 
 struct MenuItems {
+    menu: Menu,
     bridge: MenuItem,
     status: MenuItem,
     input: MenuItem,
@@ -121,6 +122,7 @@ struct MenuItems {
     problem: MenuItem,
     run_toggle: MenuItem,
     copy_error: MenuItem,
+    copy_error_visible: bool,
     updates: MenuItem,
     idle_shutdown: Vec<(Option<u64>, CheckMenuItem)>,
     puck_dock: CheckMenuItem,

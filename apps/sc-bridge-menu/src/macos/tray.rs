@@ -19,7 +19,7 @@ impl MenuApp {
         let automatic_shutdown = MenuItem::new("Auto shutdown: Idle 0:00 / 15:00", false, None);
         let problem = MenuItem::new("Problem: None", false, None);
         let run_toggle = MenuItem::with_id(RUN_TOGGLE_ID, "Start Bridge", false, None);
-        let copy_error = MenuItem::with_id(COPY_ERROR_ID, "Copy Full Error", false, None);
+        let copy_error = MenuItem::with_id(COPY_ERROR_ID, "Copy Full Error", true, None);
         let copy = MenuItem::with_id(COPY_ID, "Copy Diagnostics", true, None);
         let settings = MenuItem::with_id(SETTINGS_ID, "Open Input Monitoring Settings", true, None);
         let accessibility =
@@ -169,7 +169,8 @@ impl MenuApp {
         .map_err(|error| error.to_string())?;
         let separators: [PredefinedMenuItem; 8] =
             std::array::from_fn(|_| PredefinedMenuItem::separator());
-        let menu = Menu::with_items(&[
+        let copy_error_visible = self.runtime.status().last_error.is_some();
+        let mut root_items: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![
             &bridge,
             &status,
             &separators[0],
@@ -182,8 +183,12 @@ impl MenuApp {
             &bindings,
             &separators[1],
             &problem,
-            &copy_error,
-            &separators[2],
+        ];
+        if copy_error_visible {
+            root_items.push(&copy_error);
+        }
+        root_items.extend([
+            &separators[2] as &dyn tray_icon::menu::IsMenuItem,
             &run_toggle,
             &separators[3],
             &automatic_shutdown,
@@ -201,8 +206,9 @@ impl MenuApp {
             &about,
             &separators[7],
             &quit,
-        ])
-        .map_err(|error| error.to_string())?;
+        ]);
+        let menu = Menu::with_items(&root_items).map_err(|error| error.to_string())?;
+        let menu_handle = menu.clone();
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("Steam Controller Bridge")
@@ -212,6 +218,7 @@ impl MenuApp {
             .map_err(|error| error.to_string())?;
         let tray_icons = NativeTrayIcons::capture(&tray)?;
         self.items = Some(MenuItems {
+            menu: menu_handle,
             bridge,
             status,
             input,
@@ -225,6 +232,7 @@ impl MenuApp {
             problem,
             run_toggle,
             copy_error,
+            copy_error_visible,
             updates,
             idle_shutdown,
             puck_dock,
@@ -269,7 +277,7 @@ impl MenuApp {
             .as_ref()
             .is_none_or(|previous| previous.tray_state != model.tray_state);
         if self.last_model.as_ref() != Some(&model) {
-            if let Some(items) = &self.items {
+            if let Some(items) = self.items.as_mut() {
                 items.bridge.set_text(&model.bridge);
                 items.status.set_text(&model.status);
                 items.input.set_text(&model.input);
@@ -283,7 +291,34 @@ impl MenuApp {
                 items.problem.set_text(&model.problem);
                 items.run_toggle.set_text(model.run_action.label());
                 items.run_toggle.set_enabled(model.run_enabled);
-                items.copy_error.set_enabled(model.has_error);
+                if items.copy_error_visible != model.has_error {
+                    let result: Result<(), String> = if model.has_error {
+                        let problem_position = items
+                            .menu
+                            .items()
+                            .iter()
+                            .position(|item| item.id() == items.problem.id());
+                        problem_position
+                            .ok_or_else(|| "Problem menu item is missing".to_owned())
+                            .and_then(|position| {
+                                items
+                                    .menu
+                                    .insert(&items.copy_error, position + 1)
+                                    .map_err(|error| error.to_string())
+                            })
+                    } else {
+                        items
+                            .menu
+                            .remove(&items.copy_error)
+                            .map_err(|error| error.to_string())
+                    };
+                    match result {
+                        Ok(()) => items.copy_error_visible = model.has_error,
+                        Err(error) => {
+                            eprintln!("cannot update Copy Full Error visibility: {error}");
+                        }
+                    }
+                }
             }
             if let Some(tray) = &self.tray {
                 if icon_changed {
