@@ -2,7 +2,7 @@
 //! recording writes that hang off it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,7 @@ use gamepad_state::GamepadState;
 use recording::{RecordingEvent, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
 use serde_json::json;
 use steam_controller_device::{enumerate, DeviceEvent, HidDeviceInfo, HidSession, RawHidReport};
-use steam_controller_discovery::ActiveControllerFinder;
+use steam_controller_discovery::{ActiveControllerFinder, ControllerSearch};
 use steam_controller_protocol::DecodedReport;
 
 use crate::cli::Source;
@@ -21,6 +21,51 @@ use crate::{InputState, OutputChoice, Visualizer, FRAME_TIME};
 
 const INPUT_TIMEOUT: Duration = Duration::from_millis(200);
 const DECODE_FAILURE_LIMIT: u32 = 3;
+
+/// A stop flag paired with a condition variable, so retry waits are both idle
+/// and immediately interruptible during ownership transitions or shutdown.
+pub(crate) struct StopToken {
+    stopped: AtomicBool,
+    lock: Mutex<()>,
+    wake: Condvar,
+}
+
+impl Default for StopToken {
+    fn default() -> Self {
+        Self {
+            stopped: AtomicBool::new(false),
+            lock: Mutex::new(()),
+            wake: Condvar::new(),
+        }
+    }
+}
+
+impl StopToken {
+    pub(crate) fn load(&self, order: Ordering) -> bool {
+        self.stopped.load(order)
+    }
+
+    pub(crate) fn store(&self, stopped: bool, order: Ordering) {
+        self.stopped.store(stopped, order);
+        if stopped {
+            self.wake.notify_all();
+        }
+    }
+
+    pub(crate) fn wait(&self, timeout: Duration) {
+        if self.load(Ordering::Acquire) {
+            return;
+        }
+        let guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = self
+            .wake
+            .wait_timeout_while(guard, timeout, |()| !self.load(Ordering::Acquire))
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
 
 /// All GUI-mode HID enumeration and open calls run on this process-lifetime
 /// thread. hidapi's macOS backend owns a global `IOHIDManager` tied to the run
@@ -47,7 +92,7 @@ pub(crate) struct BrokerOpened {
 enum BrokerCommand {
     Open {
         source: Source,
-        stop: Arc<AtomicBool>,
+        stop: Arc<StopToken>,
         events: mpsc::Sender<BrokerEvent>,
     },
     #[cfg(test)]
@@ -56,7 +101,7 @@ enum BrokerCommand {
 }
 
 enum BrokerEvent {
-    Status(String),
+    Status(ControllerSearch),
     Opened(Box<BrokerOpened>),
     Failed(String),
 }
@@ -89,8 +134,8 @@ impl HidBrokerClient {
     pub(crate) fn open(
         &self,
         source: Source,
-        stop: Arc<AtomicBool>,
-        mut status: impl FnMut(String),
+        stop: Arc<StopToken>,
+        mut status: impl FnMut(ControllerSearch),
     ) -> Result<BrokerOpened, String> {
         let (events, receiver) = mpsc::channel();
         self.commands
@@ -131,7 +176,7 @@ fn broker_worker(commands: &mpsc::Receiver<BrokerCommand>) {
 
 fn broker_open(
     source: Source,
-    stop: &Arc<AtomicBool>,
+    stop: &Arc<StopToken>,
     events: &mpsc::Sender<BrokerEvent>,
     finder: &mut Option<ActiveControllerFinder>,
 ) {
@@ -191,10 +236,9 @@ fn broker_open(
                 return;
             }
             Err(search) => {
-                let message = search.to_string();
-                if last_status.as_deref() != Some(message.as_str()) {
-                    let _ = events.send(BrokerEvent::Status(message.clone()));
-                    last_status = Some(message);
+                if last_status.as_ref() != Some(&search) {
+                    let _ = events.send(BrokerEvent::Status(search.clone()));
+                    last_status = Some(search);
                 }
             }
         }
@@ -209,7 +253,7 @@ fn broker_open(
 /// The worker's end of the connection, plus the flag that stops it.
 pub(crate) struct InputChannel {
     pub(crate) mailbox: Arc<InputMailbox>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopToken>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -260,12 +304,12 @@ struct Opened {
 fn open(
     broker: &HidBrokerClient,
     mailbox: &InputMailbox,
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopToken>,
     source: Source,
 ) -> Result<Opened, String> {
     broker
         .open(source, stop, |status| {
-            mailbox.publish(InputEvent::Lifecycle(Box::new(Err(status))));
+            mailbox.publish(InputEvent::Search(status));
         })
         .map(|opened| Opened {
             session: opened.session,
@@ -275,7 +319,7 @@ fn open(
 
 pub(crate) fn input_worker(source: Source, broker: HidBrokerClient) -> InputChannel {
     let mailbox = Arc::new(InputMailbox::default());
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(StopToken::default());
     let worker_mailbox = Arc::clone(&mailbox);
     let worker_stop = Arc::clone(&stop);
     let worker = thread::spawn(move || {
@@ -342,11 +386,8 @@ pub(crate) fn input_worker(source: Source, broker: HidBrokerClient) -> InputChan
     }
 }
 
-fn wait_for_stop(stop: &AtomicBool, duration: Duration) {
-    let deadline = Instant::now() + duration;
-    while !stop.load(Ordering::Acquire) && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
+fn wait_for_stop(stop: &StopToken, duration: Duration) {
+    stop.wait(duration);
 }
 
 impl Visualizer {
@@ -423,12 +464,19 @@ impl Visualizer {
                 .clone_into(&mut self.status);
         }
         for queued in batch.drain(..) {
+            if let InputEvent::Search(search) = queued {
+                self.status = search.to_string();
+                self.connection_search = Some(search);
+                continue;
+            }
+            self.connection_search = None;
             let (event, received_at) = match queued {
                 InputEvent::Report {
                     report,
                     received_at,
                 } => (Ok(DeviceEvent::Report(report)), Some(received_at)),
                 InputEvent::Lifecycle(lifecycle) => (*lifecycle, None),
+                InputEvent::Search(_) => unreachable!("search events were handled above"),
             };
             match event {
                 Err(error) => self.status = error,

@@ -4,12 +4,12 @@
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 
-use crate::device::HidBrokerClient;
+use crate::device::{HidBrokerClient, StopToken};
 
 #[cfg(any(target_os = "macos", test))]
 use recording::RecordingEvent;
@@ -73,7 +73,7 @@ pub(crate) enum GuiCaptureEvent {
 pub(crate) struct GuiCapture {
     commands: mpsc::Sender<GuiCaptureCommand>,
     events: mpsc::Receiver<GuiCaptureEvent>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopToken>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -85,7 +85,7 @@ impl GuiCapture {
     ) -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(StopToken::default());
         let worker_stop = Arc::clone(&stop);
         let worker = thread::spawn(move || {
             let result = run_gui(
@@ -120,8 +120,21 @@ impl GuiCapture {
         self.stop.store(true, Ordering::Release);
     }
 
-    pub(crate) fn try_event(&self) -> Option<GuiCaptureEvent> {
-        self.events.try_recv().ok()
+    pub(crate) fn try_event(&mut self) -> Option<GuiCaptureEvent> {
+        match self.events.try_recv() {
+            Ok(GuiCaptureEvent::Finished(result)) => {
+                let result = self.join().and(result);
+                Some(GuiCaptureEvent::Finished(result))
+            }
+            Ok(event) => Some(event),
+            Err(mpsc::TryRecvError::Disconnected) if self.worker.is_some() => {
+                let result = self.join().and_then(|()| {
+                    Err("capture worker stopped without reporting completion".to_owned())
+                });
+                Some(GuiCaptureEvent::Finished(result))
+            }
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => None,
+        }
     }
 
     pub(crate) fn join(&mut self) -> Result<(), String> {
@@ -222,11 +235,14 @@ mod macos {
     };
     use serde_json::json;
     use steam_controller_device::{enumerate, DeviceEvent, HidDeviceInfo, HidSession};
-    use steam_controller_discovery::{same_controller_collection, ActiveControllerFinder};
+    use steam_controller_discovery::ActiveControllerFinder;
     use steam_controller_protocol::{DecodedReport, SteamControllerDecoder};
 
     use crate::lizard::protocol::{guided_trials, GUIDED_PROTOCOL};
-    use crate::{cli::Source, device::HidBrokerClient};
+    use crate::{
+        cli::Source,
+        device::{HidBrokerClient, StopToken},
+    };
 
     use super::{
         CapturePreflight, EventMerger, GuiCaptureCommand, GuiCaptureEvent, QueuedEvent,
@@ -244,11 +260,6 @@ mod macos {
         },
     }
 
-    enum Message {
-        Event(QueuedEvent),
-        ProducerDone,
-    }
-
     struct OpenedController {
         index: usize,
         info: HidDeviceInfo,
@@ -258,9 +269,10 @@ mod macos {
 
     #[derive(Clone)]
     struct Shared {
-        sender: SyncSender<Message>,
+        sender: SyncSender<QueuedEvent>,
+        producer_done: mpsc::Sender<()>,
         sequence: Arc<AtomicU64>,
-        stop: Arc<AtomicBool>,
+        stop: Arc<StopToken>,
         invalid_reason: Arc<Mutex<Option<String>>>,
         preview: Arc<Mutex<TrialPreviewBuffer>>,
         completed: Arc<AtomicBool>,
@@ -291,7 +303,7 @@ mod macos {
                 sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
                 event,
             };
-            match self.sender.try_send(Message::Event(queued)) {
+            match self.sender.try_send(queued) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
                     self.invalidate(format!(
@@ -314,7 +326,7 @@ mod macos {
         }
 
         fn done(&self) {
-            let _ = self.sender.send(Message::ProducerDone);
+            let _ = self.producer_done.send(());
         }
 
         fn begin_preview(&self) {
@@ -348,13 +360,61 @@ mod macos {
         }
     }
 
+    struct ProducerCompletion {
+        shared: Shared,
+        name: &'static str,
+    }
+
+    impl ProducerCompletion {
+        fn new(shared: Shared, name: &'static str) -> Self {
+            Self { shared, name }
+        }
+    }
+
+    impl Drop for ProducerCompletion {
+        fn drop(&mut self) {
+            if thread::panicking() {
+                self.shared
+                    .invalidate(format!("{} capture thread panicked", self.name));
+            }
+            self.shared.done();
+        }
+    }
+
+    struct ControlPanicGuard {
+        shared: Shared,
+        name: &'static str,
+    }
+
+    struct CaptureDrain<'a> {
+        receiver: &'a Receiver<QueuedEvent>,
+        merger: &'a mut EventMerger,
+        writer: &'a mut RecordingWriter<BufWriter<File>>,
+        write_error: &'a mut Option<String>,
+    }
+
+    impl ControlPanicGuard {
+        fn new(shared: Shared, name: &'static str) -> Self {
+            Self { shared, name }
+        }
+    }
+
+    impl Drop for ControlPanicGuard {
+        fn drop(&mut self) {
+            if thread::panicking() {
+                self.shared
+                    .invalidate(format!("{} capture thread panicked", self.name));
+            }
+        }
+    }
+
     pub(super) fn run(
         requested_index: Option<usize>,
         output: &Path,
         guided: bool,
         duration_secs: Option<u64>,
     ) -> Result<(), String> {
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(StopToken::default());
         install_ctrl_c(Arc::clone(&stop))?;
         run_capture(
             requested_index,
@@ -371,7 +431,7 @@ mod macos {
     pub(super) fn run_gui(
         requested_index: Option<usize>,
         output: &Path,
-        stop: &Arc<AtomicBool>,
+        stop: &Arc<StopToken>,
         commands: Receiver<GuiCaptureCommand>,
         events: mpsc::Sender<GuiCaptureEvent>,
         hid_broker: &HidBrokerClient,
@@ -392,7 +452,7 @@ mod macos {
     fn run_capture(
         requested_index: Option<usize>,
         output: &Path,
-        stop: &Arc<AtomicBool>,
+        stop: &Arc<StopToken>,
         hid_broker: Option<&HidBrokerClient>,
         control: CaptureControl,
     ) -> Result<(), String> {
@@ -452,9 +512,11 @@ mod macos {
         let started = Instant::now();
 
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
+        let (producer_done, producer_done_receiver) = mpsc::channel();
         let invalid_reason = Arc::new(Mutex::new(None));
         let shared = Shared {
             sender,
+            producer_done,
             sequence: Arc::new(AtomicU64::new(0)),
             stop: Arc::clone(stop),
             invalid_reason: Arc::clone(&invalid_reason),
@@ -494,68 +556,87 @@ mod macos {
                 timeout_secs: PREFLIGHT_TIMEOUT_SECS,
             });
         }
-        preflight(&shared, &state_count, &lizard_count, &tap_ready);
-        if let CaptureControl::Gui { events, .. } = &control {
-            let _ = events.send(GuiCaptureEvent::Preflight(CapturePreflight {
-                controller_index: index,
-                controller: info.product.clone().unwrap_or_else(|| info.id.clone()),
-                transport: info.transport.clone(),
-                state_reports: state_count.load(Ordering::Acquire),
-                lizard_reports: lizard_count.load(Ordering::Acquire),
-                event_tap_ready: tap_ready.load(Ordering::Acquire),
-                displays: initial_metadata
-                    .displays
-                    .iter()
-                    .map(|display| {
-                        format!(
-                            "display {}: {:.0}×{:.0} at ({:.0}, {:.0}), {:.2}× scale",
-                            display.id,
-                            display.width,
-                            display.height,
-                            display.x,
-                            display.y,
-                            display.scale
-                        )
-                    })
-                    .collect(),
-                invalid_reason: invalid_reason.lock().ok().and_then(|reason| reason.clone()),
-            }));
-        }
-        let guide = if stop.load(Ordering::Acquire) {
-            None
-        } else {
-            match control {
-                CaptureControl::Terminal { guided: true, .. } => Some(spawn_guide(shared.clone())),
-                CaptureControl::Terminal {
-                    guided: false,
-                    duration_secs,
-                } => duration_secs.map(|seconds| spawn_timer(Arc::clone(stop), seconds)),
-                CaptureControl::Gui { commands, events } => {
-                    Some(spawn_gui_guide(shared.clone(), commands, events))
+        let mut merger = EventMerger::default();
+        let mut write_error = None;
+        let guide;
+        {
+            let mut capture_drain = CaptureDrain {
+                receiver: &receiver,
+                merger: &mut merger,
+                writer: &mut writer,
+                write_error: &mut write_error,
+            };
+            preflight(
+                &shared,
+                &state_count,
+                &lizard_count,
+                &tap_ready,
+                &mut capture_drain,
+            );
+            if let CaptureControl::Gui { events, .. } = &control {
+                let _ = events.send(GuiCaptureEvent::Preflight(CapturePreflight {
+                    controller_index: index,
+                    controller: info.product.clone().unwrap_or_else(|| info.id.clone()),
+                    transport: info.transport.clone(),
+                    state_reports: state_count.load(Ordering::Acquire),
+                    lizard_reports: lizard_count.load(Ordering::Acquire),
+                    event_tap_ready: tap_ready.load(Ordering::Acquire),
+                    displays: initial_metadata
+                        .displays
+                        .iter()
+                        .map(|display| {
+                            format!(
+                                "display {}: {:.0}×{:.0} at ({:.0}, {:.0}), {:.2}× scale",
+                                display.id,
+                                display.width,
+                                display.height,
+                                display.x,
+                                display.y,
+                                display.scale
+                            )
+                        })
+                        .collect(),
+                    invalid_reason: invalid_reason.lock().ok().and_then(|reason| reason.clone()),
+                }));
+            }
+            guide = if stop.load(Ordering::Acquire) {
+                None
+            } else {
+                match control {
+                    CaptureControl::Terminal { guided: true, .. } => {
+                        Some(spawn_guide(shared.clone()))
+                    }
+                    CaptureControl::Terminal {
+                        guided: false,
+                        duration_secs,
+                    } => duration_secs.map(|seconds| spawn_timer(shared.clone(), seconds)),
+                    CaptureControl::Gui { commands, events } => {
+                        Some(spawn_gui_guide(shared.clone(), commands, events))
+                    }
                 }
+            };
+            if terminal_free {
+                eprintln!("Press Ctrl+C to finish.");
             }
-        };
-        if terminal_free {
-            eprintln!("Press Ctrl+C to finish.");
+            // A write failure must not skip the stop/join teardown or the final
+            // validity trailer: without `valid: false`, a truncated file would
+            // later read as "legacy" instead of invalid.
+            merge_until_done(&producer_done_receiver, &shared, &mut capture_drain);
         }
-        // A write failure must not skip the stop/join teardown or the final
-        // validity trailer: without `valid: false`, a truncated file would
-        // later read as "legacy" instead of invalid.
-        let merge_result = merge_until_done(&receiver, &shared, &mut writer);
         stop.store(true, Ordering::Release);
-        hid.join()
-            .map_err(|_| "HID capture thread panicked".to_owned())?;
-        tap.join()
-            .map_err(|_| "event-tap thread panicked".to_owned())?;
-        if let Some(handle) = guide {
-            handle
-                .join()
-                .map_err(|_| "capture control thread panicked".to_owned())?;
+        if hid.join().is_err() {
+            shared.invalidate("HID capture thread panicked".to_owned());
         }
-        if let Err(error) = merge_result {
-            if let Ok(mut slot) = invalid_reason.lock() {
-                slot.get_or_insert(format!("capture write failed: {error}"));
+        if tap.join().is_err() {
+            shared.invalidate("event-tap thread panicked".to_owned());
+        }
+        if let Some(handle) = guide {
+            if handle.join().is_err() {
+                shared.invalidate("capture control thread panicked".to_owned());
             }
+        }
+        if let Some(error) = write_error {
+            shared.invalidate(format!("capture write failed: {error}"));
         }
 
         let states = state_count.load(Ordering::Acquire);
@@ -598,6 +679,7 @@ mod macos {
         events: mpsc::Sender<GuiCaptureEvent>,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
+            let _panic_guard = ControlPanicGuard::new(shared.clone(), "GUI control");
             let required: BTreeSet<_> = guided_trials().into_iter().map(|trial| trial.id).collect();
             let mut accepted = BTreeSet::new();
             while !shared.stop.load(Ordering::Acquire) {
@@ -661,7 +743,7 @@ mod macos {
 
     fn open_controller(
         requested_index: Option<usize>,
-        stop: &Arc<AtomicBool>,
+        stop: &Arc<StopToken>,
         hid_broker: Option<&HidBrokerClient>,
     ) -> Result<OpenedController, String> {
         if let Some(broker) = hid_broker {
@@ -708,16 +790,8 @@ mod macos {
         let mut finder = ActiveControllerFinder::new().map_err(|error| error.to_string())?;
         let mut last_status = None;
         while !stop.load(Ordering::Acquire) {
-            match finder.find() {
-                Ok((info, session)) => {
-                    let devices = enumerate().map_err(|error| error.to_string())?;
-                    let index = devices
-                        .iter()
-                        .position(|candidate| same_controller_collection(candidate, &info))
-                        .ok_or_else(|| {
-                            "the auto-detected controller disappeared while resolving its global HID index"
-                                .to_owned()
-                        })?;
+            match finder.find_with_index() {
+                Ok((index, info, session)) => {
                     eprintln!("Auto-selected collection {index} ({}).", info.transport);
                     return Ok(OpenedController {
                         index,
@@ -734,7 +808,7 @@ mod macos {
                     }
                 }
             }
-            thread::sleep(Duration::from_millis(250));
+            stop.wait(Duration::from_millis(250));
         }
         Err("controller auto-detection was cancelled".to_owned())
     }
@@ -744,6 +818,7 @@ mod macos {
         state_count: &AtomicUsize,
         lizard_count: &AtomicUsize,
         tap_ready: &AtomicBool,
+        capture_drain: &mut CaptureDrain<'_>,
     ) {
         let preflight_deadline = Instant::now() + Duration::from_secs(PREFLIGHT_TIMEOUT_SECS);
         while !shared.stop.load(Ordering::Acquire)
@@ -752,8 +827,10 @@ mod macos {
                 || lizard_count.load(Ordering::Acquire) == 0
                 || !tap_ready.load(Ordering::Acquire))
         {
-            thread::sleep(Duration::from_millis(25));
+            drain_capture_events(capture_drain, shared);
+            shared.stop.wait(Duration::from_millis(25));
         }
+        drain_capture_events(capture_drain, shared);
         if state_count.load(Ordering::Acquire) == 0 {
             shared.invalidate(
                 "no controller state reports were observed during preflight".to_owned(),
@@ -771,7 +848,7 @@ mod macos {
         }
     }
 
-    fn install_ctrl_c(stop: Arc<AtomicBool>) -> Result<(), String> {
+    fn install_ctrl_c(stop: Arc<StopToken>) -> Result<(), String> {
         ctrlc::set_handler(move || stop.store(true, Ordering::Release))
             .map_err(|error| format!("cannot install Ctrl+C handler: {error}"))
     }
@@ -783,6 +860,7 @@ mod macos {
         lizard_count: Arc<AtomicUsize>,
     ) -> thread::JoinHandle<()> {
         thread::spawn(move || {
+            let _completion = ProducerCompletion::new(shared.clone(), "HID");
             let mut decoder = SteamControllerDecoder::new();
             while !shared.stop.load(Ordering::Acquire) {
                 match session.poll(Duration::from_millis(50)) {
@@ -846,12 +924,12 @@ mod macos {
                     Err(error) => shared.invalidate(format!("HID polling failed: {error}")),
                 }
             }
-            shared.done();
         })
     }
 
     fn spawn_event_tap(shared: Shared, ready: Arc<AtomicBool>) -> thread::JoinHandle<()> {
         thread::spawn(move || {
+            let _completion = ProducerCompletion::new(shared.clone(), "event-tap");
             let callback_shared = shared.clone();
             let result = CGEventTap::with_enabled(
                 CGEventTapLocation::HID,
@@ -906,7 +984,6 @@ mod macos {
                     "cannot install passive HID event tap; grant Input Monitoring to the terminal or app running sc-visualizer, then relaunch it".to_owned(),
                 );
             }
-            shared.done();
         })
     }
 
@@ -939,18 +1016,27 @@ mod macos {
         })
     }
 
-    fn spawn_timer(stop: Arc<AtomicBool>, seconds: u64) -> thread::JoinHandle<()> {
+    fn spawn_timer(shared: Shared, seconds: u64) -> thread::JoinHandle<()> {
         thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(seconds);
-            while !stop.load(Ordering::Acquire) && Instant::now() < deadline {
-                thread::sleep(Duration::from_millis(25));
+            let _panic_guard = ControlPanicGuard::new(shared.clone(), "timer");
+            let Some(deadline) = Instant::now().checked_add(Duration::from_secs(seconds)) else {
+                shared.invalidate("capture duration is too large".to_owned());
+                return;
+            };
+            while !shared.stop.load(Ordering::Acquire) && Instant::now() < deadline {
+                shared.stop.wait(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(25)),
+                );
             }
-            stop.store(true, Ordering::Release);
+            shared.stop.store(true, Ordering::Release);
         })
     }
 
     fn spawn_guide(shared: Shared) -> thread::JoinHandle<()> {
         thread::spawn(move || {
+            let _panic_guard = ControlPanicGuard::new(shared.clone(), "guided control");
             let trials = guided_trials();
             eprintln!(
                 "Guided capture: do not touch any other mouse or trackpad during a measured interval. Press Enter to start each trial."
@@ -988,20 +1074,7 @@ mod macos {
                     while !shared.stop.load(Ordering::Acquire) && Instant::now() < countdown {
                         thread::sleep(Duration::from_millis(25));
                     }
-                    let marker = |phase: &str| {
-                        RecordingEvent::new(
-                            shared.elapsed_us(),
-                            KIND_MARKER,
-                            json!({
-                                "name": trial.id,
-                                "phase": phase,
-                                "protocol": GUIDED_PROTOCOL,
-                                "trial_id": trial.id,
-                                "attempt": attempt,
-                            }),
-                        )
-                    };
-                    shared.event(marker("start"));
+                    shared.event(guided_marker(&shared, &trial.id, attempt, "start"));
                     let deadline = Instant::now() + trial.duration;
                     while !shared.stop.load(Ordering::Acquire) && Instant::now() < deadline {
                         thread::sleep(Duration::from_millis(25));
@@ -1009,17 +1082,17 @@ mod macos {
                     if shared.stop.load(Ordering::Acquire) {
                         break;
                     }
-                    shared.event(marker("end"));
+                    shared.event(guided_marker(&shared, &trial.id, attempt, "end"));
                     eprint!("Accept trial with Enter, or type r then Enter to retry... ");
                     let _ = io::stderr().flush();
                     let Some(decision) = wait_for_guided_input(&input_receiver, &shared) else {
                         break;
                     };
                     if decision.trim().eq_ignore_ascii_case("r") {
-                        shared.event(marker("discarded"));
+                        shared.event(guided_marker(&shared, &trial.id, attempt, "discarded"));
                         attempt = attempt.saturating_add(1);
                     } else {
-                        shared.event(marker("accepted"));
+                        shared.event(guided_marker(&shared, &trial.id, attempt, "accepted"));
                         completed += 1;
                         break;
                     }
@@ -1060,36 +1133,66 @@ mod macos {
     }
 
     fn merge_until_done(
-        receiver: &Receiver<Message>,
+        producer_done: &Receiver<()>,
         shared: &Shared,
-        writer: &mut RecordingWriter<BufWriter<File>>,
-    ) -> Result<(), String> {
-        let mut merger = EventMerger::default();
+        capture_drain: &mut CaptureDrain<'_>,
+    ) {
         let mut done = 0;
         while done < 2 {
-            match receiver.recv_timeout(Duration::from_millis(20)) {
-                Ok(Message::Event(event)) => push_or_invalidate(&mut merger, event, shared),
-                Ok(Message::ProducerDone) => done += 1,
+            done += producer_done.try_iter().count();
+            if done >= 2 {
+                break;
+            }
+            match capture_drain
+                .receiver
+                .recv_timeout(Duration::from_millis(20))
+            {
+                Ok(event) => push_or_invalidate(capture_drain.merger, event, shared),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
-            for event in merger.drain_ready(shared.elapsed_us()) {
-                writer
-                    .write_event_buffered(&event)
-                    .map_err(|error| error.to_string())?;
+            drain_capture_events(capture_drain, shared);
+        }
+        while let Ok(event) = capture_drain.receiver.try_recv() {
+            push_or_invalidate(capture_drain.merger, event, shared);
+        }
+        for event in capture_drain.merger.drain_all() {
+            write_capture_event(capture_drain, &event, shared);
+        }
+        if capture_drain.write_error.is_none() {
+            if let Err(error) = capture_drain.writer.flush() {
+                remember_write_error(capture_drain, &error.to_string(), shared);
             }
         }
-        while let Ok(message) = receiver.try_recv() {
-            if let Message::Event(event) = message {
-                push_or_invalidate(&mut merger, event, shared);
-            }
+    }
+
+    fn drain_capture_events(capture_drain: &mut CaptureDrain<'_>, shared: &Shared) {
+        while let Ok(event) = capture_drain.receiver.try_recv() {
+            push_or_invalidate(capture_drain.merger, event, shared);
         }
-        for event in merger.drain_all() {
-            writer
-                .write_event_buffered(&event)
-                .map_err(|error| error.to_string())?;
+        for event in capture_drain.merger.drain_ready(shared.elapsed_us()) {
+            write_capture_event(capture_drain, &event, shared);
         }
-        writer.flush().map_err(|error| error.to_string())
+    }
+
+    fn write_capture_event(
+        capture_drain: &mut CaptureDrain<'_>,
+        event: &RecordingEvent,
+        shared: &Shared,
+    ) {
+        if capture_drain.write_error.is_some() {
+            return;
+        }
+        if let Err(error) = capture_drain.writer.write_event_buffered(event) {
+            remember_write_error(capture_drain, &error.to_string(), shared);
+        }
+    }
+
+    fn remember_write_error(capture_drain: &mut CaptureDrain<'_>, error: &str, shared: &Shared) {
+        if capture_drain.write_error.is_none() {
+            *capture_drain.write_error = Some(error.to_owned());
+            shared.invalidate(format!("capture write failed: {error}"));
+        }
     }
 
     fn push_or_invalidate(merger: &mut EventMerger, event: QueuedEvent, shared: &Shared) {
@@ -1171,25 +1274,28 @@ mod macos {
     mod tests {
         use super::*;
 
-        fn shared_with_capacity(capacity: usize) -> (Shared, Receiver<Message>) {
+        fn shared_with_capacity(capacity: usize) -> (Shared, Receiver<QueuedEvent>, Receiver<()>) {
             let (sender, receiver) = mpsc::sync_channel(capacity);
+            let (producer_done, producer_done_receiver) = mpsc::channel();
             (
                 Shared {
                     sender,
+                    producer_done,
                     sequence: Arc::new(AtomicU64::new(0)),
-                    stop: Arc::new(AtomicBool::new(false)),
+                    stop: Arc::new(StopToken::default()),
                     invalid_reason: Arc::new(Mutex::new(None)),
                     preview: Arc::new(Mutex::new(TrialPreviewBuffer::default())),
                     completed: Arc::new(AtomicBool::new(false)),
                     started: Instant::now(),
                 },
                 receiver,
+                producer_done_receiver,
             )
         }
 
         #[test]
         fn queue_overflow_stops_and_invalidates_capture() {
-            let (shared, _receiver) = shared_with_capacity(1);
+            let (shared, _receiver, _producer_done) = shared_with_capacity(1);
             shared.event(RecordingEvent::new(0, "first", json!({})));
             shared.event(RecordingEvent::new(1, "overflow", json!({})));
             assert!(shared.stop.load(Ordering::Acquire));
@@ -1203,7 +1309,7 @@ mod macos {
 
         #[test]
         fn first_fatal_capture_condition_remains_authoritative() {
-            let (shared, _receiver) = shared_with_capacity(1);
+            let (shared, _receiver, _producer_done) = shared_with_capacity(1);
             shared.invalidate("event tap disabled by timeout".to_owned());
             shared.invalidate("controller disconnected".to_owned());
             assert_eq!(
@@ -1214,7 +1320,7 @@ mod macos {
 
         #[test]
         fn guided_input_wait_honors_capture_cancellation() {
-            let (shared, _events) = shared_with_capacity(1);
+            let (shared, _events, _producer_done) = shared_with_capacity(1);
             let (_sender, receiver) = mpsc::channel::<Result<String, String>>();
             shared.stop.store(true, Ordering::Release);
 
@@ -1224,7 +1330,7 @@ mod macos {
 
         #[test]
         fn guided_input_disconnect_invalidates_capture() {
-            let (shared, _events) = shared_with_capacity(1);
+            let (shared, _events, _producer_done) = shared_with_capacity(1);
             let (sender, receiver) = mpsc::channel::<Result<String, String>>();
             drop(sender);
 
@@ -1232,6 +1338,37 @@ mod macos {
             assert_eq!(
                 shared.invalid_reason.lock().unwrap().as_deref(),
                 Some("guided input ended before all stages")
+            );
+        }
+
+        #[test]
+        fn producer_completion_is_independent_of_a_full_event_queue() {
+            let (shared, _events, producer_done) = shared_with_capacity(1);
+            shared.event(RecordingEvent::new(0, "fills queue", json!({})));
+
+            let producer = thread::spawn(move || shared.done());
+            producer.join().expect("completion send must not block");
+            producer_done
+                .recv_timeout(Duration::from_secs(1))
+                .expect("producer completion is delivered separately");
+        }
+
+        #[test]
+        fn producer_panic_invalidates_and_still_reports_completion() {
+            let (shared, _events, producer_done) = shared_with_capacity(1);
+            let reason = Arc::clone(&shared.invalid_reason);
+
+            let producer = thread::spawn(move || {
+                let _completion = ProducerCompletion::new(shared.clone(), "test producer");
+                panic!("simulated producer failure");
+            });
+            assert!(producer.join().is_err());
+            producer_done
+                .recv_timeout(Duration::from_secs(1))
+                .expect("panic guard reports producer completion");
+            assert_eq!(
+                reason.lock().unwrap().as_deref(),
+                Some("test producer capture thread panicked")
             );
         }
     }
@@ -1258,7 +1395,7 @@ pub(crate) fn run(
 fn run_gui(
     index: Option<usize>,
     output: &Path,
-    stop: &Arc<AtomicBool>,
+    stop: &Arc<StopToken>,
     commands: mpsc::Receiver<GuiCaptureCommand>,
     events: mpsc::Sender<GuiCaptureEvent>,
     hid_broker: &HidBrokerClient,
@@ -1318,5 +1455,30 @@ mod tests {
         merger.push(queued(20_000, 0, "newer")).unwrap();
         assert_eq!(merger.drain_ready(30_000).len(), 1);
         assert!(merger.push(queued(19_999, 1, "too-late")).is_err());
+    }
+
+    #[test]
+    fn a_panicked_gui_capture_worker_becomes_a_finished_error() {
+        let (commands, _command_receiver) = mpsc::channel();
+        let (event_sender, events) = mpsc::channel();
+        let (ready, wait_until_disconnected) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            drop(event_sender);
+            ready.send(()).unwrap();
+            panic!("simulated capture failure");
+        });
+        wait_until_disconnected.recv().unwrap();
+        let mut capture = GuiCapture {
+            commands,
+            events,
+            stop: Arc::new(StopToken::default()),
+            worker: Some(worker),
+        };
+
+        let Some(GuiCaptureEvent::Finished(result)) = capture.try_event() else {
+            panic!("a disconnected worker must finish the capture");
+        };
+        assert_eq!(result.unwrap_err(), "capture worker panicked");
+        assert!(capture.worker.is_none());
     }
 }

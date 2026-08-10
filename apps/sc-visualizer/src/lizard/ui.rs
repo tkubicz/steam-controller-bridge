@@ -648,7 +648,7 @@ impl LabUi {
 
     fn poll_workers(&mut self) {
         let mut capture_events = Vec::new();
-        if let Some(capture) = &self.capture {
+        if let Some(capture) = &mut self.capture {
             while let Some(event) = capture.try_event() {
                 capture_events.push(event);
             }

@@ -2,12 +2,10 @@
 //! recording, and the current status line.
 
 use eframe::egui;
+use steam_controller_discovery::{ControllerSearch, CONTROLLER_OWNERSHIP_GUIDANCE};
 use ui_theme::{ACCENT, DANGER, MUTED_TEXT, SUCCESS, TEXT};
 
 use crate::Visualizer;
-
-const CANNOT_OPEN_PREFIX: &str = "Steam Controller input found, but no collection can be opened: ";
-const OWNERSHIP_GUIDANCE: &str = "Fully quit Steam and other controller tools; if Steam's ipcserver remains, stop its LaunchAgent manually";
 
 #[derive(Debug, PartialEq, Eq)]
 struct ConnectionProblem {
@@ -50,7 +48,7 @@ impl Visualizer {
                 );
             }
         });
-        if let Some(problem) = connection_problem(&self.status) {
+        if let Some(problem) = self.connection_search.as_ref().and_then(connection_problem) {
             show_connection_problem(ui, &problem);
         } else {
             ui.add(egui::Label::new(egui::RichText::new(&self.status).color(MUTED_TEXT)).wrap());
@@ -59,12 +57,17 @@ impl Visualizer {
     }
 }
 
-fn connection_problem(status: &str) -> Option<ConnectionProblem> {
-    let raw_details = status.strip_prefix(CANNOT_OPEN_PREFIX)?;
-    let owns_controller = raw_details.contains("already owned");
+fn connection_problem(search: &ControllerSearch) -> Option<ConnectionProblem> {
+    let ControllerSearch::CannotOpen {
+        detail: raw_details,
+        ownership_conflict,
+    } = search
+    else {
+        return None;
+    };
     let cleaned = raw_details
-        .replace(&format!(". {OWNERSHIP_GUIDANCE}"), "")
-        .replace(OWNERSHIP_GUIDANCE, "");
+        .replace(&format!(". {CONTROLLER_OWNERSHIP_GUIDANCE}"), "")
+        .replace(CONTROLLER_OWNERSHIP_GUIDANCE, "");
     let mut details = Vec::new();
     for detail in cleaned
         .split("; ")
@@ -77,18 +80,18 @@ fn connection_problem(status: &str) -> Option<ConnectionProblem> {
         }
     }
     Some(ConnectionProblem {
-        title: if owns_controller {
+        title: if *ownership_conflict {
             "Controller is already in use"
         } else {
             "Controller input could not be opened"
         },
-        explanation: if owns_controller {
+        explanation: if *ownership_conflict {
             "Another Steam or controller process currently owns the compatible HID interfaces."
         } else {
             "The controller was found, but none of its compatible input interfaces could be opened."
         },
         details,
-        guidance: owns_controller.then_some(OWNERSHIP_GUIDANCE),
+        guidance: ownership_conflict.then_some(CONTROLLER_OWNERSHIP_GUIDANCE),
     })
 }
 
@@ -138,12 +141,15 @@ mod tests {
 
     #[test]
     fn ownership_failures_become_one_summary_and_collapsed_interface_details() {
-        let status = format!(
-            "{CANNOT_OPEN_PREFIX}Puck interface 3: HID interface 3 is already owned. {OWNERSHIP_GUIDANCE}; Puck interface 4: HID interface 4 is already owned. {OWNERSHIP_GUIDANCE}"
-        );
-        let problem = connection_problem(&status).expect("cannot-open errors are structured");
+        let search = ControllerSearch::CannotOpen {
+            detail: format!(
+                "Puck interface 3: HID interface 3 is already owned. {CONTROLLER_OWNERSHIP_GUIDANCE}; Puck interface 4: HID interface 4 is already owned. {CONTROLLER_OWNERSHIP_GUIDANCE}"
+            ),
+            ownership_conflict: true,
+        };
+        let problem = connection_problem(&search).expect("cannot-open errors are structured");
         assert_eq!(problem.title, "Controller is already in use");
-        assert_eq!(problem.guidance, Some(OWNERSHIP_GUIDANCE));
+        assert_eq!(problem.guidance, Some(CONTROLLER_OWNERSHIP_GUIDANCE));
         assert_eq!(problem.details.len(), 2);
         assert!(problem.details[0].contains("interface 3"));
         assert!(problem.details[1].contains("interface 4"));
@@ -155,7 +161,7 @@ mod tests {
 
     #[test]
     fn ordinary_status_messages_keep_the_simple_header_path() {
-        assert!(connection_problem("Searching for a controller…").is_none());
-        assert!(connection_problem("Connected via USB").is_none());
+        assert!(connection_problem(&ControllerSearch::NoController).is_none());
+        assert!(connection_problem(&ControllerSearch::NoInputYet).is_none());
     }
 }

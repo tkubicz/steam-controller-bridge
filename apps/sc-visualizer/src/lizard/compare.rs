@@ -1,20 +1,19 @@
 #![allow(clippy::cast_precision_loss)] // Cumulative integer coordinates become f64 metrics.
 
-use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
 use desktop_bindings::{
-    load_store, BindingEngine, BindingProfile, ControlBindings, DesktopInputSink, KeyboardKey,
-    Modifier, MouseButton,
+    load_store, BindingEngine, BindingProfile, ControlBindings, DesktopInputSink,
+    DesktopInputSnapshot, KeyboardKey, Modifier, MouseButton,
 };
 use serde::Serialize;
 
 use crate::lizard::metrics::{
     angle_error, click_windows, right_pad_intervals, MotionTimeline, SpeedBand,
-    FAST_SPEED_COUNTS_PER_SECOND, STATIONARY_SPEED_COUNTS_PER_SECOND,
 };
-use crate::lizard::trace::{snapshot, Motion, Trace};
+use crate::lizard::trace::{Motion, Trace};
+use crate::lizard::write_json;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct Leakage {
@@ -95,11 +94,8 @@ pub(crate) fn write_report(
         return Err("capture has no decoded 0x40 lizard mouse reports".to_owned());
     }
     let profile = load_profile(profile_path, profile_name)?;
-    let candidate = bridge_motion(trace, profile.clone())?;
-    let report = build_report(trace, &candidate, profile.name);
-    let bytes = serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?;
-    fs::write(output, bytes)
-        .map_err(|error| format!("cannot write report '{}': {error}", output.display()))?;
+    let (report, _) = compare_with_profile(trace, profile)?;
+    write_json(output, &report)?;
     if let Some(guided) = &report.guided_summary {
         println!(
             "Compared {} states and {} reference reports; guided RMS error {:.3} px across {} stages.",
@@ -149,7 +145,7 @@ pub(crate) fn bridge_motion(trace: &Trace, profile: BindingProfile) -> Result<Ve
     for item in &trace.states {
         sink.timestamp_us = item.timestamp_us;
         engine.observe_snapshot(
-            snapshot(&item.value),
+            DesktopInputSnapshot::from(&item.value),
             Duration::from_micros(item.timestamp_us),
             &mut sink,
         )?;
@@ -440,38 +436,19 @@ fn speed_bins(
     reference: &MotionTimeline<'_>,
     candidate: &MotionTimeline<'_>,
 ) -> Vec<SpeedBin> {
-    let mut bins = vec![
-        SpeedBin {
-            label: "stationary_precision",
-            minimum_counts_per_second: 0.0,
-            maximum_counts_per_second: Some(STATIONARY_SPEED_COUNTS_PER_SECOND),
+    let mut bins: Vec<_> = SpeedBand::ALL
+        .into_iter()
+        .map(|band| SpeedBin {
+            label: band.label(),
+            minimum_counts_per_second: band.minimum(),
+            maximum_counts_per_second: band.maximum(),
             samples: 0,
             reference_pixels: 0,
             bridge_pixels: 0,
-        },
-        SpeedBin {
-            label: "slow",
-            minimum_counts_per_second: STATIONARY_SPEED_COUNTS_PER_SECOND,
-            maximum_counts_per_second: Some(FAST_SPEED_COUNTS_PER_SECOND),
-            samples: 0,
-            reference_pixels: 0,
-            bridge_pixels: 0,
-        },
-        SpeedBin {
-            label: "fast",
-            minimum_counts_per_second: FAST_SPEED_COUNTS_PER_SECOND,
-            maximum_counts_per_second: None,
-            samples: 0,
-            reference_pixels: 0,
-            bridge_pixels: 0,
-        },
-    ];
+        })
+        .collect();
     for interval in right_pad_intervals(trace) {
-        let index = match SpeedBand::classify(interval.speed_counts_per_second) {
-            SpeedBand::Stationary => 0,
-            SpeedBand::Slow => 1,
-            SpeedBand::Fast => 2,
-        };
+        let index = SpeedBand::classify(interval.speed_counts_per_second).index();
         let bin = &mut bins[index];
         bin.samples += 1;
         bin.reference_pixels += reference.magnitude(interval.start_us, interval.end_us);

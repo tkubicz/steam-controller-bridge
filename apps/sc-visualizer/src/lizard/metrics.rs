@@ -13,6 +13,8 @@ pub(crate) enum SpeedBand {
 }
 
 impl SpeedBand {
+    pub(crate) const ALL: [Self; 3] = [Self::Stationary, Self::Slow, Self::Fast];
+
     pub(crate) fn classify(speed: f64) -> Self {
         if speed < STATIONARY_SPEED_COUNTS_PER_SECOND {
             Self::Stationary
@@ -20,6 +22,38 @@ impl SpeedBand {
             Self::Slow
         } else {
             Self::Fast
+        }
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Stationary => 0,
+            Self::Slow => 1,
+            Self::Fast => 2,
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Stationary => "stationary_precision",
+            Self::Slow => "slow",
+            Self::Fast => "fast",
+        }
+    }
+
+    pub(crate) const fn minimum(self) -> f64 {
+        match self {
+            Self::Stationary => 0.0,
+            Self::Slow => STATIONARY_SPEED_COUNTS_PER_SECOND,
+            Self::Fast => FAST_SPEED_COUNTS_PER_SECOND,
+        }
+    }
+
+    pub(crate) const fn maximum(self) -> Option<f64> {
+        match self {
+            Self::Stationary => Some(STATIONARY_SPEED_COUNTS_PER_SECOND),
+            Self::Slow => Some(FAST_SPEED_COUNTS_PER_SECOND),
+            Self::Fast => None,
         }
     }
 }

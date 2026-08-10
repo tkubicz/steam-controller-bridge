@@ -239,10 +239,7 @@ impl RecordingEvent {
     ///
     /// Returns [`RecordingError`] when the event kind, fields, or ranges are invalid.
     pub fn decode_gamepad_state(&self) -> Result<GamepadState, RecordingError> {
-        if self.kind != KIND_MAPPED_GAMEPAD_STATE {
-            return Err(RecordingError::UnexpectedKind(self.kind.clone()));
-        }
-        let payload: GamepadPayload = serde_json::from_value(self.payload.clone())?;
+        let payload: GamepadPayload = self.decode_payload(KIND_MAPPED_GAMEPAD_STATE)?;
         payload.try_into()
     }
 
@@ -252,10 +249,7 @@ impl RecordingEvent {
     ///
     /// Returns [`RecordingError`] when the event kind or fields are invalid.
     pub fn decode_steam_state(&self) -> Result<SteamControllerState, RecordingError> {
-        if self.kind != KIND_DECODED_STEAM_STATE {
-            return Err(RecordingError::UnexpectedKind(self.kind.clone()));
-        }
-        Ok(serde_json::from_value(self.payload.clone())?)
+        self.decode_payload(KIND_DECODED_STEAM_STATE)
     }
 
     /// Decodes a typed lizard-mode mouse event.

@@ -3,7 +3,6 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 
-use desktop_bindings::DesktopInputSnapshot;
 use recording::{
     read_events, CaptureMetadata, HostPointerEvent, KIND_CAPTURE_METADATA,
     KIND_DECODED_LIZARD_MOUSE, KIND_DECODED_STEAM_STATE, KIND_HOST_POINTER, KIND_MARKER,
@@ -286,10 +285,6 @@ fn marker_key(marker: &Marker) -> String {
         marker.trial_id.as_deref().unwrap_or(&marker.name),
         marker.attempt.unwrap_or(0)
     )
-}
-
-pub(crate) fn snapshot(state: &SteamControllerState) -> DesktopInputSnapshot {
-    DesktopInputSnapshot::from(state)
 }
 
 #[cfg(test)]

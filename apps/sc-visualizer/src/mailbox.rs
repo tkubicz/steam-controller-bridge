@@ -15,6 +15,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use steam_controller_device::{DeviceEvent, RawHidReport};
+use steam_controller_discovery::ControllerSearch;
 use steam_controller_protocol::{
     EXTENDED_INPUT_REPORT_ID, EXTENDED_INPUT_REPORT_SIZE, INPUT_REPORT_ID, INPUT_REPORT_SIZE,
 };
@@ -33,6 +34,8 @@ pub(crate) enum InputEvent {
     },
     /// Connected, disconnected, or a worker failure.
     Lifecycle(Box<Result<DeviceEvent, String>>),
+    /// Typed controller-discovery status for structured diagnostics.
+    Search(ControllerSearch),
 }
 
 impl InputEvent {
@@ -157,6 +160,12 @@ impl InputMailbox {
                     }
                 }
             }
+            if let InputEvent::Search(new) = &event {
+                if matches!(state.events.back(), Some(InputEvent::Search(previous)) if previous == new)
+                {
+                    return;
+                }
+            }
             // Lifecycle events keep their place and end any coalescing run.
             state.run.reset();
             state.events.push_back(event);
@@ -192,9 +201,9 @@ impl InputMailbox {
             // newest report as an explicit recovery baseline, so the display
             // cannot stay stuck on an old press.
             let before = state.events.len();
-            state
-                .events
-                .retain(|queued| matches!(queued, InputEvent::Lifecycle(_)));
+            state.events.retain(|queued| {
+                matches!(queued, InputEvent::Lifecycle(_) | InputEvent::Search(_))
+            });
             let discarded = before - state.events.len();
             state.events.push_back(event);
             state.run.reset_with_latest(mask);
@@ -254,7 +263,7 @@ fn rebuild_run(state: &mut MailboxState) {
     for event in &state.events {
         match event {
             InputEvent::Report { report, .. } => state.run.push(button_mask(report)),
-            InputEvent::Lifecycle(_) => state.run.reset(),
+            InputEvent::Lifecycle(_) | InputEvent::Search(_) => state.run.reset(),
         }
     }
 }
@@ -337,7 +346,7 @@ mod tests {
             .iter()
             .map(|event| match event {
                 InputEvent::Report { report, .. } => button_mask(report),
-                InputEvent::Lifecycle(_) => None,
+                InputEvent::Lifecycle(_) | InputEvent::Search(_) => None,
             })
             .collect();
         assert_eq!(masks.last(), Some(&Some(0b11)));
@@ -396,7 +405,9 @@ mod tests {
             InputEvent::Report { report, .. } => {
                 assert_eq!(button_mask(report), Some(0xDEAD_BEEF));
             }
-            InputEvent::Lifecycle(_) => panic!("expected the newest report"),
+            InputEvent::Lifecycle(_) | InputEvent::Search(_) => {
+                panic!("expected the newest report")
+            }
         }
     }
 

@@ -5,6 +5,7 @@ use bridge_output::{GamepadOutput, SerialOutput};
 use controller_mapper::{ControllerMapper, MapperConfig};
 use eframe::egui::{self, RichText};
 use gamepad_state::GamepadState;
+use steam_controller_discovery::ControllerSearch;
 use steam_controller_protocol::{SteamControllerDecoder, SteamControllerState};
 use ui_theme::{DETAIL, MUTED_TEXT, PANEL, SURFACE};
 
@@ -118,6 +119,8 @@ struct Visualizer {
     connected: bool,
     device: String,
     status: String,
+    /// The typed discovery failure behind `status`, when one is active.
+    connection_search: Option<ControllerSearch>,
     raw: Vec<u8>,
     /// The report's own id, not `raw[0]`. `None` until a report arrives.
     raw_report_id: Option<u8>,
@@ -186,6 +189,7 @@ impl Visualizer {
                 Source::Collection(index) => format!("Opening HID collection {index}…"),
                 Source::Demo(mode) => format!("Demo state: {}", mode.label()),
             },
+            connection_search: None,
             raw: Vec::new(),
             raw_report_id: None,
             show_raw: false,

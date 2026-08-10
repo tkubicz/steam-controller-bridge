@@ -594,7 +594,7 @@ impl BindingsEditor {
                     );
                     ui.label(
                         egui::RichText::new(
-                            "100% is the balanced default; faster swipes accelerate above it.",
+                            "100% matches the measured lizard-mode response; this setting scales it linearly.",
                         )
                         .small()
                         .color(MUTED_TEXT),

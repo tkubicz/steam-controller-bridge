@@ -1,6 +1,5 @@
 //! Background capture loading, report generation, and GUI-ready trajectories.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
@@ -10,6 +9,7 @@ use desktop_bindings::{default_store_path, load_store, BindingProfile, DEFAULT_P
 use super::analysis::{analyze, AnalysisReport};
 use super::compare::{compare_with_profile, mouse_only_profile, ComparisonReport};
 use super::trace::{Motion, Trace};
+use super::write_json;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ArtifactPaths {
@@ -75,19 +75,29 @@ impl ResultWorker {
     }
 
     pub(crate) fn try_result(&mut self) -> Option<Result<LabResults, String>> {
-        let result = self.receiver.try_recv().ok()?;
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        match self.receiver.try_recv() {
+            Ok(result) => Some(self.join().and(result)),
+            Err(mpsc::TryRecvError::Disconnected) if self.worker.is_some() => {
+                Some(self.join().and_then(|()| {
+                    Err("result worker stopped without returning an analysis".to_owned())
+                }))
+            }
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => None,
         }
-        Some(result)
+    }
+
+    fn join(&mut self) -> Result<(), String> {
+        self.worker.take().map_or(Ok(()), |worker| {
+            worker
+                .join()
+                .map_err(|_| "result worker panicked".to_owned())
+        })
     }
 }
 
 impl Drop for ResultWorker {
     fn drop(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        let _ = self.join();
     }
 }
 
@@ -159,11 +169,6 @@ fn write_report_pair(
     write_json(&paths.comparison, comparison)
 }
 
-fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
-    fs::write(path, bytes).map_err(|error| format!("cannot write '{}': {error}", path.display()))
-}
-
 fn cumulative_points<'a>(motion: impl Iterator<Item = &'a Motion>) -> Vec<(i64, i64)> {
     let mut point = (0_i64, 0_i64);
     let mut points = vec![point];
@@ -219,5 +224,27 @@ mod tests {
         )
         .expect_err("a missing parent must not silently discard the report");
         assert!(error.contains("cannot write"));
+    }
+
+    #[test]
+    fn a_panicked_result_worker_becomes_a_visible_error() {
+        let (sender, receiver) = mpsc::channel();
+        let (ready, wait_until_disconnected) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            drop(sender);
+            ready.send(()).unwrap();
+            panic!("simulated analysis failure");
+        });
+        wait_until_disconnected.recv().unwrap();
+        let mut result_worker = ResultWorker {
+            receiver,
+            worker: Some(worker),
+        };
+
+        let result = result_worker
+            .try_result()
+            .expect("a disconnected worker must produce a result");
+        assert_eq!(result.unwrap_err(), "result worker panicked");
+        assert!(result_worker.worker.is_none());
     }
 }

@@ -12,7 +12,7 @@ mod ui;
 
 pub(crate) use ui::{LabAction, LabUi};
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand, ValueEnum};
 
@@ -126,4 +126,10 @@ pub(crate) fn run(command: LizardCommand) -> Result<(), String> {
             replay::run(&trace, source, output, speed)
         }
     }
+}
+
+fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    std::fs::write(path, bytes)
+        .map_err(|error| format!("cannot write '{}': {error}", path.display()))
 }

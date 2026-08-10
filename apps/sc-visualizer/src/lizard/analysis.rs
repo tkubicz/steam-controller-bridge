@@ -1,6 +1,5 @@
 #![allow(clippy::cast_precision_loss)] // Bounded capture counters become JSON f64 metrics.
 
-use std::fs;
 use std::path::Path;
 
 use recording::HostPointerEventKind;
@@ -8,9 +7,9 @@ use serde::Serialize;
 
 use crate::lizard::metrics::{
     angle_error, click_windows, right_pad_intervals, MotionTimeline, SpeedBand,
-    FAST_SPEED_COUNTS_PER_SECOND, STATIONARY_SPEED_COUNTS_PER_SECOND,
 };
 use crate::lizard::trace::Trace;
+use crate::lizard::write_json;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AnalysisReport {
@@ -116,9 +115,7 @@ struct Session {
 
 pub(crate) fn write_report(trace: &Trace, output: &Path) -> Result<(), String> {
     let report = analyze(trace);
-    let bytes = serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?;
-    fs::write(output, bytes)
-        .map_err(|error| format!("cannot write report '{}': {error}", output.display()))?;
+    write_json(output, &report)?;
     println!(
         "Analyzed {} decoded states, {} lizard mouse reports, and {} touch sessions.",
         report.decoded_state_count, report.lizard_mouse_report_count, report.touch_session_count
@@ -290,41 +287,20 @@ fn click_displacement(trace: &Trace, timeline: &MotionTimeline<'_>) -> u64 {
 }
 
 fn speed_curve(trace: &Trace, timeline: &MotionTimeline<'_>) -> Vec<SpeedResponse> {
-    let mut bins = vec![
-        SpeedResponse {
-            label: "stationary_precision",
-            minimum_counts_per_second: 0.0,
-            maximum_counts_per_second: Some(STATIONARY_SPEED_COUNTS_PER_SECOND),
+    let mut bins: Vec<_> = SpeedBand::ALL
+        .into_iter()
+        .map(|band| SpeedResponse {
+            label: band.label(),
+            minimum_counts_per_second: band.minimum(),
+            maximum_counts_per_second: band.maximum(),
             samples: 0,
             input_counts: 0.0,
             output_pixels: 0,
             pixels_per_thousand_input_counts: None,
-        },
-        SpeedResponse {
-            label: "slow",
-            minimum_counts_per_second: STATIONARY_SPEED_COUNTS_PER_SECOND,
-            maximum_counts_per_second: Some(FAST_SPEED_COUNTS_PER_SECOND),
-            samples: 0,
-            input_counts: 0.0,
-            output_pixels: 0,
-            pixels_per_thousand_input_counts: None,
-        },
-        SpeedResponse {
-            label: "fast",
-            minimum_counts_per_second: FAST_SPEED_COUNTS_PER_SECOND,
-            maximum_counts_per_second: None,
-            samples: 0,
-            input_counts: 0.0,
-            output_pixels: 0,
-            pixels_per_thousand_input_counts: None,
-        },
-    ];
+        })
+        .collect();
     for interval in right_pad_intervals(trace) {
-        let index = match SpeedBand::classify(interval.speed_counts_per_second) {
-            SpeedBand::Stationary => 0,
-            SpeedBand::Slow => 1,
-            SpeedBand::Fast => 2,
-        };
+        let index = SpeedBand::classify(interval.speed_counts_per_second).index();
         bins[index].samples += 1;
         bins[index].input_counts += interval.distance_counts;
         bins[index].output_pixels += timeline.magnitude(interval.start_us, interval.end_us);
