@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use release_updater::{
     ensure_release_artifact, installed_macos_version, refresh_catalog_if_due, stage_application,
-    FirmwareFlashProgress, LatestReleaseClient, ReleaseCache, ReleaseManifestV1,
+    CatalogRefresh, FirmwareFlashProgress, LatestReleaseClient, ReleaseCache, ReleaseManifestV1,
 };
 
 use crate::update_check::{update_context, CHECK_INTERVAL};
@@ -13,7 +13,7 @@ fn cache() -> Result<ReleaseCache, String> {
     ReleaseCache::for_current_user().map_err(|error| error.to_string())
 }
 
-pub(super) fn fetch_catalog(cancellation: &Arc<AtomicBool>) -> Result<ReleaseManifestV1, String> {
+pub(super) fn fetch_catalog(cancellation: &Arc<AtomicBool>) -> Result<CatalogRefresh, String> {
     let (keys, cache) = update_context()?;
     refresh_catalog_if_due(
         &LatestReleaseClient::cancellable(Arc::clone(cancellation)),

@@ -6,7 +6,8 @@ use std::time::Duration;
 use bridge_runtime::FirmwareVersion;
 use release_updater::{
     classify_firmware_release, embedded_trusted_keys, refresh_catalog_if_due, ArtifactDescriptor,
-    FirmwareReleaseState, LatestReleaseClient, ReleaseCache, ReleaseManifestV1, TrustedPublicKey,
+    CatalogRefresh, FirmwareReleaseState, LatestReleaseClient, ReleaseCache, ReleaseManifestV1,
+    TrustedPublicKey,
 };
 use semver::Version;
 
@@ -28,7 +29,7 @@ pub fn update_context() -> Result<(Vec<TrustedPublicKey>, ReleaseCache), String>
 
 pub struct UpdateChecker {
     manifest: Option<ReleaseManifestV1>,
-    result: Option<Receiver<Result<ReleaseManifestV1, String>>>,
+    result: Option<Receiver<Result<CatalogRefresh, String>>>,
     running_version: Version,
 }
 
@@ -75,7 +76,17 @@ impl UpdateChecker {
             return;
         };
         match result.try_recv() {
-            Ok(Ok(manifest)) => {
+            Ok(Ok(CatalogRefresh::Current(manifest))) => {
+                self.manifest = Some(manifest);
+                self.result = None;
+            }
+            Ok(Ok(CatalogRefresh::Stale {
+                manifest,
+                refresh_error,
+            })) => {
+                eprintln!(
+                    "level=warn event=automatic_update_check_stale message={refresh_error:?}"
+                );
                 self.manifest = Some(manifest);
                 self.result = None;
             }

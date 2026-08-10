@@ -70,6 +70,24 @@ pub struct LatestReleaseClient {
     cancellation: Option<Arc<AtomicBool>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogRefresh {
+    Current(ReleaseManifestV1),
+    Stale {
+        manifest: ReleaseManifestV1,
+        refresh_error: String,
+    },
+}
+
+impl CatalogRefresh {
+    #[must_use]
+    pub const fn manifest(&self) -> &ReleaseManifestV1 {
+        match self {
+            Self::Current(manifest) | Self::Stale { manifest, .. } => manifest,
+        }
+    }
+}
+
 pub trait ReleaseSource {
     fn fetch_metadata(&self, directory: &Path) -> Result<(Vec<u8>, Vec<u8>), DownloadError>;
     fn download_release_asset(
@@ -151,10 +169,11 @@ pub fn refresh_catalog_if_due(
     cache: &ReleaseCache,
     trusted_keys: &[TrustedPublicKey],
     interval: std::time::Duration,
-) -> Result<ReleaseManifestV1, String> {
+) -> Result<CatalogRefresh, String> {
     if !cache.check_due(interval) {
         return cache
             .load_manifest(trusted_keys)
+            .map(CatalogRefresh::Current)
             .map_err(|error| error.to_string());
     }
     fs::create_dir_all(cache.root()).map_err(|error| error.to_string())?;
@@ -170,6 +189,7 @@ pub fn refresh_catalog_if_due(
     if !cache.check_due(interval) {
         return cache
             .load_manifest(trusted_keys)
+            .map(CatalogRefresh::Current)
             .map_err(|error| error.to_string());
     }
     let temporary =
@@ -188,11 +208,17 @@ pub fn refresh_catalog_if_due(
             // The marker is only a network-throttling optimization. Verified
             // metadata remains usable if writing the marker itself fails.
             let _ = cache.mark_check_success();
-            Ok(manifest)
+            Ok(CatalogRefresh::Current(manifest))
         }
-        Err(error) => cache.load_manifest(trusted_keys).map_err(|_| {
-            format!("Cannot check releases and no verified cache is available: {error}")
-        }),
+        Err(refresh_error) => cache
+            .load_manifest(trusted_keys)
+            .map(|manifest| CatalogRefresh::Stale {
+                manifest,
+                refresh_error: refresh_error.clone(),
+            })
+            .map_err(|_| {
+                format!("Cannot check releases and no verified cache is available: {refresh_error}")
+            }),
     }
 }
 
@@ -453,6 +479,7 @@ mod tests {
                 Duration::from_hours(24)
             )
             .unwrap()
+            .manifest()
             .application_version,
             semver::Version::new(1, 5, 0)
         );
@@ -474,7 +501,18 @@ mod tests {
         refresh_catalog_if_due(&source, &cache, std::slice::from_ref(&key), Duration::ZERO)
             .unwrap();
         let fallback = refresh_catalog_if_due(&source, &cache, &[key], Duration::ZERO).unwrap();
-        assert_eq!(fallback.application_version, semver::Version::new(1, 5, 0));
+        let CatalogRefresh::Stale {
+            manifest,
+            refresh_error,
+        } = fallback
+        else {
+            panic!("failed refresh must report stale provenance");
+        };
+        assert_eq!(manifest.application_version, semver::Version::new(1, 5, 0));
+        assert!(
+            refresh_error.contains("invalid release signature envelope"),
+            "unexpected refresh error: {refresh_error}"
+        );
         assert_eq!(source.calls(), 2);
         let _ = fs::remove_dir_all(root);
     }
@@ -502,7 +540,7 @@ mod tests {
         }
         for worker in workers {
             assert_eq!(
-                worker.join().unwrap().application_version,
+                worker.join().unwrap().manifest().application_version,
                 semver::Version::new(1, 5, 0)
             );
         }

@@ -43,8 +43,8 @@ pub use manifest::{
     TrustedPublicKey,
 };
 pub use network::{
-    download_to_path, ensure_release_artifact, refresh_catalog_if_due, DownloadError,
-    LatestReleaseClient, ReleaseSource,
+    download_to_path, ensure_release_artifact, refresh_catalog_if_due, CatalogRefresh,
+    DownloadError, LatestReleaseClient, ReleaseSource,
 };
 
 /// GitHub repository that owns the only accepted update channel.

@@ -6,9 +6,9 @@ use std::thread;
 use eframe::egui;
 use release_updater::{
     flash_firmware, guided_replacement_supported, ApplicationRelease, ArtifactDescriptor,
-    FirmwareFlashProgress, FirmwareRelease, ReleaseManifestV1, APPLICATION_BUNDLE_ID,
-    FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID, XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT,
-    XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
+    CatalogRefresh, FirmwareFlashProgress, FirmwareRelease, ReleaseManifestV1,
+    APPLICATION_BUNDLE_ID, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID,
+    XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
 };
 use semver::Version;
 use ui_theme::{ACCENT, ACCENT_SUBTLE, DANGER, MUTED_TEXT, PANEL, SUCCESS, SURFACE, TEXT};
@@ -77,7 +77,7 @@ pub fn run(arguments: AppCenterArgs) -> Result<(), String> {
 }
 
 enum WorkerEvent {
-    Catalog(Box<Result<ReleaseManifestV1, String>>),
+    Catalog(Box<Result<CatalogRefresh, String>>),
     Application(Result<PathBuf, String>),
     FirmwareProgress(FirmwareFlashProgress),
     Firmware(Result<(), FirmwareOperationError>),
@@ -173,7 +173,7 @@ fn spawn_worker(
     true
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatusTone {
     Info,
     Success,
@@ -203,6 +203,30 @@ impl CatalogStatus {
         }
         *self = Self::NotRequested;
         true
+    }
+}
+
+fn catalog_presentation(
+    refresh: CatalogRefresh,
+) -> (ReleaseManifestV1, String, StatusTone, CatalogStatus) {
+    match refresh {
+        CatalogRefresh::Current(manifest) => (
+            manifest,
+            "Signed release information is current.".to_owned(),
+            StatusTone::Success,
+            CatalogStatus::Loaded,
+        ),
+        CatalogRefresh::Stale {
+            manifest,
+            refresh_error,
+        } => (
+            manifest,
+            format!(
+                "Cannot check for a newer release; showing the last verified information. {refresh_error}"
+            ),
+            StatusTone::Error,
+            CatalogStatus::Failed,
+        ),
     }
 }
 
@@ -394,13 +418,15 @@ impl AppCenter {
             let terminal = !matches!(&event, WorkerEvent::FirmwareProgress(_));
             match event {
                 WorkerEvent::Catalog(result) => match *result {
-                    Ok(manifest) => {
-                        "Signed release information is current.".clone_into(&mut self.status);
+                    Ok(refresh) => {
+                        let (manifest, status, tone, catalog_status) =
+                            catalog_presentation(refresh);
+                        self.status = status;
                         self.release_notes = parse_release_notes(&manifest.release_notes);
                         self.catalog = Some(manifest);
                         self.activity = Activity::Idle;
-                        self.status_tone = StatusTone::Success;
-                        self.catalog_status = CatalogStatus::Loaded;
+                        self.status_tone = tone;
+                        self.catalog_status = catalog_status;
                     }
                     Err(error) => {
                         self.status = error;
@@ -898,5 +924,20 @@ mod tests {
         assert!(status.retry_if_failed());
         assert_eq!(status, CatalogStatus::NotRequested);
         assert!(status.begin_if_needed(AppCenterPage::Updates));
+    }
+
+    #[test]
+    fn stale_catalog_information_is_usable_but_warns_and_allows_retry() {
+        let manifest = demo_manifest(DemoMode::Current);
+        let (presented, message, tone, mut status) = catalog_presentation(CatalogRefresh::Stale {
+            manifest: manifest.clone(),
+            refresh_error: "offline".to_owned(),
+        });
+        assert_eq!(presented, manifest);
+        assert!(message.contains("last verified"));
+        assert!(message.contains("offline"));
+        assert_eq!(tone, StatusTone::Error);
+        assert_eq!(status, CatalogStatus::Failed);
+        assert!(status.retry_if_failed());
     }
 }
