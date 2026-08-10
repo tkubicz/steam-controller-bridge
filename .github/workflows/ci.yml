@@ -23,15 +23,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Test the title validator
         run: python3 tools/check-pr-title.py --self-test
-      - name: Check generated changelog for duplicate entries
+      - name: Check newest generated changelog section
         run: |
           python3 tools/check-changelog.py --self-test
           python3 tools/check-changelog.py
-      - name: Validate pull-request title
+      - name: Validate pull-request release metadata
         if: github.event_name == 'pull_request'
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
-        run: python3 tools/check-pr-title.py "${PR_TITLE}"
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 tools/check-pr-title.py "${PR_TITLE}" --body "${PR_BODY}"
 
   test:
     # macOS is the shipped product target. Ubuntu is intentionally retained as

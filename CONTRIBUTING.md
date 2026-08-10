@@ -15,6 +15,8 @@ The scope and breaking-change `!` are optional. Supported types are `feat`,
 patch. Add `!` or a `BREAKING CHANGE:` footer for a SemVer major change.
 Internal documentation, test, build, CI, chore, and refactoring entries are
 hidden from release notes and do not create a release by themselves.
+Scopes do not change that visibility: use `ci: repair release automation`, not
+`fix(ci): repair release automation`, for an internal CI-only change.
 
 When one squash merge contains multiple user-visible changes, add this block to
 the pull-request description before merging:

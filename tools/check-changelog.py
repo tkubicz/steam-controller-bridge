@@ -1,35 +1,72 @@
 #!/usr/bin/env python3
-"""Reject repeated release-note bullets inside one generated release."""
+"""Validate the newest generated release-note section."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 
-def duplicate_entries(markdown: str) -> list[str]:
-    release = "unversioned"
-    seen: set[str] = set()
-    duplicates: list[str] = []
+ROOT = Path(__file__).resolve().parent.parent
+CHANGELOG_SECTIONS = json.loads(
+    (ROOT / "release-please-config.json").read_text(encoding="utf-8")
+)["changelog-sections"]
+VISIBLE_SECTIONS = frozenset(
+    section["section"] for section in CHANGELOG_SECTIONS if not section.get("hidden", False)
+)
+INTERNAL_SCOPES = frozenset(
+    section["type"] for section in CHANGELOG_SECTIONS if section.get("hidden", False)
+)
+
+
+def newest_release(markdown: str) -> tuple[str, list[str]]:
+    release: str | None = None
+    lines: list[str] = []
     for line in markdown.splitlines():
         if line.startswith("## ["):
+            if release is not None:
+                break
             release = line.split("]", 1)[0][4:]
-            seen.clear()
+        elif release is not None:
+            lines.append(line)
+    return release or "unversioned", lines
+
+
+def invalid_entries(markdown: str) -> list[str]:
+    release, lines = newest_release(markdown)
+    seen: set[str] = set()
+    section = ""
+    invalid: list[str] = []
+    for line in lines:
+        if line.startswith("### "):
+            section = line[4:]
         elif line.startswith("* "):
             description = line[2:].split(" ([", 1)[0].strip()
             if description in seen:
-                duplicates.append(f"{release}: {description}")
+                invalid.append(f"{release}: duplicate entry: {description}")
             seen.add(description)
-    return duplicates
+            if section in VISIBLE_SECTIONS and description.startswith("**"):
+                scope = description[2:].split(":**", 1)[0]
+                if scope in INTERNAL_SCOPES:
+                    invalid.append(
+                        f"{release}: internal scope {scope!r} appears under {section}"
+                    )
+    return invalid
 
 
 def self_test() -> None:
-    assert duplicate_entries("## [1.0.0]\n\n* one ([abc])\n* two ([def])\n") == []
-    assert duplicate_entries("## [1.0.0]\n\n* one ([abc])\n* one ([#1]) ([abc])\n") == [
-        "1.0.0: one"
+    assert invalid_entries("## [1.0.0]\n\n* one ([abc])\n* two ([def])\n") == []
+    assert invalid_entries("## [1.0.0]\n\n* one ([abc])\n* one ([#1]) ([abc])\n") == [
+        "1.0.0: duplicate entry: one"
     ]
-    assert duplicate_entries("## [2.0.0]\n* one ([abc])\n## [1.0.0]\n* one ([abc])") == []
+    assert invalid_entries(
+        "## [2.0.0]\n### Features\n* **ci:** internal ([abc])\n"
+    ) == ["2.0.0: internal scope 'ci' appears under Features"]
+    assert invalid_entries(
+        "## [2.0.0]\n* clean ([abc])\n## [1.0.0]\n* old ([abc])\n* old ([def])"
+    ) == []
 
 
 def main() -> int:
@@ -40,11 +77,10 @@ def main() -> int:
         self_test()
         return 0
 
-    root = Path(__file__).resolve().parent.parent
-    duplicates = duplicate_entries((root / "CHANGELOG.md").read_text(encoding="utf-8"))
-    for duplicate in duplicates:
-        print(f"duplicate changelog entry: {duplicate}", file=sys.stderr)
-    return int(bool(duplicates))
+    invalid = invalid_entries((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
+    for entry in invalid:
+        print(f"invalid changelog entry: {entry}", file=sys.stderr)
+    return int(bool(invalid))
 
 
 if __name__ == "__main__":
