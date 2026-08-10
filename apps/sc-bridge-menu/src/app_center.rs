@@ -163,7 +163,7 @@ struct AppCenter {
     demo: Option<DemoMode>,
     status_tone: StatusTone,
     host_commands: mpsc::Receiver<AppCenterCommand>,
-    catalog_requested: bool,
+    catalog_status: CatalogStatus,
     firmware_write_started: bool,
 }
 
@@ -179,6 +179,32 @@ enum StatusTone {
     Info,
     Success,
     Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogStatus {
+    NotRequested,
+    Checking,
+    Loaded,
+    Failed,
+}
+
+impl CatalogStatus {
+    fn begin_if_needed(&mut self, page: AppCenterPage) -> bool {
+        if page != AppCenterPage::Updates || *self != Self::NotRequested {
+            return false;
+        }
+        *self = Self::Checking;
+        true
+    }
+
+    fn retry_if_failed(&mut self) -> bool {
+        if *self != Self::Failed {
+            return false;
+        }
+        *self = Self::NotRequested;
+        true
+    }
 }
 
 impl AppCenter {
@@ -230,7 +256,11 @@ impl AppCenter {
             demo,
             status_tone: StatusTone::Info,
             host_commands,
-            catalog_requested: demo.is_some(),
+            catalog_status: if demo.is_some() {
+                CatalogStatus::Loaded
+            } else {
+                CatalogStatus::NotRequested
+            },
             firmware_write_started: false,
         }
     }
@@ -328,11 +358,13 @@ impl AppCenter {
                         self.catalog = Some(manifest);
                         self.activity = Activity::Idle;
                         self.status_tone = StatusTone::Success;
+                        self.catalog_status = CatalogStatus::Loaded;
                     }
                     Err(error) => {
                         self.status = error;
                         self.activity = Activity::Idle;
                         self.status_tone = StatusTone::Error;
+                        self.catalog_status = CatalogStatus::Failed;
                     }
                 },
                 WorkerEvent::Application(Ok(path)) => {
@@ -402,12 +434,7 @@ impl AppCenter {
                     if self.firmware_write_started {
                         continue;
                     }
-                    self.page = page;
-                    // Asking for Updates again after a failed check must retry
-                    // instead of leaving the window on the stale error.
-                    if page == AppCenterPage::Updates && self.catalog.is_none() && !self.busy() {
-                        self.catalog_requested = false;
-                    }
+                    self.navigate_to(page);
                 }
                 AppCenterCommand::FirmwareVersion { firmware_version } => {
                     self.firmware_version = firmware_version;
@@ -420,10 +447,9 @@ impl AppCenter {
     }
 
     fn ensure_catalog(&mut self, ctx: egui::Context) {
-        if self.page != AppCenterPage::Updates || self.catalog_requested || self.demo.is_some() {
+        if self.demo.is_some() || !self.catalog_status.begin_if_needed(self.page) {
             return;
         }
-        self.catalog_requested = true;
         self.activity = Activity::Busy { can_cancel: false };
         self.status_tone = StatusTone::Info;
         "Checking the signed stable release…".clone_into(&mut self.status);
@@ -432,6 +458,13 @@ impl AppCenter {
 
     fn busy(&self) -> bool {
         self.activity != Activity::Idle
+    }
+
+    fn navigate_to(&mut self, page: AppCenterPage) {
+        self.page = page;
+        if page == AppCenterPage::Updates && self.catalog.is_none() && !self.busy() {
+            self.catalog_status.retry_if_failed();
+        }
     }
 
     fn reveal_application(&mut self) {
@@ -495,11 +528,15 @@ impl AppCenter {
 
     fn navigation(&mut self, ui: &mut egui::Ui) {
         ui.add_enabled_ui(!self.firmware_write_started, |ui| {
+            let mut page = self.page;
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.page, AppCenterPage::About, "About");
-                ui.selectable_value(&mut self.page, AppCenterPage::Changelog, "Changelog");
-                ui.selectable_value(&mut self.page, AppCenterPage::Updates, "Updates");
+                ui.selectable_value(&mut page, AppCenterPage::About, "About");
+                ui.selectable_value(&mut page, AppCenterPage::Changelog, "Changelog");
+                ui.selectable_value(&mut page, AppCenterPage::Updates, "Updates");
             });
+            if page != self.page {
+                self.navigate_to(page);
+            }
         });
         if self.firmware_write_started {
             ui.label(
@@ -610,6 +647,12 @@ impl eframe::App for AppCenter {
 impl AppCenter {
     fn updates_page(&mut self, ui: &mut egui::Ui) {
         self.status_banner(ui);
+        if self.catalog_status == CatalogStatus::Failed && !self.busy() {
+            ui.add_space(10.0);
+            if secondary_button(ui, "Retry Check", true).clicked() {
+                self.catalog_status.retry_if_failed();
+            }
+        }
         ui.add_space(14.0);
         let catalog = self.catalog.take();
         if let Some(manifest) = catalog.as_ref() {
@@ -1056,5 +1099,19 @@ mod tests {
         assert_eq!(firmware_badge("3"), "Firmware rev 3");
         assert_eq!(firmware_badge("newer"), "Firmware newer");
         assert_eq!(firmware_badge("unknown"), "Firmware unknown");
+    }
+
+    #[test]
+    fn catalog_state_retries_only_after_an_explicit_failed_action() {
+        let mut status = CatalogStatus::NotRequested;
+        assert!(!status.begin_if_needed(AppCenterPage::About));
+        assert!(status.begin_if_needed(AppCenterPage::Updates));
+        assert_eq!(status, CatalogStatus::Checking);
+        assert!(!status.retry_if_failed());
+
+        status = CatalogStatus::Failed;
+        assert!(status.retry_if_failed());
+        assert_eq!(status, CatalogStatus::NotRequested);
+        assert!(status.begin_if_needed(AppCenterPage::Updates));
     }
 }
