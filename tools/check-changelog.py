@@ -4,21 +4,9 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
-from pathlib import Path
 
-
-ROOT = Path(__file__).resolve().parent.parent
-CHANGELOG_SECTIONS = json.loads(
-    (ROOT / "release-please-config.json").read_text(encoding="utf-8")
-)["changelog-sections"]
-VISIBLE_SECTIONS = frozenset(
-    section["section"] for section in CHANGELOG_SECTIONS if not section.get("hidden", False)
-)
-INTERNAL_SCOPES = frozenset(
-    section["type"] for section in CHANGELOG_SECTIONS if section.get("hidden", False)
-)
+from release_metadata import ROOT, VISIBLE_SECTIONS, is_internal_scope
 
 
 def newest_release(markdown: str) -> tuple[str, list[str]]:
@@ -49,7 +37,7 @@ def invalid_entries(markdown: str) -> list[str]:
             seen.add(description)
             if section in VISIBLE_SECTIONS and description.startswith("**"):
                 scope = description[2:].split(":**", 1)[0]
-                if scope in INTERNAL_SCOPES:
+                if is_internal_scope(scope):
                     invalid.append(
                         f"{release}: internal scope {scope!r} appears under {section}"
                     )
@@ -64,6 +52,9 @@ def self_test() -> None:
     assert invalid_entries(
         "## [2.0.0]\n### Features\n* **ci:** internal ([abc])\n"
     ) == ["2.0.0: internal scope 'ci' appears under Features"]
+    assert invalid_entries(
+        "## [2.0.0]\n### Bug Fixes\n* **build/macos:** internal ([abc])\n"
+    ) == ["2.0.0: internal scope 'build/macos' appears under Bug Fixes"]
     assert invalid_entries(
         "## [2.0.0]\n* clean ([abc])\n## [1.0.0]\n* old ([abc])\n* old ([def])"
     ) == []
