@@ -1,4 +1,4 @@
-# XIAO nRF52840 Firmware
+# XIAO nRF52840 Firmware Architecture
 
 Firmware is implemented in `firmware/xiao-nrf52840` for the non-Sense board.
 Its native protocol/session tests run without hardware. Serial flashing,

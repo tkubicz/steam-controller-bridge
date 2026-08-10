@@ -2,41 +2,19 @@ name: Bug report
 description: Something does not work as documented
 labels: ["bug"]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Thanks for the report. The two checkboxes below cover the most common
-        causes — please confirm both before filling in the rest.
-
-  - type: checkboxes
-    id: prerequisites
-    attributes:
-      label: Before reporting
-      options:
-        - label: >
-            My controller is a **Steam Controller 2 (2026)**, not the
-            discontinued 2015 Steam Controller. The 2015 controller and its
-            wireless receiver use a different protocol and are not supported.
-          required: true
-        - label: >
-            Steam is **fully quit** (Steam → Quit Steam, not just closing the
-            window) and its helper is stopped with
-            `launchctl bootout user/$(id -u)/com.valvesoftware.steam.ipctool`.
-          required: true
-        - label: >
-            No other controller tool, `sc-probe`, or `sc-visualizer` is running
-            against the same collection.
-          required: true
-
   - type: dropdown
-    id: transport
+    id: area
     attributes:
-      label: How is the controller connected?
+      label: Area
+      description: Choose the closest affected area.
       options:
-        - Official Puck over USB
-        - Direct Bluetooth
-        - Direct USB-C (unsupported)
-        - Not connected / not detected
+        - Bridge or controller input
+        - XIAO firmware or flashing
+        - Menu app, profiles, or permissions
+        - Application updater or packaging
+        - Visualizer or developer tool
+        - Documentation
+        - Other
     validations:
       required: true
 
@@ -49,34 +27,51 @@ body:
       required: true
 
   - type: textarea
-    id: diagnostics
+    id: reproduction
     attributes:
-      label: Diagnostics
-      description: >
-        In the menu-bar app, use **Copy Diagnostics** and paste the result. From
-        the CLI, paste the `sc-bridge` status lines instead. Hardware serials are
-        masked to their last four characters, so this output is safe to share.
-        Do not paste `sc-probe capture` files — those keep full serials so they
-        stay replayable.
-      render: text
+      label: Reproduction steps
+      description: Include the smallest reliable sequence and whether it happens every time.
     validations:
       required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        **For controller or bridge failures only:** confirm the device is a
+        Steam Controller 2 (2026), fully quit Steam, stop other controller
+        tools, and state whether the connection is the official Puck or direct
+        Bluetooth. Direct USB-C input and the 2015 Steam Controller are not
+        supported. These steps are not prerequisites for updater, packaging,
+        UI, or documentation reports.
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics (when applicable)
+      description: >
+        For runtime or hardware issues, paste Copy Diagnostics or CLI status
+        output. Displayed hardware serials are masked. Do not paste sc-probe
+        captures or recording files because they retain full serials.
+      render: text
 
   - type: input
     id: versions
     attributes:
-      label: Versions
-      description: Release tag or commit, plus your macOS version.
-      placeholder: "v0.1.0, macOS 15.5"
+      label: Version and environment
+      description: Release tag or commit, macOS version, and relevant tool or browser version.
+      placeholder: "v1.5.0 on macOS 15.5"
     validations:
       required: true
 
   - type: input
     id: firmware
     attributes:
-      label: Firmware
-      description: >
-        Which UF2 or DFU build is on the XIAO? Rumble needs firmware containing
-        protocol-v1 message type 8; older builds accept input but cannot return
-        vibration requests.
-      placeholder: "v0.1.0 UF2 from Releases"
+      label: Firmware revision (hardware issues only)
+      description: Copy the connected revision shown by the menu app, or name the release artifact flashed.
+      placeholder: "Revision 2 from release v1.5.0"
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Screenshots, logs, or details that help distinguish the failure.

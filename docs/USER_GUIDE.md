@@ -911,10 +911,11 @@ but a broadly distributable product should additionally provide:
   direct USB-C remains a separate future transport;
 - hardware qualification of the narrow lizard-mode suppression lifecycle;
 - automated hardware acceptance and long-duration testing;
-- signed/notarized macOS binaries and downloadable firmware artifacts;
+- Developer ID-signed and notarized macOS binaries (current release bundles
+  are ad-hoc signed; firmware artifacts are already published and verified);
 - an owned or licensed USB VID/PID plus a macOS recognition path that does not
   depend on another vendor's Xbox 360 compatibility identity;
 - hardware qualification of dual-rumble expiry and disconnect timing, beyond
   the confirmed delivery path;
-- Developer ID signing, notarization, and a supported upgrade/recovery
-  procedure beyond the current versioned GitHub downloads.
+- broader distribution such as a DMG or package manager beyond the current
+  signed-metadata in-app updater and versioned GitHub recovery downloads.

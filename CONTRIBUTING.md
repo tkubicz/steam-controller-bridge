@@ -62,6 +62,8 @@ Do not manually edit the generated changelog, create a version tag, or compose a
 second GitHub Release description. Automated prereleases are not supported yet.
 
 Repository administrators must enable **Allow GitHub Actions to create and
-approve pull requests**. The workflow uses the built-in `GITHUB_TOKEN`; it
-explicitly dispatches CI for the generated release branch, so no personal token
-or long-lived release credential is required.
+approve pull requests** and configure `RELEASE_APP_ID` plus
+`RELEASE_APP_PRIVATE_KEY`. The workflow exchanges those GitHub App credentials
+for a short-lived installation token that can update the release pull-request
+branch; the resulting push triggers ordinary pull-request CI. No personal
+access token is used.
