@@ -1,3 +1,4 @@
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -6,7 +7,7 @@ use std::thread;
 use eframe::egui;
 use release_updater::{
     flash_firmware, guided_replacement_supported, ApplicationRelease, ArtifactDescriptor,
-    CatalogRefresh, FirmwareFlashProgress, FirmwareRelease, ReleaseManifestV1,
+    CatalogRefresh, FirmwareFlashError, FirmwareFlashProgress, FirmwareRelease, ReleaseManifestV1,
     APPLICATION_BUNDLE_ID, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID,
     XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
 };
@@ -84,33 +85,58 @@ enum WorkerEvent {
     Quit(Result<(), String>),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum FirmwareOperationError {
     Preparation(String),
-    Flash(String),
+    Flash(FirmwareFlashError),
     Resume(String),
-    FlashAndResume { flash: String, resume: String },
+    FlashAndResume {
+        flash: FirmwareFlashError,
+        resume: String,
+    },
+    Panicked,
+    PanickedAndResume(String),
 }
 
 impl FirmwareOperationError {
     fn message(self) -> String {
         match self {
             Self::Preparation(error) => error,
-            Self::Flash(error) => {
-                format!("{error} Check the cable, disconnect extra boards, and retry.")
-            }
+            Self::Flash(error) => flash_failure_message(&error),
             Self::Resume(error) => format!(
                 "Firmware was written and verified, but bridge recovery failed: {error}"
             ),
-            Self::FlashAndResume { flash, resume } => format!(
-                "{flash} Bridge recovery also failed: {resume} Check the cable, disconnect extra boards, and retry; then restart the bridge manually."
+            Self::FlashAndResume { flash, resume } => {
+                format!(
+                    "{} Bridge recovery also failed: {resume} Restart the bridge manually.",
+                    flash_failure_message(&flash)
+                )
+            }
+            Self::Panicked => "Firmware installation stopped unexpectedly. The bridge recovery request completed; reopen Updates and retry.".to_owned(),
+            Self::PanickedAndResume(resume) => format!(
+                "Firmware installation stopped unexpectedly, and bridge recovery also failed: {resume} Restart the bridge manually."
             ),
         }
     }
 }
 
+fn flash_failure_message(error: &FirmwareFlashError) -> String {
+    let message = error.to_string();
+    if matches!(
+        error,
+        FirmwareFlashError::Io(_)
+            | FirmwareFlashError::Discovery(_)
+            | FirmwareFlashError::Timeout(_)
+            | FirmwareFlashError::Revision { .. }
+    ) {
+        format!("{message} Check the cable, disconnect extra boards, and retry.")
+    } else {
+        message
+    }
+}
+
 fn combine_flash_and_resume(
-    flash: Result<(), String>,
+    flash: Result<(), FirmwareFlashError>,
     resume: Result<(), String>,
 ) -> Result<(), FirmwareOperationError> {
     match (flash, resume) {
@@ -118,6 +144,28 @@ fn combine_flash_and_resume(
         (Err(error), Ok(())) => Err(FirmwareOperationError::Flash(error)),
         (Ok(()), Err(error)) => Err(FirmwareOperationError::Resume(error)),
         (Err(flash), Err(resume)) => Err(FirmwareOperationError::FlashAndResume { flash, resume }),
+    }
+}
+
+fn combine_panic_and_resume(resume: Result<(), String>) -> Result<(), FirmwareOperationError> {
+    match resume {
+        Ok(()) => Err(FirmwareOperationError::Panicked),
+        Err(error) => Err(FirmwareOperationError::PanickedAndResume(error)),
+    }
+}
+
+struct ActiveFirmwareSession(Arc<AtomicBool>);
+
+impl ActiveFirmwareSession {
+    fn begin(active: Arc<AtomicBool>) -> Self {
+        active.store(true, Ordering::Release);
+        Self(active)
+    }
+}
+
+impl Drop for ActiveFirmwareSession {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -369,21 +417,25 @@ impl AppCenter {
                         },
                     ));
                 }
-                session_active.store(true, Ordering::Release);
-                let flash_result = flash_firmware(
-                    &path,
-                    &manifest.firmware,
-                    Path::new("/Volumes"),
-                    &cancel,
-                    |progress| {
-                        let _ = sender.send(WorkerEvent::FirmwareProgress(progress));
-                        ctx.request_repaint();
-                    },
-                )
-                .map_err(|error| error.to_string());
+                let session = ActiveFirmwareSession::begin(session_active);
+                let flash_result = catch_unwind(AssertUnwindSafe(|| {
+                    flash_firmware(
+                        &path,
+                        &manifest.firmware,
+                        Path::new("/Volumes"),
+                        &cancel,
+                        |progress| {
+                            let _ = sender.send(WorkerEvent::FirmwareProgress(progress));
+                            ctx.request_repaint();
+                        },
+                    )
+                }));
                 let resume_result = host.request(UpdateOperation::ResumeBridge);
-                session_active.store(false, Ordering::Release);
-                combine_flash_and_resume(flash_result, resume_result)
+                drop(session);
+                match flash_result {
+                    Ok(result) => combine_flash_and_resume(result, resume_result),
+                    Err(_) => combine_panic_and_resume(resume_result),
+                }
             })();
             let _ = sender.send(WorkerEvent::Firmware(result));
             ctx.request_repaint();
@@ -878,7 +930,9 @@ mod tests {
     #[test]
     fn flash_and_resume_failures_are_both_reported_with_specific_guidance() {
         let combined = combine_flash_and_resume(
-            Err("firmware copy failed".to_owned()),
+            Err(FirmwareFlashError::Discovery(
+                "firmware copy failed".to_owned(),
+            )),
             Err("runtime stopped".to_owned()),
         )
         .unwrap_err()
@@ -892,6 +946,39 @@ mod tests {
             .message();
         assert!(resume_only.contains("runtime stopped"));
         assert!(!resume_only.contains("Check the cable"));
+
+        let cancelled = combine_flash_and_resume(Err(FirmwareFlashError::Cancelled), Ok(()))
+            .unwrap_err()
+            .message();
+        assert!(cancelled.contains("cancelled"));
+        assert!(!cancelled.contains("Check the cable"));
+
+        let cancelled_and_resume = combine_flash_and_resume(
+            Err(FirmwareFlashError::Cancelled),
+            Err("runtime stopped".to_owned()),
+        )
+        .unwrap_err()
+        .message();
+        assert!(cancelled_and_resume.contains("cancelled"));
+        assert!(cancelled_and_resume.contains("runtime stopped"));
+        assert!(!cancelled_and_resume.contains("Check the cable"));
+    }
+
+    #[test]
+    fn a_panicking_flash_still_clears_the_session_and_reports_resume_failure() {
+        let active = Arc::new(AtomicBool::new(false));
+        let session = ActiveFirmwareSession::begin(Arc::clone(&active));
+        let flash = catch_unwind(AssertUnwindSafe(|| panic!("fixture panic")));
+        let result = match flash {
+            Ok(()) => unreachable!(),
+            Err(_) => combine_panic_and_resume(Err("runtime stopped".to_owned())),
+        };
+        drop(session);
+
+        assert!(!active.load(Ordering::Acquire));
+        let message = result.unwrap_err().message();
+        assert!(message.contains("stopped unexpectedly"));
+        assert!(message.contains("runtime stopped"));
     }
 
     #[test]
