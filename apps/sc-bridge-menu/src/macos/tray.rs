@@ -264,6 +264,7 @@ impl MenuApp {
 
     pub(super) fn refresh_status(&mut self) {
         let status = self.runtime.status();
+        let recovery_problem = self.app_center_recovery.problem().map(str::to_owned);
         if let Err(error) = self.app_center_host.update_firmware(status.xiao.firmware) {
             eprintln!("cannot update app window firmware status: {error}");
         }
@@ -286,10 +287,13 @@ impl MenuApp {
             eprintln!("cannot write menu-app diagnostics: {error}");
         }
         self.sync_overlay_process(&status);
-        if status.revision == self.last_revision {
+        if status.revision == self.last_revision && recovery_problem == self.last_recovery_problem {
             return;
         }
-        let model = MenuModel::from_status(&status);
+        let mut model = MenuModel::from_status(&status);
+        if let Some(error) = recovery_problem.as_deref() {
+            model.apply_external_error(error);
+        }
         let icon_changed = self
             .last_model
             .as_ref()
@@ -349,6 +353,7 @@ impl MenuApp {
             self.last_model = Some(model);
         }
         self.last_revision = status.revision;
+        self.last_recovery_problem = recovery_problem;
     }
 
     pub(super) fn show_app_center(&mut self, page: AppCenterPage) {
@@ -424,7 +429,8 @@ impl MenuApp {
                 self.update_setting_checkmarks();
             }
             COPY_ERROR_ID => {
-                if let Some(error) = self.runtime.status().last_error {
+                let recovery_error = self.app_center_recovery.problem().map(str::to_owned);
+                if let Some(error) = recovery_error.or_else(|| self.runtime.status().last_error) {
                     if let Err(copy_error) = copy_text(&error) {
                         eprintln!("cannot copy full error: {copy_error}");
                     }
@@ -560,21 +566,65 @@ impl MenuApp {
     pub(super) fn recover_app_center_suspension(&mut self) {
         self.app_center_host.reap();
         if !self.app_center_host.suspension_recovery_needed() {
+            self.app_center_recovery = AppCenterRecovery::Idle;
             return;
         }
-        match self.runtime.resume_from_update() {
-            Ok(()) => self.app_center_host.complete_suspension_recovery(),
-            Err(error) if self.runtime.is_terminated() => {
-                let join = self.runtime.join();
-                eprintln!(
-                    "level=error event=app_center_recovery_abandoned reason=runtime_terminated error={error:?} join={join:?}"
-                );
-                // A joined runtime cannot still own HID or serial handles, so
-                // retaining the updater's quit interlock would only strand the
-                // menu process after its worker has already ended.
-                self.app_center_host.complete_suspension_recovery();
+        let now = Instant::now();
+        let state = std::mem::replace(&mut self.app_center_recovery, AppCenterRecovery::Idle);
+        match state {
+            AppCenterRecovery::Waiting(request) => match request.poll() {
+                UpdateResumePoll::Pending => {
+                    self.app_center_recovery = AppCenterRecovery::Waiting(request);
+                }
+                UpdateResumePoll::Complete(Ok(())) => {
+                    self.app_center_host.complete_suspension_recovery();
+                }
+                UpdateResumePoll::Complete(Err(error)) => {
+                    self.defer_or_complete_app_center_recovery(now, &error);
+                }
+            },
+            AppCenterRecovery::Backoff { retry_at, error } if now < retry_at => {
+                self.app_center_recovery = AppCenterRecovery::Backoff { retry_at, error };
             }
-            Err(error) => eprintln!("cannot recover bridge after app window exit: {error}"),
+            AppCenterRecovery::Idle | AppCenterRecovery::Backoff { .. } => {
+                self.start_app_center_recovery(now);
+            }
+        }
+    }
+
+    fn start_app_center_recovery(&mut self, now: Instant) {
+        match self.runtime.begin_resume_from_update() {
+            Ok(request) => {
+                self.app_center_recovery = AppCenterRecovery::Waiting(request);
+            }
+            Err(error) => self.defer_or_complete_app_center_recovery(now, &error),
+        }
+    }
+
+    fn defer_or_complete_app_center_recovery(
+        &mut self,
+        now: Instant,
+        error: &bridge_runtime::RuntimeError,
+    ) {
+        if self.runtime.is_terminated() {
+            let join = self.runtime.join();
+            eprintln!(
+                "level=error event=app_center_recovery_abandoned reason=runtime_terminated error={error:?} join={join:?}"
+            );
+            // A joined runtime cannot still own HID or serial handles, so
+            // retaining the updater's quit interlock would only strand the
+            // menu process after its worker has already ended.
+            self.app_center_host.complete_suspension_recovery();
+            self.app_center_recovery = AppCenterRecovery::Idle;
+        } else {
+            let message = format!(
+                "Updater suspension recovery is not responding: {error}. Quit remains deferred while recovery retries."
+            );
+            eprintln!("level=error event=app_center_recovery_deferred error={error:?}");
+            self.app_center_recovery = AppCenterRecovery::Backoff {
+                retry_at: now + APP_CENTER_RECOVERY_RETRY_DELAY,
+                error: message,
+            };
         }
     }
 }

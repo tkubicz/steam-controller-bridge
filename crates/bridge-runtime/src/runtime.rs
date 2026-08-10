@@ -163,6 +163,38 @@ pub struct BridgeHandle {
     power_monitor: Mutex<Option<PowerMonitor>>,
 }
 
+/// The result of polling a non-blocking updater-resume request.
+#[derive(Debug)]
+pub enum UpdateResumePoll {
+    Pending,
+    Complete(Result<(), RuntimeError>),
+}
+
+/// A queued updater-resume request whose acknowledgement can be polled by a UI.
+pub struct PendingUpdateResume {
+    receiver: mpsc::Receiver<Result<(), String>>,
+    deadline: std::time::Instant,
+}
+
+impl PendingUpdateResume {
+    /// Checks for completion without blocking the caller.
+    #[must_use]
+    pub fn poll(&self) -> UpdateResumePoll {
+        match self.receiver.try_recv() {
+            Ok(result) => UpdateResumePoll::Complete(result.map_err(RuntimeError)),
+            Err(mpsc::TryRecvError::Empty) if std::time::Instant::now() < self.deadline => {
+                UpdateResumePoll::Pending
+            }
+            Err(mpsc::TryRecvError::Empty) => UpdateResumePoll::Complete(Err(RuntimeError(
+                "bridge runtime command timed out".to_owned(),
+            ))),
+            Err(mpsc::TryRecvError::Disconnected) => UpdateResumePoll::Complete(Err(RuntimeError(
+                "bridge runtime stopped before acknowledging recovery".to_owned(),
+            ))),
+        }
+    }
+}
+
 impl BridgeHandle {
     /// Reports whether the runtime worker has terminated or has already been joined.
     ///
@@ -287,6 +319,25 @@ impl BridgeHandle {
     /// Returns an error if the runtime thread stops.
     pub fn resume_from_update(&self) -> Result<(), RuntimeError> {
         self.command(RuntimeCommand::ResumeFromUpdate)
+    }
+
+    /// Queues release of an updater suspension without blocking the caller.
+    ///
+    /// The returned request enforces the same acknowledgement deadline as the
+    /// synchronous command API. Frontends should poll it from their event loop
+    /// and discard it after the first [`UpdateResumePoll::Complete`] result.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has already stopped.
+    pub fn begin_resume_from_update(&self) -> Result<PendingUpdateResume, RuntimeError> {
+        let (sender, receiver) = mpsc::channel();
+        self.command_sender
+            .send(RuntimeCommand::ResumeFromUpdate(sender))
+            .map_err(|_| RuntimeError("bridge runtime is no longer running".to_owned()))?;
+        Ok(PendingUpdateResume {
+            receiver,
+            deadline: std::time::Instant::now() + COMMAND_TIMEOUT,
+        })
     }
 
     /// Lets the bridge look for its hardware again after a system wake.
@@ -425,5 +476,52 @@ impl BridgeHandle {
 impl Drop for BridgeHandle {
     fn drop(&mut self) {
         let _ = self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_resume_acknowledgements_are_polled_without_waiting() {
+        let (sender, receiver) = mpsc::channel();
+        let request = PendingUpdateResume {
+            receiver,
+            deadline: std::time::Instant::now() + COMMAND_TIMEOUT,
+        };
+
+        assert!(matches!(request.poll(), UpdateResumePoll::Pending));
+        sender.send(Ok(())).unwrap();
+        assert!(matches!(request.poll(), UpdateResumePoll::Complete(Ok(()))));
+    }
+
+    #[test]
+    fn update_resume_poll_reports_timeout_and_disconnection() {
+        let (sender, receiver) = mpsc::channel();
+        let timed_out = PendingUpdateResume {
+            receiver,
+            deadline: std::time::Instant::now()
+                .checked_sub(Duration::from_millis(1))
+                .unwrap(),
+        };
+        assert!(matches!(
+            timed_out.poll(),
+            UpdateResumePoll::Complete(Err(RuntimeError(error)))
+                if error.contains("timed out")
+        ));
+        drop(sender);
+
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        let disconnected = PendingUpdateResume {
+            receiver,
+            deadline: std::time::Instant::now() + COMMAND_TIMEOUT,
+        };
+        assert!(matches!(
+            disconnected.poll(),
+            UpdateResumePoll::Complete(Err(RuntimeError(error)))
+                if error.contains("stopped before acknowledging")
+        ));
     }
 }

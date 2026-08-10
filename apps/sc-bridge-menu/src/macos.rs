@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bridge_runtime::{
-    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, PickerConfig,
-    PickerEvent, PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord, StatusLogTracker,
+    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, PendingUpdateResume,
+    PickerConfig, PickerEvent, PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord,
+    StatusLogTracker, UpdateResumePoll,
 };
 use desktop_bindings::{
     default_store_path, input_monitoring_access, load_or_create_store, parse_store,
@@ -67,6 +68,7 @@ use system::{
 mod tests;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const APP_CENTER_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(5);
 const LOG_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 const LOG_TRUNCATION_MARKER: &str = " log_truncated=true\n";
 const RUN_TOGGLE_ID: &str = "run-toggle";
@@ -185,6 +187,7 @@ struct MenuApp {
     items: Option<MenuItems>,
     last_revision: u64,
     last_model: Option<MenuModel>,
+    last_recovery_problem: Option<String>,
     next_poll: Instant,
     logger: StatusLogger,
     settings: AppSettings,
@@ -216,10 +219,26 @@ struct MenuApp {
     /// About, Changelog, and Updates share one child native event loop. The
     /// host also owns the updater's safety-ordered bridge lifecycle requests.
     app_center_host: AppCenterHost,
+    app_center_recovery: AppCenterRecovery,
     #[cfg(feature = "updater")]
     update_checker: UpdateChecker,
     #[cfg(feature = "updater")]
     last_update_available: Option<bool>,
+}
+
+enum AppCenterRecovery {
+    Idle,
+    Waiting(PendingUpdateResume),
+    Backoff { retry_at: Instant, error: String },
+}
+
+impl AppCenterRecovery {
+    fn problem(&self) -> Option<&str> {
+        match self {
+            Self::Backoff { error, .. } => Some(error),
+            Self::Idle | Self::Waiting(_) => None,
+        }
+    }
 }
 
 impl MenuApp {
@@ -280,6 +299,7 @@ impl MenuApp {
             items: None,
             last_revision: u64::MAX,
             last_model: None,
+            last_recovery_problem: None,
             next_poll: Instant::now(),
             logger: StatusLogger::new()?,
             settings,
@@ -298,6 +318,7 @@ impl MenuApp {
             picker_roster_dirty: false,
             editor_children: Vec::new(),
             app_center_host: AppCenterHost::new(),
+            app_center_recovery: AppCenterRecovery::Idle,
             #[cfg(feature = "updater")]
             update_checker: UpdateChecker::new(),
             #[cfg(feature = "updater")]
