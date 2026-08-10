@@ -279,15 +279,19 @@ adapter's Accessibility trust, even when the Default profile is all-unbound.
 The app must appear in both Privacy & Security lists without using the `+` file
 picker; grants must be detected without a restart.
 
-The `macos-app` CI job builds the current-architecture release binary, creates
+The `macos-app` CI job builds the current-architecture release binary with the
+configured update public keys, creates
 an `LSUIElement` `.app`, ad-hoc signs and verifies it, archives it, and uploads
 the bundle artifact. This proves source packaging, not Developer ID trust or
 notarization.
 
 The Release Please workflow separately validates the exact tagged source and
 builds both firmware formats and the macOS application into a draft release.
-Only after tests, dependency policy, checksums, artifact upload, and generated
-release-note comparison succeed does it publish the draft. A failed release run
+The protected publication job validates UF2 metadata, generates a unified
+manifest, signs its exact bytes with Ed25519, and checksums all assets. Only
+after tests, dependency policy, artifact validation, signature generation,
+checksums, upload, and generated release-note comparison succeed does it publish
+the draft. A failed release run
 therefore leaves an inspectable draft instead of an incomplete public release.
 
 The menu app renders and retains one native image for each of its four status

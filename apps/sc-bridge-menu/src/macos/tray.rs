@@ -28,6 +28,7 @@ impl MenuApp {
             MenuItem::with_id(ENABLE_BINDINGS_ID, "Request Permissions…", true, None);
         let edit_profiles = MenuItem::with_id(EDIT_BINDINGS_ID, EDIT_PROFILES_LABEL, true, None);
         let logs = MenuItem::with_id(LOGS_ID, "Open Log Folder", true, None);
+        let updates = MenuItem::with_id(UPDATES_ID, "Check for Updates…", true, None);
         let about = MenuItem::with_id(ABOUT_ID, "About", true, None);
         let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
         let idle_shutdown = vec![
@@ -166,7 +167,7 @@ impl MenuApp {
             ],
         )
         .map_err(|error| error.to_string())?;
-        let separators: [PredefinedMenuItem; 7] =
+        let separators: [PredefinedMenuItem; 8] =
             std::array::from_fn(|_| PredefinedMenuItem::separator());
         let menu = Menu::with_items(&[
             &bridge,
@@ -195,8 +196,10 @@ impl MenuApp {
             &permissions_submenu,
             &copy,
             &logs,
-            &about,
             &separators[6],
+            &updates,
+            &about,
+            &separators[7],
             &quit,
         ])
         .map_err(|error| error.to_string())?;
@@ -222,6 +225,7 @@ impl MenuApp {
             problem,
             run_toggle,
             copy_error,
+            updates,
             idle_shutdown,
             puck_dock,
             bindings_submenu,
@@ -237,6 +241,21 @@ impl MenuApp {
 
     pub(super) fn refresh_status(&mut self) {
         let status = self.runtime.status();
+        #[cfg(feature = "updater")]
+        {
+            self.update_checker.poll();
+            let available = self.update_checker.available(status.xiao.firmware);
+            if self.last_update_available != Some(available) {
+                self.last_update_available = Some(available);
+                if let Some(items) = &self.items {
+                    items.updates.set_text(if available {
+                        "Updates Available…"
+                    } else {
+                        "Check for Updates…"
+                    });
+                }
+            }
+        }
         if let Err(error) = self.logger.write_status(&status) {
             eprintln!("cannot write menu-app diagnostics: {error}");
         }
@@ -380,6 +399,12 @@ impl MenuApp {
                 }
             }
             ABOUT_ID => self.show_about(),
+            UPDATES_ID => {
+                let firmware = self.runtime.status().xiao.firmware;
+                if let Err(error) = self.update_host.launch(firmware) {
+                    eprintln!("cannot launch Update Center: {error}");
+                }
+            }
             QUIT_ID => {
                 self.shutdown();
                 event_loop.exit();
@@ -420,6 +445,7 @@ impl MenuApp {
         }
         self.shutting_down = true;
         self.overlay.stop();
+        self.update_host.stop();
         self.flush_overlay_diagnostics();
         if let Some(mut child) = self.about_child.take() {
             let _ = child.kill();
@@ -427,6 +453,52 @@ impl MenuApp {
         }
         if let Err(error) = self.runtime.shutdown() {
             eprintln!("bridge shutdown failed: {error}");
+        }
+    }
+
+    pub(super) fn handle_update_requests(&mut self, event_loop: &ActiveEventLoop) {
+        let requests: Vec<_> = self.update_host.drain().collect();
+        for request in requests {
+            let response = match request {
+                UpdateRequest::SuspendBridge => {
+                    let resume_after = self
+                        .last_model
+                        .as_ref()
+                        .is_some_and(|model| model.run_action == RunAction::Stop);
+                    match self.runtime.stop() {
+                        Ok(()) => {
+                            self.update_host.set_suspended(resume_after);
+                            UpdateResponse::Suspended { resume_after }
+                        }
+                        Err(error) => UpdateResponse::Error {
+                            message: format!("Bridge could not release its devices: {error}"),
+                        },
+                    }
+                }
+                UpdateRequest::ResumeBridge => {
+                    let restart = self.update_host.clear_suspended();
+                    if restart {
+                        match self.runtime.request_start() {
+                            Ok(()) => UpdateResponse::Resumed,
+                            Err(error) => UpdateResponse::Error {
+                                message: format!("Bridge could not restart: {error}"),
+                            },
+                        }
+                    } else {
+                        UpdateResponse::Resumed
+                    }
+                }
+                UpdateRequest::QuitForReplacement => {
+                    let response = UpdateResponse::Quitting;
+                    let _ = self.update_host.respond(&response);
+                    self.shutdown();
+                    event_loop.exit();
+                    continue;
+                }
+            };
+            if let Err(error) = self.update_host.respond(&response) {
+                eprintln!("cannot answer Update Center: {error}");
+            }
         }
     }
 }
