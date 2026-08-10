@@ -3047,6 +3047,7 @@ dependencies = [
  "bridge-output",
  "clap",
  "ed25519-dalek",
+ "rustix 1.1.4",
  "semver",
  "serde",
  "serde_json",

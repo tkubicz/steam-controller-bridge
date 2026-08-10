@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -122,6 +122,21 @@ pub fn refresh_catalog_if_due(
     trusted_keys: &[TrustedPublicKey],
     interval: std::time::Duration,
 ) -> Result<ReleaseManifestV1, String> {
+    if !cache.check_due(interval) {
+        return cache
+            .load_manifest(trusted_keys)
+            .map_err(|error| error.to_string());
+    }
+    fs::create_dir_all(cache.root()).map_err(|error| error.to_string())?;
+    let refresh_lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(cache.root().join("catalog-refresh.lock"))
+        .map_err(|error| error.to_string())?;
+    rustix::fs::flock(&refresh_lock, rustix::fs::FlockOperation::LockExclusive)
+        .map_err(|error| error.to_string())?;
     if !cache.check_due(interval) {
         return cache
             .load_manifest(trusted_keys)
@@ -268,7 +283,6 @@ mod tests {
     struct MetadataSource {
         replies: Mutex<VecDeque<MetadataReply>>,
         directories: Mutex<Vec<PathBuf>>,
-        barrier: Option<Barrier>,
     }
 
     impl MetadataSource {
@@ -276,14 +290,6 @@ mod tests {
             Self {
                 replies: Mutex::new(replies.into_iter().collect()),
                 directories: Mutex::new(Vec::new()),
-                barrier: None,
-            }
-        }
-
-        fn concurrent(replies: impl IntoIterator<Item = MetadataReply>) -> Self {
-            Self {
-                barrier: Some(Barrier::new(2)),
-                ..Self::new(replies)
             }
         }
 
@@ -295,9 +301,6 @@ mod tests {
     impl ReleaseSource for MetadataSource {
         fn fetch_metadata(&self, directory: &Path) -> Result<(Vec<u8>, Vec<u8>), DownloadError> {
             self.directories.lock().unwrap().push(directory.to_owned());
-            if let Some(barrier) = &self.barrier {
-                barrier.wait();
-            }
             match self.replies.lock().unwrap().pop_front().unwrap() {
                 MetadataReply::Metadata(manifest, signatures) => Ok((manifest, signatures)),
                 MetadataReply::Failure => Err(DownloadError::Io(io::Error::other(
@@ -390,20 +393,22 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_refreshes_use_private_directories_and_clean_them() {
+    fn concurrent_refreshes_are_single_flight_and_clean_their_directory() {
         let root = temporary_directory("network-concurrent");
         let cache = Arc::new(ReleaseCache::new(root.clone()));
         let (manifest, signatures, key) = signed_metadata("1.5.0", 5);
-        let source = Arc::new(MetadataSource::concurrent([
-            MetadataReply::Metadata(manifest.clone(), signatures.clone()),
-            MetadataReply::Metadata(manifest, signatures),
-        ]));
+        let source = Arc::new(MetadataSource::new([MetadataReply::Metadata(
+            manifest, signatures,
+        )]));
+        let start = Arc::new(Barrier::new(2));
         let mut workers = Vec::new();
         for _ in 0..2 {
             let cache = Arc::clone(&cache);
             let source = Arc::clone(&source);
+            let start = Arc::clone(&start);
             let key = key.clone();
             workers.push(std::thread::spawn(move || {
+                start.wait();
                 refresh_catalog_if_due(source.as_ref(), &cache, &[key], Duration::from_hours(24))
                     .unwrap()
             }));
@@ -415,8 +420,7 @@ mod tests {
             );
         }
         let directories = source.directories.lock().unwrap();
-        assert_eq!(directories.len(), 2);
-        assert_ne!(directories[0], directories[1]);
+        assert_eq!(directories.len(), 1);
         assert!(directories.iter().all(|directory| !directory.exists()));
         drop(directories);
         let _ = fs::remove_dir_all(root);
