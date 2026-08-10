@@ -569,43 +569,59 @@ impl MenuApp {
             self.app_center_recovery = AppCenterRecovery::Idle;
             return;
         }
-        let now = Instant::now();
         let state = std::mem::replace(&mut self.app_center_recovery, AppCenterRecovery::Idle);
         match state {
-            AppCenterRecovery::Waiting(request) => match request.poll() {
+            AppCenterRecovery::Waiting {
+                mut request,
+                mut error,
+            } => match request.poll() {
                 UpdateResumePoll::Pending => {
-                    self.app_center_recovery = AppCenterRecovery::Waiting(request);
+                    self.app_center_recovery = AppCenterRecovery::Waiting { request, error };
+                }
+                UpdateResumePoll::TimedOut => {
+                    let message = "Updater suspension recovery is not responding. Quit remains deferred while the original recovery request is pending.".to_owned();
+                    eprintln!("level=error event=app_center_recovery_delayed");
+                    error = Some(message);
+                    self.app_center_recovery = AppCenterRecovery::Waiting { request, error };
                 }
                 UpdateResumePoll::Complete(Ok(())) => {
                     self.app_center_host.complete_suspension_recovery();
                 }
                 UpdateResumePoll::Complete(Err(error)) => {
-                    self.defer_or_complete_app_center_recovery(now, &error);
+                    self.fail_app_center_recovery(&error.to_string());
                 }
             },
-            AppCenterRecovery::Backoff { retry_at, error } if now < retry_at => {
-                self.app_center_recovery = AppCenterRecovery::Backoff { retry_at, error };
+            AppCenterRecovery::Failed(error) => {
+                if !self.complete_terminated_app_center_recovery(&error) {
+                    self.app_center_recovery = AppCenterRecovery::Failed(error);
+                }
             }
-            AppCenterRecovery::Idle | AppCenterRecovery::Backoff { .. } => {
-                self.start_app_center_recovery(now);
-            }
+            AppCenterRecovery::Idle => self.start_app_center_recovery(),
         }
     }
 
-    fn start_app_center_recovery(&mut self, now: Instant) {
+    fn start_app_center_recovery(&mut self) {
         match self.runtime.begin_resume_from_update() {
             Ok(request) => {
-                self.app_center_recovery = AppCenterRecovery::Waiting(request);
+                self.app_center_recovery = AppCenterRecovery::Waiting {
+                    request,
+                    error: None,
+                };
             }
-            Err(error) => self.defer_or_complete_app_center_recovery(now, &error),
+            Err(error) => self.fail_app_center_recovery(&error.to_string()),
         }
     }
 
-    fn defer_or_complete_app_center_recovery(
-        &mut self,
-        now: Instant,
-        error: &bridge_runtime::RuntimeError,
-    ) {
+    fn fail_app_center_recovery(&mut self, error: &str) {
+        if self.complete_terminated_app_center_recovery(error) {
+            return;
+        }
+        let message = format!("Updater suspension recovery failed: {error}. Quit remains deferred because bridge ownership could not be proven safe.");
+        eprintln!("level=error event=app_center_recovery_failed error={error:?}");
+        self.app_center_recovery = AppCenterRecovery::Failed(message);
+    }
+
+    fn complete_terminated_app_center_recovery(&mut self, error: &str) -> bool {
         if self.runtime.is_terminated() {
             let join = self.runtime.join();
             eprintln!(
@@ -616,15 +632,9 @@ impl MenuApp {
             // menu process after its worker has already ended.
             self.app_center_host.complete_suspension_recovery();
             self.app_center_recovery = AppCenterRecovery::Idle;
+            true
         } else {
-            let message = format!(
-                "Updater suspension recovery is not responding: {error}. Quit remains deferred while recovery retries."
-            );
-            eprintln!("level=error event=app_center_recovery_deferred error={error:?}");
-            self.app_center_recovery = AppCenterRecovery::Backoff {
-                retry_at: now + APP_CENTER_RECOVERY_RETRY_DELAY,
-                error: message,
-            };
+            false
         }
     }
 }

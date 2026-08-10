@@ -68,7 +68,6 @@ use system::{
 mod tests;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
-const APP_CENTER_RECOVERY_RETRY_DELAY: Duration = Duration::from_secs(5);
 const LOG_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 const LOG_TRUNCATION_MARKER: &str = " log_truncated=true\n";
 const RUN_TOGGLE_ID: &str = "run-toggle";
@@ -228,15 +227,21 @@ struct MenuApp {
 
 enum AppCenterRecovery {
     Idle,
-    Waiting(PendingUpdateResume),
-    Backoff { retry_at: Instant, error: String },
+    Waiting {
+        request: PendingUpdateResume,
+        error: Option<String>,
+    },
+    Failed(String),
 }
 
 impl AppCenterRecovery {
     fn problem(&self) -> Option<&str> {
         match self {
-            Self::Backoff { error, .. } => Some(error),
-            Self::Idle | Self::Waiting(_) => None,
+            Self::Waiting {
+                error: Some(error), ..
+            }
+            | Self::Failed(error) => Some(error),
+            Self::Idle | Self::Waiting { error: None, .. } => None,
         }
     }
 }

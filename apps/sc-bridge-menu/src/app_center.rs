@@ -147,10 +147,10 @@ fn combine_flash_and_resume(
     }
 }
 
-fn combine_panic_and_resume(resume: Result<(), String>) -> Result<(), FirmwareOperationError> {
+fn panic_and_resume_error(resume: Result<(), String>) -> FirmwareOperationError {
     match resume {
-        Ok(()) => Err(FirmwareOperationError::Panicked),
-        Err(error) => Err(FirmwareOperationError::PanickedAndResume(error)),
+        Ok(()) => FirmwareOperationError::Panicked,
+        Err(error) => FirmwareOperationError::PanickedAndResume(error),
     }
 }
 
@@ -434,7 +434,7 @@ impl AppCenter {
                 drop(session);
                 match flash_result {
                     Ok(result) => combine_flash_and_resume(result, resume_result),
-                    Err(_) => combine_panic_and_resume(resume_result),
+                    Err(_) => Err(panic_and_resume_error(resume_result)),
                 }
             })();
             let _ = sender.send(WorkerEvent::Firmware(result));
@@ -969,14 +969,14 @@ mod tests {
         let active = Arc::new(AtomicBool::new(false));
         let session = ActiveFirmwareSession::begin(Arc::clone(&active));
         let flash = catch_unwind(AssertUnwindSafe(|| panic!("fixture panic")));
-        let result = match flash {
+        let error = match flash {
             Ok(()) => unreachable!(),
-            Err(_) => combine_panic_and_resume(Err("runtime stopped".to_owned())),
+            Err(_) => panic_and_resume_error(Err("runtime stopped".to_owned())),
         };
         drop(session);
 
         assert!(!active.load(Ordering::Acquire));
-        let message = result.unwrap_err().message();
+        let message = error.message();
         assert!(message.contains("stopped unexpectedly"));
         assert!(message.contains("runtime stopped"));
     }
