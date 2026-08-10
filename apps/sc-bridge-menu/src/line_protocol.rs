@@ -4,7 +4,7 @@ pub fn read_bounded_line(
     reader: &mut impl BufRead,
     maximum_bytes: usize,
 ) -> Result<Option<Vec<u8>>, String> {
-    let mut line = Vec::with_capacity(maximum_bytes);
+    let mut line = Vec::new();
     loop {
         let available = reader.fill_buf().map_err(|error| error.to_string())?;
         if available.is_empty() {
@@ -44,5 +44,14 @@ mod tests {
         );
         assert!(read_bounded_line(&mut Cursor::new(b"abcd\n"), 4).is_err());
         assert!(read_bounded_line(&mut Cursor::new(b"abc"), 4).is_err());
+    }
+
+    #[test]
+    fn short_lines_do_not_reserve_the_whole_protocol_bound() {
+        let line = read_bounded_line(&mut Cursor::new(b"ok\n"), 64 * 1024)
+            .unwrap()
+            .unwrap();
+        assert_eq!(line, b"ok");
+        assert!(line.capacity() < 64 * 1024);
     }
 }

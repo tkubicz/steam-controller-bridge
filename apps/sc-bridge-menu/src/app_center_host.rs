@@ -302,22 +302,34 @@ impl AppCenterHost {
             return false;
         };
         match child.try_wait() {
-            Ok(None) => false,
+            Ok(None) => {}
             Ok(Some(status)) => {
                 let _ = self.diagnostic_sender.try_send(format!(
                     "level=info event=app_center_exited status={status:?}"
                 ));
                 self.discard_child();
-                true
+                return true;
             }
             Err(error) => {
                 let _ = self.diagnostic_sender.try_send(format!(
                     "level=warn event=app_center_wait_failed error={error:?}"
                 ));
                 self.discard_child();
-                true
+                return true;
             }
         }
+        if self
+            .reader_thread
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            let _ = self
+                .diagnostic_sender
+                .try_send("level=warn event=app_center_reader_ended".to_owned());
+            self.discard_child();
+            return true;
+        }
+        false
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
@@ -366,6 +378,7 @@ impl AppCenterHost {
         }
         self.generation = None;
         self.last_firmware = None;
+        while self.requests.try_recv().is_ok() {}
     }
 
     fn detach_child(&mut self) {
@@ -479,5 +492,37 @@ mod tests {
         assert!(marker.exists());
         assert!(host.child.is_none());
         let _ = std::fs::remove_file(marker);
+    }
+
+    #[test]
+    fn a_full_request_queue_retires_the_unreadable_child() {
+        let mut host = AppCenterHost::new();
+        let lines = (0..=REQUEST_CAPACITY)
+            .map(|id| request_line(u64::try_from(id).unwrap()))
+            .collect::<String>();
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf '%s' \"$1\"; read _",
+            "app-center-test",
+            &lines,
+        ]);
+        host.spawn_command(&mut command).unwrap();
+
+        let retired = (0..100).any(|_| {
+            if host.reap() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            false
+        });
+
+        assert!(retired, "host did not observe the failed reader");
+        assert!(host.child.is_none());
+        assert!(host.drain().is_empty());
+        assert!(host
+            .drain_diagnostics()
+            .iter()
+            .any(|line| line.contains("app_center_request_queue_full")));
     }
 }
