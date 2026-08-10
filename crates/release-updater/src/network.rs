@@ -79,15 +79,6 @@ pub enum CatalogRefresh {
     },
 }
 
-impl CatalogRefresh {
-    #[must_use]
-    pub const fn manifest(&self) -> &ReleaseManifestV1 {
-        match self {
-            Self::Current(manifest) | Self::Stale { manifest, .. } => manifest,
-        }
-    }
-}
-
 pub trait ReleaseSource {
     fn fetch_metadata(&self, directory: &Path) -> Result<(Vec<u8>, Vec<u8>), DownloadError>;
     fn download_release_asset(
@@ -435,6 +426,12 @@ mod tests {
 
     struct ArtifactSource;
 
+    fn refreshed_manifest(refresh: &CatalogRefresh) -> &ReleaseManifestV1 {
+        match refresh {
+            CatalogRefresh::Current(manifest) | CatalogRefresh::Stale { manifest, .. } => manifest,
+        }
+    }
+
     impl ReleaseSource for ArtifactSource {
         fn fetch_metadata(&self, _directory: &Path) -> Result<(Vec<u8>, Vec<u8>), DownloadError> {
             unreachable!()
@@ -472,14 +469,15 @@ mod tests {
         .is_err());
         assert!(cache.check_due(Duration::from_hours(24)));
         assert_eq!(
-            refresh_catalog_if_due(
-                &source,
-                &cache,
-                std::slice::from_ref(&key),
-                Duration::from_hours(24)
+            refreshed_manifest(
+                &refresh_catalog_if_due(
+                    &source,
+                    &cache,
+                    std::slice::from_ref(&key),
+                    Duration::from_hours(24)
+                )
+                .unwrap()
             )
-            .unwrap()
-            .manifest()
             .application_version,
             semver::Version::new(1, 5, 0)
         );
@@ -539,8 +537,9 @@ mod tests {
             }));
         }
         for worker in workers {
+            let refresh = worker.join().unwrap();
             assert_eq!(
-                worker.join().unwrap().manifest().application_version,
+                refreshed_manifest(&refresh).application_version,
                 semver::Version::new(1, 5, 0)
             );
         }
