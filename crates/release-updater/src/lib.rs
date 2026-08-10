@@ -17,6 +17,7 @@ mod cache;
 mod firmware;
 mod manifest;
 mod network;
+mod temporary;
 #[cfg(test)]
 mod test_support;
 

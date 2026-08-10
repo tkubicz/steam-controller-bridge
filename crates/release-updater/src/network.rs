@@ -2,8 +2,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::temporary::unique_temporary_path;
 use crate::{
     ArtifactDescriptor, ReleaseCache, ReleaseManifestV1, TrustedPublicKey, MANIFEST_ASSET,
     SIGNATURES_ASSET, UPDATE_REPOSITORY,
@@ -29,9 +29,6 @@ const CURL_DOWNLOAD_ARGS: &[&str] = &[
     "60",
     "--max-filesize",
 ];
-
-static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-static METADATA_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub enum DownloadError {
@@ -130,11 +127,8 @@ pub fn refresh_catalog_if_due(
             .load_manifest(trusted_keys)
             .map_err(|error| error.to_string());
     }
-    let temporary = cache.root().join(format!(
-        ".metadata-download.{}.{}",
-        std::process::id(),
-        METADATA_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
+    let temporary =
+        unique_temporary_path(cache.root(), std::ffi::OsStr::new("metadata"), "download");
     let refreshed = source
         .fetch_metadata(&temporary)
         .map_err(|error| error.to_string())
@@ -203,15 +197,13 @@ pub fn download_to_path(
         .parent()
         .ok_or_else(|| io::Error::other("download destination has no parent"))?;
     fs::create_dir_all(parent)?;
-    let temporary: PathBuf = parent.join(format!(
-        ".{}.{}.{}.download",
+    let temporary = unique_temporary_path(
+        parent,
         destination
             .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("update"),
-        std::process::id(),
-        DOWNLOAD_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
+            .unwrap_or_else(|| std::ffi::OsStr::new("update")),
+        "download",
+    );
     let output = Command::new("/usr/bin/curl")
         .args(CURL_DOWNLOAD_ARGS)
         .arg(maximum_size.to_string())

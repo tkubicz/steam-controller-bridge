@@ -1,12 +1,12 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
+use crate::temporary::unique_temporary_path;
 use crate::{
     verify_artifact, verify_signed_manifest, ArtifactDescriptor, ArtifactError, ManifestError,
     ReleaseManifestV1, TrustedPublicKey, MANIFEST_ASSET, SIGNATURES_ASSET,
@@ -74,8 +74,6 @@ struct CachedMetadata {
     manifest: Vec<u8>,
     signatures: Vec<u8>,
 }
-
-static CACHE_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 impl ReleaseCache {
     #[must_use]
@@ -194,14 +192,12 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("cache path has no parent"))?;
     fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(
-        ".{}.{}.{}.tmp",
+    let temporary = unique_temporary_path(
+        parent,
         path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("update"),
-        std::process::id(),
-        CACHE_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
+            .unwrap_or_else(|| std::ffi::OsStr::new("update")),
+        "tmp",
+    );
     let result = (|| {
         let mut file = OpenOptions::new()
             .create(true)
