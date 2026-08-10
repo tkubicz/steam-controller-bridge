@@ -16,7 +16,6 @@ updater = ["dep:eframe", "dep:ui-theme", "dep:release-updater", "dep:semver"]
 
 [dependencies]
 bridge-runtime = { path = "../../crates/bridge-runtime" }
-clap.workspace = true
 desktop-bindings = { path = "../../crates/desktop-bindings" }
 profile-picker = { path = "../../crates/profile-picker" }
 serde.workspace = true
@@ -26,6 +25,7 @@ serde_json.workspace = true
 steam-controller-device = { path = "../../crates/steam-controller-device" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+clap.workspace = true
 eframe = { workspace = true, optional = true }
 ui-theme = { path = "../../crates/ui-theme", optional = true }
 # Only the editor draws a controller; the overlay does not.
