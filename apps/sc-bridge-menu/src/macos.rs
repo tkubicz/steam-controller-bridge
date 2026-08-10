@@ -56,10 +56,12 @@ use support::{
     resolve_picker_commit, save_settings, settings_path, AppSettings, BindingsFileFingerprint,
     PermissionStage, PickerEventMailbox, OVERLAY_HOLD_CHOICES,
 };
+pub(crate) use system::open_path;
+#[cfg(feature = "updater")]
+pub(crate) use system::reveal_path;
 use system::{
     activate_child_application, copy_text, launch_bindings_editor, open_privacy_pane, PrivacyPane,
 };
-pub(crate) use system::{open_path, reveal_path};
 
 #[cfg(test)]
 mod tests;

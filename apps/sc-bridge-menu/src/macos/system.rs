@@ -78,6 +78,7 @@ pub(crate) fn open_path(path: impl AsRef<std::ffi::OsStr>) -> Result<(), String>
     run_open(std::iter::once(path.as_ref()))
 }
 
+#[cfg(feature = "updater")]
 pub(crate) fn reveal_path(path: impl AsRef<std::ffi::OsStr>) -> Result<(), String> {
     run_open([std::ffi::OsStr::new("-R"), path.as_ref()])
 }
