@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::temporary::unique_temporary_path;
 use crate::{
     verify_artifact, verify_signed_manifest, ArtifactDescriptor, ArtifactError, ManifestError,
-    ReleaseManifestV1, TrustedPublicKey, MANIFEST_ASSET, SIGNATURES_ASSET,
+    ReleaseManifestV1, TrustedPublicKey,
 };
 
 #[derive(Debug)]
@@ -92,16 +92,6 @@ impl ReleaseCache {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
-    }
-
-    #[must_use]
-    pub fn manifest_path(&self) -> PathBuf {
-        self.root.join(MANIFEST_ASSET)
-    }
-
-    #[must_use]
-    pub fn signatures_path(&self) -> PathBuf {
-        self.root.join(SIGNATURES_ASSET)
     }
 
     fn metadata_path(&self) -> PathBuf {
