@@ -55,7 +55,10 @@ as invalid.
 Capture is macOS-only. Grant Input Monitoring to the terminal or the app hosting
 `sc-visualizer` and relaunch it before recording. The preflight view reports the
 controller, state and `0x40` activity, event-tap readiness, display setup, and
-output path. The tool observes Core Graphics at the HID entry
+output path. When prompted, touch and move either controller pad to trigger the
+required lizard mouse stream. Preflight waits up to 20 seconds for that `0x40`
+activity before invalidating the capture. The tool observes Core Graphics at the
+HID entry
 tap in listen-only mode; it does not suppress, replace, or post those events.
 The JSONL includes raw HID, decoded states, decoded `0x40` reports, connection
 events, transport, OS/build, display geometry, mouse scaling, tool version, and

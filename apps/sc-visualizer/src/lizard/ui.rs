@@ -9,9 +9,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use controller_art::PadSide;
 use desktop_bindings::BindingProfile;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use ui_theme::{ACCENT, DANGER, DETAIL, MUTED_TEXT, OUTLINE, SUCCESS, SUNKEN, TEXT};
+use ui_theme::{ACCENT, DANGER, DETAIL, MUTED_TEXT, SUCCESS, SUNKEN, TEXT};
 
 use crate::device::HidBrokerClient;
 
@@ -51,6 +52,7 @@ pub(crate) struct LabUi {
     profile_warning: Option<String>,
     capture: Option<GuiCapture>,
     preflight: Option<CapturePreflight>,
+    preflight_wait: Option<(Instant, u64)>,
     paths: Option<ArtifactPaths>,
     trials: Vec<GuidedTrial>,
     trial_index: usize,
@@ -80,6 +82,7 @@ impl LabUi {
             profile_warning,
             capture: None,
             preflight: None,
+            preflight_wait: None,
             paths: None,
             trials: guided_trials(),
             trial_index: 0,
@@ -234,13 +237,14 @@ impl LabUi {
         self.paths = Some(ArtifactPaths::from_capture(path.clone()));
         self.capture = Some(GuiCapture::start(None, path, self.hid_broker.clone()));
         self.preflight = None;
+        self.preflight_wait = None;
         self.trial_index = 0;
         self.attempt = 1;
         self.phase = TrialPhase::Waiting;
         self.preview.clear();
         self.error = None;
         self.screen = Screen::Capturing;
-        "Preflight: waiting for controller state, lizard reports, and the event tap…"
+        "Preflight: detecting the controller before checking lizard mouse output…"
             .clone_into(&mut self.status);
     }
 
@@ -260,7 +264,26 @@ impl LabUi {
     fn capturing(&mut self, ui: &mut egui::Ui) {
         let Some(preflight) = &self.preflight else {
             ui.spinner();
-            ui.label("Auto-detecting the active controller and validating capture streams…");
+            if let Some((started, timeout_secs)) = self.preflight_wait {
+                let remaining = Duration::from_secs(timeout_secs)
+                    .saturating_sub(started.elapsed())
+                    .as_secs()
+                    .saturating_add(1)
+                    .min(timeout_secs);
+                ui.heading("Move a controller pad now");
+                ui.label(
+                    egui::RichText::new(
+                        "Touch and move either the left or right pad. This triggers the 0x40 lizard mouse reports required by the test.",
+                    )
+                    .strong()
+                    .color(TEXT),
+                );
+                ui.label(format!(
+                    "Waiting up to {timeout_secs} seconds — approximately {remaining} seconds remaining."
+                ));
+            } else {
+                ui.label("Auto-detecting the active controller and preparing preflight…");
+            }
             if ui.button("Cancel capture").clicked() {
                 self.cancel_capture();
             }
@@ -632,7 +655,13 @@ impl LabUi {
         }
         for event in capture_events {
             match event {
+                GuiCaptureEvent::PreflightStarted { timeout_secs } => {
+                    self.preflight_wait = Some((Instant::now(), timeout_secs));
+                    "Preflight: touch and move either controller pad now."
+                        .clone_into(&mut self.status);
+                }
                 GuiCaptureEvent::Preflight(preflight) => {
+                    self.preflight_wait = None;
                     if let Some(reason) = &preflight.invalid_reason {
                         self.error = Some(reason.clone());
                     } else {
@@ -765,11 +794,25 @@ fn paint_trial(ui: &mut egui::Ui, trial: &GuidedTrial, observed: Option<&[(i64, 
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 12.0, SUNKEN);
-    let pad = Rect::from_center_size(rect.center(), Vec2::splat(260.0));
-    painter.circle_stroke(pad.center(), pad.width() / 2.0, Stroke::new(2.0, OUTLINE));
+    let pad = Rect::from_center_size(rect.center(), Vec2::splat(238.0));
+    controller_art::draw_trackpad_surface(&painter, pad, PadSide::Right);
+    painter.text(
+        rect.center_top() + Vec2::new(0.0, 8.0),
+        egui::Align2::CENTER_TOP,
+        "FRONT OF CONTROLLER ↑",
+        egui::FontId::proportional(11.0),
+        MUTED_TEXT,
+    );
+    painter.text(
+        rect.center_bottom() - Vec2::new(0.0, 8.0),
+        egui::Align2::CENTER_BOTTOM,
+        "RIGHT PAD",
+        egui::FontId::proportional(11.0),
+        MUTED_TEXT,
+    );
     match trial.visual {
         TrialVisual::Hold(point) | TrialVisual::Click(point) | TrialVisual::Precision(point) => {
-            let position = normalized_position(pad, point.normalized());
+            let position = pad_position(pad, point.normalized());
             let radius = if matches!(trial.visual, TrialVisual::Precision(_)) {
                 20.0
             } else {
@@ -780,8 +823,8 @@ fn paint_trial(ui: &mut egui::Ui, trial: &GuidedTrial, observed: Option<&[(i64, 
         }
         TrialVisual::Swipe(direction, _) | TrialVisual::ClickDrag(direction) => {
             let (start, end) = direction.endpoints();
-            let start = normalized_position(pad, start);
-            let end = normalized_position(pad, end);
+            let start = pad_position(pad, start);
+            let end = pad_position(pad, end);
             painter.arrow(start, end - start, Stroke::new(4.0, ACCENT));
             let time = ui.input(|input| input.time) as f32;
             let progress = (time.fract() * 1.2).min(1.0);
@@ -789,7 +832,7 @@ fn paint_trial(ui: &mut egui::Ui, trial: &GuidedTrial, observed: Option<&[(i64, 
         }
     }
     if let Some(points) = observed {
-        paint_normalized_polyline(&painter, pad.shrink(18.0), points, SUCCESS);
+        paint_pad_polyline(&painter, pad, points, SUCCESS);
     }
 }
 
@@ -829,21 +872,31 @@ fn paint_trajectory(ui: &mut egui::Ui, trajectory: &StageTrajectory) {
     );
 }
 
-fn normalized_position(rect: Rect, point: (f32, f32)) -> Pos2 {
-    Pos2::new(
-        egui::lerp(rect.x_range(), point.0),
-        egui::lerp(rect.y_range(), point.1),
+fn pad_position(surface: Rect, point: (f32, f32)) -> Pos2 {
+    controller_art::trackpad_surface_point(
+        surface,
+        PadSide::Right,
+        [point.0.mul_add(2.0, -1.0), 1.0 - point.1 * 2.0],
     )
 }
 
-fn paint_normalized_polyline(
+fn paint_pad_polyline(
     painter: &egui::Painter,
-    rect: Rect,
+    surface: Rect,
     points: &[(i64, i64)],
     color: Color32,
 ) {
     if points.len() > 1 {
-        let mapped = map_points(rect, points, bounds(points, &[]));
+        let mapped = map_points(surface.shrink(18.0), points, bounds(points, &[]))
+            .into_iter()
+            .map(|point| {
+                let locus = [
+                    (point.x - surface.center().x) / (surface.width() * 0.5),
+                    (surface.center().y - point.y) / (surface.height() * 0.5),
+                ];
+                controller_art::trackpad_surface_point(surface, PadSide::Right, locus)
+            })
+            .collect();
         painter.add(egui::Shape::line(mapped, Stroke::new(2.0, color)));
     }
 }

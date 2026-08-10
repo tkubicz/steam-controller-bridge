@@ -18,6 +18,8 @@ use recording::RecordingEvent;
 const QUEUE_CAPACITY: usize = 8_192;
 #[cfg(any(target_os = "macos", test))]
 const REORDER_WINDOW_US: u64 = 10_000;
+#[cfg(target_os = "macos")]
+const PREFLIGHT_TIMEOUT_SECS: u64 = 20;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(
@@ -57,6 +59,9 @@ pub(crate) struct CapturePreflight {
     )
 )]
 pub(crate) enum GuiCaptureEvent {
+    PreflightStarted {
+        timeout_secs: u64,
+    },
     Preflight(CapturePreflight),
     TrialPreview {
         trial_id: String,
@@ -225,7 +230,7 @@ mod macos {
 
     use super::{
         CapturePreflight, EventMerger, GuiCaptureCommand, GuiCaptureEvent, QueuedEvent,
-        QUEUE_CAPACITY,
+        PREFLIGHT_TIMEOUT_SECS, QUEUE_CAPACITY,
     };
 
     enum CaptureControl {
@@ -481,7 +486,14 @@ mod macos {
             info.transport,
             output.display()
         );
-        eprintln!("Preflight: waiting up to 3 seconds for state and 0x40 reports...");
+        eprintln!(
+            "Preflight: touch and move either controller pad now to trigger lizard mouse output; waiting up to {PREFLIGHT_TIMEOUT_SECS} seconds for state and 0x40 reports..."
+        );
+        if let CaptureControl::Gui { events, .. } = &control {
+            let _ = events.send(GuiCaptureEvent::PreflightStarted {
+                timeout_secs: PREFLIGHT_TIMEOUT_SECS,
+            });
+        }
         preflight(&shared, &state_count, &lizard_count, &tap_ready);
         if let CaptureControl::Gui { events, .. } = &control {
             let _ = events.send(GuiCaptureEvent::Preflight(CapturePreflight {
@@ -733,7 +745,7 @@ mod macos {
         lizard_count: &AtomicUsize,
         tap_ready: &AtomicBool,
     ) {
-        let preflight_deadline = Instant::now() + Duration::from_secs(3);
+        let preflight_deadline = Instant::now() + Duration::from_secs(PREFLIGHT_TIMEOUT_SECS);
         while !shared.stop.load(Ordering::Acquire)
             && Instant::now() < preflight_deadline
             && (state_count.load(Ordering::Acquire) == 0
@@ -748,9 +760,9 @@ mod macos {
             );
         }
         if lizard_count.load(Ordering::Acquire) == 0 {
-            shared.invalidate(
-                "no 0x40 lizard mouse reports were observed during preflight; Steam or another lizard-mode heartbeat may have disabled lizard mode".to_owned(),
-            );
+            shared.invalidate(format!(
+                "no 0x40 lizard mouse reports were observed during the {PREFLIGHT_TIMEOUT_SECS}-second preflight; touching or moving either controller pad should trigger one. If you moved a pad, Steam or another lizard-mode heartbeat may have disabled lizard mode"
+            ));
         }
         if !tap_ready.load(Ordering::Acquire) {
             shared.invalidate(

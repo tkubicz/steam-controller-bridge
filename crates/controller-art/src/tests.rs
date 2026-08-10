@@ -11,7 +11,7 @@ use crate::geometry::{
     TRACKPAD_SIZE, USB_PORT_SIZE,
 };
 use crate::shape::{cross, signed_area};
-use crate::{Analog, Control, ControlState, Face, Highlight};
+use crate::{Analog, Control, ControlState, Face, Highlight, PadSide};
 
 /// A view large enough that rounding never decides an assertion.
 fn test_view() -> egui::Rect {
@@ -518,6 +518,20 @@ fn the_two_pads_cant_in_opposite_directions() {
         left.y.signum() != right.y.signum(),
         "pad cants should mirror: left {left:?}, right {right:?}"
     );
+}
+
+#[test]
+fn standalone_pad_surface_preserves_center_and_physical_cant() {
+    let surface = egui::Rect::from_center_size(egui::pos2(300.0, 200.0), egui::vec2(180.0, 180.0));
+    for side in PadSide::ALL {
+        let center = crate::trackpad_surface_point(surface, side, [0.0, 0.0]);
+        assert!((center - surface.center()).length() < f32::EPSILON);
+    }
+    let left = crate::trackpad_surface_point(surface, PadSide::Left, [1.0, 0.0]) - surface.center();
+    let right =
+        crate::trackpad_surface_point(surface, PadSide::Right, [1.0, 0.0]) - surface.center();
+    assert!(left.y * right.y < 0.0);
+    assert!((left.length() - right.length()).abs() < f32::EPSILON);
 }
 
 #[test]

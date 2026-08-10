@@ -5,12 +5,20 @@ use ui_theme::{ACCENT, ACCENT_SUBTLE, DETAIL, INSET, OUTLINE, SURFACE};
 
 use crate::geometry::{
     body_shape, control_rect, dpad_arm, dpad_shape, locus_point, normalized_point, shoulder_index,
-    shoulder_shapes, trackpad_shapes, unit_rect, BUMPERS, BUMPER_SIZE, DOT_RADIUS,
-    FACE_BUTTON_LAYOUT, FACE_BUTTON_RADIUS, GRIP_PADDLES, OPTION_LAYOUT, PUCK_CONNECTOR,
-    PUCK_CONNECTOR_SIZE, QUICK_ACCESS, QUICK_ACCESS_SIZE, STEAM_RADIUS, STICKS, STICK_RADIUS,
-    TOP_SEAM, TOP_SEAM_WIDTH, USB_PORT_SIZE,
+    shoulder_shapes, trackpad_shapes, trackpad_surface_shapes, unit_rect, BUMPERS, BUMPER_SIZE,
+    DOT_RADIUS, FACE_BUTTON_LAYOUT, FACE_BUTTON_RADIUS, GRIP_PADDLES, OPTION_LAYOUT,
+    PUCK_CONNECTOR, PUCK_CONNECTOR_SIZE, QUICK_ACCESS, QUICK_ACCESS_SIZE, STEAM_RADIUS, STICKS,
+    STICK_RADIUS, TOP_SEAM, TOP_SEAM_WIDTH, USB_PORT_SIZE,
 };
-use crate::{Analog, Control, ControlState, Highlight};
+use crate::{Analog, Control, ControlState, Highlight, PadSide};
+
+/// Draws one pad at instruction-view scale using the same cant, corner radius,
+/// inset, and resting colors as the full controller artwork.
+pub fn draw_trackpad_surface(painter: &egui::Painter, surface: egui::Rect, side: PadSide) {
+    let (pad, inset) = &trackpad_surface_shapes()[side.index()];
+    pad.paint(painter, surface, INSET, egui::Stroke::new(2.0, OUTLINE));
+    inset.outline(painter, surface, egui::Stroke::new(1.0, DETAIL));
+}
 
 /// Fill and stroke for one control, from its state and the face's resting
 /// stroke.
