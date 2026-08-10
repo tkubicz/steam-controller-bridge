@@ -1,43 +1,45 @@
-use std::io::{BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::{Duration, Instant};
 
 use eframe::egui;
 use release_updater::{
-    classify_firmware_release, ensure_release_artifact, flash_firmware,
-    guided_replacement_supported, installed_macos_version, refresh_catalog_if_due,
-    stage_application, ApplicationRelease, ArtifactDescriptor, FirmwareFlashProgress,
-    FirmwareRelease, FirmwareReleaseState, LatestReleaseClient, ReleaseCache, ReleaseManifestV1,
-    APPLICATION_BUNDLE_ID, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID,
-    XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
+    flash_firmware, guided_replacement_supported, ApplicationRelease, ArtifactDescriptor,
+    FirmwareFlashProgress, FirmwareRelease, ReleaseManifestV1, APPLICATION_BUNDLE_ID,
+    FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID, XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT,
+    XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
 };
 use semver::Version;
-use ui_theme::{
-    ACCENT, ACCENT_SUBTLE, BORDER, DANGER, MUTED_TEXT, ON_ACCENT, PANEL, SUCCESS, SURFACE, TEXT,
-};
+use ui_theme::{ACCENT, ACCENT_SUBTLE, DANGER, MUTED_TEXT, PANEL, SUCCESS, SURFACE, TEXT};
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
 use crate::about_pages::AboutContent;
 use crate::app_center_protocol::{
-    encode, read, AppCenterCommand, AppCenterPage, FirmwareStatus, UpdateOperation, UpdateRequest,
-    UpdateResponse, UpdateResult,
+    AppCenterCommand, AppCenterPage, FirmwareStatus, UpdateOperation,
 };
 use crate::cli::{AppCenterArgs, DemoMode};
 use crate::macos::{open_path, reveal_path};
-use crate::update_check::{running_version, update_context, CHECK_INTERVAL};
+use crate::update_check::running_version;
 use crate::window_ui::{
-    activate_window, configure_window_style, full_width_card, hero_transition, load_texture,
-    parse_release_notes, render_release_notes, ReleaseNotes,
+    activate_window, configure_window_style, hero_transition, load_texture, parse_release_notes,
+    ReleaseNotes,
 };
 
 const WINDOW_TITLE: &str = "Steam Controller Bridge";
 const APP_ICON: &[u8] = include_bytes!("../../../packaging/macos/AppIcon.png");
 const WINDOW_SIZE: [f32; 2] = [760.0, 680.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [640.0, 540.0];
-const HOST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+
+mod host_client;
+mod release_actions;
+mod view;
+
+use self::host_client::HostClient;
+use self::release_actions::{
+    download_and_stage_application, download_firmware, fetch_catalog, progress_text,
+};
+use self::view::{firmware_badge, hero_badge};
 
 pub fn run(arguments: AppCenterArgs) -> Result<(), String> {
     let demo = arguments.demo;
@@ -72,104 +74,6 @@ pub fn run(arguments: AppCenterArgs) -> Result<(), String> {
         }),
     )
     .map_err(|error| error.to_string())
-}
-
-#[derive(Clone)]
-struct HostClient {
-    output: Arc<Mutex<std::io::Stdout>>,
-    responses: Arc<Mutex<mpsc::Receiver<UpdateResponse>>>,
-    request_gate: Arc<Mutex<()>>,
-    next_request_id: Arc<AtomicU64>,
-}
-
-impl HostClient {
-    fn new(ctx: egui::Context) -> (Self, mpsc::Receiver<AppCenterCommand>) {
-        const COMMAND_CAPACITY: usize = 16;
-        let (command_sender, commands) = mpsc::sync_channel(COMMAND_CAPACITY);
-        let (response_sender, responses) = mpsc::sync_channel(1);
-        thread::Builder::new()
-            .name("app-center-host-reader".to_owned())
-            .spawn(move || {
-                let mut input = BufReader::new(std::io::stdin());
-                while let Ok(Some(command)) = read(&mut input) {
-                    let sent = match command {
-                        AppCenterCommand::UpdateResponse(response) => {
-                            response_sender.send(response).is_ok()
-                        }
-                        command => match command_sender.try_send(command) {
-                            Ok(()) | Err(mpsc::TrySendError::Full(_)) => true,
-                            Err(mpsc::TrySendError::Disconnected(_)) => false,
-                        },
-                    };
-                    if !sent {
-                        break;
-                    }
-                    ctx.request_repaint();
-                }
-            })
-            .expect("app center host reader thread must start");
-        (
-            Self {
-                output: Arc::new(Mutex::new(std::io::stdout())),
-                responses: Arc::new(Mutex::new(responses)),
-                request_gate: Arc::new(Mutex::new(())),
-                next_request_id: Arc::new(AtomicU64::new(1)),
-            },
-            commands,
-        )
-    }
-
-    fn request(&self, operation: UpdateOperation) -> Result<(), String> {
-        let _request = self
-            .request_gate
-            .lock()
-            .map_err(|_| "app window IPC failed")?;
-        let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let encoded = encode(UpdateRequest { id, operation })?;
-        {
-            let mut output = self.output.lock().map_err(|_| "app window IPC failed")?;
-            output
-                .write_all(&encoded)
-                .and_then(|()| output.flush())
-                .map_err(|error| error.to_string())?;
-        }
-        let deadline = Instant::now() + HOST_RESPONSE_TIMEOUT;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err("app window host response timed out".to_owned());
-            }
-            let response = self
-                .responses
-                .lock()
-                .map_err(|_| "app window IPC failed")?
-                .recv_timeout(remaining)
-                .map_err(|error| match error {
-                    mpsc::RecvTimeoutError::Timeout => {
-                        "app window host response timed out".to_owned()
-                    }
-                    mpsc::RecvTimeoutError::Disconnected => {
-                        "app window host response is unavailable".to_owned()
-                    }
-                })?;
-            if response.id != id {
-                continue;
-            }
-            return validate_update_result(operation, response.result);
-        }
-    }
-}
-
-fn validate_update_result(operation: UpdateOperation, result: UpdateResult) -> Result<(), String> {
-    match (operation, result) {
-        (_, UpdateResult::Error { message }) => Err(message),
-        (UpdateOperation::SuspendBridge, UpdateResult::Suspended)
-        | (UpdateOperation::ResumeBridge, UpdateResult::Resumed)
-        | (UpdateOperation::QuitForReplacement, UpdateResult::Quitting) => Ok(()),
-        (_, result) => Err(format!(
-            "app window host returned an unexpected response: {result:?}"
-        )),
-    }
 }
 
 enum WorkerEvent {
@@ -752,345 +656,6 @@ impl Drop for AppCenter {
     }
 }
 
-impl AppCenter {
-    fn updates_page(&mut self, ui: &mut egui::Ui) {
-        self.status_banner(ui);
-        if self.catalog_status == CatalogStatus::Failed && !self.busy() {
-            ui.add_space(10.0);
-            if secondary_button(ui, "Retry Check", true).clicked() {
-                self.catalog_status.retry_if_failed();
-            }
-        }
-        ui.add_space(14.0);
-        let catalog = self.catalog.take();
-        if let Some(manifest) = catalog.as_ref() {
-            self.application_card(ui, manifest);
-            ui.add_space(14.0);
-            self.firmware_card(ui, manifest);
-        }
-        self.catalog = catalog;
-        if matches!(self.activity, Activity::Busy { can_cancel: true }) {
-            ui.add_space(14.0);
-            if secondary_button(ui, "Cancel Before Writing", true).clicked() {
-                self.cancel.store(true, Ordering::Release);
-                "Cancelling safely…".clone_into(&mut self.status);
-                self.status_tone = StatusTone::Info;
-            }
-        }
-    }
-
-    fn application_card(&mut self, ui: &mut egui::Ui, manifest: &ReleaseManifestV1) {
-        full_width_card(ui, 20, |ui| {
-            let installed = &self.installed;
-            let ordering = installed.cmp(&manifest.application_version);
-            let (badge, badge_colour) = match ordering {
-                std::cmp::Ordering::Less => ("Update available", ACCENT),
-                std::cmp::Ordering::Equal => ("Up to date", SUCCESS),
-                std::cmp::Ordering::Greater => ("Newer build", MUTED_TEXT),
-            };
-            card_header(
-                ui,
-                "APPLICATION",
-                &format!("Steam Controller Bridge {}", manifest.application_version),
-                &format!(
-                    "Installed {installed} · Requires macOS {}+",
-                    manifest.minimum_macos
-                ),
-                badge,
-                badge_colour,
-            );
-            ui.add_space(14.0);
-            match installed.cmp(&manifest.application_version) {
-                std::cmp::Ordering::Less if self.staged_application.is_some() => {
-                    status_callout(
-                        ui,
-                        SUCCESS,
-                        "Application verified",
-                        "The new version is staged and ready to replace the installed app.",
-                    );
-                    ui.add_space(12.0);
-                    if secondary_button(ui, "Show New App and Applications", true).clicked() {
-                        self.reveal_application();
-                    }
-                    ui.add_space(6.0);
-                    if self.replacement_supported {
-                        ui.label(
-                            egui::RichText::new("Quit the bridge, drag the revealed app into Applications, choose Replace, then launch it. Right-click Open may be required for this ad-hoc-signed build.")
-                                .color(MUTED_TEXT),
-                        );
-                    } else {
-                        ui.label(
-                            egui::RichText::new("This source or metadata-mismatched build cannot use guided replacement. The verified archive remains available for manual installation.")
-                                .color(MUTED_TEXT),
-                        );
-                    }
-                    ui.add_space(10.0);
-                    if primary_button(
-                        ui,
-                        "Quit Bridge for Replacement",
-                        self.replacement_supported,
-                    )
-                    .clicked()
-                    {
-                        self.quit_for_replacement(ui.ctx().clone());
-                    }
-                }
-                std::cmp::Ordering::Less => {
-                    status_callout(
-                        ui,
-                        ACCENT,
-                        &format!("Version {} is ready", manifest.application_version),
-                        "Download and verify the application before replacing the installed version.",
-                    );
-                    ui.add_space(12.0);
-                    if primary_button(ui, "Download Application Update", !self.busy()).clicked() {
-                        self.download_application(manifest.clone(), ui.ctx().clone());
-                    }
-                }
-                std::cmp::Ordering::Equal => {
-                    status_callout(
-                        ui,
-                        SUCCESS,
-                        "Application is up to date",
-                        "You are running the latest signed stable release.",
-                    );
-                }
-                std::cmp::Ordering::Greater => {
-                    status_callout(
-                        ui,
-                        MUTED_TEXT,
-                        "Newer than stable",
-                        "This application is newer than the latest stable release. No downgrade is offered.",
-                    );
-                }
-            }
-            self.release_notes(ui, manifest, ordering == std::cmp::Ordering::Less);
-        });
-    }
-
-    fn firmware_card(&mut self, ui: &mut egui::Ui, manifest: &ReleaseManifestV1) {
-        full_width_card(ui, 20, |ui| {
-            let installed = &self.installed;
-            let app_pending = installed < &manifest.application_version;
-            let app_incompatible = installed < &manifest.firmware.minimum_application_version;
-            let release_state =
-                classify_firmware_release(self.firmware.into(), manifest.firmware.revision);
-            let (badge, badge_colour) = match release_state {
-                FirmwareReleaseState::Pending => ("Checking firmware", MUTED_TEXT),
-                FirmwareReleaseState::UpdateAvailable => ("Update available", ACCENT),
-                FirmwareReleaseState::Current => ("Up to date", SUCCESS),
-                FirmwareReleaseState::Newer => ("Newer firmware", MUTED_TEXT),
-            };
-            card_header(
-                ui,
-                "FIRMWARE",
-                &format!("XIAO firmware revision {}", manifest.firmware.revision),
-                &format!(
-                    "Connected revision {} · non-Sense XIAO nRF52840",
-                    firmware_description(self.firmware)
-                ),
-                badge,
-                badge_colour,
-            );
-            ui.add_space(14.0);
-            if app_pending {
-                status_callout(
-                    ui,
-                    ACCENT,
-                    "Application update required first",
-                    "Replace and relaunch the application before installing this firmware.",
-                );
-                ui.add_space(12.0);
-                let _ = primary_button(ui, "Update Application First", false);
-            } else if app_incompatible {
-                status_callout(
-                    ui,
-                    DANGER,
-                    "Newer application required",
-                    "The installed application cannot communicate with this firmware revision.",
-                );
-            } else if release_state == FirmwareReleaseState::Pending {
-                status_callout(
-                    ui,
-                    MUTED_TEXT,
-                    "Waiting for firmware information",
-                    "Reconnect the board if its firmware revision does not appear shortly.",
-                );
-            } else if release_state == FirmwareReleaseState::Newer {
-                status_callout(
-                    ui,
-                    MUTED_TEXT,
-                    "Firmware is newer than stable",
-                    "Downgrading the connected board is disabled.",
-                );
-            } else if release_state == FirmwareReleaseState::Current {
-                status_callout(
-                    ui,
-                    SUCCESS,
-                    "Firmware is up to date",
-                    "The connected board reports the latest signed revision.",
-                );
-                ui.add_space(12.0);
-                if secondary_button(ui, "Reinstall Firmware", !self.busy()).clicked() {
-                    self.install_firmware(manifest.clone(), ui.ctx().clone());
-                }
-            } else {
-                status_callout(
-                    ui,
-                    ACCENT,
-                    &format!("Revision {} is ready", manifest.firmware.revision),
-                    "The board and firmware are verified before anything is written.",
-                );
-                ui.add_space(12.0);
-                if primary_button(ui, "Install Firmware Update", !self.busy()).clicked() {
-                    self.install_firmware(manifest.clone(), ui.ctx().clone());
-                }
-            }
-            ui.add_space(14.0);
-            ui.separator();
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("The bridge pauses only while flashing. If automatic bootloader entry fails, double-tap RESET. Success requires the exact signed revision to reconnect.")
-                    .size(13.0)
-                    .color(MUTED_TEXT),
-            );
-        });
-    }
-
-    fn release_notes(
-        &self,
-        ui: &mut egui::Ui,
-        manifest: &ReleaseManifestV1,
-        update_available: bool,
-    ) {
-        if self.release_notes.is_empty() {
-            return;
-        }
-        ui.add_space(14.0);
-        ui.separator();
-        ui.add_space(4.0);
-        egui::CollapsingHeader::new(
-            egui::RichText::new(format!("What’s new in {}", manifest.application_version))
-                .strong()
-                .color(TEXT),
-        )
-        .id_salt(("update-release-notes", manifest.release_tag.as_str()))
-        .default_open(update_available)
-        .show(ui, |ui| {
-            ui.add_space(6.0);
-            render_release_notes(ui, &self.release_notes);
-        });
-    }
-}
-
-fn card_header(
-    ui: &mut egui::Ui,
-    eyebrow: &str,
-    title: &str,
-    subtitle: &str,
-    badge: &str,
-    badge_colour: egui::Color32,
-) {
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new(eyebrow)
-                    .size(11.0)
-                    .strong()
-                    .color(ACCENT),
-            );
-            ui.label(egui::RichText::new(title).size(20.0).strong().color(TEXT));
-            ui.label(egui::RichText::new(subtitle).size(13.0).color(MUTED_TEXT));
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-            egui::Frame::new()
-                .fill(badge_colour.gamma_multiply(0.16))
-                .corner_radius(7)
-                .inner_margin(egui::Margin::symmetric(9, 5))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new(badge)
-                            .size(12.0)
-                            .strong()
-                            .color(badge_colour),
-                    );
-                });
-        });
-    });
-}
-
-fn hero_badge(ui: &mut egui::Ui, label: &str, colour: egui::Color32) {
-    egui::Frame::new()
-        .fill(colour.gamma_multiply(0.16))
-        .corner_radius(7)
-        .inner_margin(egui::Margin::symmetric(10, 5))
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new(label).size(13.0).color(colour));
-        });
-}
-
-fn firmware_description(status: FirmwareStatus) -> String {
-    match status {
-        FirmwareStatus::Reported(revision) => revision.to_string(),
-        FirmwareStatus::Pending => "checking".to_owned(),
-        FirmwareStatus::UnsupportedFormat(format) => format!("newer format {format}"),
-        FirmwareStatus::Malformed => "invalid report".to_owned(),
-        FirmwareStatus::Unreported => "not reported".to_owned(),
-    }
-}
-
-fn firmware_badge(status: FirmwareStatus) -> String {
-    match status {
-        FirmwareStatus::Reported(revision) => format!("Firmware rev {revision}"),
-        FirmwareStatus::UnsupportedFormat(_) => "Firmware newer".to_owned(),
-        FirmwareStatus::Pending => "Checking firmware".to_owned(),
-        FirmwareStatus::Malformed | FirmwareStatus::Unreported => {
-            "Firmware update needed".to_owned()
-        }
-    }
-}
-
-fn status_callout(ui: &mut egui::Ui, colour: egui::Color32, title: &str, body: &str) {
-    let inner_width = (ui.available_width() - 28.0 - 2.0).max(0.0);
-    egui::Frame::new()
-        .fill(colour.gamma_multiply(0.12))
-        .stroke(egui::Stroke::new(1.0, colour.gamma_multiply(0.42)))
-        .corner_radius(9)
-        .inner_margin(egui::Margin::symmetric(14, 11))
-        .show(ui, |ui| {
-            ui.set_width(inner_width);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("●").size(11.0).color(colour));
-                ui.vertical(|ui| {
-                    ui.label(egui::RichText::new(title).strong().color(TEXT));
-                    ui.label(egui::RichText::new(body).size(13.0).color(MUTED_TEXT));
-                });
-            });
-        });
-}
-
-fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(egui::RichText::new(label).strong().color(ON_ACCENT))
-            .fill(ACCENT)
-            .stroke(egui::Stroke::NONE)
-            .corner_radius(8)
-            .min_size(egui::vec2(180.0, 36.0)),
-    )
-}
-
-fn secondary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(egui::RichText::new(label).strong().color(TEXT))
-            .fill(SURFACE)
-            .stroke(egui::Stroke::new(1.0, BORDER))
-            .corner_radius(8)
-            .min_size(egui::vec2(164.0, 36.0)),
-    )
-}
-
 impl DemoMode {
     fn label(self) -> &'static str {
         match self {
@@ -1152,64 +717,6 @@ fn demo_manifest(_mode: DemoMode) -> ReleaseManifestV1 {
     }
 }
 
-fn cache() -> Result<ReleaseCache, String> {
-    ReleaseCache::for_current_user().map_err(|error| error.to_string())
-}
-
-fn fetch_catalog() -> Result<ReleaseManifestV1, String> {
-    let (keys, cache) = update_context()?;
-    refresh_catalog_if_due(&LatestReleaseClient, &cache, &keys, CHECK_INTERVAL)
-}
-
-fn download_and_stage_application(manifest: &ReleaseManifestV1) -> Result<PathBuf, String> {
-    if installed_macos_version()? < manifest.minimum_macos {
-        return Err(format!(
-            "This release requires macOS {} or newer.",
-            manifest.minimum_macos
-        ));
-    }
-    let cache = cache()?;
-    let artifact = &manifest.application.artifact;
-    let path = ensure_release_artifact(
-        &LatestReleaseClient,
-        &cache,
-        &manifest.release_tag,
-        artifact,
-    )?;
-    let staged = stage_application(
-        &path,
-        &manifest.application,
-        &cache.root().join("staged-app"),
-    )?;
-    Ok(staged.bundle_path)
-}
-
-fn download_firmware(manifest: &ReleaseManifestV1) -> Result<PathBuf, String> {
-    let cache = cache()?;
-    let artifact = &manifest.firmware.artifact;
-    ensure_release_artifact(
-        &LatestReleaseClient,
-        &cache,
-        &manifest.release_tag,
-        artifact,
-    )
-}
-
-fn progress_text(progress: &FirmwareFlashProgress) -> &'static str {
-    match progress {
-        FirmwareFlashProgress::LookingForDevice => "Looking for one compatible XIAO…",
-        FirmwareFlashProgress::EnteringBootloader => "Entering the UF2 bootloader…",
-        FirmwareFlashProgress::WaitingForBootloader => {
-            "Waiting for bootloader. Double-tap RESET if needed…"
-        }
-        FirmwareFlashProgress::Writing => "Writing firmware. Do not unplug the board…",
-        FirmwareFlashProgress::WaitingForApplication => {
-            "Waiting for the flashed device to reconnect…"
-        }
-        FirmwareFlashProgress::Verifying => "Verifying the reported firmware revision…",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1255,22 +762,5 @@ mod tests {
         assert!(status.retry_if_failed());
         assert_eq!(status, CatalogStatus::NotRequested);
         assert!(status.begin_if_needed(AppCenterPage::Updates));
-    }
-
-    #[test]
-    fn host_responses_must_match_the_requested_operation() {
-        assert!(
-            validate_update_result(UpdateOperation::SuspendBridge, UpdateResult::Suspended).is_ok()
-        );
-        assert!(
-            validate_update_result(UpdateOperation::SuspendBridge, UpdateResult::Resumed).is_err()
-        );
-        assert!(validate_update_result(
-            UpdateOperation::QuitForReplacement,
-            UpdateResult::Error {
-                message: "refused".to_owned()
-            }
-        )
-        .is_err());
     }
 }
