@@ -6,7 +6,10 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-use crate::{APPLICATION_BUNDLE_ID, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID};
+use crate::{
+    APPLICATION_BUNDLE_ID, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID,
+    XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -214,10 +217,10 @@ fn validate_manifest(manifest: &ReleaseManifestV1) -> Result<(), ManifestError> 
         ));
     }
     if manifest.firmware.minimum_application_version > manifest.application_version
-        || manifest.firmware.usb_vendor_id != 0x045e
-        || manifest.firmware.usb_product_id != 0x028e
-        || manifest.firmware.usb_manufacturer != "Lynxware"
-        || manifest.firmware.usb_product != "Steam Controller Bridge"
+        || manifest.firmware.usb_vendor_id != XIAO_USB_VENDOR_ID
+        || manifest.firmware.usb_product_id != XIAO_USB_PRODUCT_ID
+        || manifest.firmware.usb_manufacturer != XIAO_USB_MANUFACTURER
+        || manifest.firmware.usb_product != XIAO_USB_PRODUCT
     {
         return Err(ManifestError::InvalidField(
             "incompatible firmware/application or USB identity".to_owned(),
@@ -282,10 +285,10 @@ mod tests {
                 device_info_format: 1,
                 board_id: FIRMWARE_BOARD_ID.to_owned(),
                 uf2_family_id: UF2_FAMILY_ID,
-                usb_vendor_id: 0x045e,
-                usb_product_id: 0x028e,
-                usb_manufacturer: "Lynxware".to_owned(),
-                usb_product: "Steam Controller Bridge".to_owned(),
+                usb_vendor_id: XIAO_USB_VENDOR_ID,
+                usb_product_id: XIAO_USB_PRODUCT_ID,
+                usb_manufacturer: XIAO_USB_MANUFACTURER.to_owned(),
+                usb_product: XIAO_USB_PRODUCT.to_owned(),
                 artifact: ArtifactDescriptor {
                     name: "steam-controller-bridge-xiao-nrf52840.uf2".to_owned(),
                     size: 24,

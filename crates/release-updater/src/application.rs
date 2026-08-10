@@ -13,11 +13,17 @@ pub struct StagedApplication {
     pub version: Version,
 }
 
+/// The caller supplies the running application's package version so bundle
+/// validation is tied to the executable being assessed, not this library.
 #[must_use]
-pub fn guided_replacement_supported() -> bool {
+pub fn guided_replacement_supported(running_version: &str) -> bool {
     let Ok(executable) = std::env::current_exe() else {
         return false;
     };
+    guided_replacement_supported_at(&executable, running_version)
+}
+
+fn guided_replacement_supported_at(executable: &Path, running_version: &str) -> bool {
     let Some(contents) = executable.parent().and_then(Path::parent) else {
         return false;
     };
@@ -34,7 +40,7 @@ pub fn guided_replacement_supported() -> bool {
     let Ok(version) = plist_value(&plist, "CFBundleShortVersionString") else {
         return false;
     };
-    identifier == APPLICATION_BUNDLE_ID && version == env!("CARGO_PKG_VERSION")
+    identifier == APPLICATION_BUNDLE_ID && version == running_version
 }
 
 pub fn installed_macos_version() -> Result<Version, String> {
@@ -137,6 +143,29 @@ fn parse_version(value: &str) -> Result<Version, String> {
 mod tests {
     use super::*;
 
+    fn fixture_bundle(version: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "release-updater-guided-replacement-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let contents = root.join("Steam Controller Bridge.app/Contents");
+        let executable = contents.join("MacOS/sc-bridge-menu");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(
+            contents.join("Info.plist"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>{APPLICATION_BUNDLE_ID}</string>
+<key>CFBundleShortVersionString</key><string>{version}</string>
+</dict></plist>"#
+            ),
+        )
+        .unwrap();
+        (root, executable)
+    }
+
     #[test]
     fn macos_versions_are_normalized_without_accepting_invalid_versions() {
         assert_eq!(parse_version("13").unwrap(), Version::new(13, 0, 0));
@@ -146,6 +175,14 @@ mod tests {
 
     #[test]
     fn an_unbundled_test_binary_cannot_offer_guided_replacement() {
-        assert!(!guided_replacement_supported());
+        assert!(!guided_replacement_supported(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn guided_replacement_uses_the_calling_app_version() {
+        let (root, executable) = fixture_bundle("9.8.7");
+        assert!(guided_replacement_supported_at(&executable, "9.8.7"));
+        assert!(!guided_replacement_supported_at(&executable, "1.4.0"));
+        let _ = fs::remove_dir_all(root);
     }
 }

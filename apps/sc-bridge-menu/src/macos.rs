@@ -123,6 +123,10 @@ struct MenuItems {
     run_toggle: MenuItem,
     copy_error: MenuItem,
     copy_error_visible: bool,
+    #[cfg_attr(
+        not(feature = "updater"),
+        expect(dead_code, reason = "only the updater feature rewrites the label")
+    )]
     updates: MenuItem,
     idle_shutdown: Vec<(Option<u64>, CheckMenuItem)>,
     puck_dock: CheckMenuItem,

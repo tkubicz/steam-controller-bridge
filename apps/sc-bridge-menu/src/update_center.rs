@@ -4,18 +4,18 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use eframe::egui;
 use release_updater::{
-    embedded_trusted_keys, ensure_release_artifact, flash_firmware, guided_replacement_supported,
-    installed_macos_version, refresh_catalog_if_due, stage_application, FirmwareFlashProgress,
-    LatestReleaseClient, ReleaseCache, ReleaseManifestV1,
+    ensure_release_artifact, flash_firmware, guided_replacement_supported, installed_macos_version,
+    refresh_catalog_if_due, stage_application, FirmwareFlashProgress, LatestReleaseClient,
+    ReleaseCache, ReleaseManifestV1,
 };
 use semver::Version;
 use ui_theme::{BORDER, MUTED_TEXT, PANEL, SURFACE_RAISED, TEXT};
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
+use crate::update_check::{update_context, CHECK_INTERVAL};
 use crate::update_protocol::{encode, read, UpdateRequest, UpdateResponse};
 
 const WINDOW_TITLE: &str = "Steam Controller Bridge Update Center";
@@ -101,6 +101,7 @@ enum WorkerEvent {
 
 struct UpdateCenter {
     catalog: Option<ReleaseManifestV1>,
+    installed: Version,
     firmware_version: String,
     status: String,
     activity: Activity,
@@ -124,6 +125,7 @@ impl UpdateCenter {
         let (sender, events) = mpsc::channel();
         let center = Self {
             catalog: None,
+            installed: Version::parse(env!("CARGO_PKG_VERSION")).expect("package version"),
             firmware_version,
             status: "Checking the signed stable release…".to_owned(),
             activity: Activity::Busy { can_cancel: false },
@@ -132,7 +134,7 @@ impl UpdateCenter {
             sender,
             host: HostClient::new(),
             cancel: Arc::new(AtomicBool::new(false)),
-            replacement_supported: guided_replacement_supported(),
+            replacement_supported: guided_replacement_supported(env!("CARGO_PKG_VERSION")),
         };
         center.check_catalog(ctx);
         center
@@ -308,7 +310,7 @@ impl eframe::App for UpdateCenter {
 impl UpdateCenter {
     fn application_card(&mut self, ui: &mut egui::Ui, manifest: &ReleaseManifestV1) {
         card(ui, |ui| {
-            let installed = Version::parse(env!("CARGO_PKG_VERSION")).expect("package version");
+            let installed = &self.installed;
             ui.heading(format!("Application {}", manifest.application_version));
             ui.label(format!(
                 "Installed: {installed} · Requires macOS {}+",
@@ -362,8 +364,8 @@ impl UpdateCenter {
 
     fn firmware_card(&mut self, ui: &mut egui::Ui, manifest: &ReleaseManifestV1) {
         card(ui, |ui| {
-            let installed = Version::parse(env!("CARGO_PKG_VERSION")).expect("package version");
-            let app_pending = installed < manifest.application_version;
+            let installed = &self.installed;
+            let app_pending = installed < &manifest.application_version;
             let newer_firmware = self
                 .firmware_version
                 .parse::<u16>()
@@ -376,7 +378,7 @@ impl UpdateCenter {
             ));
             if app_pending {
                 ui.label("Update and relaunch the application before installing firmware.");
-            } else if installed < manifest.firmware.minimum_application_version {
+            } else if installed < &manifest.firmware.minimum_application_version {
                 ui.label("This firmware requires a newer application.");
             } else if newer_firmware {
                 ui.label("The connected firmware is newer; downgrade is disabled.");
@@ -415,17 +417,8 @@ fn cache() -> Result<ReleaseCache, String> {
 }
 
 fn fetch_catalog() -> Result<ReleaseManifestV1, String> {
-    let keys = embedded_trusted_keys().map_err(|error| error.to_string())?;
-    if keys.is_empty() {
-        return Err("Secure updates are unavailable in this source build: no release public key is embedded.".to_owned());
-    }
-    let cache = cache()?;
-    refresh_catalog_if_due(
-        &LatestReleaseClient,
-        &cache,
-        &keys,
-        Duration::from_hours(24),
-    )
+    let (keys, cache) = update_context()?;
+    refresh_catalog_if_due(&LatestReleaseClient, &cache, &keys, CHECK_INTERVAL)
 }
 
 fn download_and_stage_application(manifest: &ReleaseManifestV1) -> Result<PathBuf, String> {

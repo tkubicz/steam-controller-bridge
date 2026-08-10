@@ -5,12 +5,26 @@ use std::time::Duration;
 
 use bridge_runtime::FirmwareVersion;
 use release_updater::{
-    embedded_trusted_keys, refresh_catalog_if_due, LatestReleaseClient, ReleaseCache,
-    ReleaseManifestV1,
+    embedded_trusted_keys, refresh_catalog_if_due, ArtifactDescriptor, LatestReleaseClient,
+    ReleaseCache, ReleaseManifestV1, TrustedPublicKey,
 };
 use semver::Version;
 
-const CHECK_INTERVAL: Duration = Duration::from_hours(24);
+pub const CHECK_INTERVAL: Duration = Duration::from_hours(24);
+
+/// The embedded trust anchors and per-user cache every update path shares, or
+/// the user-facing reason updates cannot work in this build.
+pub fn update_context() -> Result<(Vec<TrustedPublicKey>, ReleaseCache), String> {
+    let keys = embedded_trusted_keys().map_err(|error| error.to_string())?;
+    if keys.is_empty() {
+        return Err(
+            "Secure updates are unavailable in this source build: no release public key is embedded."
+                .to_owned(),
+        );
+    }
+    let cache = ReleaseCache::for_current_user().map_err(|error| error.to_string())?;
+    Ok((keys, cache))
+}
 
 pub struct UpdateChecker {
     manifest: Option<ReleaseManifestV1>,
@@ -20,55 +34,40 @@ pub struct UpdateChecker {
 
 impl UpdateChecker {
     pub fn new() -> Self {
-        let Ok(keys) = embedded_trusted_keys() else {
-            return Self {
-                manifest: None,
-                result: None,
-                running_version: running_version(),
-            };
+        let mut checker = Self {
+            manifest: None,
+            result: None,
+            running_version: running_version(),
         };
-        if keys.is_empty() {
-            return Self {
-                manifest: None,
-                result: None,
-                running_version: running_version(),
-            };
-        }
-        let Ok(cache) = ReleaseCache::for_current_user() else {
-            return Self {
-                manifest: None,
-                result: None,
-                running_version: running_version(),
-            };
+        let Ok((keys, cache)) = update_context() else {
+            return checker;
         };
-        let manifest = cache.load_manifest(&keys).ok();
-        if manifest.as_ref().is_some_and(|manifest| {
-            Version::parse(env!("CARGO_PKG_VERSION"))
-                .is_ok_and(|running| running >= manifest.application_version)
-        }) {
-            let _ = fs::remove_dir_all(cache.root().join("staged-app"));
-            if let Some(application) = manifest.as_ref().map(|item| &item.application.artifact) {
-                let _ = fs::remove_file(cache.artifact_path(application));
-            }
-        }
+        checker.manifest = cache.load_manifest(&keys).ok();
+        let obsolete_application = checker
+            .manifest
+            .as_ref()
+            .filter(|manifest| checker.running_version >= manifest.application_version)
+            .map(|manifest| manifest.application.artifact.clone());
         if !cache.check_due(CHECK_INTERVAL) {
-            return Self {
-                manifest,
-                result: None,
-                running_version: running_version(),
-            };
+            if let Some(artifact) = obsolete_application {
+                thread::spawn(move || remove_obsolete_application_cache(&cache, &artifact));
+            }
+            return checker;
         }
         let (sender, result) = mpsc::sync_channel(1);
         thread::spawn(move || {
-            let checked =
-                refresh_catalog_if_due(&LatestReleaseClient, &cache, &keys, CHECK_INTERVAL);
-            let _ = sender.send(checked);
+            if let Some(artifact) = obsolete_application {
+                remove_obsolete_application_cache(&cache, &artifact);
+            }
+            let _ = sender.send(refresh_catalog_if_due(
+                &LatestReleaseClient,
+                &cache,
+                &keys,
+                CHECK_INTERVAL,
+            ));
         });
-        Self {
-            manifest,
-            result: Some(result),
-            running_version: running_version(),
-        }
+        checker.result = Some(result);
+        checker
     }
 
     pub fn poll(&mut self) {
@@ -103,6 +102,11 @@ impl UpdateChecker {
                 FirmwareVersion::Pending | FirmwareVersion::UnsupportedFormat(_) => false,
             }
     }
+}
+
+fn remove_obsolete_application_cache(cache: &ReleaseCache, artifact: &ArtifactDescriptor) {
+    let _ = fs::remove_dir_all(cache.root().join("staged-app"));
+    let _ = fs::remove_file(cache.artifact_path(artifact));
 }
 
 fn running_version() -> Version {

@@ -46,8 +46,6 @@ pub enum FirmwareFlashProgress {
     Verifying,
 }
 
-pub type FirmwareFlashState = FirmwareFlashProgress;
-
 #[derive(Debug)]
 pub enum FirmwareFlashError {
     Io(io::Error),
@@ -474,10 +472,10 @@ mod tests {
             device_info_format: 1,
             board_id: FIRMWARE_BOARD_ID.to_owned(),
             uf2_family_id: UF2_FAMILY_ID,
-            usb_vendor_id: 0x045e,
-            usb_product_id: 0x028e,
-            usb_manufacturer: "Lynxware".to_owned(),
-            usb_product: "Steam Controller Bridge".to_owned(),
+            usb_vendor_id: crate::XIAO_USB_VENDOR_ID,
+            usb_product_id: crate::XIAO_USB_PRODUCT_ID,
+            usb_manufacturer: crate::XIAO_USB_MANUFACTURER.to_owned(),
+            usb_product: crate::XIAO_USB_PRODUCT.to_owned(),
             artifact: crate::ArtifactDescriptor {
                 name: "firmware.uf2".to_owned(),
                 size: 1,

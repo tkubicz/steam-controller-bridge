@@ -8,6 +8,27 @@ use crate::{
     SIGNATURES_ASSET, UPDATE_REPOSITORY,
 };
 
+const CURL_DOWNLOAD_ARGS: &[&str] = &[
+    "--fail",
+    "--location",
+    "--silent",
+    "--show-error",
+    "--proto",
+    "=https",
+    // `--proto` constrains only the first URL; redirects need their own
+    // restriction to keep the documented HTTPS-only contract.
+    "--proto-redir",
+    "=https",
+    "--max-redirs",
+    "5",
+    "--tlsv1.2",
+    "--connect-timeout",
+    "10",
+    "--max-time",
+    "60",
+    "--max-filesize",
+];
+
 #[derive(Debug)]
 pub enum DownloadError {
     Io(io::Error),
@@ -174,20 +195,7 @@ pub fn download_to_path(
         std::process::id()
     ));
     let output = Command::new("/usr/bin/curl")
-        .args([
-            "--fail",
-            "--location",
-            "--silent",
-            "--show-error",
-            "--proto",
-            "=https",
-            "--tlsv1.2",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            "60",
-            "--max-filesize",
-        ])
+        .args(CURL_DOWNLOAD_ARGS)
         .arg(maximum_size.to_string())
         .arg("--output")
         .arg(&temporary)
@@ -222,6 +230,19 @@ mod tests {
         assert!(!valid_component("../app.zip"));
         assert!(!valid_component("folder/app.zip"));
         assert!(!valid_component("https://example.test"));
+    }
+
+    #[test]
+    fn curl_downloads_and_redirects_are_https_only_and_bounded() {
+        assert!(CURL_DOWNLOAD_ARGS
+            .windows(2)
+            .any(|arguments| arguments == ["--proto", "=https"]));
+        assert!(CURL_DOWNLOAD_ARGS
+            .windows(2)
+            .any(|arguments| arguments == ["--proto-redir", "=https"]));
+        assert!(CURL_DOWNLOAD_ARGS
+            .windows(2)
+            .any(|arguments| arguments == ["--max-redirs", "5"]));
     }
 
     struct FakeSource;

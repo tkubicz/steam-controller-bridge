@@ -23,11 +23,15 @@ pub use application::{
     guided_replacement_supported, installed_macos_version, stage_application, StagedApplication,
 };
 pub use artifact::{sha256_hex, verify_artifact, ArtifactError};
+/// The post-flash USB identity a signed manifest must match, re-exported from
+/// the crate that also selects the live bridge by it.
+pub use bridge_output::{
+    XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
+};
 pub use cache::{CacheError, ReleaseCache};
 pub use firmware::{
     discover_bootloader_volumes, discover_firmware_devices, flash_firmware, validate_uf2,
     BootloaderVolume, FirmwareDevice, FirmwareFlashError, FirmwareFlashProgress,
-    FirmwareFlashState,
 };
 pub use manifest::{
     embedded_trusted_keys, verify_signed_manifest, ApplicationRelease, ArtifactDescriptor,
