@@ -80,8 +80,45 @@ enum WorkerEvent {
     Catalog(Box<Result<ReleaseManifestV1, String>>),
     Application(Result<PathBuf, String>),
     FirmwareProgress(FirmwareFlashProgress),
-    Firmware(Result<(), String>),
+    Firmware(Result<(), FirmwareOperationError>),
     Quit(Result<(), String>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FirmwareOperationError {
+    Preparation(String),
+    Flash(String),
+    Resume(String),
+    FlashAndResume { flash: String, resume: String },
+}
+
+impl FirmwareOperationError {
+    fn message(self) -> String {
+        match self {
+            Self::Preparation(error) => error,
+            Self::Flash(error) => {
+                format!("{error} Check the cable, disconnect extra boards, and retry.")
+            }
+            Self::Resume(error) => format!(
+                "Firmware was written and verified, but bridge recovery failed: {error}"
+            ),
+            Self::FlashAndResume { flash, resume } => format!(
+                "{flash} Bridge recovery also failed: {resume} Check the cable, disconnect extra boards, and retry; then restart the bridge manually."
+            ),
+        }
+    }
+}
+
+fn combine_flash_and_resume(
+    flash: Result<(), String>,
+    resume: Result<(), String>,
+) -> Result<(), FirmwareOperationError> {
+    match (flash, resume) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(FirmwareOperationError::Flash(error)),
+        (Ok(()), Err(error)) => Err(FirmwareOperationError::Resume(error)),
+        (Err(flash), Err(resume)) => Err(FirmwareOperationError::FlashAndResume { flash, resume }),
+    }
 }
 
 struct AppCenter {
@@ -119,6 +156,21 @@ enum Activity {
 
 fn must_defer_close(activity: Activity, firmware_session_active: bool) -> bool {
     firmware_session_active || matches!(activity, Activity::Busy { .. })
+}
+
+fn operation_available(activity: Activity, worker_running: bool) -> bool {
+    activity == Activity::Idle && !worker_running
+}
+
+fn spawn_worker(
+    slot: &mut Option<thread::JoinHandle<()>>,
+    task: impl FnOnce() + Send + 'static,
+) -> bool {
+    if slot.is_some() {
+        return false;
+    }
+    *slot = Some(thread::spawn(task));
+    true
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -223,13 +275,17 @@ impl AppCenter {
         let sender = self.sender.clone();
         self.cancel.store(false, Ordering::Release);
         let cancel = Arc::clone(&self.cancel);
-        self.worker = Some(thread::spawn(move || {
+        let started = spawn_worker(&mut self.worker, move || {
             let _ = sender.send(WorkerEvent::Catalog(Box::new(fetch_catalog(&cancel))));
             ctx.request_repaint();
-        }));
+        });
+        debug_assert!(started, "catalog worker slot must be empty");
     }
 
     fn download_application(&mut self, manifest: ReleaseManifestV1, ctx: egui::Context) {
+        if !self.operation_available() {
+            return;
+        }
         if self.demo.is_some() {
             self.staged_application = Some(PathBuf::from(
                 "/Applications/Steam Controller Bridge.app (demo)",
@@ -244,14 +300,18 @@ impl AppCenter {
         "Downloading and validating the application…".clone_into(&mut self.status);
         let sender = self.sender.clone();
         let cancel = Arc::clone(&self.cancel);
-        self.worker = Some(thread::spawn(move || {
+        let started = spawn_worker(&mut self.worker, move || {
             let result = download_and_stage_application(&manifest, &cancel);
             let _ = sender.send(WorkerEvent::Application(result));
             ctx.request_repaint();
-        }));
+        });
+        debug_assert!(started, "application worker slot must be empty");
     }
 
     fn install_firmware(&mut self, manifest: ReleaseManifestV1, ctx: egui::Context) {
+        if !self.operation_available() {
+            return;
+        }
         if self.demo.is_some() {
             self.firmware = FirmwareStatus::Reported(manifest.firmware.revision);
             "Demo: firmware installation completed and verified.".clone_into(&mut self.status);
@@ -266,15 +326,24 @@ impl AppCenter {
         let host = self.host.clone();
         let cancel = Arc::clone(&self.cancel);
         let session_active = Arc::clone(&self.firmware_session_active);
-        self.worker = Some(thread::spawn(move || {
-            let result = (|| {
-                let path = download_firmware(&manifest, &cancel)?;
+        let started = spawn_worker(&mut self.worker, move || {
+            let result = (|| -> Result<(), FirmwareOperationError> {
+                let path = download_firmware(&manifest, &cancel)
+                    .map_err(FirmwareOperationError::Preparation)?;
                 if cancel.load(Ordering::Acquire) {
-                    return Err("firmware update cancelled".to_owned());
+                    return Err(FirmwareOperationError::Preparation(
+                        "firmware update cancelled".to_owned(),
+                    ));
                 }
                 if let Err(error) = host.request(UpdateOperation::SuspendBridge) {
-                    let _ = host.request(UpdateOperation::ResumeBridge);
-                    return Err(error);
+                    return Err(FirmwareOperationError::Preparation(
+                        match host.request(UpdateOperation::ResumeBridge) {
+                            Ok(()) => error,
+                            Err(resume) => {
+                                format!("{error} Bridge recovery also failed: {resume}")
+                            }
+                        },
+                    ));
                 }
                 session_active.store(true, Ordering::Release);
                 let flash_result = flash_firmware(
@@ -290,14 +359,18 @@ impl AppCenter {
                 .map_err(|error| error.to_string());
                 let resume_result = host.request(UpdateOperation::ResumeBridge);
                 session_active.store(false, Ordering::Release);
-                flash_result.and(resume_result)
+                combine_flash_and_resume(flash_result, resume_result)
             })();
             let _ = sender.send(WorkerEvent::Firmware(result));
             ctx.request_repaint();
-        }));
+        });
+        debug_assert!(started, "firmware worker slot must be empty");
     }
 
     fn quit_for_replacement(&mut self, ctx: egui::Context) {
+        if !self.operation_available() {
+            return;
+        }
         if self.demo.is_some() {
             "Demo: the bridge would now quit safely for replacement.".clone_into(&mut self.status);
             self.status_tone = StatusTone::Success;
@@ -308,11 +381,12 @@ impl AppCenter {
         "Waiting for the bridge to release hardware safely…".clone_into(&mut self.status);
         let sender = self.sender.clone();
         let host = self.host.clone();
-        self.worker = Some(thread::spawn(move || {
+        let started = spawn_worker(&mut self.worker, move || {
             let result = host.request(UpdateOperation::QuitForReplacement);
             let _ = sender.send(WorkerEvent::Quit(result));
             ctx.request_repaint();
-        }));
+        });
+        debug_assert!(started, "quit worker slot must be empty");
     }
 
     fn drain_events(&mut self) {
@@ -377,8 +451,7 @@ impl AppCenter {
                     self.firmware_write_started = false;
                 }
                 WorkerEvent::Firmware(Err(error)) => {
-                    self.status =
-                        format!("{error} Check the cable, disconnect extra boards, and retry.");
+                    self.status = error.message();
                     self.activity = Activity::Idle;
                     self.status_tone = StatusTone::Error;
                     self.firmware_write_started = false;
@@ -466,6 +539,10 @@ impl AppCenter {
 
     fn busy(&self) -> bool {
         self.activity != Activity::Idle
+    }
+
+    fn operation_available(&self) -> bool {
+        operation_available(self.activity, self.worker.is_some())
     }
 
     fn navigate_to(&mut self, page: AppCenterPage) {
@@ -745,6 +822,50 @@ mod tests {
         assert!(must_defer_close(Activity::Idle, true));
         assert!(!must_defer_close(Activity::Idle, false));
         assert!(!must_defer_close(Activity::Closing, false));
+    }
+
+    #[test]
+    fn operations_require_both_an_idle_activity_and_an_empty_worker_slot() {
+        assert!(operation_available(Activity::Idle, false));
+        assert!(!operation_available(Activity::Idle, true));
+        assert!(!operation_available(
+            Activity::Busy { can_cancel: false },
+            false
+        ));
+        assert!(!operation_available(Activity::Closing, false));
+    }
+
+    #[test]
+    fn a_second_worker_cannot_replace_the_owned_handle() {
+        let (release, wait) = mpsc::channel();
+        let mut slot = None;
+        assert!(spawn_worker(&mut slot, move || {
+            let _ = wait.recv();
+        }));
+        let first_thread = slot.as_ref().unwrap().thread().id();
+        assert!(!spawn_worker(&mut slot, || panic!("must not run")));
+        assert_eq!(slot.as_ref().unwrap().thread().id(), first_thread);
+        release.send(()).unwrap();
+        slot.take().unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn flash_and_resume_failures_are_both_reported_with_specific_guidance() {
+        let combined = combine_flash_and_resume(
+            Err("firmware copy failed".to_owned()),
+            Err("runtime stopped".to_owned()),
+        )
+        .unwrap_err()
+        .message();
+        assert!(combined.contains("firmware copy failed"));
+        assert!(combined.contains("runtime stopped"));
+        assert!(combined.contains("Check the cable"));
+
+        let resume_only = combine_flash_and_resume(Ok(()), Err("runtime stopped".to_owned()))
+            .unwrap_err()
+            .message();
+        assert!(resume_only.contains("runtime stopped"));
+        assert!(!resume_only.contains("Check the cable"));
     }
 
     #[test]

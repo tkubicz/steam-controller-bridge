@@ -84,7 +84,7 @@ impl AppCenter {
                     if primary_button(
                         ui,
                         "Quit Bridge for Replacement",
-                        self.replacement_supported,
+                        self.replacement_supported && self.operation_available(),
                     )
                     .clicked()
                     {
@@ -99,7 +99,13 @@ impl AppCenter {
                         "Download and verify the application before replacing the installed version.",
                     );
                     ui.add_space(12.0);
-                    if primary_button(ui, "Download Application Update", !self.busy()).clicked() {
+                    if primary_button(
+                        ui,
+                        "Download Application Update",
+                        self.operation_available(),
+                    )
+                    .clicked()
+                    {
                         self.download_application(manifest.clone(), ui.ctx().clone());
                     }
                 }
@@ -187,7 +193,8 @@ impl AppCenter {
                     "The connected board reports the latest signed revision.",
                 );
                 ui.add_space(12.0);
-                if secondary_button(ui, "Reinstall Firmware", !self.busy()).clicked() {
+                if secondary_button(ui, "Reinstall Firmware", self.operation_available()).clicked()
+                {
                     self.install_firmware(manifest.clone(), ui.ctx().clone());
                 }
             } else {
@@ -198,7 +205,9 @@ impl AppCenter {
                     "The board and firmware are verified before anything is written.",
                 );
                 ui.add_space(12.0);
-                if primary_button(ui, "Install Firmware Update", !self.busy()).clicked() {
+                if primary_button(ui, "Install Firmware Update", self.operation_available())
+                    .clicked()
+                {
                     self.install_firmware(manifest.clone(), ui.ctx().clone());
                 }
             }
