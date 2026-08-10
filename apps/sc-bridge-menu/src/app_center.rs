@@ -202,6 +202,8 @@ struct AppCenter {
     catalog_status: CatalogStatus,
     firmware_write_started: bool,
     firmware_session_active: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+    close_when_idle: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -209,6 +211,10 @@ enum Activity {
     Idle,
     Busy { can_cancel: bool },
     Closing,
+}
+
+fn must_defer_close(activity: Activity, firmware_session_active: bool) -> bool {
+    firmware_session_active || matches!(activity, Activity::Busy { .. })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -304,15 +310,17 @@ impl AppCenter {
             },
             firmware_write_started: false,
             firmware_session_active: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            close_when_idle: false,
         }
     }
 
-    fn check_catalog(&self, ctx: egui::Context) {
+    fn check_catalog(&mut self, ctx: egui::Context) {
         let sender = self.sender.clone();
-        thread::spawn(move || {
+        self.worker = Some(thread::spawn(move || {
             let _ = sender.send(WorkerEvent::Catalog(Box::new(fetch_catalog())));
             ctx.request_repaint();
-        });
+        }));
     }
 
     fn download_application(&mut self, manifest: ReleaseManifestV1, ctx: egui::Context) {
@@ -328,11 +336,11 @@ impl AppCenter {
         self.status_tone = StatusTone::Info;
         "Downloading and validating the application…".clone_into(&mut self.status);
         let sender = self.sender.clone();
-        thread::spawn(move || {
+        self.worker = Some(thread::spawn(move || {
             let result = download_and_stage_application(&manifest);
             let _ = sender.send(WorkerEvent::Application(result));
             ctx.request_repaint();
-        });
+        }));
     }
 
     fn install_firmware(&mut self, manifest: ReleaseManifestV1, ctx: egui::Context) {
@@ -350,9 +358,12 @@ impl AppCenter {
         let host = self.host.clone();
         let cancel = Arc::clone(&self.cancel);
         let session_active = Arc::clone(&self.firmware_session_active);
-        thread::spawn(move || {
+        self.worker = Some(thread::spawn(move || {
             let result = (|| {
                 let path = download_firmware(&manifest)?;
+                if cancel.load(Ordering::Acquire) {
+                    return Err("firmware update cancelled".to_owned());
+                }
                 if let Err(error) = host.request(UpdateOperation::SuspendBridge) {
                     let _ = host.request(UpdateOperation::ResumeBridge);
                     return Err(error);
@@ -375,7 +386,7 @@ impl AppCenter {
             })();
             let _ = sender.send(WorkerEvent::Firmware(result));
             ctx.request_repaint();
-        });
+        }));
     }
 
     fn quit_for_replacement(&mut self, ctx: egui::Context) {
@@ -389,15 +400,16 @@ impl AppCenter {
         "Waiting for the bridge to release hardware safely…".clone_into(&mut self.status);
         let sender = self.sender.clone();
         let host = self.host.clone();
-        thread::spawn(move || {
+        self.worker = Some(thread::spawn(move || {
             let result = host.request(UpdateOperation::QuitForReplacement);
             let _ = sender.send(WorkerEvent::Quit(result));
             ctx.request_repaint();
-        });
+        }));
     }
 
     fn drain_events(&mut self) {
         while let Ok(event) = self.events.try_recv() {
+            let terminal = !matches!(&event, WorkerEvent::FirmwareProgress(_));
             match event {
                 WorkerEvent::Catalog(result) => match *result {
                     Ok(manifest) => {
@@ -469,6 +481,35 @@ impl AppCenter {
                     self.status_tone = StatusTone::Error;
                 }
                 WorkerEvent::Quit(Ok(())) => self.activity = Activity::Closing,
+            }
+            if terminal {
+                self.join_worker();
+                if self.close_when_idle {
+                    self.activity = Activity::Closing;
+                }
+            }
+        }
+    }
+
+    fn join_worker(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                "The background operation stopped unexpectedly.".clone_into(&mut self.status);
+                self.status_tone = StatusTone::Error;
+                self.activity = Activity::Idle;
+            }
+        }
+    }
+
+    fn detect_worker_panic(&mut self) {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(thread::JoinHandle::is_finished)
+        {
+            self.join_worker();
+            if self.close_when_idle {
+                self.activity = Activity::Closing;
             }
         }
     }
@@ -623,15 +664,26 @@ impl AppCenter {
 impl eframe::App for AppCenter {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.detect_worker_panic();
         self.drain_host_commands();
-        if self.firmware_session_active.load(Ordering::Acquire)
-            && ui.ctx().input(|input| input.viewport().close_requested())
+        let close_requested = ui.ctx().input(|input| input.viewport().close_requested());
+        if close_requested
+            && must_defer_close(
+                self.activity,
+                self.firmware_session_active.load(Ordering::Acquire),
+            )
         {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.page = AppCenterPage::Updates;
-            "Firmware verification is still in progress. Keep the board connected."
-                .clone_into(&mut self.status);
+            self.close_when_idle = true;
+            self.cancel.store(true, Ordering::Release);
+            if self.firmware_session_active.load(Ordering::Acquire) {
+                self.page = AppCenterPage::Updates;
+                "Firmware verification is still in progress. Keep the board connected."
+                    .clone_into(&mut self.status);
+            } else {
+                "Finishing the current operation before closing…".clone_into(&mut self.status);
+            }
             self.status_tone = StatusTone::Info;
         }
         if self.activity == Activity::Closing {
@@ -690,6 +742,13 @@ impl eframe::App for AppCenter {
                         });
                 });
         });
+    }
+}
+
+impl Drop for AppCenter {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+        self.join_worker();
     }
 }
 
@@ -1154,6 +1213,17 @@ fn progress_text(progress: &FirmwareFlashProgress) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn close_waits_for_owned_work_but_not_the_final_close_command() {
+        assert!(must_defer_close(
+            Activity::Busy { can_cancel: false },
+            false
+        ));
+        assert!(must_defer_close(Activity::Idle, true));
+        assert!(!must_defer_close(Activity::Idle, false));
+        assert!(!must_defer_close(Activity::Closing, false));
+    }
 
     #[test]
     fn demo_release_notes_are_structured() {
