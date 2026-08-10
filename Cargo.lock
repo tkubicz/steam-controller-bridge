@@ -564,7 +564,7 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "controller-art"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "eframe",
  "ui-theme",
@@ -757,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-bindings"
-version = "1.1.0"
+version = "1.5.0"
 dependencies = [
  "enigo",
  "objc2-core-graphics",
@@ -2135,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "macos-power-monitor"
-version = "1.3.0"
+version = "1.5.0"
 dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
@@ -2909,7 +2909,7 @@ dependencies = [
 
 [[package]]
 name = "profile-picker"
-version = "1.3.0"
+version = "1.5.0"
 dependencies = [
  "controller-mapper",
  "gamepad-state",
@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "release-updater"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "base64",
  "bridge-output",
@@ -3525,7 +3525,7 @@ dependencies = [
 
 [[package]]
 name = "steam-controller-discovery"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "steam-controller-device",
  "steam-controller-protocol",
@@ -3868,7 +3868,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "ui-theme"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "eframe",
 ]

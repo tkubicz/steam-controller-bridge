@@ -18,11 +18,18 @@
     { "type": "toml", "path": "crates/bridge-output/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/bridge-protocol/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/bridge-runtime/Cargo.toml", "jsonpath": "$.package.version" },
+    { "type": "toml", "path": "crates/controller-art/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/controller-mapper/Cargo.toml", "jsonpath": "$.package.version" },
+    { "type": "toml", "path": "crates/desktop-bindings/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/gamepad-state/Cargo.toml", "jsonpath": "$.package.version" },
+    { "type": "toml", "path": "crates/macos-power-monitor/Cargo.toml", "jsonpath": "$.package.version" },
+    { "type": "toml", "path": "crates/profile-picker/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/recording/Cargo.toml", "jsonpath": "$.package.version" },
+    { "type": "toml", "path": "crates/release-updater/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/steam-controller-device/Cargo.toml", "jsonpath": "$.package.version" },
-    { "type": "toml", "path": "crates/steam-controller-protocol/Cargo.toml", "jsonpath": "$.package.version" }
+    { "type": "toml", "path": "crates/steam-controller-discovery/Cargo.toml", "jsonpath": "$.package.version" },
+    { "type": "toml", "path": "crates/steam-controller-protocol/Cargo.toml", "jsonpath": "$.package.version" },
+    { "type": "toml", "path": "crates/ui-theme/Cargo.toml", "jsonpath": "$.package.version" }
   ],
   "changelog-sections": [
     { "type": "feat", "section": "Features" },
