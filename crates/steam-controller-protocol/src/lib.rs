@@ -231,12 +231,26 @@ pub struct BatteryStatus {
     pub percent: u8,
 }
 
+/// One six-byte mouse report emitted by the controller's built-in lizard mode.
+///
+/// The layout is the HID descriptor's report ID followed by the standard
+/// mouse fields: button bitmap, signed X/Y motion, and signed vertical and
+/// horizontal wheel motion. Keeping the validated packet makes captures
+/// independently auditable if the descriptor or firmware changes later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LizardMouseReport {
+    pub buttons: u8,
+    pub x: i8,
+    pub y: i8,
+    pub vertical_wheel: i8,
+    pub horizontal_wheel: i8,
+    pub raw_report: Vec<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecodedReport {
     ControllerState(SteamControllerState),
-    LizardMouse {
-        raw_report: Vec<u8>,
-    },
+    LizardMouse(LizardMouseReport),
     LizardKeyboard {
         raw_report: Vec<u8>,
     },
@@ -279,9 +293,14 @@ impl SteamControllerDecoder {
         match report_id {
             LIZARD_MOUSE_REPORT_ID => {
                 exact_size(report_id, data, LIZARD_MOUSE_REPORT_SIZE)?;
-                Ok(DecodedReport::LizardMouse {
+                Ok(DecodedReport::LizardMouse(LizardMouseReport {
+                    buttons: data[1],
+                    x: i8::from_ne_bytes([data[2]]),
+                    y: i8::from_ne_bytes([data[3]]),
+                    vertical_wheel: i8::from_ne_bytes([data[4]]),
+                    horizontal_wheel: i8::from_ne_bytes([data[5]]),
                     raw_report: data.to_vec(),
-                })
+                }))
             }
             LIZARD_KEYBOARD_REPORT_ID => {
                 exact_size(report_id, data, LIZARD_KEYBOARD_REPORT_SIZE)?;
@@ -712,12 +731,17 @@ mod tests {
 
     #[test]
     fn decodes_lizard_mouse_and_keyboard_reports() {
-        let mouse = [LIZARD_MOUSE_REPORT_ID, 1, 2, 3, 4, 5];
+        let mouse = [LIZARD_MOUSE_REPORT_ID, 0x15, 0x7f, 0x80, 0xff, 0x01];
         assert_eq!(
             SteamControllerDecoder::new().decode(LIZARD_MOUSE_REPORT_ID, &mouse),
-            Ok(DecodedReport::LizardMouse {
-                raw_report: mouse.to_vec()
-            })
+            Ok(DecodedReport::LizardMouse(LizardMouseReport {
+                buttons: 0x15,
+                x: 127,
+                y: -128,
+                vertical_wheel: -1,
+                horizontal_wheel: 1,
+                raw_report: mouse.to_vec(),
+            }))
         );
 
         let keyboard = [LIZARD_KEYBOARD_REPORT_ID, 1, 0, 4, 5, 6, 7, 8, 9];
@@ -736,6 +760,32 @@ mod tests {
             SteamControllerDecoder::new().decode(LIZARD_KEYBOARD_REPORT_ID, &keyboard[..8]),
             Err(DecodeError::InvalidReportSize { .. })
         ));
+    }
+
+    #[test]
+    fn lizard_mouse_signed_fields_and_raw_bytes_are_preserved() {
+        for (bytes, expected) in [
+            ([0x40, 0, 1, 2, 3, 4], (1, 2, 3, 4)),
+            ([0x40, 0xff, 0xff, 0xfe, 0xfd, 0xfc], (-1, -2, -3, -4)),
+        ] {
+            let DecodedReport::LizardMouse(report) = SteamControllerDecoder::new()
+                .decode(LIZARD_MOUSE_REPORT_ID, &bytes)
+                .unwrap()
+            else {
+                panic!("lizard mouse report expected");
+            };
+            assert_eq!(
+                (
+                    report.x,
+                    report.y,
+                    report.vertical_wheel,
+                    report.horizontal_wheel
+                ),
+                expected
+            );
+            assert_eq!(report.buttons, bytes[1]);
+            assert_eq!(report.raw_report, bytes);
+        }
     }
 
     #[test]

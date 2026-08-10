@@ -2,20 +2,43 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use steam_controller_protocol::{PadHapticGain, SteamButton, SteamButtons};
+use steam_controller_protocol::{PadHapticGain, SteamButton, SteamButtons, SteamControllerState};
 
-pub const BINDINGS_VERSION: u32 = 3;
+pub const BINDINGS_VERSION: u32 = 4;
 pub const MAX_PROFILES: usize = 32;
 pub const MAX_PROFILE_NAME_CHARS: usize = 48;
 pub const DEFAULT_PROFILE_ID: &str = "default";
 pub const DEFAULT_PROFILE_NAME: &str = "Default";
-pub const MIN_SCROLL_SPEED_PERCENT: u16 = 25;
-pub const MAX_SCROLL_SPEED_PERCENT: u16 = 300;
-pub const DEFAULT_SCROLL_SPEED_PERCENT: u16 = 100;
+pub const MIN_PAD_SPEED_PERCENT: u16 = 25;
+pub const MAX_PAD_SPEED_PERCENT: u16 = 300;
+pub const DEFAULT_PAD_SPEED_PERCENT: u16 = 100;
 
 pub(super) const PAD_MOTION_DEADZONE_COUNTS: i32 = 192;
+pub(super) const PAD_EDGE_DEADZONE_START_COUNTS: i32 = 16_384;
+pub(super) const PAD_EDGE_DEADZONE_COUNTS: i32 = 2_048;
+pub(super) const PAD_EDGE_STOP_PROGRESS_COUNTS: i32 = 256;
 pub(super) const PAD_MAX_DELTA_COUNTS: i32 = 32_768;
-pub(super) const MOUSE_COUNTS_PER_PIXEL: i32 = 64;
+pub(super) const PAD_STOP_PROGRESS_COUNTS: i32 = 96;
+pub(super) const PAD_STOP_WINDOW: Duration = Duration::from_millis(150);
+pub(super) const PAD_RELEASE_GUARD: Duration = Duration::from_millis(250);
+// Above ordinary press-roll wander in the supplied capture; crossing it after
+// the physical press edge is treated as deliberate drag intent.
+pub(super) const PAD_DRAG_THRESHOLD_COUNTS: i32 = 2_800;
+// Raw captures: normal touch pressure stays under ~1,300 while every press
+// drives it past 3,200. The 1,600 crossing leads the click bit by tens of
+// milliseconds, so pressure catches the approach roll; the lower exit bound
+// adds hysteresis.
+pub(super) const PAD_PRESSURE_FREEZE_ENTER: i16 = 1_600;
+pub(super) const PAD_PRESSURE_FREEZE_EXIT: i16 = 1_000;
+// The captured lizard-mode transfer is essentially linear once its anchored
+// noise envelope is escaped: guided fast, slow, cardinal, diagonal, and center
+// precision stages all land near this raw-count ratio.
+pub(super) const MOUSE_COUNTS_PER_PIXEL: i32 = 128;
+pub(super) const MOUSE_MOTION_DEADZONE_COUNTS: i32 = 2_560;
+pub(super) const MOUSE_EDGE_DEADZONE_COUNTS: i32 = 3_584;
+pub(super) const MOUSE_STOP_PROGRESS_COUNTS: i32 = 384;
+pub(super) const MOUSE_EDGE_STOP_PROGRESS_COUNTS: i32 = 768;
+pub(super) const MOUSE_STOP_WINDOW: Duration = Duration::from_millis(100);
 pub(super) const SCROLL_COUNTS_PER_PIXEL: i32 = 192;
 pub(super) const FEEDBACK_DISPLACEMENT_COUNTS: i32 = 768;
 pub(super) const FEEDBACK_SLOW_INTERVAL: Duration = Duration::from_millis(450);
@@ -78,11 +101,22 @@ impl Default for PadFeedbackConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PadFunctionConfig {
     pub enabled: bool,
     pub feedback: PadFeedbackConfig,
+    pub speed_percent: u16,
+}
+
+impl Default for PadFunctionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            feedback: PadFeedbackConfig::default(),
+            speed_percent: DEFAULT_PAD_SPEED_PERCENT,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +133,7 @@ impl Default for ScrollPadConfig {
         Self {
             enabled: false,
             feedback: PadFeedbackConfig::default(),
-            speed_percent: DEFAULT_SCROLL_SPEED_PERCENT,
+            speed_percent: DEFAULT_PAD_SPEED_PERCENT,
             momentum: true,
         }
     }
@@ -156,6 +190,28 @@ impl DesktopInputSnapshot {
     }
 }
 
+impl From<&SteamControllerState> for DesktopInputSnapshot {
+    fn from(state: &SteamControllerState) -> Self {
+        Self {
+            buttons: state.buttons,
+            left_pad: PadSample {
+                x: state.left_pad_x,
+                y: state.left_pad_y,
+                pressure: state.left_pad_pressure,
+                touched: state.left_pad_touched,
+                pressed: state.left_pad_pressed,
+            },
+            right_pad: PadSample {
+                x: state.right_pad_x,
+                y: state.right_pad_y,
+                pressure: state.right_pad_pressure,
+                touched: state.right_pad_touched,
+                pressed: state.right_pad_pressed,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PadFeedbackRequest {
     pub left: Option<PadFeedbackStrength>,
@@ -177,10 +233,20 @@ pub enum BindableControl {
     R4,
     R5,
     QuickAccess,
+    LeftPadClick,
+    RightPadClick,
 }
 
 impl BindableControl {
-    pub const ALL: [Self; 5] = [Self::L4, Self::L5, Self::R4, Self::R5, Self::QuickAccess];
+    pub const ALL: [Self; 7] = [
+        Self::L4,
+        Self::L5,
+        Self::R4,
+        Self::R5,
+        Self::QuickAccess,
+        Self::LeftPadClick,
+        Self::RightPadClick,
+    ];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -190,6 +256,8 @@ impl BindableControl {
             Self::R4 => "R4",
             Self::R5 => "R5",
             Self::QuickAccess => "Quick Access",
+            Self::LeftPadClick => "Left Pad Click",
+            Self::RightPadClick => "Right Pad Click",
         }
     }
 
@@ -201,6 +269,8 @@ impl BindableControl {
             Self::R4 => SteamButton::RightGrip4,
             Self::R5 => SteamButton::RightGrip5,
             Self::QuickAccess => SteamButton::QuickAccess,
+            Self::LeftPadClick => SteamButton::LeftPadClick,
+            Self::RightPadClick => SteamButton::RightPadClick,
         }
     }
 
@@ -534,6 +604,8 @@ pub struct ControlBindings {
     pub r4: Option<BindingAction>,
     pub r5: Option<BindingAction>,
     pub quick_access: Option<BindingAction>,
+    pub left_pad_click: Option<BindingAction>,
+    pub right_pad_click: Option<BindingAction>,
 }
 
 impl ControlBindings {
@@ -545,6 +617,8 @@ impl ControlBindings {
             BindableControl::R4 => self.r4.as_ref(),
             BindableControl::R5 => self.r5.as_ref(),
             BindableControl::QuickAccess => self.quick_access.as_ref(),
+            BindableControl::LeftPadClick => self.left_pad_click.as_ref(),
+            BindableControl::RightPadClick => self.right_pad_click.as_ref(),
         }
     }
 
@@ -555,6 +629,8 @@ impl ControlBindings {
             BindableControl::R4 => &mut self.r4,
             BindableControl::R5 => &mut self.r5,
             BindableControl::QuickAccess => &mut self.quick_access,
+            BindableControl::LeftPadClick => &mut self.left_pad_click,
+            BindableControl::RightPadClick => &mut self.right_pad_click,
         }
     }
 

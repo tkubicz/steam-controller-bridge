@@ -9,20 +9,128 @@ use crate::model::{
     ScrollPadConfig, FEEDBACK_DISPLACEMENT_COUNTS, FEEDBACK_FAST_INTERVAL, FEEDBACK_SLOW_INTERVAL,
     MOMENTUM_FRAME_MAX_SECONDS, MOTION_DEFAULT_SECONDS, MOTION_MIN_SECONDS,
     MOTION_SPEED_FULL_COUNTS_PER_SECOND, MOTION_SPEED_MAX_SECONDS,
-    MOTION_SPEED_START_COUNTS_PER_SECOND, MOUSE_COUNTS_PER_PIXEL, PAD_MAX_DELTA_COUNTS,
-    PAD_MOTION_DEADZONE_COUNTS, SCROLL_COUNTS_PER_PIXEL, SCROLL_MAX_ACCELERATION,
-    SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND, SCROLL_MOMENTUM_DECAY_PER_SECOND,
-    SCROLL_MOMENTUM_STOP_PIXELS_PER_SECOND, SCROLL_VELOCITY_BLEND,
+    MOTION_SPEED_START_COUNTS_PER_SECOND, MOUSE_COUNTS_PER_PIXEL, MOUSE_EDGE_DEADZONE_COUNTS,
+    MOUSE_EDGE_STOP_PROGRESS_COUNTS, MOUSE_MOTION_DEADZONE_COUNTS, MOUSE_STOP_PROGRESS_COUNTS,
+    MOUSE_STOP_WINDOW, PAD_DRAG_THRESHOLD_COUNTS, PAD_EDGE_DEADZONE_COUNTS,
+    PAD_EDGE_DEADZONE_START_COUNTS, PAD_EDGE_STOP_PROGRESS_COUNTS, PAD_MAX_DELTA_COUNTS,
+    PAD_MOTION_DEADZONE_COUNTS, PAD_PRESSURE_FREEZE_ENTER, PAD_PRESSURE_FREEZE_EXIT,
+    PAD_RELEASE_GUARD, PAD_STOP_PROGRESS_COUNTS, PAD_STOP_WINDOW, SCROLL_COUNTS_PER_PIXEL,
+    SCROLL_MAX_ACCELERATION, SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+    SCROLL_MOMENTUM_DECAY_PER_SECOND, SCROLL_MOMENTUM_STOP_PIXELS_PER_SECOND,
+    SCROLL_VELOCITY_BLEND,
 };
 use crate::sink::{DesktopInputSink, OutputKey};
 
+/// The pad motion filter's states. Raw captures show the reported centroid
+/// wandering by hundreds or thousands of counts as a pressed fingertip
+/// flattens and rolls, so a press enters a frozen state that only deliberate
+/// held travel can escape.
+#[derive(Debug)]
+enum MotionFilter {
+    /// Unpressed rest: displacement from the anchor accumulates and bounded
+    /// wander inside the noise radius emits nothing; escaping forwards only
+    /// the radial excess.
+    Parked { deadzone_x: i32, deadzone_y: i32 },
+    /// Unpressed motion: deltas pass through while each stop-window shows net
+    /// radial progress; an elapsed window without it re-parks.
+    Moving {
+        window_start: Duration,
+        window_x: i32,
+        window_y: i32,
+    },
+    /// Clicked: frozen. Displacement from the press point accumulates and only
+    /// crossing the drag threshold escapes into `Dragging`.
+    PressHeld { offset_x: i32, offset_y: i32 },
+    /// An intentional drag that paused. It uses the smaller position-aware
+    /// stop-progress envelope to resume instead of the full contact or drag
+    /// threshold.
+    DragParked { deadzone_x: i32, deadzone_y: i32 },
+    /// Clicked and deliberately dragging: deltas pass through until a stalled
+    /// window parks the drag without forgetting its drag latch.
+    Dragging {
+        window_start: Duration,
+        window_x: i32,
+        window_y: i32,
+    },
+}
+
+#[derive(Debug)]
+struct PadMotion {
+    raw_x: i32,
+    raw_y: i32,
+    filtered: Option<(i32, i32)>,
+    speed: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MotionThresholds {
+    deadzone_counts: i32,
+    edge_deadzone_counts: i32,
+    stop_progress_counts: i32,
+    edge_stop_progress_counts: i32,
+    stop_window: Duration,
+}
+
+impl MotionThresholds {
+    const fn drag_resume(self) -> Self {
+        Self {
+            deadzone_counts: self.stop_progress_counts,
+            edge_deadzone_counts: self.edge_stop_progress_counts,
+            ..self
+        }
+    }
+}
+
+struct StopWindow<'a> {
+    start: &'a mut Duration,
+    x: &'a mut i32,
+    y: &'a mut i32,
+}
+
+const POINTER_THRESHOLDS: MotionThresholds = MotionThresholds {
+    deadzone_counts: MOUSE_MOTION_DEADZONE_COUNTS,
+    edge_deadzone_counts: MOUSE_EDGE_DEADZONE_COUNTS,
+    stop_progress_counts: MOUSE_STOP_PROGRESS_COUNTS,
+    edge_stop_progress_counts: MOUSE_EDGE_STOP_PROGRESS_COUNTS,
+    stop_window: MOUSE_STOP_WINDOW,
+};
+
+const SCROLL_THRESHOLDS: MotionThresholds = MotionThresholds {
+    deadzone_counts: PAD_MOTION_DEADZONE_COUNTS,
+    edge_deadzone_counts: PAD_EDGE_DEADZONE_COUNTS,
+    stop_progress_counts: PAD_STOP_PROGRESS_COUNTS,
+    edge_stop_progress_counts: PAD_EDGE_STOP_PROGRESS_COUNTS,
+    stop_window: PAD_STOP_WINDOW,
+};
+
+impl Default for MotionFilter {
+    fn default() -> Self {
+        Self::Parked {
+            deadzone_x: 0,
+            deadzone_y: 0,
+        }
+    }
+}
+
+// Five genuinely independent latches: contact, safety block, effective press,
+// physical click, and post-click pressure suppression. Packing them into enums
+// would obscure that each is set and cleared on its own schedule.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Default)]
 struct PadMotionState {
     previous: Option<(i16, i16)>,
     touched: bool,
     blocked: bool,
-    deadzone_x: i32,
-    deadzone_y: i32,
+    /// Effective press latch: the click bit OR pressure past the freeze
+    /// threshold. Drives the motion freeze.
+    held: bool,
+    /// Physical click-bit latch. Distinguishes press, hold, and release edges.
+    clicked: bool,
+    /// After a physical release, do not let residual analog pressure start a
+    /// second freeze before it first drops below the hysteresis exit point.
+    pressure_blocked: bool,
+    guard_until: Option<Duration>,
+    filter: MotionFilter,
     x_residual: i32,
     y_residual: i32,
     feedback_x: i32,
@@ -37,10 +145,12 @@ struct PadMotionState {
 }
 
 impl PadMotionState {
-    fn reset_contact(&mut self) {
+    // The click latch and guard window survive `reset_motion_tracking` on purpose:
+    // the guard rebaselines every report, which calls into the reset path,
+    // and clearing the guard there would end it after a single report.
+    fn reset_motion_tracking(&mut self) {
         self.previous = None;
-        self.deadzone_x = 0;
-        self.deadzone_y = 0;
+        self.filter = MotionFilter::default();
         self.x_residual = 0;
         self.y_residual = 0;
         self.feedback_x = 0;
@@ -50,13 +160,22 @@ impl PadMotionState {
     }
 
     fn reset_motion(&mut self) {
-        self.reset_contact();
+        self.reset_motion_tracking();
         clear_scroll_momentum(self);
     }
 
     fn block_if_touched(&mut self) {
         self.blocked = self.touched;
         self.reset_motion();
+    }
+
+    fn end_contact(&mut self, sample: PadSample) {
+        self.touched = false;
+        self.blocked = false;
+        self.held = false;
+        self.clicked = sample.pressed;
+        self.pressure_blocked = false;
+        self.guard_until = None;
     }
 }
 
@@ -132,7 +251,7 @@ impl BindingEngine {
     }
 
     /// Observes buttons and pads, emitting desktop actions and returning any
-    /// finite pad-feedback ticks requested by movement.
+    /// finite pad-feedback ticks requested by movement or physical clicks.
     ///
     /// The first snapshot is a non-emitting baseline. Any sink error releases
     /// held outputs and blocks controls and pads until their physical release.
@@ -156,6 +275,20 @@ impl BindingEngine {
         self.blocked_mask &= mask;
         let changed = previous ^ mask;
         let pads = self.profile.pads;
+        let left_click_feedback = pad_click_feedback(
+            changed,
+            mask,
+            self.blocked_mask,
+            BindableControl::LeftPadClick,
+            pads.left_scroll.feedback,
+        );
+        let right_click_feedback = pad_click_feedback(
+            changed,
+            mask,
+            self.blocked_mask,
+            BindableControl::RightPadClick,
+            pads.right_mouse.feedback,
+        );
         let result = self.apply_changes(changed, mask, sink).and_then(|()| {
             let left = process_scroll_pad(
                 &mut self.left_pad,
@@ -171,7 +304,10 @@ impl BindingEngine {
                 now,
                 sink,
             )?;
-            Ok(PadFeedbackRequest { left, right })
+            Ok(PadFeedbackRequest {
+                left: left.or(left_click_feedback),
+                right: right.or(right_click_feedback),
+            })
         });
         self.previous_mask = Some(mask);
         match result {
@@ -389,7 +525,128 @@ impl BindingEngine {
 fn baseline_pad(state: &mut PadMotionState, sample: PadSample) {
     state.touched = sample.touched;
     state.blocked = sample.touched;
+    state.held = effectively_pressed(false, false, sample);
+    state.clicked = sample.pressed;
+    state.pressure_blocked = false;
+    state.guard_until = None;
     state.reset_motion();
+}
+
+/// Effective press: the physical click bit OR the analog pressure crossing
+/// the freeze threshold, with hysteresis. Pressure typically leads switch
+/// actuation by tens of milliseconds, so the freeze catches the approach roll
+/// and light presses that never reach the click bit.
+fn effectively_pressed(previously_held: bool, pressure_blocked: bool, sample: PadSample) -> bool {
+    sample.pressed
+        || (!pressure_blocked
+            && sample.pressure
+                >= if previously_held {
+                    PAD_PRESSURE_FREEZE_EXIT
+                } else {
+                    PAD_PRESSURE_FREEZE_ENTER
+                })
+}
+
+/// Latches the pad's press state and applies its filter transitions. Pressure
+/// freezes the approach, the physical click edge establishes a fresh drag
+/// anchor, and the falling edge immediately guards the un-flattening tail even
+/// while analog pressure remains high.
+fn apply_click_transitions(state: &mut PadMotionState, sample: PadSample, now: Duration) -> bool {
+    if state.pressure_blocked && sample.pressure < PAD_PRESSURE_FREEZE_EXIT {
+        state.pressure_blocked = false;
+    }
+    let was_clicked = state.clicked;
+    let pressed_edge = sample.pressed && !was_clicked;
+    let released_edge = !sample.pressed && was_clicked;
+    state.clicked = sample.pressed;
+    let was_held = state.held;
+    state.held = effectively_pressed(was_held, state.pressure_blocked, sample);
+
+    if pressed_edge {
+        state.pressure_blocked = false;
+        state.held = true;
+        rebaseline_placement(state, sample);
+        state.guard_until = None;
+    } else if released_edge {
+        state.pressure_blocked = true;
+        state.held = false;
+        rebaseline_placement(state, sample);
+        state.guard_until = Some(now + PAD_RELEASE_GUARD);
+    } else if state.held && !was_held {
+        rebaseline_placement(state, sample);
+        state.guard_until = None;
+    } else if !state.held && was_held {
+        rebaseline_placement(state, sample);
+        state.guard_until = Some(now + PAD_RELEASE_GUARD);
+    }
+    match state.guard_until {
+        Some(until) if now < until => true,
+        Some(_) => {
+            state.guard_until = None;
+            false
+        }
+        None => false,
+    }
+}
+
+fn pad_click_feedback(
+    changed: u8,
+    current: u8,
+    blocked: u8,
+    control: BindableControl,
+    config: PadFeedbackConfig,
+) -> Option<PadFeedbackStrength> {
+    let control = control.mask();
+    (config.enabled && changed & control != 0 && current & control != 0 && blocked & control == 0)
+        .then_some(config.strength)
+}
+
+/// Runs the touch/press/release state machine shared by pointer and scroll
+/// pads, leaving only their output conversion in the callers.
+fn process_touched_pad(
+    state: &mut PadMotionState,
+    sample: PadSample,
+    enabled: bool,
+    thresholds: MotionThresholds,
+    now: Duration,
+) -> Option<PadMotion> {
+    state.touched = true;
+    if state.blocked {
+        state.held = effectively_pressed(state.held, state.pressure_blocked, sample);
+        state.clicked = sample.pressed;
+        state.pressure_blocked = false;
+        state.reset_motion();
+        return None;
+    }
+    let guard_active = apply_click_transitions(state, sample, now);
+    if !enabled {
+        state.reset_motion();
+        return None;
+    }
+    if guard_active {
+        rebaseline_placement(state, sample);
+        return None;
+    }
+
+    let Some((previous_x, previous_y)) = state.previous.replace((sample.x, sample.y)) else {
+        state.last_motion = Some(now);
+        return None;
+    };
+    let raw_x = i32::from(sample.x) - i32::from(previous_x);
+    let raw_y = i32::from(sample.y) - i32::from(previous_y);
+    if raw_x.abs() > PAD_MAX_DELTA_COUNTS || raw_y.abs() > PAD_MAX_DELTA_COUNTS {
+        rebaseline_placement(state, sample);
+        return None;
+    }
+
+    let speed = update_motion_speed(state, raw_x, raw_y, now);
+    let filtered = filter_pad_motion(state, sample, raw_x, raw_y, thresholds, now);
+    Some(PadMotion {
+        raw_x,
+        raw_y,
+        filtered,
+        speed,
+    })
 }
 
 fn process_mouse_pad(
@@ -399,47 +656,30 @@ fn process_mouse_pad(
     now: Duration,
     sink: &mut dyn DesktopInputSink,
 ) -> Result<Option<PadFeedbackStrength>, String> {
-    state.touched = sample.touched;
     if !sample.touched {
-        state.blocked = false;
+        state.end_contact(sample);
         state.reset_motion();
         return Ok(None);
     }
-    if state.blocked || !config.enabled {
-        state.reset_motion();
-        return Ok(None);
-    }
-
-    let Some((previous_x, previous_y)) = state.previous.replace((sample.x, sample.y)) else {
-        state.last_motion = Some(now);
+    let Some(motion) = process_touched_pad(state, sample, config.enabled, POINTER_THRESHOLDS, now)
+    else {
         return Ok(None);
     };
-    let raw_x = i32::from(sample.x) - i32::from(previous_x);
-    let raw_y = i32::from(sample.y) - i32::from(previous_y);
-    if raw_x.abs() > PAD_MAX_DELTA_COUNTS || raw_y.abs() > PAD_MAX_DELTA_COUNTS {
-        rebaseline_placement(state, sample);
-        return Ok(None);
+    if let Some((delta_x, delta_y)) = motion.filtered {
+        let gain = mouse_gain(config.speed_percent);
+        state.x_residual += scale_counts(delta_x, gain);
+        state.y_residual -= scale_counts(delta_y, gain);
+        let pixels_x = take_pixels(&mut state.x_residual, MOUSE_COUNTS_PER_PIXEL);
+        let pixels_y = take_pixels(&mut state.y_residual, MOUSE_COUNTS_PER_PIXEL);
+        if pixels_x != 0 || pixels_y != 0 {
+            sink.mouse_move(pixels_x, pixels_y)?;
+        }
     }
 
-    let Some((delta_x, delta_y)) = accumulate_deadzone_motion(state, raw_x, raw_y) else {
-        return Ok(None);
-    };
-
-    state.x_residual += delta_x;
-    state.y_residual -= delta_y;
-    let pixels_x = take_pixels(&mut state.x_residual, MOUSE_COUNTS_PER_PIXEL);
-    let pixels_y = take_pixels(&mut state.y_residual, MOUSE_COUNTS_PER_PIXEL);
-    if pixels_x != 0 || pixels_y != 0 {
-        sink.mouse_move(pixels_x, pixels_y)?;
-    }
-
-    let speed = update_motion_speed(state, delta_x, delta_y, now);
-    Ok(process_feedback(
+    Ok(process_motion_feedback(
         state,
         config.feedback,
-        delta_x,
-        delta_y,
-        speed,
+        &motion,
         now,
     ))
 }
@@ -452,19 +692,17 @@ fn process_scroll_pad(
     sink: &mut dyn DesktopInputSink,
 ) -> Result<Option<PadFeedbackStrength>, String> {
     let was_touched = state.touched;
-    state.touched = sample.touched;
-    if !config.enabled || state.blocked {
-        if !sample.touched {
-            state.blocked = false;
-        }
-        state.reset_motion();
-        return Ok(None);
-    }
     if !sample.touched {
+        state.end_contact(sample);
+        if !config.enabled {
+            state.reset_motion();
+            return Ok(None);
+        }
         if was_touched {
-            state.reset_contact();
-            state.scroll_last_update = Some(now);
-            if !config.momentum {
+            state.reset_motion_tracking();
+            if config.momentum && scroll_velocity_pending(state) {
+                state.scroll_last_update = Some(now);
+            } else {
                 clear_scroll_momentum(state);
             }
             return Ok(None);
@@ -476,52 +714,50 @@ fn process_scroll_pad(
         }
         return Ok(None);
     }
-
     if !was_touched {
         clear_scroll_momentum(state);
     }
-    let Some((previous_x, previous_y)) = state.previous.replace((sample.x, sample.y)) else {
-        state.last_motion = Some(now);
+    let Some(motion) = process_touched_pad(state, sample, config.enabled, SCROLL_THRESHOLDS, now)
+    else {
+        // Seed velocity timing from contact rather than assuming the default
+        // frame interval for the first accepted scroll sample. This timestamp
+        // alone cannot schedule momentum: release also requires real velocity.
+        if config.enabled && state.touched && state.scroll_last_update.is_none() {
+            state.scroll_last_update = Some(now);
+        }
+        return Ok(None);
+    };
+    if let Some((delta_x, delta_y)) = motion.filtered {
+        let acceleration = scroll_acceleration(motion.speed);
+        let profile_scale = f64::from(config.speed_percent) / 100.0;
+        let scale = profile_scale * acceleration / f64::from(SCROLL_COUNTS_PER_PIXEL);
+        let scroll_x = f64::from(delta_x) * scale;
+        let scroll_y = -f64::from(delta_y) * scale;
+        emit_fractional_scroll(state, scroll_x, scroll_y, sink)?;
+
+        let seconds = motion_seconds(state.scroll_last_update, now);
         state.scroll_last_update = Some(now);
-        return Ok(None);
-    };
-    let raw_x = i32::from(sample.x) - i32::from(previous_x);
-    let raw_y = i32::from(sample.y) - i32::from(previous_y);
-    if raw_x.abs() > PAD_MAX_DELTA_COUNTS || raw_y.abs() > PAD_MAX_DELTA_COUNTS {
-        rebaseline_placement(state, sample);
-        return Ok(None);
+        let instantaneous_x = (scroll_x / seconds).clamp(
+            -SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+            SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+        );
+        let instantaneous_y = (scroll_y / seconds).clamp(
+            -SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+            SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+        );
+        state.scroll_velocity_x = blend_velocity(state.scroll_velocity_x, instantaneous_x);
+        state.scroll_velocity_y = blend_velocity(state.scroll_velocity_y, instantaneous_y);
+    } else if matches!(
+        state.filter,
+        MotionFilter::Parked { .. } | MotionFilter::DragParked { .. }
+    ) {
+        clear_scroll_momentum(state);
     }
-    let Some((delta_x, delta_y)) = accumulate_deadzone_motion(state, raw_x, raw_y) else {
-        return Ok(None);
-    };
 
-    let speed = update_motion_speed(state, delta_x, delta_y, now);
-    let acceleration = scroll_acceleration(speed);
-    let profile_scale = f64::from(config.speed_percent) / 100.0;
-    let scale = profile_scale * acceleration / f64::from(SCROLL_COUNTS_PER_PIXEL);
-    let scroll_x = f64::from(delta_x) * scale;
-    let scroll_y = -f64::from(delta_y) * scale;
-    emit_fractional_scroll(state, scroll_x, scroll_y, sink)?;
-
-    let seconds = motion_seconds(state.scroll_last_update, now);
-    state.scroll_last_update = Some(now);
-    let instantaneous_x = (scroll_x / seconds).clamp(
-        -SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
-        SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
-    );
-    let instantaneous_y = (scroll_y / seconds).clamp(
-        -SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
-        SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
-    );
-    state.scroll_velocity_x = blend_velocity(state.scroll_velocity_x, instantaneous_x);
-    state.scroll_velocity_y = blend_velocity(state.scroll_velocity_y, instantaneous_y);
-
-    Ok(process_feedback(
+    Ok(process_motion_feedback(
         state,
         config.feedback,
-        delta_x,
-        delta_y,
-        speed,
+        &motion,
         now,
     ))
 }
@@ -612,12 +848,14 @@ fn advance_scroll_momentum(
     let decay = (-SCROLL_MOMENTUM_DECAY_PER_SECOND * seconds).exp();
     state.scroll_velocity_x *= decay;
     state.scroll_velocity_y *= decay;
-    if state.scroll_velocity_x.hypot(state.scroll_velocity_y)
-        < SCROLL_MOMENTUM_STOP_PIXELS_PER_SECOND
-    {
+    if !scroll_velocity_pending(state) {
         clear_scroll_momentum(state);
     }
     Ok(())
+}
+
+fn scroll_velocity_pending(state: &PadMotionState) -> bool {
+    state.scroll_velocity_x.hypot(state.scroll_velocity_y) >= SCROLL_MOMENTUM_STOP_PIXELS_PER_SECOND
 }
 
 fn clear_scroll_momentum(state: &mut PadMotionState) {
@@ -673,33 +911,237 @@ fn process_feedback(
     }
 }
 
+fn process_motion_feedback(
+    state: &mut PadMotionState,
+    config: PadFeedbackConfig,
+    motion: &PadMotion,
+    now: Duration,
+) -> Option<PadFeedbackStrength> {
+    // Texture feedback follows accepted pointer/scroll motion. Raw centroid
+    // noise while parked or press-frozen must remain silent as well as still.
+    if motion.filtered.is_none() {
+        state.feedback_x = 0;
+        state.feedback_y = 0;
+        return None;
+    }
+    process_feedback(state, config, motion.raw_x, motion.raw_y, motion.speed, now)
+}
+
 /// Treats an impossibly large per-report delta as a lift-and-replace: motion,
 /// deadzone, feedback, and momentum restart from the new contact point.
 fn rebaseline_placement(state: &mut PadMotionState, sample: PadSample) {
     state.reset_motion();
+    if state.held {
+        state.filter = MotionFilter::PressHeld {
+            offset_x: 0,
+            offset_y: 0,
+        };
+    }
     state.previous = Some((sample.x, sample.y));
 }
 
-fn accumulate_deadzone_motion(
+/// Anchored motion filter with hysteresis; see [`MotionFilter`] for the state
+/// semantics. Escapes forward only the radial excess beyond the escaped
+/// radius (rescaled along the accumulated direction, like the stick dead
+/// zones), and the pass-through states re-anchor whenever a stop-window
+/// elapses without net radial progress — oscillating press-noise nets out to
+/// nothing, so it can never hold the filter open the way it defeated the
+/// previous per-crossing progress counter.
+fn filter_pad_motion(
     state: &mut PadMotionState,
+    sample: PadSample,
     delta_x: i32,
     delta_y: i32,
+    thresholds: MotionThresholds,
+    now: Duration,
 ) -> Option<(i32, i32)> {
-    // Accumulate slow intentional motion, but require its radial displacement
-    // to leave the stationary-noise region before forwarding it. Recenter
-    // after every accepted vector so a stopped finger gets a fresh deadzone.
-    state.deadzone_x += delta_x;
-    state.deadzone_y += delta_y;
-    let x = i64::from(state.deadzone_x);
-    let y = i64::from(state.deadzone_y);
-    if x * x + y * y < i64::from(PAD_MOTION_DEADZONE_COUNTS).pow(2) {
-        None
-    } else {
-        let filtered = (state.deadzone_x, state.deadzone_y);
-        state.deadzone_x = 0;
-        state.deadzone_y = 0;
-        Some(filtered)
+    match &mut state.filter {
+        MotionFilter::Parked {
+            deadzone_x,
+            deadzone_y,
+        } => {
+            let escaped =
+                escape_parked_motion(deadzone_x, deadzone_y, sample, delta_x, delta_y, thresholds);
+            if escaped.is_some() {
+                state.filter = MotionFilter::Moving {
+                    window_start: now,
+                    window_x: 0,
+                    window_y: 0,
+                };
+            }
+            escaped
+        }
+        MotionFilter::PressHeld { offset_x, offset_y } => {
+            *offset_x += delta_x;
+            *offset_y += delta_y;
+            if !state.clicked {
+                return None;
+            }
+            let escaped = escape_excess(*offset_x, *offset_y, PAD_DRAG_THRESHOLD_COUNTS);
+            if escaped.is_some() {
+                state.filter = MotionFilter::Dragging {
+                    window_start: now,
+                    window_x: 0,
+                    window_y: 0,
+                };
+            }
+            escaped
+        }
+        MotionFilter::DragParked {
+            deadzone_x,
+            deadzone_y,
+        } => {
+            let escaped = escape_parked_motion(
+                deadzone_x,
+                deadzone_y,
+                sample,
+                delta_x,
+                delta_y,
+                thresholds.drag_resume(),
+            );
+            if escaped.is_some() {
+                state.filter = MotionFilter::Dragging {
+                    window_start: now,
+                    window_x: 0,
+                    window_y: 0,
+                };
+            }
+            escaped
+        }
+        MotionFilter::Moving {
+            window_start,
+            window_x,
+            window_y,
+        } => {
+            if window_stalled(
+                &mut StopWindow {
+                    start: window_start,
+                    x: window_x,
+                    y: window_y,
+                },
+                (delta_x, delta_y),
+                sample,
+                thresholds,
+                now,
+            ) {
+                state.filter = MotionFilter::default();
+                return None;
+            }
+            Some((delta_x, delta_y))
+        }
+        MotionFilter::Dragging {
+            window_start,
+            window_x,
+            window_y,
+        } => {
+            if window_stalled(
+                &mut StopWindow {
+                    start: window_start,
+                    x: window_x,
+                    y: window_y,
+                },
+                (delta_x, delta_y),
+                sample,
+                thresholds,
+                now,
+            ) {
+                state.filter = MotionFilter::DragParked {
+                    deadzone_x: 0,
+                    deadzone_y: 0,
+                };
+                return None;
+            }
+            Some((delta_x, delta_y))
+        }
     }
+}
+
+fn escape_parked_motion(
+    deadzone_x: &mut i32,
+    deadzone_y: &mut i32,
+    sample: PadSample,
+    delta_x: i32,
+    delta_y: i32,
+    thresholds: MotionThresholds,
+) -> Option<(i32, i32)> {
+    *deadzone_x += delta_x;
+    *deadzone_y += delta_y;
+    escape_excess(
+        *deadzone_x,
+        *deadzone_y,
+        position_aware_threshold(
+            sample,
+            thresholds.deadzone_counts,
+            thresholds.edge_deadzone_counts,
+        ),
+    )
+}
+
+/// Forwards the radial excess beyond an anchored radius once accumulated
+/// displacement escapes it; `None` while still inside.
+fn escape_excess(x: i32, y: i32, radius_counts: i32) -> Option<(i32, i32)> {
+    let r2 = i64::from(x) * i64::from(x) + i64::from(y) * i64::from(y);
+    if r2 <= i64::from(radius_counts).pow(2) {
+        return None;
+    }
+    let radius = f64::from(x).hypot(f64::from(y));
+    let scale = (radius - f64::from(radius_counts)) / radius;
+    Some((scale_counts(x, scale), scale_counts(y, scale)))
+}
+
+/// Reports whether a stop-window elapsed without net radial progress, and
+/// refreshes the window when it elapsed with progress.
+fn window_stalled(
+    window: &mut StopWindow<'_>,
+    delta: (i32, i32),
+    sample: PadSample,
+    thresholds: MotionThresholds,
+    now: Duration,
+) -> bool {
+    *window.x += delta.0;
+    *window.y += delta.1;
+    if now.saturating_sub(*window.start) < thresholds.stop_window {
+        return false;
+    }
+    let x = i64::from(*window.x);
+    let y = i64::from(*window.y);
+    let threshold = position_aware_threshold(
+        sample,
+        thresholds.stop_progress_counts,
+        thresholds.edge_stop_progress_counts,
+    );
+    if x * x + y * y < i64::from(threshold).pow(2) {
+        return true;
+    }
+    *window.start = now;
+    *window.x = 0;
+    *window.y = 0;
+    false
+}
+
+/// Capacitive centroid noise grows sharply near the pad rim, especially when
+/// one axis is clamped. Grow each center threshold toward its separate edge
+/// cap: the parked envelope rejects a fresh contact's wander, while the much
+/// smaller stop threshold preserves deliberate slow travel already in motion.
+fn position_aware_threshold(sample: PadSample, center_counts: i32, edge_counts: i32) -> i32 {
+    let edge = i32::from(sample.x).abs().max(i32::from(sample.y).abs());
+    if edge <= PAD_EDGE_DEADZONE_START_COUNTS {
+        return center_counts;
+    }
+    let edge_span = i32::from(i16::MAX) - PAD_EDGE_DEADZONE_START_COUNTS;
+    let edge_progress = edge - PAD_EDGE_DEADZONE_START_COUNTS;
+    center_counts + (edge_counts - center_counts) * edge_progress / edge_span
+}
+
+/// Lizard-mode-compatible linear pointer gain plus the profile speed control.
+fn mouse_gain(speed_percent: u16) -> f64 {
+    f64::from(speed_percent) / 100.0
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn scale_counts(counts: i32, factor: f64) -> i32 {
+    // Per-report deltas and configured gain are bounded far below i32 limits.
+    (f64::from(counts) * factor).round() as i32
 }
 
 fn take_pixels(residual: &mut i32, counts_per_pixel: i32) -> i32 {

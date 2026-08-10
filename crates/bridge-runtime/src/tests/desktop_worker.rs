@@ -95,6 +95,61 @@ fn desktop_worker_mailbox_coalesces_motion_without_dropping_edges() {
 }
 
 #[test]
+fn desktop_worker_mailbox_preserves_pad_click_edges_during_motion() {
+    let mailbox = DesktopWorkerMailbox::default();
+    let outputs = DesktopWorkerOutputs::default();
+    let touched = |x, clicked: bool| DesktopInputSnapshot {
+        buttons: if clicked {
+            SteamButtons(1_u32 << SteamButton::RightPadClick as u8)
+        } else {
+            SteamButtons::default()
+        },
+        right_pad: PadSample {
+            x,
+            touched: true,
+            pressed: clicked,
+            ..PadSample::NEUTRAL
+        },
+        ..DesktopInputSnapshot::buttons_only(SteamButtons::default())
+    };
+
+    for (index, snapshot) in [
+        DesktopInputSnapshot::buttons_only(SteamButtons::default()),
+        touched(0, false),
+        touched(10, false),
+        touched(20, true),
+        touched(30, false),
+        touched(40, false),
+        touched(50, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            mailbox.publish_snapshot(&outputs, snapshot, Duration::from_millis(index as u64)),
+            DesktopSnapshotPublish::Published
+        );
+    }
+
+    let snapshots = mailbox
+        .take_batch(Some(Duration::ZERO))
+        .into_iter()
+        .map(|message| match message {
+            DesktopWorkerMessage::Snapshot(snapshot) => snapshot.snapshot,
+            _ => panic!("expected only desktop snapshots"),
+        })
+        .collect::<Vec<_>>();
+    // The analog-only run still coalesces (x=40 is replaced by x=50), but both
+    // the click press and its release edge survive.
+    assert_eq!(snapshots.len(), 6);
+    assert!(snapshots[3].right_pad.pressed);
+    assert_eq!(snapshots[3].right_pad.x, 20);
+    assert!(!snapshots[4].right_pad.pressed);
+    assert_eq!(snapshots[4].right_pad.x, 30);
+    assert_eq!(snapshots[5].right_pad.x, 50);
+}
+
+#[test]
 fn desktop_worker_mailbox_overflow_keeps_control_barriers_and_latest_state() {
     let mailbox = DesktopWorkerMailbox::default();
     let outputs = DesktopWorkerOutputs::default();
@@ -496,6 +551,52 @@ fn transition_mailbox_coalesces_analog_reports_but_preserves_button_edges() {
         vec![1, 6, 3, 7, 5]
     );
     assert_eq!(dropped.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn transition_mailbox_preserves_pad_click_edges_between_analog_reports() {
+    let mailbox = TransitionReportMailbox::default();
+    let dropped = AtomicU64::new(0);
+    let report = |sequence: u8, buttons: u32, x: i16| {
+        let mut data = vec![0; INPUT_REPORT_SIZE];
+        data[0] = INPUT_REPORT_ID;
+        data[1] = sequence;
+        data[2..6].copy_from_slice(&buttons.to_le_bytes());
+        data[24..26].copy_from_slice(&x.to_le_bytes());
+        RawHidReport {
+            timestamp: Duration::ZERO,
+            report_id: INPUT_REPORT_ID,
+            data,
+            source_device_id: "mailbox".to_owned(),
+            transport: "USB".to_owned(),
+            dropped_reports: 0,
+        }
+    };
+    let touch = 1_u32 << SteamButton::RightPadTouch as u8;
+    let right_click = 1_u32 << SteamButton::RightPadClick as u8;
+    let left_click = 1_u32 << SteamButton::LeftPadClick as u8;
+
+    assert!(mailbox.publish(report(1, touch, 0), &dropped));
+    assert!(!mailbox.publish(report(2, touch, 100), &dropped));
+    assert!(!mailbox.publish(report(3, touch | right_click, 150), &dropped));
+    assert!(!mailbox.publish(report(4, touch, 200), &dropped));
+    assert!(!mailbox.publish(report(5, touch, 250), &dropped));
+    assert!(!mailbox.publish(report(6, touch, 300), &dropped));
+    assert!(!mailbox.publish(report(7, touch | left_click, 300), &dropped));
+    assert!(!mailbox.publish(report(8, touch, 300), &dropped));
+
+    let batch = mailbox.take_all();
+    assert!(!batch.overflowed);
+    // Both click edges survive; only the analog-only report 5 is coalesced.
+    assert_eq!(
+        batch
+            .reports
+            .iter()
+            .map(|report| report.data[1])
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 6, 7, 8]
+    );
+    assert_eq!(dropped.load(Ordering::Relaxed), 1);
 }
 
 #[test]

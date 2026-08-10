@@ -2,7 +2,7 @@
 //! recording writes that hang off it.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,8 +11,8 @@ use controller_mapper::ControllerMapper;
 use gamepad_state::GamepadState;
 use recording::{RecordingEvent, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
 use serde_json::json;
-use steam_controller_device::{DeviceEvent, HidDeviceInfo, HidSession, RawHidReport};
-use steam_controller_discovery::ActiveControllerFinder;
+use steam_controller_device::{enumerate, DeviceEvent, HidDeviceInfo, HidSession, RawHidReport};
+use steam_controller_discovery::{ActiveControllerFinder, ControllerSearch};
 use steam_controller_protocol::DecodedReport;
 
 use crate::cli::Source;
@@ -22,15 +22,257 @@ use crate::{InputState, OutputChoice, Visualizer, FRAME_TIME};
 const INPUT_TIMEOUT: Duration = Duration::from_millis(200);
 const DECODE_FAILURE_LIMIT: u32 = 3;
 
+/// A stop flag paired with a condition variable, so retry waits are both idle
+/// and immediately interruptible during ownership transitions or shutdown.
+pub(crate) struct StopToken {
+    stopped: AtomicBool,
+    lock: Mutex<()>,
+    wake: Condvar,
+}
+
+impl Default for StopToken {
+    fn default() -> Self {
+        Self {
+            stopped: AtomicBool::new(false),
+            lock: Mutex::new(()),
+            wake: Condvar::new(),
+        }
+    }
+}
+
+impl StopToken {
+    pub(crate) fn load(&self, order: Ordering) -> bool {
+        self.stopped.load(order)
+    }
+
+    pub(crate) fn store(&self, stopped: bool, order: Ordering) {
+        self.stopped.store(stopped, order);
+        if stopped {
+            self.wake.notify_all();
+        }
+    }
+
+    pub(crate) fn wait(&self, timeout: Duration) {
+        if self.load(Ordering::Acquire) {
+            return;
+        }
+        let guard = self
+            .lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _ = self
+            .wake
+            .wait_timeout_while(guard, timeout, |()| !self.load(Ordering::Acquire))
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
+
+/// All GUI-mode HID enumeration and open calls run on this process-lifetime
+/// thread. hidapi's macOS backend owns a global `IOHIDManager` tied to the run
+/// loop of its first enumeration thread; destroying an ordinary worker and
+/// enumerating from its replacement otherwise traps in CoreFoundation.
+pub(crate) struct HidBroker {
+    client: HidBrokerClient,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct HidBrokerClient {
+    commands: mpsc::Sender<BrokerCommand>,
+}
+
+pub(crate) struct BrokerOpened {
+    #[cfg(target_os = "macos")]
+    pub(crate) index: usize,
+    pub(crate) info: HidDeviceInfo,
+    pub(crate) session: HidSession,
+    pub(crate) announce_connection: bool,
+}
+
+enum BrokerCommand {
+    Open {
+        source: Source,
+        stop: Arc<StopToken>,
+        events: mpsc::Sender<BrokerEvent>,
+    },
+    #[cfg(test)]
+    ReportThread(mpsc::Sender<thread::ThreadId>),
+    Shutdown,
+}
+
+enum BrokerEvent {
+    Status(ControllerSearch),
+    Opened(Box<BrokerOpened>),
+    Failed(String),
+}
+
+impl HidBroker {
+    pub(crate) fn new() -> Self {
+        let (commands, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || broker_worker(&receiver));
+        Self {
+            client: HidBrokerClient { commands },
+            worker: Some(worker),
+        }
+    }
+
+    pub(crate) fn client(&self) -> HidBrokerClient {
+        self.client.clone()
+    }
+}
+
+impl Drop for HidBroker {
+    fn drop(&mut self) {
+        let _ = self.client.commands.send(BrokerCommand::Shutdown);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl HidBrokerClient {
+    pub(crate) fn open(
+        &self,
+        source: Source,
+        stop: Arc<StopToken>,
+        mut status: impl FnMut(ControllerSearch),
+    ) -> Result<BrokerOpened, String> {
+        let (events, receiver) = mpsc::channel();
+        self.commands
+            .send(BrokerCommand::Open {
+                source,
+                stop,
+                events,
+            })
+            .map_err(|_| "visualizer HID broker stopped unexpectedly".to_owned())?;
+        loop {
+            match receiver.recv() {
+                Ok(BrokerEvent::Status(message)) => status(message),
+                Ok(BrokerEvent::Opened(opened)) => return Ok(*opened),
+                Ok(BrokerEvent::Failed(error)) => return Err(error),
+                Err(_) => return Err("visualizer HID broker stopped unexpectedly".to_owned()),
+            }
+        }
+    }
+}
+
+fn broker_worker(commands: &mpsc::Receiver<BrokerCommand>) {
+    let mut finder = None;
+    while let Ok(command) = commands.recv() {
+        match command {
+            BrokerCommand::Open {
+                source,
+                stop,
+                events,
+            } => broker_open(source, &stop, &events, &mut finder),
+            #[cfg(test)]
+            BrokerCommand::ReportThread(sender) => {
+                let _ = sender.send(thread::current().id());
+            }
+            BrokerCommand::Shutdown => return,
+        }
+    }
+}
+
+fn broker_open(
+    source: Source,
+    stop: &Arc<StopToken>,
+    events: &mpsc::Sender<BrokerEvent>,
+    finder: &mut Option<ActiveControllerFinder>,
+) {
+    if let Source::Collection(index) = source {
+        let event = enumerate()
+            .map_err(|error| error.to_string())
+            .and_then(|devices| {
+                devices
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| format!("HID device index {index} does not exist"))
+            })
+            .and_then(|info| {
+                HidSession::open_info(&info)
+                    .map(|session| (info, session))
+                    .map_err(|error| error.to_string())
+            })
+            .map_or_else(BrokerEvent::Failed, |(info, session)| {
+                BrokerEvent::Opened(Box::new(BrokerOpened {
+                    #[cfg(target_os = "macos")]
+                    index,
+                    info,
+                    session,
+                    announce_connection: false,
+                }))
+            });
+        let _ = events.send(event);
+        return;
+    }
+    if matches!(source, Source::Demo(_)) {
+        let _ = events.send(BrokerEvent::Failed("demo runs open no device".to_owned()));
+        return;
+    }
+    let active_finder = match finder {
+        Some(finder) => finder,
+        slot => match ActiveControllerFinder::new() {
+            Ok(finder) => slot.insert(finder),
+            Err(error) => {
+                let _ = events.send(BrokerEvent::Failed(error.to_string()));
+                return;
+            }
+        },
+    };
+    let mut last_status = None;
+    while !stop.load(Ordering::Acquire) {
+        match active_finder.find_with_index() {
+            Ok((index, info, session)) => {
+                #[cfg(not(target_os = "macos"))]
+                let _ = index;
+                let _ = events.send(BrokerEvent::Opened(Box::new(BrokerOpened {
+                    #[cfg(target_os = "macos")]
+                    index,
+                    info,
+                    session,
+                    announce_connection: true,
+                })));
+                return;
+            }
+            Err(search) => {
+                if last_status.as_ref() != Some(&search) {
+                    let _ = events.send(BrokerEvent::Status(search.clone()));
+                    last_status = Some(search);
+                }
+            }
+        }
+        wait_for_stop(stop, Duration::from_millis(250));
+    }
+    active_finder.clear_candidates();
+    let _ = events.send(BrokerEvent::Failed(
+        "controller auto-detection was cancelled".to_owned(),
+    ));
+}
+
 /// The worker's end of the connection, plus the flag that stops it.
 pub(crate) struct InputChannel {
     pub(crate) mailbox: Arc<InputMailbox>,
-    stop: Arc<AtomicBool>,
+    stop: Arc<StopToken>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for InputChannel {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.shutdown();
+    }
+}
+
+impl InputChannel {
+    /// Stops and joins the worker so its HID ownership is released before a
+    /// lossless capture session opens the same controller.
+    pub(crate) fn shutdown(&mut self) -> Result<(), String> {
+        self.stop.store(true, Ordering::Release);
+        self.worker.take().map_or(Ok(()), |worker| {
+            worker
+                .join()
+                .map_err(|_| "visualizer input worker panicked".to_owned())
+        })
     }
 }
 
@@ -59,47 +301,33 @@ struct Opened {
 /// [`HidDeviceInfo`] it selected precisely so the caller can re-announce it;
 /// `--index` skips probing, so there the event is still queued and re-announcing
 /// would double-count it.
-fn open(finder: &mut Option<ActiveControllerFinder>, source: Source) -> Result<Opened, String> {
-    match source {
-        Source::Collection(index) => HidSession::open_index(index)
-            .map(|session| Opened {
-                session,
-                announce: None,
-            })
-            .map_err(|error| error.to_string()),
-        Source::Discover => {
-            let finder = match finder {
-                Some(finder) => finder,
-                none => {
-                    none.insert(ActiveControllerFinder::new().map_err(|error| error.to_string())?)
-                }
-            };
-            finder
-                .find()
-                .map(|(info, session)| Opened {
-                    session,
-                    announce: Some(info),
-                })
-                .map_err(|search| search.to_string())
-        }
-        // A demo run never reaches the worker.
-        Source::Demo(_) => Err("demo runs open no device".to_owned()),
-    }
+fn open(
+    broker: &HidBrokerClient,
+    mailbox: &InputMailbox,
+    stop: Arc<StopToken>,
+    source: Source,
+) -> Result<Opened, String> {
+    broker
+        .open(source, stop, |status| {
+            mailbox.publish(InputEvent::Search(status));
+        })
+        .map(|opened| Opened {
+            session: opened.session,
+            announce: opened.announce_connection.then_some(opened.info),
+        })
 }
 
-pub(crate) fn input_worker(source: Source) -> InputChannel {
+pub(crate) fn input_worker(source: Source, broker: HidBrokerClient) -> InputChannel {
     let mailbox = Arc::new(InputMailbox::default());
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(StopToken::default());
     let worker_mailbox = Arc::clone(&mailbox);
     let worker_stop = Arc::clone(&stop);
-    thread::spawn(move || {
-        // Built once and reused across scans; it owns the shared HID context.
-        let mut finder = None;
+    let worker = thread::spawn(move || {
         while !worker_stop.load(Ordering::Relaxed) {
             let Opened {
                 mut session,
                 announce,
-            } = match open(&mut finder, source) {
+            } = match open(&broker, &worker_mailbox, Arc::clone(&worker_stop), source) {
                 Ok(opened) => opened,
                 Err(error) => {
                     worker_mailbox.publish(InputEvent::Lifecycle(Box::new(Err(error))));
@@ -109,7 +337,7 @@ pub(crate) fn input_worker(source: Source) -> InputChannel {
                     if matches!(source, Source::Collection(_)) {
                         return;
                     }
-                    thread::sleep(DISCOVERY_INTERVAL);
+                    wait_for_stop(&worker_stop, DISCOVERY_INTERVAL);
                     continue;
                 }
             };
@@ -145,13 +373,21 @@ pub(crate) fn input_worker(source: Source) -> InputChannel {
                         // A failed HID refresh can return immediately. Back off
                         // while retaining the session instead of spinning or
                         // reopening an explicit index against a changed list.
-                        thread::sleep(DISCOVERY_INTERVAL);
+                        wait_for_stop(&worker_stop, DISCOVERY_INTERVAL);
                     }
                 }
             }
         }
     });
-    InputChannel { mailbox, stop }
+    InputChannel {
+        mailbox,
+        stop,
+        worker: Some(worker),
+    }
+}
+
+fn wait_for_stop(stop: &StopToken, duration: Duration) {
+    stop.wait(duration);
 }
 
 impl Visualizer {
@@ -228,12 +464,19 @@ impl Visualizer {
                 .clone_into(&mut self.status);
         }
         for queued in batch.drain(..) {
+            if let InputEvent::Search(search) = queued {
+                self.status = search.to_string();
+                self.connection_search = Some(search);
+                continue;
+            }
+            self.connection_search = None;
             let (event, received_at) = match queued {
                 InputEvent::Report {
                     report,
                     received_at,
                 } => (Ok(DeviceEvent::Report(report)), Some(received_at)),
                 InputEvent::Lifecycle(lifecycle) => (*lifecycle, None),
+                InputEvent::Search(_) => unreachable!("search events were handled above"),
             };
             match event {
                 Err(error) => self.status = error,
@@ -474,17 +717,51 @@ impl Visualizer {
 
 #[cfg(test)]
 mod tests {
-    use super::{Visualizer, DECODE_FAILURE_LIMIT, INPUT_TIMEOUT};
+    use super::{BrokerCommand, HidBroker, Visualizer, DECODE_FAILURE_LIMIT, INPUT_TIMEOUT};
     use crate::cli::Source;
     use crate::demo::DemoState;
     use crate::{InputState, OutputChoice};
     use controller_mapper::RightAxisSource;
     use gamepad_state::GamepadState;
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use steam_controller_device::RawHidReport;
 
     fn analog_demo() -> Visualizer {
         Visualizer::new(Source::Demo(DemoState::Analog))
+    }
+
+    #[test]
+    fn hid_broker_keeps_one_process_lifetime_worker_thread() {
+        let broker = HidBroker::new();
+        let client = broker.client();
+        let worker_id = || {
+            let (sender, receiver) = mpsc::channel();
+            client
+                .commands
+                .send(BrokerCommand::ReportThread(sender))
+                .expect("broker accepts diagnostics");
+            receiver.recv().expect("broker reports its thread")
+        };
+        assert_eq!(worker_id(), worker_id());
+    }
+
+    /// Exercises the native hidapi/IOHIDManager lifecycle that cannot be
+    /// modeled by the platform-neutral broker test. Run explicitly on macOS;
+    /// it requires only enumeration, not an available controller.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "native macOS HID lifecycle regression"]
+    fn dashboard_worker_can_restart_after_join_without_rebinding_hidapi() {
+        let broker = HidBroker::new();
+        for _ in 0..2 {
+            let mut input = super::input_worker(Source::Discover, broker.client());
+            // Let the broker enter native enumeration. `shutdown` then waits
+            // for that request to acknowledge cancellation before the next
+            // worker is created.
+            std::thread::sleep(Duration::from_millis(500));
+            input.shutdown().expect("worker joins cleanly");
+        }
     }
 
     #[test]

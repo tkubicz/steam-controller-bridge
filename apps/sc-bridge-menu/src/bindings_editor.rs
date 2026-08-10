@@ -6,7 +6,7 @@ use controller_art::{
 use desktop_bindings::{
     default_store_path, load_or_create_store, save_store, BindableControl, BindingAction,
     BindingStore, KeyboardKey, Modifier, MouseButton, PadFeedbackConfig, PadFeedbackStrength,
-    MAX_PROFILE_NAME_CHARS, MAX_SCROLL_SPEED_PERCENT, MIN_SCROLL_SPEED_PERCENT,
+    MAX_PAD_SPEED_PERCENT, MAX_PROFILE_NAME_CHARS, MIN_PAD_SPEED_PERCENT,
 };
 use eframe::egui;
 
@@ -65,6 +65,8 @@ const fn art_control(control: BindableControl) -> Control {
         BindableControl::R4 => Control::R4,
         BindableControl::R5 => Control::R5,
         BindableControl::QuickAccess => Control::QuickAccess,
+        BindableControl::LeftPadClick => Control::LeftPad,
+        BindableControl::RightPadClick => Control::RightPad,
     }
 }
 
@@ -534,10 +536,12 @@ impl BindingsEditor {
                             .color(MUTED_TEXT),
                     );
                     ui.add_space(18.0);
-                    match selection {
-                        EditorSelection::Button(control) => self.binding_editor(ui, control),
-                        EditorSelection::Pad(side) => self.pad_editor(ui, side),
-                    }
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| match selection {
+                            EditorSelection::Button(control) => self.binding_editor(ui, control),
+                            EditorSelection::Pad(side) => self.pad_editor(ui, side),
+                        });
                 });
             });
     }
@@ -562,7 +566,7 @@ impl BindingsEditor {
                     ui.add(
                         egui::Slider::new(
                             &mut config.speed_percent,
-                            MIN_SCROLL_SPEED_PERCENT..=MAX_SCROLL_SPEED_PERCENT,
+                            MIN_PAD_SPEED_PERCENT..=MAX_PAD_SPEED_PERCENT,
                         )
                         .suffix("%"),
                     );
@@ -573,8 +577,6 @@ impl BindingsEditor {
                     );
                     ui.add_space(12.0);
                     ui.checkbox(&mut config.momentum, "Momentum after release");
-                    ui.add_space(16.0);
-                    pad_feedback_editor(ui, &mut config.feedback);
                 });
             }
             PadSide::Right => {
@@ -582,13 +584,55 @@ impl BindingsEditor {
                 ui.checkbox(&mut config.enabled, "Enable this pad");
                 ui.add_space(16.0);
                 ui.add_enabled_ui(config.enabled, |ui| {
-                    pad_feedback_editor(ui, &mut config.feedback);
+                    ui.label("Pointer speed");
+                    ui.add(
+                        egui::Slider::new(
+                            &mut config.speed_percent,
+                            MIN_PAD_SPEED_PERCENT..=MAX_PAD_SPEED_PERCENT,
+                        )
+                        .suffix("%"),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "100% matches the measured lizard-mode response; this setting scales it linearly.",
+                        )
+                        .small()
+                        .color(MUTED_TEXT),
+                    );
                 });
             }
         }
         ui.add_space(16.0);
+        match side {
+            PadSide::Left => pad_feedback_editor(
+                ui,
+                &mut self.store.profiles[self.selected].pads.left_scroll.feedback,
+            ),
+            PadSide::Right => pad_feedback_editor(
+                ui,
+                &mut self.store.profiles[self.selected].pads.right_mouse.feedback,
+            ),
+        }
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(12.0);
+        ui.label("Pad click");
         ui.label(
-            egui::RichText::new("Pad clicks, pressure actions, and gestures are not used.")
+            egui::RichText::new("Fires even when the pad function above is disabled.")
+                .small()
+                .color(MUTED_TEXT),
+        );
+        ui.add_space(12.0);
+        self.binding_editor(
+            ui,
+            match side {
+                PadSide::Left => BindableControl::LeftPadClick,
+                PadSide::Right => BindableControl::RightPadClick,
+            },
+        );
+        ui.add_space(16.0);
+        ui.label(
+            egui::RichText::new("Pressure actions and gestures are not used.")
                 .small()
                 .color(MUTED_TEXT),
         );

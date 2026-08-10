@@ -366,11 +366,11 @@ fn controller_source_identity(info: &HidDeviceInfo) -> String {
     )
 }
 
+pub const CONTROLLER_OWNERSHIP_GUIDANCE: &str =
+    "Fully quit Steam and other controller tools; if Steam's ipcserver remains, stop its LaunchAgent manually";
+
 fn ownership_guidance(error: &DeviceError) -> String {
-    format!(
-        "{error}. Fully quit Steam and other controller tools; if Steam's ipcserver remains, \
-         stop its LaunchAgent manually"
-    )
+    format!("{error}. {CONTROLLER_OWNERSHIP_GUIDANCE}")
 }
 
 /// Why one discovery attempt did not produce a session.
@@ -378,7 +378,10 @@ fn ownership_guidance(error: &DeviceError) -> String {
 pub enum ControllerSearch {
     NoController,
     Backend(String),
-    CannotOpen(String),
+    CannotOpen {
+        detail: String,
+        ownership_conflict: bool,
+    },
     NoInputYet,
     Ambiguous(usize),
 }
@@ -395,7 +398,7 @@ impl std::fmt::Display for ControllerSearch {
                     "Cannot enumerate Steam Controller input: {detail}"
                 )
             }
-            Self::CannotOpen(detail) => write!(
+            Self::CannotOpen { detail, .. } => write!(
                 formatter,
                 "Steam Controller input found, but no collection can be opened: {detail}"
             ),
@@ -415,6 +418,7 @@ impl std::fmt::Display for ControllerSearch {
 pub struct ActiveControllerFinder {
     enumerator: ControllerEnumerator,
     discovery: ControllerDiscoveryState<HidSession>,
+    ownership_conflict: bool,
 }
 
 impl ActiveControllerFinder {
@@ -427,7 +431,14 @@ impl ActiveControllerFinder {
         Ok(Self {
             enumerator: ControllerEnumerator::new()?,
             discovery: ControllerDiscoveryState::new(),
+            ownership_conflict: false,
         })
+    }
+
+    /// Releases every retained candidate session while preserving the native
+    /// enumeration context for a later scan on the same thread.
+    pub fn clear_candidates(&mut self) {
+        self.discovery.clear();
     }
 
     /// Probes retained candidates and refreshes their inventory only when due.
@@ -436,6 +447,20 @@ impl ActiveControllerFinder {
     ///
     /// Returns a displayable search state when no unique active source exists.
     pub fn find(&mut self) -> Result<(HidDeviceInfo, HidSession), ControllerSearch> {
+        self.find_with_index()
+            .map(|(_, info, session)| (info, session))
+    }
+
+    /// Finds the active source while retaining its path-sorted global HID
+    /// index for diagnostics that need to report the exact selected
+    /// collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a displayable search state when no unique active source exists.
+    pub fn find_with_index(
+        &mut self,
+    ) -> Result<(usize, HidDeviceInfo, HidSession), ControllerSearch> {
         if self.discovery.scan_due() {
             let discovered = self
                 .enumerator
@@ -443,8 +468,11 @@ impl ActiveControllerFinder {
                 .map(|devices| devices.into_iter().enumerate().collect::<Vec<_>>())
                 .map_err(|error| error.to_string());
             let enumerator = &self.enumerator;
+            self.ownership_conflict = false;
+            let ownership_conflict = &mut self.ownership_conflict;
             self.discovery.refresh(discovered, |_, info| {
                 enumerator.open(info).map_err(|error| {
+                    *ownership_conflict |= matches!(error, DeviceError::OwnershipConflict { .. });
                     format!(
                         "{}: {}",
                         controller_source_identity(info),
@@ -458,11 +486,13 @@ impl ActiveControllerFinder {
             return Err(if let Some(detail) = self.discovery.scan_error() {
                 ControllerSearch::Backend(detail.to_owned())
             } else if self.discovery.supported_devices_seen() {
-                ControllerSearch::CannotOpen(
-                    self.discovery
+                ControllerSearch::CannotOpen {
+                    detail: self
+                        .discovery
                         .current_errors(&[])
                         .unwrap_or_else(|| "no detail available".to_owned()),
-                )
+                    ownership_conflict: self.ownership_conflict,
+                }
             } else {
                 ControllerSearch::NoController
             });
@@ -471,11 +501,15 @@ impl ActiveControllerFinder {
         let probe = self.discovery.probe();
         match choose_unique_active(&probe.active_indices) {
             Ok(Some(selected)) => {
+                let enumeration_index = self.discovery.candidate(selected).enumeration_index();
                 let (info, session) = self.discovery.select(selected).into_parts();
-                Ok((info, session))
+                Ok((enumeration_index, info, session))
             }
             Ok(None) => Err(match self.discovery.current_errors(&probe.failures) {
-                Some(detail) => ControllerSearch::CannotOpen(detail),
+                Some(detail) => ControllerSearch::CannotOpen {
+                    detail,
+                    ownership_conflict: self.ownership_conflict,
+                },
                 None => ControllerSearch::NoInputYet,
             }),
             Err(active) => Err(ControllerSearch::Ambiguous(active.len())),
@@ -530,7 +564,10 @@ mod tests {
         let states = [
             ControllerSearch::NoController,
             ControllerSearch::Backend("IOKit unavailable".to_owned()),
-            ControllerSearch::CannotOpen("held by Steam".to_owned()),
+            ControllerSearch::CannotOpen {
+                detail: "held by Steam".to_owned(),
+                ownership_conflict: true,
+            },
             ControllerSearch::NoInputYet,
             ControllerSearch::Ambiguous(2),
         ];

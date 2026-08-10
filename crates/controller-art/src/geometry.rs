@@ -190,6 +190,28 @@ pub(crate) fn trackpad_shapes() -> &'static [(UnitShape, UnitShape); 2] {
     })
 }
 
+/// The same pad geometry, centered in a standalone unit square for focused
+/// instruction and diagnostic views outside the full controller drawing.
+pub(crate) fn trackpad_surface_shapes() -> &'static [(UnitShape, UnitShape); 2] {
+    static PADS: OnceLock<[(UnitShape, UnitShape); 2]> = OnceLock::new();
+    PADS.get_or_init(|| {
+        let pad = |index: usize| {
+            let corner = TRACKPAD_CORNER / TRACKPAD_SIZE[0];
+            let inset_size = 1.0 - 0.028 / TRACKPAD_SIZE[0];
+            (
+                UnitShape::rounded_rect([0.5, 0.5], [1.0, 1.0], corner, pad_tilt(index)),
+                UnitShape::rounded_rect(
+                    [0.5, 0.5],
+                    [inset_size, inset_size],
+                    corner * 0.75,
+                    pad_tilt(index),
+                ),
+            )
+        };
+        [pad(0), pad(1)]
+    })
+}
+
 /// The cant applied to one pad. The two pads mirror each other.
 pub(crate) fn pad_tilt(index: usize) -> f32 {
     if index == 0 {
@@ -503,6 +525,32 @@ pub(crate) fn unit_center(control: Control) -> [f32; 2] {
 #[must_use]
 pub fn trackpad_rect(view: egui::Rect, side: PadSide) -> egui::Rect {
     pad_rect(view, side.index())
+}
+
+/// Maps a pad-local position onto a standalone tilted pad surface.
+///
+/// `locus` uses the controller convention: both axes span `-1..=1`, with
+/// positive Y pointing upward. `surface` is the pad's square before its
+/// physical cant is applied, so callers should leave room around it.
+#[must_use]
+pub fn trackpad_surface_point(surface: egui::Rect, side: PadSide, locus: [f32; 2]) -> egui::Pos2 {
+    let clamp = |value: f32| {
+        if value.is_finite() {
+            value.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    let local = egui::vec2(
+        clamp(locus[0]) * surface.width() * 0.5,
+        -clamp(locus[1]) * surface.height() * 0.5,
+    );
+    let (sin, cos) = pad_tilt(side.index()).sin_cos();
+    surface.center()
+        + egui::vec2(
+            local.x.mul_add(cos, -local.y * sin),
+            local.x.mul_add(sin, local.y * cos),
+        )
 }
 
 fn pad_rect(view: egui::Rect, index: usize) -> egui::Rect {

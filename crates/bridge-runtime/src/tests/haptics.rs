@@ -202,7 +202,7 @@ fn runtime_pad_observation_emits_mouse_and_feedback_without_changing_gamepad_out
     let reports = [
         report(1, false, 0),
         report(2, true, 0),
-        report(3, true, 768),
+        report(3, true, 3_968),
     ];
     let mut profile = BindingProfile::default();
     profile.pads.right_mouse.enabled = true;
@@ -250,11 +250,48 @@ fn runtime_pad_observation_emits_mouse_and_feedback_without_changing_gamepad_out
         .unwrap();
     }
     assert_eq!(bound_output.states, control_output.states);
-    assert_eq!(*events.lock().unwrap(), ["move:12:0".to_owned()]);
+    assert_eq!(*events.lock().unwrap(), ["move:11:0".to_owned()]);
     assert_eq!(
         feedback.right,
         Some(desktop_bindings::PadFeedbackStrength::Medium)
     );
+}
+
+#[test]
+fn runtime_emits_one_feedback_tick_for_a_physical_pad_click() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut bindings = DesktopBindingsRuntime::with_sink(
+        BindingProfile::default(),
+        Box::new(SharedDesktopSink(Arc::clone(&events))),
+    );
+    let snapshot = |pressed| DesktopInputSnapshot {
+        buttons: steam_controller_protocol::SteamButtons(if pressed {
+            1_u32 << SteamButton::RightPadClick as u8
+        } else {
+            0
+        }),
+        right_pad: PadSample {
+            touched: true,
+            pressed,
+            ..PadSample::default()
+        },
+        ..desktop_snapshot(steam_controller_protocol::SteamButtons::default())
+    };
+
+    let _ = bindings.observe(
+        desktop_snapshot(steam_controller_protocol::SteamButtons::default()),
+        Duration::ZERO,
+    );
+    let _ = bindings.observe(snapshot(false), Duration::from_millis(1));
+    let press = bindings.observe(snapshot(true), Duration::from_millis(10));
+    let hold = bindings.observe(snapshot(true), Duration::from_millis(20));
+
+    assert_eq!(
+        press.right,
+        Some(desktop_bindings::PadFeedbackStrength::Medium)
+    );
+    assert_eq!(hold, PadFeedbackRequest::NONE);
+    assert!(events.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -287,7 +324,7 @@ fn runtime_tick_advances_scroll_momentum_without_more_hid_reports() {
 
     assert_eq!(
         *events.lock().unwrap(),
-        ["scroll:12:0".to_owned(), "scroll:10:0".to_owned()]
+        ["scroll:9:0".to_owned(), "scroll:7:0".to_owned()]
     );
 }
 
@@ -308,7 +345,7 @@ fn desktop_motion_failure_requests_pending_feedback_discard() {
     let _ = bindings.observe(snapshot(0, false), Duration::ZERO);
     let _ = bindings.observe(snapshot(0, true), Duration::from_millis(1));
     assert_eq!(
-        bindings.observe(snapshot(224, true), Duration::from_millis(20)),
+        bindings.observe(snapshot(3_200, true), Duration::from_millis(20)),
         PadFeedbackRequest::NONE
     );
     assert_eq!(bindings.status().state, DesktopBindingsState::Degraded);
@@ -759,4 +796,3 @@ fn haptics_refreshes_expires_and_recovers_after_backoff() {
     assert_eq!(recovered.state, HapticsState::Active);
     assert_eq!(recovered.failures, 1);
 }
-

@@ -5,6 +5,7 @@ use bridge_output::{GamepadOutput, SerialOutput};
 use controller_mapper::{ControllerMapper, MapperConfig};
 use eframe::egui::{self, RichText};
 use gamepad_state::GamepadState;
+use steam_controller_discovery::ControllerSearch;
 use steam_controller_protocol::{SteamControllerDecoder, SteamControllerState};
 use ui_theme::{DETAIL, MUTED_TEXT, PANEL, SURFACE};
 
@@ -26,6 +27,7 @@ mod device;
 mod diagnostics;
 mod header;
 mod hero;
+mod lizard;
 mod mailbox;
 mod readouts;
 mod recording_sink;
@@ -33,15 +35,26 @@ mod sidebar;
 
 use clap::Parser;
 
-use cli::{Cli, Source};
+use cli::{Cli, Launch, Source};
 use demo::DemoState;
-use device::{input_worker, InputChannel};
+use device::{input_worker, HidBroker, InputChannel};
 use mailbox::InputEvent;
 use readouts::{mapped_state_ui, source_state_ui, DeadZones};
 use recording_sink::RecordingSession;
 
-fn main() -> eframe::Result {
-    let source = Cli::parse().source();
+fn main() {
+    let result = match Cli::parse().launch() {
+        Ok(Launch::Gui(source)) => run_gui(source).map_err(|error| error.to_string()),
+        Ok(Launch::Lizard(command)) => lizard::run(command),
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        eprintln!("sc-visualizer: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run_gui(source: Source) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(DEFAULT_WINDOW)
@@ -77,9 +90,21 @@ struct SerialUiConfig {
     packet_logging: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModeTransition {
+    None,
+    EnterLab,
+}
+
 struct Visualizer {
+    source_choice: Source,
+    lab: Option<lizard::LabUi>,
+    mode_transition: ModeTransition,
     /// `None` for a demo run: no worker, no device, no ownership lock.
     input: Option<InputChannel>,
+    /// Keeps every GUI-mode hidapi enumeration/open call on one macOS run-loop
+    /// thread across dashboard/lab ownership transitions.
+    hid_broker: HidBroker,
     /// Reused drain storage; neither side of the mailbox reallocates every
     /// repaint under ordinary 250 Hz input.
     input_events: Vec<InputEvent>,
@@ -94,6 +119,8 @@ struct Visualizer {
     connected: bool,
     device: String,
     status: String,
+    /// The typed discovery failure behind `status`, when one is active.
+    connection_search: Option<ControllerSearch>,
     raw: Vec<u8>,
     /// The report's own id, not `raw[0]`. `None` until a report arrives.
     raw_report_id: Option<u8>,
@@ -133,11 +160,17 @@ impl Visualizer {
             Source::Demo(mode) => Some(mode),
             Source::Discover | Source::Collection(_) => None,
         };
+        let hid_broker = HidBroker::new();
+        let input = (demo.is_none()).then(|| input_worker(source, hid_broker.client()));
         let mut visualizer = Self {
+            source_choice: source,
+            lab: None,
+            mode_transition: ModeTransition::None,
             // A demo run starts no worker at all, so it takes no HID ownership
             // lock. The old code opened a collection and only skipped draining
             // it, which is not the same thing.
-            input: (demo.is_none()).then(|| input_worker(source)),
+            input,
+            hid_broker,
             input_events: Vec::with_capacity(mailbox::CAPACITY),
             source_report_drops: 0,
             decoder: SteamControllerDecoder::new(),
@@ -156,6 +189,7 @@ impl Visualizer {
                 Source::Collection(index) => format!("Opening HID collection {index}…"),
                 Source::Demo(mode) => format!("Demo state: {}", mode.label()),
             },
+            connection_search: None,
             raw: Vec::new(),
             raw_report_id: None,
             show_raw: false,
@@ -220,11 +254,28 @@ impl Visualizer {
 
 impl eframe::App for Visualizer {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.lab.is_some() {
+            let action = self
+                .lab
+                .as_mut()
+                .map_or(lizard::LabAction::Stay, |lab| lab.ui(ui));
+            if action == lizard::LabAction::Exit {
+                self.leave_lab_mode();
+            }
+            return;
+        }
         if self.input.is_some() {
             self.process_events();
         }
         self.check_input_timeout();
         self.service_recording();
+        if self.mode_transition == ModeTransition::EnterLab && self.recording.is_none() {
+            self.enter_lab_mode();
+            if let Some(lab) = &mut self.lab {
+                let _ = lab.ui(ui);
+            }
+            return;
+        }
         if self.output == OutputChoice::Serial {
             if let Some(serial) = &mut self.serial {
                 if let Err(error) = serial.service() {
@@ -261,6 +312,22 @@ impl Visualizer {
         // take `show(ui, ..)`. `show_inside` is the deprecated spelling of the
         // same thing and would fail the `-D warnings` gate. egui 0.35 also
         // folded `SidePanel`/`TopBottomPanel` into one `Panel` type.
+        egui::Panel::top("mode_switch")
+            .frame(egui::Frame::new().fill(SURFACE).inner_margin(egui::Margin {
+                left: 14,
+                right: 14,
+                top: 8,
+                bottom: 4,
+            }))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let _ = ui.selectable_label(true, "Controller dashboard");
+                    if ui.button("Lizard Mouse Lab").clicked() {
+                        self.request_lab_mode();
+                    }
+                });
+            });
+
         egui::Panel::top("header")
             .frame(egui::Frame::new().fill(SURFACE).inner_margin(egui::Margin {
                 left: 14,
@@ -304,6 +371,51 @@ impl Visualizer {
                     .auto_shrink([false, false])
                     .show(ui, |ui| self.central(ui));
             });
+    }
+
+    fn request_lab_mode(&mut self) {
+        self.neutralize_output();
+        self.select_output(OutputChoice::Disabled);
+        if let Some(recording) = &mut self.recording {
+            recording.request_finish();
+            "Finishing ordinary recording before entering Lizard Mouse Lab…"
+                .clone_into(&mut self.status);
+        }
+        self.mode_transition = ModeTransition::EnterLab;
+    }
+
+    fn enter_lab_mode(&mut self) {
+        if let Some(mut input) = self.input.take() {
+            if let Err(error) = input.shutdown() {
+                self.status = error;
+                self.mode_transition = ModeTransition::None;
+                return;
+            }
+        }
+        self.connected = false;
+        self.source = None;
+        self.mapped = GamepadState::neutral();
+        self.input_state = InputState::Neutralized;
+        self.lab = Some(lizard::LabUi::new(self.hid_broker.client()));
+        self.mode_transition = ModeTransition::None;
+    }
+
+    fn leave_lab_mode(&mut self) {
+        self.lab = None;
+        self.decoder = SteamControllerDecoder::new();
+        self.mapper = ControllerMapper::new(self.config).unwrap_or_default();
+        self.last_report_timestamp = None;
+        self.last_controller_input = None;
+        self.source = None;
+        self.mapped = GamepadState::neutral();
+        self.input_state = InputState::Neutralized;
+        match self.source_choice {
+            Source::Demo(mode) => self.apply_demo(mode),
+            source => {
+                self.input = Some(input_worker(source, self.hid_broker.client()));
+                "Lizard Mouse Lab closed; reconnecting controller…".clone_into(&mut self.status);
+            }
+        }
     }
 
     fn central(&mut self, ui: &mut egui::Ui) {

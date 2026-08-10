@@ -16,7 +16,7 @@ pub(crate) enum DesktopWorkerMessage {
     Snapshot(DesktopWorkerSnapshot),
     Overflow,
     ReplaceProfile {
-        profile: Option<BindingProfile>,
+        profile: Option<Box<BindingProfile>>,
         ack: Option<CommandAck>,
     },
     Enable {
@@ -51,18 +51,18 @@ impl DesktopWorkerMessage {
 /// makes an intermediate analog-only sample replaceable.
 #[derive(Debug, Default)]
 pub(crate) struct StableTransitionRun {
-    pub(crate) previous: Option<u8>,
-    pub(crate) latest: Option<u8>,
+    pub(crate) previous: Option<u16>,
+    pub(crate) latest: Option<u16>,
 }
 
 impl StableTransitionRun {
-    pub(crate) fn can_replace_latest(&self, transition_mask: Option<u8>) -> bool {
+    pub(crate) fn can_replace_latest(&self, transition_mask: Option<u16>) -> bool {
         transition_mask.is_some()
             && self.latest == transition_mask
             && self.previous == transition_mask
     }
 
-    pub(crate) fn push(&mut self, transition_mask: Option<u8>) {
+    pub(crate) fn push(&mut self, transition_mask: Option<u16>) {
         self.previous = self.latest;
         self.latest = transition_mask;
     }
@@ -72,7 +72,7 @@ impl StableTransitionRun {
         self.latest = None;
     }
 
-    pub(crate) fn reset_with_latest(&mut self, transition_mask: Option<u8>) {
+    pub(crate) fn reset_with_latest(&mut self, transition_mask: Option<u16>) {
         self.previous = None;
         self.latest = transition_mask;
     }
@@ -284,7 +284,7 @@ impl DesktopWorkerMailbox {
         state: &mut DesktopWorkerMailboxState,
         snapshot: DesktopInputSnapshot,
         now: Duration,
-        transition_mask: u8,
+        transition_mask: u16,
     ) {
         state
             .messages
@@ -309,7 +309,7 @@ impl DesktopWorkerMailbox {
     }
 }
 
-pub(crate) fn desktop_snapshot_transition_mask(snapshot: DesktopInputSnapshot) -> u8 {
+pub(crate) fn desktop_snapshot_transition_mask(snapshot: DesktopInputSnapshot) -> u16 {
     desktop_transition_mask(
         snapshot.buttons,
         snapshot.left_pad.touched,
@@ -321,10 +321,10 @@ pub(crate) fn desktop_transition_mask(
     buttons: SteamButtons,
     left_touched: bool,
     right_touched: bool,
-) -> u8 {
-    let mut mask = bindable_mask(buttons);
-    mask |= u8::from(left_touched) << 5;
-    mask |= u8::from(right_touched) << 6;
+) -> u16 {
+    let mut mask = u16::from(bindable_mask(buttons));
+    mask |= u16::from(left_touched) << 8;
+    mask |= u16::from(right_touched) << 9;
     mask
 }
 

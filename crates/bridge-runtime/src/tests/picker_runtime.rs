@@ -29,14 +29,14 @@ fn blocked_desktop_sink_does_not_block_the_supervisor_facing_publisher() {
     };
     worker.observe(DesktopInputSnapshot::buttons_only(SteamButtons::default()));
     worker.observe(right_pad(0));
-    worker.observe(right_pad(512));
+    worker.observe(right_pad(3_200));
     entered_receiver
         .recv_timeout(Duration::from_secs(1))
         .unwrap();
 
     let (ack, ack_receiver) = mpsc::channel();
     let publish_started = Instant::now();
-    for x in 513..=768 {
+    for x in 3_201..=3_456 {
         worker.observe(right_pad(x));
     }
     worker.replace_profile(Some(profile), ack);
@@ -92,7 +92,7 @@ fn blocked_desktop_sink_cannot_defeat_the_shutdown_timeout() {
     };
     worker.observe(DesktopInputSnapshot::buttons_only(SteamButtons::default()));
     worker.observe(right_pad(0));
-    worker.observe(right_pad(512));
+    worker.observe(right_pad(3_200));
     entered_receiver
         .recv_timeout(Duration::from_secs(1))
         .unwrap();
@@ -794,4 +794,3 @@ fn a_config_change_mid_hold_cancels_the_wheel_and_swallows_the_press() {
     assert!(keys.lock().unwrap().is_empty());
     assert!(harness.engine.output_suppression().is_none());
 }
-

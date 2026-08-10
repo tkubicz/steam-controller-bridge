@@ -42,6 +42,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 hidapi = { version = "2.6.6", default-features = false, features = ["macos-shared-device"] }
 rustix = { version = "1.1.4", features = ["fs"] }
+rfd = "0.17.2"
 eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow"] }
 tray-icon = "0.24.2"
 tiny-skia = { version = "0.12.0", default-features = false, features = ["simd", "std"] }
@@ -49,6 +50,8 @@ winit = "0.30.13"
 serialport = { version = "4.9.0", default-features = false }
 ctrlc = "3.5.2"
 enigo = { version = "0.6.1", features = ["platform_specific"] }
+core-foundation = "0.10.1"
+core-graphics = "0.25.0"
 objc2 = "0.6.4"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["CFRunLoop"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGEvent"] }

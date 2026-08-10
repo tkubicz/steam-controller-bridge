@@ -2,13 +2,19 @@ use super::*;
 
 #[test]
 fn callouts_cover_each_bindable_control_once() {
+    // Pad clicks are the only bindable controls without a callout: they are
+    // edited through the pad hotspots' inspector instead.
     let controls = CONTROL_CALLOUTS
         .iter()
         .map(|callout| callout.control)
         .collect::<BTreeSet<_>>();
-    assert_eq!(controls.len(), BindableControl::ALL.len());
+    assert_eq!(controls.len(), CONTROL_CALLOUTS.len());
     for control in BindableControl::ALL {
-        assert!(controls.contains(&control));
+        let pad_click = matches!(
+            control,
+            BindableControl::LeftPadClick | BindableControl::RightPadClick
+        );
+        assert_eq!(controls.contains(&control), !pad_click);
     }
 }
 
@@ -91,11 +97,11 @@ fn pad_edits_participate_in_dirty_state_detection() {
 fn pad_selections_have_fixed_roles_and_default_feedback() {
     assert_eq!(
         selection_description(EditorSelection::Pad(PadSide::Left)),
-        "Two-axis smooth desktop scrolling"
+        "Two-axis smooth desktop scrolling, bindable click"
     );
     assert_eq!(
         selection_description(EditorSelection::Pad(PadSide::Right)),
-        "Relative desktop pointer movement"
+        "Relative desktop pointer movement, bindable click"
     );
     let pads = desktop_bindings::PadBindings::default();
     assert!(!pads.left_scroll.enabled);
