@@ -36,8 +36,8 @@ use crate::model::{MenuModel, RunAction, TrayState};
 use crate::overlay_host::OverlayHost;
 #[cfg(feature = "updater")]
 use crate::update_check::UpdateChecker;
-use crate::update_host::UpdateHost;
-use crate::update_protocol::{UpdateRequest, UpdateResponse};
+use crate::update_host::AppCenterHost;
+use crate::update_protocol::{AppCenterPage, UpdateRequest, UpdateResponse};
 
 mod icons;
 mod logging;
@@ -55,8 +55,8 @@ use support::{
     PermissionStage, PickerEventMailbox, OVERLAY_HOLD_CHOICES,
 };
 use system::{
-    activate_child_application, copy_text, launch_about_window, launch_bindings_editor, open_path,
-    open_privacy_pane, PrivacyPane,
+    activate_child_application, copy_text, launch_bindings_editor, open_path, open_privacy_pane,
+    PrivacyPane,
 };
 
 #[cfg(test)]
@@ -194,12 +194,9 @@ struct MenuApp {
     picker_roster_dirty: bool,
     /// Spawned bindings editors, reaped on the status poll once they exit.
     editor_children: Vec<std::process::Child>,
-    /// The dedicated About window runs in one child process because eframe and
-    /// the menu host each own a native event loop. Keeping a single child also
-    /// makes repeated About clicks focus the existing window instead of
-    /// stacking copies.
-    about_child: Option<std::process::Child>,
-    update_host: UpdateHost,
+    /// About, Changelog, and Updates share one child native event loop. The
+    /// host also owns the updater's safety-ordered bridge lifecycle requests.
+    app_center_host: AppCenterHost,
     #[cfg(feature = "updater")]
     update_checker: UpdateChecker,
     #[cfg(feature = "updater")]
@@ -281,8 +278,7 @@ impl MenuApp {
             picker_roster_publishes: 0,
             picker_roster_dirty: false,
             editor_children: Vec::new(),
-            about_child: None,
-            update_host: UpdateHost::new(),
+            app_center_host: AppCenterHost::new(),
             #[cfg(feature = "updater")]
             update_checker: UpdateChecker::new(),
             #[cfg(feature = "updater")]
@@ -338,17 +334,10 @@ impl ApplicationHandler for MenuApp {
             }
             self.editor_children
                 .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
-            if self
-                .about_child
-                .as_mut()
-                .is_some_and(|child| !matches!(child.try_wait(), Ok(None)))
-            {
-                self.about_child = None;
-            }
             self.handle_update_requests(event_loop);
-            if self.update_host.reap() && self.update_host.clear_suspended() {
+            if self.app_center_host.reap() && self.app_center_host.clear_suspended() {
                 if let Err(error) = self.runtime.request_start() {
-                    eprintln!("cannot restart bridge after Update Center exit: {error}");
+                    eprintln!("cannot restart bridge after app window exit: {error}");
                 }
             }
             self.reload_bindings_if_changed();

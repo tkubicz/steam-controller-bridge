@@ -19,26 +19,26 @@ use ui_theme::{
 };
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
+use crate::about_window::AboutContent;
+use crate::cli::{AppCenterArgs, DemoMode};
 use crate::update_check::{update_context, CHECK_INTERVAL};
 use crate::update_protocol::{
-    encode, read, UpdateRequest, UpdateResponse, UPDATE_CENTER_DEMO_ARGUMENT,
+    encode, read, AppCenterCommand, AppCenterPage, UpdateRequest, UpdateResponse,
 };
 use crate::window_ui::{
     activate_window, configure_window_style, full_width_card, hero_transition, load_texture,
-    parse_release_notes, render_inline, ReleaseNotes,
+    parse_release_notes, render_release_notes, ReleaseNotes,
 };
 
-const WINDOW_TITLE: &str = "Steam Controller Bridge Update Center";
+const WINDOW_TITLE: &str = "Steam Controller Bridge";
 const APP_ICON: &[u8] = include_bytes!("../../../packaging/macos/AppIcon.png");
 const WINDOW_SIZE: [f32; 2] = [760.0, 680.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [640.0, 540.0];
 
-pub fn run() -> Result<(), String> {
-    let demo = demo_mode();
-    let firmware = std::env::args()
-        .skip_while(|argument| argument != "--firmware-version")
-        .nth(1)
-        .unwrap_or_else(|| "unknown".to_owned());
+pub fn run(arguments: AppCenterArgs) -> Result<(), String> {
+    let demo = arguments.demo;
+    let page = arguments.page();
+    let firmware = arguments.firmware_version;
     let icon = eframe::icon_data::from_png_bytes(APP_ICON).map_err(|error| error.to_string())?;
     let options = eframe::NativeOptions {
         event_loop_builder: Some(Box::new(|builder| {
@@ -59,10 +59,11 @@ pub fn run() -> Result<(), String> {
         Box::new(move |creation| {
             configure_window_style(&creation.egui_ctx);
             activate_window();
-            Ok(Box::new(UpdateCenter::new(
+            Ok(Box::new(AppCenter::new(
                 creation.egui_ctx.clone(),
                 firmware,
                 demo,
+                page,
             )))
         }),
     )
@@ -71,34 +72,63 @@ pub fn run() -> Result<(), String> {
 
 #[derive(Clone)]
 struct HostClient {
-    inner: Arc<Mutex<HostConnection>>,
-}
-
-struct HostConnection {
-    input: BufReader<std::io::Stdin>,
-    output: std::io::Stdout,
+    output: Arc<Mutex<std::io::Stdout>>,
+    responses: Arc<Mutex<mpsc::Receiver<UpdateResponse>>>,
+    request_gate: Arc<Mutex<()>>,
 }
 
 impl HostClient {
-    fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(HostConnection {
-                input: BufReader::new(std::io::stdin()),
-                output: std::io::stdout(),
-            })),
-        }
+    fn new(ctx: egui::Context) -> (Self, mpsc::Receiver<AppCenterCommand>) {
+        const COMMAND_CAPACITY: usize = 16;
+        let (command_sender, commands) = mpsc::sync_channel(COMMAND_CAPACITY);
+        let (response_sender, responses) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("app-center-host-reader".to_owned())
+            .spawn(move || {
+                let mut input = BufReader::new(std::io::stdin());
+                while let Ok(Some(command)) = read(&mut input) {
+                    let sent = match command {
+                        AppCenterCommand::UpdateResponse(response) => {
+                            response_sender.send(response).is_ok()
+                        }
+                        command => command_sender.send(command).is_ok(),
+                    };
+                    if !sent {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            })
+            .expect("app center host reader thread must start");
+        (
+            Self {
+                output: Arc::new(Mutex::new(std::io::stdout())),
+                responses: Arc::new(Mutex::new(responses)),
+                request_gate: Arc::new(Mutex::new(())),
+            },
+            commands,
+        )
     }
 
     fn request(&self, request: UpdateRequest) -> Result<UpdateResponse, String> {
-        let mut connection = self.inner.lock().map_err(|_| "Update Center IPC failed")?;
+        let _request = self
+            .request_gate
+            .lock()
+            .map_err(|_| "app window IPC failed")?;
         let encoded = encode(request)?;
-        connection
-            .output
-            .write_all(&encoded)
-            .and_then(|()| connection.output.flush())
-            .map_err(|error| error.to_string())?;
-        let response: UpdateResponse =
-            read(&mut connection.input)?.ok_or("Update Center host response is unavailable")?;
+        {
+            let mut output = self.output.lock().map_err(|_| "app window IPC failed")?;
+            output
+                .write_all(&encoded)
+                .and_then(|()| output.flush())
+                .map_err(|error| error.to_string())?;
+        }
+        let response = self
+            .responses
+            .lock()
+            .map_err(|_| "app window IPC failed")?
+            .recv()
+            .map_err(|_| "app window host response is unavailable")?;
         if let UpdateResponse::Error { message } = &response {
             return Err(message.clone());
         }
@@ -114,7 +144,9 @@ enum WorkerEvent {
     Quit(Result<(), String>),
 }
 
-struct UpdateCenter {
+struct AppCenter {
+    page: AppCenterPage,
+    about: AboutContent,
     catalog: Option<ReleaseManifestV1>,
     release_notes: Vec<ReleaseNotes>,
     installed: Version,
@@ -130,6 +162,9 @@ struct UpdateCenter {
     app_icon: egui::TextureHandle,
     demo: Option<DemoMode>,
     status_tone: StatusTone,
+    host_commands: mpsc::Receiver<AppCenterCommand>,
+    catalog_requested: bool,
+    firmware_write_started: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -146,15 +181,15 @@ enum StatusTone {
     Error,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DemoMode {
-    Available,
-    Current,
-}
-
-impl UpdateCenter {
-    fn new(ctx: egui::Context, firmware_version: String, demo: Option<DemoMode>) -> Self {
+impl AppCenter {
+    fn new(
+        ctx: egui::Context,
+        firmware_version: String,
+        demo: Option<DemoMode>,
+        page: AppCenterPage,
+    ) -> Self {
         let (sender, events) = mpsc::channel();
+        let (host, host_commands) = HostClient::new(ctx.clone());
         let catalog = demo.map(demo_manifest);
         let release_notes = catalog.as_ref().map_or_else(Vec::new, |manifest| {
             parse_release_notes(&manifest.release_notes)
@@ -170,16 +205,20 @@ impl UpdateCenter {
             None => firmware_version,
         };
         let center = Self {
+            page,
+            about: AboutContent::new(&ctx),
             catalog,
             release_notes,
             installed,
             firmware_version,
             status: if demo.is_some() {
-                "Demo preview — no network, files, or hardware will be accessed.".to_owned()
-            } else {
+                "Demo preview — updater networking, files, and hardware are disabled.".to_owned()
+            } else if page == AppCenterPage::Updates {
                 "Checking the signed stable release…".to_owned()
+            } else {
+                "Open Updates to check the signed stable release.".to_owned()
             },
-            activity: if demo.is_some() {
+            activity: if demo.is_some() || page != AppCenterPage::Updates {
                 Activity::Idle
             } else {
                 Activity::Busy { can_cancel: false }
@@ -187,15 +226,18 @@ impl UpdateCenter {
             staged_application: None,
             events,
             sender,
-            host: HostClient::new(),
+            host,
             cancel: Arc::new(AtomicBool::new(false)),
             replacement_supported: demo.is_some()
                 || guided_replacement_supported(env!("CARGO_PKG_VERSION")),
             app_icon: load_texture(&ctx, "update-center-app-icon", APP_ICON),
             demo,
             status_tone: StatusTone::Info,
+            host_commands,
+            catalog_requested: demo.is_some() || page == AppCenterPage::Updates,
+            firmware_write_started: false,
         };
-        if demo.is_none() {
+        if demo.is_none() && page == AppCenterPage::Updates {
             center.check_catalog(ctx);
         }
         center
@@ -309,6 +351,15 @@ impl UpdateCenter {
                     self.status_tone = StatusTone::Success;
                 }
                 WorkerEvent::FirmwareProgress(progress) => {
+                    if matches!(
+                        progress,
+                        FirmwareFlashProgress::Writing
+                            | FirmwareFlashProgress::WaitingForApplication
+                            | FirmwareFlashProgress::Verifying
+                    ) {
+                        self.firmware_write_started = true;
+                        self.page = AppCenterPage::Updates;
+                    }
                     self.activity = Activity::Busy {
                         can_cancel: !matches!(
                             progress,
@@ -329,12 +380,14 @@ impl UpdateCenter {
                     );
                     self.activity = Activity::Idle;
                     self.status_tone = StatusTone::Success;
+                    self.firmware_write_started = false;
                 }
                 WorkerEvent::Firmware(Err(error)) => {
                     self.status =
                         format!("{error} Check the cable, disconnect extra boards, and retry.");
                     self.activity = Activity::Idle;
                     self.status_tone = StatusTone::Error;
+                    self.firmware_write_started = false;
                 }
                 WorkerEvent::Application(Err(error)) | WorkerEvent::Quit(Err(error)) => {
                     self.status = error;
@@ -344,6 +397,40 @@ impl UpdateCenter {
                 WorkerEvent::Quit(Ok(())) => self.activity = Activity::Closing,
             }
         }
+    }
+
+    fn drain_host_commands(&mut self, ctx: &egui::Context) {
+        while let Ok(command) = self.host_commands.try_recv() {
+            match command {
+                AppCenterCommand::Navigate {
+                    page,
+                    firmware_version,
+                } => {
+                    self.firmware_version = firmware_version;
+                    if !self.firmware_write_started {
+                        self.page = page;
+                    }
+                }
+                AppCenterCommand::FirmwareVersion { firmware_version } => {
+                    self.firmware_version = firmware_version;
+                }
+                AppCenterCommand::UpdateResponse(_) => {
+                    // Responses are routed to the worker waiting in HostClient.
+                }
+            }
+        }
+        self.ensure_catalog(ctx.clone());
+    }
+
+    fn ensure_catalog(&mut self, ctx: egui::Context) {
+        if self.page != AppCenterPage::Updates || self.catalog_requested || self.demo.is_some() {
+            return;
+        }
+        self.catalog_requested = true;
+        self.activity = Activity::Busy { can_cancel: false };
+        self.status_tone = StatusTone::Info;
+        "Checking the signed stable release…".clone_into(&mut self.status);
+        self.check_catalog(ctx);
     }
 
     fn busy(&self) -> bool {
@@ -386,34 +473,44 @@ impl UpdateCenter {
                     ui.vertical(|ui| {
                         ui.add_space(4.0);
                         ui.label(
-                            egui::RichText::new("Update Center")
+                            egui::RichText::new("Steam Controller Bridge")
                                 .size(28.0)
                                 .strong()
                                 .color(TEXT),
                         );
                         ui.label(
-                            egui::RichText::new("Application and XIAO firmware")
+                            egui::RichText::new("Controller translation, profiles, and updates")
                                 .size(15.0)
                                 .color(MUTED_TEXT),
                         );
                         ui.add_space(7.0);
-                        egui::Frame::new()
-                            .fill(ACCENT_SUBTLE)
-                            .corner_radius(7)
-                            .inner_margin(egui::Margin::symmetric(10, 5))
-                            .show(ui, |ui| {
-                                let label = if let Some(mode) = self.demo {
-                                    format!("Demo preview · {}", mode.label())
-                                } else if let Some(manifest) = &self.catalog {
-                                    format!("Signed stable release {}", manifest.release_tag)
-                                } else {
-                                    "Checking signed release…".to_owned()
-                                };
-                                ui.label(egui::RichText::new(label).size(13.0).color(ACCENT));
-                            });
+                        ui.horizontal_wrapped(|ui| {
+                            hero_badge(ui, &format!("App {}", self.installed), ACCENT);
+                            hero_badge(ui, &firmware_badge(&self.firmware_version), ACCENT);
+                            if let Some(mode) = self.demo {
+                                hero_badge(ui, &format!("Demo · {}", mode.label()), MUTED_TEXT);
+                            }
+                        });
                     });
                 });
             });
+    }
+
+    fn navigation(&mut self, ui: &mut egui::Ui) {
+        ui.add_enabled_ui(!self.firmware_write_started, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.page, AppCenterPage::About, "About");
+                ui.selectable_value(&mut self.page, AppCenterPage::Changelog, "Changelog");
+                ui.selectable_value(&mut self.page, AppCenterPage::Updates, "Updates");
+            });
+        });
+        if self.firmware_write_started {
+            ui.label(
+                egui::RichText::new("Firmware verification must finish before leaving Updates.")
+                    .size(12.0)
+                    .color(MUTED_TEXT),
+            );
+        }
     }
 
     fn status_banner(&self, ui: &mut egui::Ui) {
@@ -441,24 +538,53 @@ impl UpdateCenter {
     }
 }
 
-impl eframe::App for UpdateCenter {
+impl eframe::App for AppCenter {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.drain_host_commands(ui.ctx());
+        if self.firmware_write_started && ui.ctx().input(|input| input.viewport().close_requested())
+        {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.page = AppCenterPage::Updates;
+            "Firmware verification is still in progress. Keep the board connected."
+                .clone_into(&mut self.status);
+            self.status_tone = StatusTone::Info;
+        }
         if self.activity == Activity::Closing {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
         egui::Frame::new().fill(PANEL).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
 
-            egui::Panel::top("update-center-hero")
+            egui::Panel::bottom("app-center-footer")
+                .exact_size(36.0)
                 .show_separator_line(false)
                 .frame(egui::Frame::new().fill(PANEL))
                 .show(ui, |ui| {
-                    // Match About exactly: the hero and gradient touch, with
-                    // no panel-coloured gap between the two surfaces.
+                    ui.centered_and_justified(|ui| {
+                        ui.label(
+                            egui::RichText::new("Copyright © Lynxware · MIT licensed")
+                                .size(12.0)
+                                .color(MUTED_TEXT),
+                        );
+                    });
+                });
+
+            egui::Panel::top("app-center-hero")
+                .show_separator_line(false)
+                .frame(egui::Frame::new().fill(PANEL))
+                .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     self.hero(ui);
                     hero_transition(ui);
+                    ui.horizontal(|ui| {
+                        ui.add_space(24.0);
+                        self.navigation(ui);
+                    });
+                    ui.add_space(4.0);
+                    ui.separator();
+                    self.ensure_catalog(ui.ctx().clone());
                 });
 
             egui::CentralPanel::default()
@@ -472,22 +598,10 @@ impl eframe::App for UpdateCenter {
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            self.status_banner(ui);
-                            ui.add_space(14.0);
-                            let catalog = self.catalog.take();
-                            if let Some(manifest) = catalog.as_ref() {
-                                self.application_card(ui, manifest);
-                                ui.add_space(14.0);
-                                self.firmware_card(ui, manifest);
-                            }
-                            self.catalog = catalog;
-                            if matches!(self.activity, Activity::Busy { can_cancel: true }) {
-                                ui.add_space(14.0);
-                                if secondary_button(ui, "Cancel Before Writing", true).clicked() {
-                                    self.cancel.store(true, Ordering::Release);
-                                    "Cancelling safely…".clone_into(&mut self.status);
-                                    self.status_tone = StatusTone::Info;
-                                }
+                            match self.page {
+                                AppCenterPage::About => self.about.about_page(ui),
+                                AppCenterPage::Changelog => self.about.changelog_page(ui),
+                                AppCenterPage::Updates => self.updates_page(ui),
                             }
                             ui.add_space(16.0);
                         });
@@ -496,7 +610,27 @@ impl eframe::App for UpdateCenter {
     }
 }
 
-impl UpdateCenter {
+impl AppCenter {
+    fn updates_page(&mut self, ui: &mut egui::Ui) {
+        self.status_banner(ui);
+        ui.add_space(14.0);
+        let catalog = self.catalog.take();
+        if let Some(manifest) = catalog.as_ref() {
+            self.application_card(ui, manifest);
+            ui.add_space(14.0);
+            self.firmware_card(ui, manifest);
+        }
+        self.catalog = catalog;
+        if matches!(self.activity, Activity::Busy { can_cancel: true }) {
+            ui.add_space(14.0);
+            if secondary_button(ui, "Cancel Before Writing", true).clicked() {
+                self.cancel.store(true, Ordering::Release);
+                "Cancelling safely…".clone_into(&mut self.status);
+                self.status_tone = StatusTone::Info;
+            }
+        }
+    }
+
     fn application_card(&mut self, ui: &mut egui::Ui, manifest: &ReleaseManifestV1) {
         full_width_card(ui, 20, |ui| {
             let installed = &self.installed;
@@ -695,31 +829,7 @@ impl UpdateCenter {
         .default_open(update_available)
         .show(ui, |ui| {
             ui.add_space(6.0);
-            for (release_index, release) in self.release_notes.iter().enumerate() {
-                if release_index > 0 {
-                    ui.add_space(12.0);
-                }
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing.x = 3.0;
-                    render_inline(ui, &release.title, 17.0, true);
-                });
-                for section in &release.sections {
-                    ui.add_space(10.0);
-                    ui.label(
-                        egui::RichText::new(section.title.to_uppercase())
-                            .size(11.0)
-                            .strong()
-                            .color(ACCENT),
-                    );
-                    for note in &section.notes {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 3.0;
-                            ui.label(egui::RichText::new("•").color(ACCENT));
-                            render_inline(ui, note, 14.0, false);
-                        });
-                    }
-                }
-            }
+            render_release_notes(ui, &self.release_notes, true, 17.0);
         });
     }
 }
@@ -758,6 +868,24 @@ fn card_header(
                 });
         });
     });
+}
+
+fn hero_badge(ui: &mut egui::Ui, label: &str, colour: egui::Color32) {
+    egui::Frame::new()
+        .fill(colour.gamma_multiply(0.16))
+        .corner_radius(7)
+        .inner_margin(egui::Margin::symmetric(10, 5))
+        .show(ui, |ui| {
+            ui.label(egui::RichText::new(label).size(13.0).color(colour));
+        });
+}
+
+fn firmware_badge(version: &str) -> String {
+    match version {
+        "newer" => "Firmware newer".to_owned(),
+        "unknown" => "Firmware unknown".to_owned(),
+        revision => format!("Firmware rev {revision}"),
+    }
 }
 
 fn status_callout(ui: &mut egui::Ui, colour: egui::Color32, title: &str, body: &str) {
@@ -808,24 +936,6 @@ impl DemoMode {
             Self::Current => "up to date",
         }
     }
-}
-
-fn demo_mode() -> Option<DemoMode> {
-    let arguments: Vec<_> = std::env::args().collect();
-    arguments.iter().enumerate().find_map(|(index, argument)| {
-        if argument == UPDATE_CENTER_DEMO_ARGUMENT {
-            return Some(match arguments.get(index + 1).map(String::as_str) {
-                Some("current") => DemoMode::Current,
-                _ => DemoMode::Available,
-            });
-        }
-        argument
-            .strip_prefix("--update-center-demo=")
-            .map(|state| match state {
-                "current" => DemoMode::Current,
-                _ => DemoMode::Available,
-            })
-    })
 }
 
 fn demo_manifest(_mode: DemoMode) -> ReleaseManifestV1 {
@@ -932,5 +1042,22 @@ fn progress_text(progress: &FirmwareFlashProgress) -> &'static str {
             "Waiting for the flashed device to reconnect…"
         }
         FirmwareFlashProgress::Verifying => "Verifying the reported firmware revision…",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_release_notes_are_structured() {
+        assert!(!parse_release_notes(&demo_manifest(DemoMode::Current).release_notes).is_empty());
+    }
+
+    #[test]
+    fn hero_firmware_badges_are_explicit() {
+        assert_eq!(firmware_badge("3"), "Firmware rev 3");
+        assert_eq!(firmware_badge("newer"), "Firmware newer");
+        assert_eq!(firmware_badge("unknown"), "Firmware unknown");
     }
 }

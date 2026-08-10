@@ -5,20 +5,24 @@ use std::thread;
 
 use bridge_runtime::FirmwareVersion;
 
-use crate::update_protocol::{encode, read, UpdateRequest, UpdateResponse, UPDATE_CENTER_ARGUMENT};
+use crate::cli::APP_CENTER_COMMAND;
+use crate::update_protocol::{
+    encode, read, AppCenterCommand, AppCenterPage, UpdateRequest, UpdateResponse,
+};
 
 const REQUEST_CAPACITY: usize = 16;
 
-pub struct UpdateHost {
+pub struct AppCenterHost {
     child: Option<Child>,
     input: Option<ChildStdin>,
     requests: Receiver<UpdateRequest>,
     sender: SyncSender<UpdateRequest>,
     suspended: bool,
     resume_after: bool,
+    last_firmware_version: Option<String>,
 }
 
-impl UpdateHost {
+impl AppCenterHost {
     pub fn new() -> Self {
         let (sender, requests) = mpsc::sync_channel(REQUEST_CAPACITY);
         Self {
@@ -28,15 +32,30 @@ impl UpdateHost {
             sender,
             suspended: false,
             resume_after: false,
+            last_firmware_version: None,
         }
     }
 
-    pub fn launch(&mut self, firmware: FirmwareVersion) -> Result<(), String> {
+    /// Opens the shared information window, or navigates the existing child.
+    /// Returns `true` when an existing child should be brought to the front.
+    pub fn launch(
+        &mut self,
+        page: AppCenterPage,
+        firmware: FirmwareVersion,
+    ) -> Result<bool, String> {
+        let firmware_version = firmware_argument(firmware);
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
-                Ok(None) => return Ok(()),
+                Ok(None) => {
+                    self.send_command(&AppCenterCommand::Navigate {
+                        page,
+                        firmware_version: firmware_version.clone(),
+                    })?;
+                    self.last_firmware_version = Some(firmware_version);
+                    return Ok(true);
+                }
                 Ok(Some(_)) => {}
-                Err(error) => return Err(format!("cannot inspect Update Center: {error}")),
+                Err(error) => return Err(format!("cannot inspect app window: {error}")),
             }
         }
         self.child = None;
@@ -44,24 +63,26 @@ impl UpdateHost {
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let mut command = Command::new(executable);
         command
-            .arg(UPDATE_CENTER_ARGUMENT)
+            .arg(APP_CENTER_COMMAND)
+            .arg("--tab")
+            .arg(page_argument(page))
             .arg("--firmware-version")
-            .arg(firmware_argument(firmware))
+            .arg(&firmware_version)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         let mut child = command.spawn().map_err(|error| error.to_string())?;
         let Some(input) = child.stdin.take() else {
             cleanup_child(&mut child);
-            return Err("Update Center stdin is unavailable".to_owned());
+            return Err("app window stdin is unavailable".to_owned());
         };
         let Some(output) = child.stdout.take() else {
             cleanup_child(&mut child);
-            return Err("Update Center stdout is unavailable".to_owned());
+            return Err("app window stdout is unavailable".to_owned());
         };
         let sender = self.sender.clone();
         let reader_thread = thread::Builder::new()
-            .name("update-center-ipc".to_owned())
+            .name("app-center-ipc".to_owned())
             .spawn(move || {
                 let mut reader = BufReader::new(output);
                 while let Ok(Some(request)) = read(&mut reader) {
@@ -76,7 +97,8 @@ impl UpdateHost {
         }
         self.input = Some(input);
         self.child = Some(child);
-        Ok(())
+        self.last_firmware_version = Some(firmware_version);
+        Ok(false)
     }
 
     pub fn drain(&self) -> impl Iterator<Item = UpdateRequest> + '_ {
@@ -84,8 +106,27 @@ impl UpdateHost {
     }
 
     pub fn respond(&mut self, response: &UpdateResponse) -> Result<(), String> {
-        let input = self.input.as_mut().ok_or("Update Center is not running")?;
-        let encoded = encode(response)?;
+        self.send_command(&AppCenterCommand::UpdateResponse(response.clone()))
+    }
+
+    pub fn update_firmware(&mut self, firmware: FirmwareVersion) -> Result<(), String> {
+        if self.child.is_none() {
+            return Ok(());
+        }
+        let firmware_version = firmware_argument(firmware);
+        if self.last_firmware_version.as_deref() == Some(&firmware_version) {
+            return Ok(());
+        }
+        self.send_command(&AppCenterCommand::FirmwareVersion {
+            firmware_version: firmware_version.clone(),
+        })?;
+        self.last_firmware_version = Some(firmware_version);
+        Ok(())
+    }
+
+    fn send_command(&mut self, command: &AppCenterCommand) -> Result<(), String> {
+        let input = self.input.as_mut().ok_or("app window is not running")?;
+        let encoded = encode(command)?;
         input
             .write_all(&encoded)
             .map_err(|error| error.to_string())?;
@@ -112,6 +153,7 @@ impl UpdateHost {
         if exited {
             self.child = None;
             self.input = None;
+            self.last_firmware_version = None;
         }
         exited
     }
@@ -122,6 +164,11 @@ impl UpdateHost {
             let _ = child.wait();
         }
         self.input = None;
+        self.last_firmware_version = None;
+    }
+
+    pub fn child(&self) -> Option<&Child> {
+        self.child.as_ref()
     }
 }
 
@@ -137,5 +184,25 @@ fn firmware_argument(version: FirmwareVersion) -> String {
         FirmwareVersion::Unreported | FirmwareVersion::Malformed | FirmwareVersion::Pending => {
             "unknown".to_owned()
         }
+    }
+}
+
+const fn page_argument(page: AppCenterPage) -> &'static str {
+    match page {
+        AppCenterPage::About => "about",
+        AppCenterPage::Changelog => "changelog",
+        AppCenterPage::Updates => "updates",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_tab_has_a_stable_launch_argument() {
+        assert_eq!(page_argument(AppCenterPage::About), "about");
+        assert_eq!(page_argument(AppCenterPage::Changelog), "changelog");
+        assert_eq!(page_argument(AppCenterPage::Updates), "updates");
     }
 }

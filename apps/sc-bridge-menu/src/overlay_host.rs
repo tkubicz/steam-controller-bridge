@@ -13,7 +13,8 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::overlay_protocol::{OverlayEnvelope, OverlayMessage, OVERLAY_ARGUMENT};
+use crate::cli::PROFILE_OVERLAY_COMMAND;
+use crate::overlay_protocol::{OverlayEnvelope, OverlayMessage};
 
 /// An overlay binary that cannot even start must not be re-executed on every
 /// hold of a determined user.
@@ -270,7 +271,7 @@ impl OverlayHost {
     fn spawn(&mut self) -> Result<(), String> {
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let mut command = Command::new(executable);
-        command.arg(OVERLAY_ARGUMENT);
+        command.arg(PROFILE_OVERLAY_COMMAND);
         self.spawn_command(&mut command)
     }
 

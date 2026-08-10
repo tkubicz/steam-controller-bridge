@@ -259,6 +259,9 @@ impl MenuApp {
 
     pub(super) fn refresh_status(&mut self) {
         let status = self.runtime.status();
+        if let Err(error) = self.app_center_host.update_firmware(status.xiao.firmware) {
+            eprintln!("cannot update app window firmware status: {error}");
+        }
         #[cfg(feature = "updater")]
         {
             self.update_checker.poll();
@@ -343,22 +346,20 @@ impl MenuApp {
         self.last_revision = status.revision;
     }
 
-    pub(super) fn show_about(&mut self) {
-        if let Some(child) = self.about_child.as_mut() {
-            match child.try_wait() {
-                Ok(None) => {
-                    if !activate_child_application(child) {
-                        eprintln!("level=warn event=about_window_focus_deferred");
-                    }
-                    return;
+    pub(super) fn show_app_center(&mut self, page: AppCenterPage) {
+        let firmware = self.runtime.status().xiao.firmware;
+        match self.app_center_host.launch(page, firmware) {
+            Ok(reused) => {
+                if reused
+                    && self
+                        .app_center_host
+                        .child()
+                        .is_some_and(|child| !activate_child_application(child))
+                {
+                    eprintln!("level=warn event=app_window_focus_deferred");
                 }
-                Ok(Some(_)) | Err(_) => self.about_child = None,
             }
-        }
-
-        match launch_about_window() {
-            Ok(child) => self.about_child = Some(child),
-            Err(error) => eprintln!("cannot launch About window: {error}"),
+            Err(error) => eprintln!("cannot open Steam Controller Bridge window: {error}"),
         }
     }
 
@@ -443,13 +444,8 @@ impl MenuApp {
                     eprintln!("cannot open log folder: {error}");
                 }
             }
-            ABOUT_ID => self.show_about(),
-            UPDATES_ID => {
-                let firmware = self.runtime.status().xiao.firmware;
-                if let Err(error) = self.update_host.launch(firmware) {
-                    eprintln!("cannot launch Update Center: {error}");
-                }
-            }
+            ABOUT_ID => self.show_app_center(AppCenterPage::About),
+            UPDATES_ID => self.show_app_center(AppCenterPage::Updates),
             QUIT_ID => {
                 self.shutdown();
                 event_loop.exit();
@@ -490,19 +486,15 @@ impl MenuApp {
         }
         self.shutting_down = true;
         self.overlay.stop();
-        self.update_host.stop();
+        self.app_center_host.stop();
         self.flush_overlay_diagnostics();
-        if let Some(mut child) = self.about_child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
         if let Err(error) = self.runtime.shutdown() {
             eprintln!("bridge shutdown failed: {error}");
         }
     }
 
     pub(super) fn handle_update_requests(&mut self, event_loop: &ActiveEventLoop) {
-        let requests: Vec<_> = self.update_host.drain().collect();
+        let requests: Vec<_> = self.app_center_host.drain().collect();
         for request in requests {
             let response = match request {
                 UpdateRequest::SuspendBridge => {
@@ -512,7 +504,7 @@ impl MenuApp {
                         .is_some_and(|model| model.run_action == RunAction::Stop);
                     match self.runtime.stop() {
                         Ok(()) => {
-                            self.update_host.set_suspended(resume_after);
+                            self.app_center_host.set_suspended(resume_after);
                             UpdateResponse::Suspended { resume_after }
                         }
                         Err(error) => UpdateResponse::Error {
@@ -521,7 +513,7 @@ impl MenuApp {
                     }
                 }
                 UpdateRequest::ResumeBridge => {
-                    let restart = self.update_host.clear_suspended();
+                    let restart = self.app_center_host.clear_suspended();
                     if restart {
                         match self.runtime.request_start() {
                             Ok(()) => UpdateResponse::Resumed,
@@ -535,14 +527,14 @@ impl MenuApp {
                 }
                 UpdateRequest::QuitForReplacement => {
                     let response = UpdateResponse::Quitting;
-                    let _ = self.update_host.respond(&response);
+                    let _ = self.app_center_host.respond(&response);
                     self.shutdown();
                     event_loop.exit();
                     continue;
                 }
             };
-            if let Err(error) = self.update_host.respond(&response) {
-                eprintln!("cannot answer Update Center: {error}");
+            if let Err(error) = self.app_center_host.respond(&response) {
+                eprintln!("cannot answer app window: {error}");
             }
         }
     }

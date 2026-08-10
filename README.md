@@ -386,8 +386,10 @@ and is documented in [docs/PROFILE_OVERLAY.md](docs/PROFILE_OVERLAY.md).
 Friendly problem summaries stay bounded; use
 `Copy Full Error`, `Copy Diagnostics`, or the rotated log folder for the
 complete technical detail. Start/Stop, Input Monitoring settings, and Quit are
-also available. `About` opens a dedicated foreground window with a project
-summary, GitHub link, packaged version, and browsable release notes. Logs write
+also available. `About` and `Check for Updates…` open the corresponding tab in
+one foreground Steam Controller Bridge window. Its hero reports the installed
+application and connected firmware revisions alongside the project summary,
+collapsible changelog, and signed update workflow. Logs write
 concise `status_change` records immediately, full `status_snapshot` records at
 startup and every five minutes, and an immediate full snapshot when an error or
 failure appears. This source-built application is not notarized; release

@@ -45,17 +45,6 @@ pub(super) fn open_privacy_pane(pane: PrivacyPane) {
     }
 }
 
-pub(super) fn launch_about_window() -> Result<std::process::Child, String> {
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    Command::new(executable)
-        .arg("--about")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| error.to_string())
-}
-
 #[allow(deprecated)] // Required on macOS 13; the replacement API starts at macOS 14.
 pub(super) fn activate_child_application(child: &std::process::Child) -> bool {
     let Ok(pid) = i32::try_from(child.id()) else {
@@ -77,7 +66,7 @@ pub(super) fn activate_child_application(child: &std::process::Child) -> bool {
 pub(super) fn launch_bindings_editor() -> Result<std::process::Child, String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     Command::new(executable)
-        .arg("--bindings-editor")
+        .arg(crate::cli::BINDINGS_EDITOR_COMMAND)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

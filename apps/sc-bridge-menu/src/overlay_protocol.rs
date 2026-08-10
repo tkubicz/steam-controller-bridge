@@ -17,9 +17,6 @@ pub const PROTOCOL_VERSION: u32 = 1;
 #[cfg(feature = "overlay")]
 pub const OVERLAY_WINDOW_TITLE: &str = "Steam Controller Bridge Profile Wheel";
 
-/// The command-line flag that runs this binary as the overlay.
-pub const OVERLAY_ARGUMENT: &str = "--profile-overlay";
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OverlayMessage {

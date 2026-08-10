@@ -3,8 +3,6 @@ use std::io::BufRead;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-pub const UPDATE_CENTER_ARGUMENT: &str = "--update-center";
-pub const UPDATE_CENTER_DEMO_ARGUMENT: &str = "--update-center-demo";
 pub const MAX_UPDATE_IPC_LINE_BYTES: usize = 4 * 1024;
 const UPDATE_PROTOCOL_VERSION: u32 = 1;
 
@@ -20,6 +18,27 @@ pub enum UpdateRequest {
     SuspendBridge,
     ResumeBridge,
     QuitForReplacement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppCenterPage {
+    About,
+    Changelog,
+    Updates,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppCenterCommand {
+    Navigate {
+        page: AppCenterPage,
+        firmware_version: String,
+    },
+    FirmwareVersion {
+        firmware_version: String,
+    },
+    UpdateResponse(UpdateResponse),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,5 +113,21 @@ mod tests {
         ));
         let oversized = vec![b'x'; MAX_UPDATE_IPC_LINE_BYTES + 1];
         assert!(read::<UpdateRequest>(&mut Cursor::new(oversized)).is_err());
+    }
+
+    #[test]
+    fn host_commands_distinguish_navigation_from_update_responses() {
+        let encoded = encode(AppCenterCommand::Navigate {
+            page: AppCenterPage::Updates,
+            firmware_version: "7".to_owned(),
+        })
+        .unwrap();
+        assert!(matches!(
+            read(&mut Cursor::new(encoded)).unwrap(),
+            Some(AppCenterCommand::Navigate {
+                page: AppCenterPage::Updates,
+                firmware_version
+            }) if firmware_version == "7"
+        ));
     }
 }

@@ -3167,6 +3167,7 @@ name = "sc-bridge-menu"
 version = "1.5.0"
 dependencies = [
  "bridge-runtime",
+ "clap",
  "controller-art",
  "desktop-bindings",
  "eframe",

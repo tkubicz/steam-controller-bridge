@@ -57,18 +57,25 @@ artifacts, logs, or ordinary repository secrets.
 
 ## Local UI preview
 
-Preview an available update without trusted keys, network access, release
-assets, or connected hardware:
+Preview the unified window on its Updates tab with an available update, without
+trusted keys, updater network access, release assets, or connected hardware:
 
 ```sh
-cargo run -p sc-bridge-menu -- --update-center-demo
+cargo run -p sc-bridge-menu -- app-center --demo --tab updates
 ```
 
 Preview the fully up-to-date state, including the collapsed current release
 notes and firmware reinstall action:
 
 ```sh
-cargo run -p sc-bridge-menu -- --update-center-demo current
+cargo run -p sc-bridge-menu -- app-center --demo current --tab updates
+```
+
+The same fixture can open the other tabs directly:
+
+```sh
+cargo run -p sc-bridge-menu -- app-center --demo --tab about
+cargo run -p sc-bridge-menu -- app-center --demo current --tab changelog
 ```
 
 Demo actions only advance the preview state. They never download files, open

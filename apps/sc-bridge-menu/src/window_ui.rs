@@ -192,6 +192,45 @@ pub(crate) fn render_inline(ui: &mut egui::Ui, inline: &InlineText, size: f32, s
     }
 }
 
+pub(crate) fn render_release_notes(
+    ui: &mut egui::Ui,
+    releases: &[ReleaseNotes],
+    show_release_titles: bool,
+    title_size: f32,
+) {
+    for (release_index, release) in releases.iter().enumerate() {
+        if release_index > 0 {
+            ui.add_space(12.0);
+        }
+        if show_release_titles {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                render_inline(ui, &release.title, title_size, true);
+            });
+        }
+        render_release_sections(ui, release);
+    }
+}
+
+pub(crate) fn render_release_sections(ui: &mut egui::Ui, release: &ReleaseNotes) {
+    for section in &release.sections {
+        ui.add_space(10.0);
+        ui.label(
+            egui::RichText::new(section.title.to_uppercase())
+                .size(11.0)
+                .strong()
+                .color(ACCENT),
+        );
+        for note in &section.notes {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.label(egui::RichText::new("•").color(ACCENT));
+                render_inline(ui, note, 14.0, false);
+            });
+        }
+    }
+}
+
 impl InlineText {
     pub(crate) fn plain(&self) -> String {
         self.spans.iter().map(|span| span.text.as_str()).collect()
