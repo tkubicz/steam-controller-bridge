@@ -37,6 +37,28 @@ use controller::*;
 #[cfg(test)]
 pub(crate) use controller::*;
 
+#[derive(Debug, Default)]
+struct SuspensionState {
+    system_sleep: bool,
+    update: bool,
+}
+
+impl SuspensionState {
+    fn active(&self) -> bool {
+        self.system_sleep || self.update
+    }
+
+    fn detail(&self) -> Option<&'static str> {
+        if self.system_sleep {
+            Some("Suspended for system sleep")
+        } else if self.update {
+            Some("Suspended for application update")
+        } else {
+            None
+        }
+    }
+}
+
 pub(crate) struct Supervisor {
     config: RuntimeConfig,
     status: Arc<Mutex<BridgeStatus>>,
@@ -46,9 +68,10 @@ pub(crate) struct Supervisor {
     /// present, hardware stays closed and Start requests are rejected.
     startup_blocker: Option<String>,
     desired_running: bool,
-    /// System sleep is imminent or in progress: every hardware handle is
-    /// closed and stays closed, whatever `desired_running` says.
-    suspended: bool,
+    /// Independent owners that require every hardware handle to stay closed.
+    /// User start/stop intent remains in `desired_running` while either owner
+    /// is active.
+    suspension: SuspensionState,
     /// Hardware discovery holds off until this instant after a system wake.
     wake_settle: Option<Instant>,
     shutdown_requested: bool,
@@ -82,7 +105,7 @@ impl Supervisor {
             commands,
             desired_running: startup_blocker.is_none(),
             startup_blocker,
-            suspended: false,
+            suspension: SuspensionState::default(),
             wake_settle: None,
             shutdown_requested: false,
             pending_stop_acks: Vec::new(),
@@ -126,15 +149,11 @@ impl Supervisor {
                 acknowledge_all(&mut self.pending_stop_acks);
                 break;
             }
-            if !self.desired_running || self.suspended {
+            if !self.desired_running || self.suspension.active() {
                 drop(retained_output.take());
                 self.clear_controller_discovery();
                 if self.current_state() != RuntimeState::Error {
-                    let detail = if self.suspended {
-                        "Suspended for system sleep"
-                    } else {
-                        "Bridge stopped"
-                    };
+                    let detail = self.suspension.detail().unwrap_or("Bridge stopped");
                     self.transition(RuntimeState::Stopped, detail, None);
                 }
                 acknowledge_all(&mut self.pending_stop_acks);
@@ -272,7 +291,13 @@ impl Supervisor {
                         cleanup,
                     );
                     self.clear_hardware_status();
-                    self.transition(RuntimeState::Stopped, "Suspended for system sleep", None);
+                    self.transition(
+                        RuntimeState::Stopped,
+                        self.suspension
+                            .detail()
+                            .expect("a suspended exit has an owner"),
+                        None,
+                    );
                 }
                 Ok((ActiveExit::ShutdownWithAck(ack), output, cleanup)) => {
                     acknowledge_after_hardware_release(

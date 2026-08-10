@@ -23,6 +23,10 @@ pub(crate) enum RuntimeCommand {
     SuspendForSleep(CommandAck),
     /// Let discovery run again after a system wake.
     ResumeFromWake(CommandAck),
+    /// Park the device for an updater operation without changing user intent.
+    SuspendForUpdate(CommandAck),
+    /// Release only the updater suspension; system sleep still wins.
+    ResumeFromUpdate(CommandAck),
 }
 
 /// Where picker events go. Called on the runtime thread, so it must not block.
@@ -250,6 +254,26 @@ impl BridgeHandle {
     /// Returns an error if the runtime thread stops or the teardown fails.
     pub fn suspend_for_sleep(&self) -> Result<(), RuntimeError> {
         self.command(RuntimeCommand::SuspendForSleep)
+    }
+
+    /// Parks every device for an updater operation while preserving whether the
+    /// user wanted the bridge running. The acknowledgement is sent only after
+    /// neutralization and hardware release complete.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread stops or teardown fails.
+    pub fn suspend_for_update(&self) -> Result<(), RuntimeError> {
+        self.command(RuntimeCommand::SuspendForUpdate)
+    }
+
+    /// Releases an updater suspension. A concurrent system-sleep suspension
+    /// remains active, and a bridge the user stopped while updating stays
+    /// stopped.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread stops.
+    pub fn resume_from_update(&self) -> Result<(), RuntimeError> {
+        self.command(RuntimeCommand::ResumeFromUpdate)
     }
 
     /// Lets the bridge look for its hardware again after a system wake.

@@ -42,7 +42,7 @@ impl Supervisor {
                 self.pending_stop_acks.push(ack);
             }
             RuntimeCommand::SuspendForSleep(ack) => {
-                self.suspended = true;
+                self.suspension.system_sleep = true;
                 self.wake_settle = None;
                 self.transition(RuntimeState::Stopping, "Suspending for system sleep", None);
                 self.clear_hardware_status();
@@ -50,10 +50,24 @@ impl Supervisor {
                 self.pending_stop_acks.push(ack);
             }
             RuntimeCommand::ResumeFromWake(ack) => {
-                if self.suspended {
-                    self.suspended = false;
+                if self.suspension.system_sleep {
+                    self.suspension.system_sleep = false;
                     self.wake_settle = Some(Instant::now() + WAKE_SETTLE_DELAY);
                 }
+                let _ = ack.send(Ok(()));
+            }
+            RuntimeCommand::SuspendForUpdate(ack) => {
+                self.suspension.update = true;
+                self.transition(
+                    RuntimeState::Stopping,
+                    "Suspending for application update",
+                    None,
+                );
+                self.clear_hardware_status();
+                self.pending_stop_acks.push(ack);
+            }
+            RuntimeCommand::ResumeFromUpdate(ack) => {
+                self.suspension.update = false;
                 let _ = ack.send(Ok(()));
             }
             RuntimeCommand::Shutdown(ack) => {
@@ -138,7 +152,7 @@ impl Supervisor {
                     return Some(ActiveExit::StoppedWithAck(ack));
                 }
                 RuntimeCommand::SuspendForSleep(ack) => {
-                    self.suspended = true;
+                    self.suspension.system_sleep = true;
                     self.wake_settle = None;
                     // Same cleanup as a stop: the device is parked at neutral
                     // and every handle is closed before the ack lets the
@@ -147,6 +161,16 @@ impl Supervisor {
                 }
                 RuntimeCommand::ResumeFromWake(ack) => {
                     // Already awake and running; nothing to resume.
+                    let _ = ack.send(Ok(()));
+                }
+                RuntimeCommand::SuspendForUpdate(ack) => {
+                    self.suspension.update = true;
+                    return Some(ActiveExit::SuspendedWithAck(ack));
+                }
+                RuntimeCommand::ResumeFromUpdate(ack) => {
+                    // Already active, so there is no updater suspension to
+                    // release. Keep this idempotent for recovery paths.
+                    self.suspension.update = false;
                     let _ = ack.send(Ok(()));
                 }
                 RuntimeCommand::Shutdown(ack) => {
