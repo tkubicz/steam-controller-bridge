@@ -33,7 +33,7 @@ Full texts ship inside the crate as `fonts/UFL.txt`, `fonts/Hack-Regular.txt`,
 Neither the SIL OFL nor the Ubuntu Font Licence restricts distributing a program
 that embeds the fonts. Both require that their notices travel with the binary,
 which is the purpose of this file. The menu binary uses these fonts only in its
-`--bindings-editor` window; `sc-bridge` embeds no fonts.
+`bindings-editor` window; `sc-bridge` embeds no fonts.
 
 ## `enigo`
 

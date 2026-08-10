@@ -7,7 +7,7 @@
 
 #![allow(
     clippy::missing_errors_doc,
-    reason = "workspace-only APIs are documented by the Update Center contract"
+    reason = "workspace-only APIs are documented by the updater contract"
 )]
 
 #[cfg(target_os = "macos")]
@@ -52,7 +52,7 @@ pub const FIRMWARE_TARGET_ID: &str = "seeed-xiao-nrf52840";
 pub const FIRMWARE_BOARD_ID: &str = "Seeed_XIAO_nRF52840";
 pub const UF2_FAMILY_ID: u32 = 0xADA5_2840;
 
-/// Coarse state shared by the menu label and Update Center.
+/// Coarse state shared by the menu label and the Updates tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateCatalog {
     Unavailable(String),

@@ -1,4 +1,4 @@
-# Update Center security and release operations
+# Updater security and release operations
 
 The menu app checks the latest stable GitHub release at most once every 24
 hours. It downloads only the manifest and signature envelope during that check.

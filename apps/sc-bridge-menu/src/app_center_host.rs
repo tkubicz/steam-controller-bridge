@@ -5,10 +5,10 @@ use std::thread;
 
 use bridge_runtime::FirmwareVersion;
 
-use crate::cli::APP_CENTER_COMMAND;
-use crate::update_protocol::{
+use crate::app_center_protocol::{
     encode, read, AppCenterCommand, AppCenterPage, UpdateRequest, UpdateResponse,
 };
+use crate::cli::APP_CENTER_COMMAND;
 
 const REQUEST_CAPACITY: usize = 16;
 
@@ -20,6 +20,10 @@ pub struct AppCenterHost {
     suspended: bool,
     resume_after: bool,
     last_firmware_version: Option<String>,
+    /// A child went away and its exit has not been reported yet. Relaunching
+    /// consumes the exit that [`Self::reap`] would otherwise observe, and a
+    /// child that owned the bridge suspension must not leave it stopped.
+    lost_child: bool,
 }
 
 impl AppCenterHost {
@@ -33,6 +37,7 @@ impl AppCenterHost {
             suspended: false,
             resume_after: false,
             last_firmware_version: None,
+            lost_child: false,
         }
     }
 
@@ -47,27 +52,49 @@ impl AppCenterHost {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(None) => {
-                    self.send_command(&AppCenterCommand::Navigate {
+                    let navigated = self.send_command(&AppCenterCommand::Navigate {
                         page,
                         firmware_version: firmware_version.clone(),
-                    })?;
-                    self.last_firmware_version = Some(firmware_version);
-                    return Ok(true);
+                    });
+                    if navigated.is_ok() {
+                        self.last_firmware_version = Some(firmware_version);
+                        return Ok(true);
+                    }
+                    // The child is running but unreachable, so it can no longer
+                    // show a window. Replace it instead of reporting a failure
+                    // the user cannot act on.
                 }
                 Ok(Some(_)) => {}
                 Err(error) => return Err(format!("cannot inspect app window: {error}")),
             }
+            self.discard_child();
         }
-        self.child = None;
+        self.spawn(page, &firmware_version)?;
+        self.last_firmware_version = Some(firmware_version);
+        Ok(false)
+    }
+
+    /// Kills the current child and remembers that the menu still owes it a
+    /// [`Self::reap`]. Relaunching would otherwise consume the exit that
+    /// releases a bridge suspension the lost child still owned.
+    fn discard_child(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            cleanup_child(&mut child);
+        }
         self.input = None;
+        self.last_firmware_version = None;
+        self.lost_child = true;
+    }
+
+    fn spawn(&mut self, page: AppCenterPage, firmware_version: &str) -> Result<(), String> {
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let mut command = Command::new(executable);
         command
             .arg(APP_CENTER_COMMAND)
             .arg("--tab")
-            .arg(page_argument(page))
+            .arg(page.argument())
             .arg("--firmware-version")
-            .arg(&firmware_version)
+            .arg(firmware_version)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -97,8 +124,7 @@ impl AppCenterHost {
         }
         self.input = Some(input);
         self.child = Some(child);
-        self.last_firmware_version = Some(firmware_version);
-        Ok(false)
+        Ok(())
     }
 
     pub fn drain(&self) -> impl Iterator<Item = UpdateRequest> + '_ {
@@ -145,6 +171,8 @@ impl AppCenterHost {
         restart
     }
 
+    /// Reports a child that went away since the last call, whether it exited on
+    /// its own or had to be replaced by [`Self::launch`].
     pub fn reap(&mut self) -> bool {
         let exited = self
             .child
@@ -155,16 +183,18 @@ impl AppCenterHost {
             self.input = None;
             self.last_firmware_version = None;
         }
-        exited
+        exited | std::mem::take(&mut self.lost_child)
     }
 
+    /// Ends the session for good. Shutdown owns the bridge from here, so unlike
+    /// [`Self::discard_child`] this owes the menu no restart.
     pub fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            cleanup_child(&mut child);
         }
         self.input = None;
         self.last_firmware_version = None;
+        self.lost_child = false;
     }
 
     pub fn child(&self) -> Option<&Child> {
@@ -177,6 +207,7 @@ fn cleanup_child(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// The argument the child reads its hero firmware badge from.
 fn firmware_argument(version: FirmwareVersion) -> String {
     match version {
         FirmwareVersion::Reported(revision) => revision.to_string(),
@@ -187,22 +218,30 @@ fn firmware_argument(version: FirmwareVersion) -> String {
     }
 }
 
-const fn page_argument(page: AppCenterPage) -> &'static str {
-    match page {
-        AppCenterPage::About => "about",
-        AppCenterPage::Changelog => "changelog",
-        AppCenterPage::Updates => "updates",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn every_tab_has_a_stable_launch_argument() {
-        assert_eq!(page_argument(AppCenterPage::About), "about");
-        assert_eq!(page_argument(AppCenterPage::Changelog), "changelog");
-        assert_eq!(page_argument(AppCenterPage::Updates), "updates");
+    fn a_replaced_child_still_owes_exactly_one_reap() {
+        let mut host = AppCenterHost::new();
+        host.set_suspended(true);
+        host.discard_child();
+
+        assert!(host.reap(), "a discarded child must report its exit");
+        assert!(
+            host.clear_suspended(),
+            "a lost child must release the bridge suspension"
+        );
+        assert!(!host.reap(), "the same exit must not be reported twice");
+    }
+
+    #[test]
+    fn shutdown_owes_no_restart() {
+        let mut host = AppCenterHost::new();
+        host.discard_child();
+        host.stop();
+
+        assert!(!host.reap());
     }
 }

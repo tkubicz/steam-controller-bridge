@@ -29,12 +29,12 @@ Grab the latest [release](https://github.com/tkubicz/steam-controller-bridge/rel
 | `steam-controller-bridge-xiao-nrf52840.uf2` | Firmware. Double-tap RESET on the XIAO and copy this onto the drive that mounts. |
 | `steam-controller-bridge-macos.zip` | The menu-bar application. |
 | `steam-controller-bridge-xiao-nrf52840-dfu.zip` | Firmware for serial DFU flashing, if you prefer `make flash`. |
-| `steam-controller-bridge-update-manifest.json` | Signed application and firmware release metadata used by the Update Center. |
+| `steam-controller-bridge-update-manifest.json` | Signed application and firmware release metadata used by the in-app updater. |
 | `steam-controller-bridge-update-signatures.json` | Ed25519 signatures for the exact manifest bytes. |
 
 After installing the menu app, use **Check for Updates…** for normal application
-and firmware updates. The Update Center downloads nothing beyond signed metadata
-until you choose an action. Application replacement is Finder-guided in v1;
+and firmware updates. It opens the Updates tab, which downloads nothing beyond
+signed metadata until you choose an action. Application replacement is Finder-guided in v1;
 firmware flashing is performed by the app and does not require Arduino CLI.
 
 Verify a download against the published sums before flashing:
@@ -334,7 +334,7 @@ error diagnostics; edits the mapping filters; and records raw, decoded, mapped,
 lifecycle, and marker events to JSONL. It supports mock and negotiated serial
 output.
 
-See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [serial transport](docs/SERIAL_TRANSPORT.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [desktop bindings](docs/DESKTOP_BINDINGS.md), [lizard mouse lab](docs/LIZARD_MOUSE_LAB.md), [recording format](docs/RECORDING_FORMAT.md), [Update Center operations](docs/UPDATES.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
+See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [serial transport](docs/SERIAL_TRANSPORT.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [desktop bindings](docs/DESKTOP_BINDINGS.md), [lizard mouse lab](docs/LIZARD_MOUSE_LAB.md), [recording format](docs/RECORDING_FORMAT.md), [updater operations](docs/UPDATES.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
 
 Firmware setup, native tests, UF2/DFU builds, flashing, recovery, LED states,
 and hardware validation are documented in

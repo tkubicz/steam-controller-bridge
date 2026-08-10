@@ -182,19 +182,4 @@ mod tests {
             .iter()
             .any(|section| section.title == "Features"));
     }
-
-    #[test]
-    fn cards_share_the_available_width_regardless_of_padding_or_content() {
-        for width in [540.0, 700.0] {
-            egui::__run_test_ui(|ui| {
-                ui.set_width(width);
-                let description = full_width_card(ui, 24, |ui| ui.label("Longer description"));
-                let action = full_width_card(ui, 20, |ui| ui.label("Short"));
-                assert!(
-                    (description.response.rect.width() - action.response.rect.width()).abs() < 0.1
-                );
-                assert!((description.response.rect.width() - width).abs() < 0.1);
-            });
-        }
-    }
 }

@@ -19,12 +19,12 @@ use ui_theme::{
 };
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
-use crate::about_window::AboutContent;
-use crate::cli::{AppCenterArgs, DemoMode};
-use crate::update_check::{update_context, CHECK_INTERVAL};
-use crate::update_protocol::{
+use crate::about_pages::AboutContent;
+use crate::app_center_protocol::{
     encode, read, AppCenterCommand, AppCenterPage, UpdateRequest, UpdateResponse,
 };
+use crate::cli::{AppCenterArgs, DemoMode};
+use crate::update_check::{update_context, CHECK_INTERVAL};
 use crate::window_ui::{
     activate_window, configure_window_style, full_width_card, hero_transition, load_texture,
     parse_release_notes, render_release_notes, ReleaseNotes,
@@ -60,7 +60,7 @@ pub fn run(arguments: AppCenterArgs) -> Result<(), String> {
             configure_window_style(&creation.egui_ctx);
             activate_window();
             Ok(Box::new(AppCenter::new(
-                creation.egui_ctx.clone(),
+                &creation.egui_ctx,
                 firmware,
                 demo,
                 page,
@@ -183,7 +183,7 @@ enum StatusTone {
 
 impl AppCenter {
     fn new(
-        ctx: egui::Context,
+        ctx: &egui::Context,
         firmware_version: String,
         demo: Option<DemoMode>,
         page: AppCenterPage,
@@ -204,25 +204,21 @@ impl AppCenter {
             Some(DemoMode::Current) => "2".to_owned(),
             None => firmware_version,
         };
-        let center = Self {
+        // A window that opens on Updates starts its check in `ensure_catalog`
+        // on the first frame, so opening and navigating share one path.
+        Self {
             page,
-            about: AboutContent::new(&ctx),
+            about: AboutContent::new(ctx),
             catalog,
             release_notes,
             installed,
             firmware_version,
             status: if demo.is_some() {
                 "Demo preview — updater networking, files, and hardware are disabled.".to_owned()
-            } else if page == AppCenterPage::Updates {
-                "Checking the signed stable release…".to_owned()
             } else {
                 "Open Updates to check the signed stable release.".to_owned()
             },
-            activity: if demo.is_some() || page != AppCenterPage::Updates {
-                Activity::Idle
-            } else {
-                Activity::Busy { can_cancel: false }
-            },
+            activity: Activity::Idle,
             staged_application: None,
             events,
             sender,
@@ -230,17 +226,13 @@ impl AppCenter {
             cancel: Arc::new(AtomicBool::new(false)),
             replacement_supported: demo.is_some()
                 || guided_replacement_supported(env!("CARGO_PKG_VERSION")),
-            app_icon: load_texture(&ctx, "update-center-app-icon", APP_ICON),
+            app_icon: load_texture(ctx, "app-center-app-icon", APP_ICON),
             demo,
             status_tone: StatusTone::Info,
             host_commands,
-            catalog_requested: demo.is_some() || page == AppCenterPage::Updates,
+            catalog_requested: demo.is_some(),
             firmware_write_started: false,
-        };
-        if demo.is_none() && page == AppCenterPage::Updates {
-            center.check_catalog(ctx);
         }
-        center
     }
 
     fn check_catalog(&self, ctx: egui::Context) {
@@ -399,7 +391,7 @@ impl AppCenter {
         }
     }
 
-    fn drain_host_commands(&mut self, ctx: &egui::Context) {
+    fn drain_host_commands(&mut self) {
         while let Ok(command) = self.host_commands.try_recv() {
             match command {
                 AppCenterCommand::Navigate {
@@ -407,8 +399,14 @@ impl AppCenter {
                     firmware_version,
                 } => {
                     self.firmware_version = firmware_version;
-                    if !self.firmware_write_started {
-                        self.page = page;
+                    if self.firmware_write_started {
+                        continue;
+                    }
+                    self.page = page;
+                    // Asking for Updates again after a failed check must retry
+                    // instead of leaving the window on the stale error.
+                    if page == AppCenterPage::Updates && self.catalog.is_none() && !self.busy() {
+                        self.catalog_requested = false;
                     }
                 }
                 AppCenterCommand::FirmwareVersion { firmware_version } => {
@@ -419,7 +417,6 @@ impl AppCenter {
                 }
             }
         }
-        self.ensure_catalog(ctx.clone());
     }
 
     fn ensure_catalog(&mut self, ctx: egui::Context) {
@@ -541,7 +538,7 @@ impl AppCenter {
 impl eframe::App for AppCenter {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_events();
-        self.drain_host_commands(ui.ctx());
+        self.drain_host_commands();
         if self.firmware_write_started && ui.ctx().input(|input| input.viewport().close_requested())
         {
             ui.ctx()
@@ -790,7 +787,7 @@ impl AppCenter {
                     ui,
                     ACCENT,
                     &format!("Revision {} is ready", manifest.firmware.revision),
-                    "The Update Center will verify the board and firmware before writing.",
+                    "The board and firmware are verified before anything is written.",
                 );
                 ui.add_space(12.0);
                 if primary_button(ui, "Install Firmware Update", !self.busy()).clicked() {
@@ -829,7 +826,7 @@ impl AppCenter {
         .default_open(update_available)
         .show(ui, |ui| {
             ui.add_space(6.0);
-            render_release_notes(ui, &self.release_notes, true, 17.0);
+            render_release_notes(ui, &self.release_notes);
         });
     }
 }

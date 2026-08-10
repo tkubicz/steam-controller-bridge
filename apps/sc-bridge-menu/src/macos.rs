@@ -32,12 +32,12 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::window::WindowId;
 
+use crate::app_center_host::AppCenterHost;
+use crate::app_center_protocol::{AppCenterPage, UpdateRequest, UpdateResponse};
 use crate::model::{MenuModel, RunAction, TrayState};
 use crate::overlay_host::OverlayHost;
 #[cfg(feature = "updater")]
 use crate::update_check::UpdateChecker;
-use crate::update_host::AppCenterHost;
-use crate::update_protocol::{AppCenterPage, UpdateRequest, UpdateResponse};
 
 mod icons;
 mod logging;

@@ -1,5 +1,11 @@
-#[cfg(all(target_os = "macos", any(feature = "about", feature = "updater")))]
-mod about_window;
+#[cfg(all(target_os = "macos", feature = "updater"))]
+mod about_pages;
+#[cfg(all(target_os = "macos", feature = "updater"))]
+mod app_center;
+#[cfg(target_os = "macos")]
+mod app_center_host;
+#[cfg(target_os = "macos")]
+mod app_center_protocol;
 #[cfg(all(target_os = "macos", feature = "editor"))]
 mod bindings_editor;
 #[cfg(target_os = "macos")]
@@ -20,26 +26,18 @@ mod overlay_protocol;
 #[cfg(all(target_os = "macos", feature = "overlay"))]
 mod profile_overlay;
 #[cfg(all(target_os = "macos", feature = "updater"))]
-mod update_center;
-#[cfg(all(target_os = "macos", feature = "updater"))]
 mod update_check;
-#[cfg(target_os = "macos")]
-mod update_host;
-#[cfg(target_os = "macos")]
-mod update_protocol;
-#[cfg(all(target_os = "macos", any(feature = "about", feature = "updater")))]
+#[cfg(all(target_os = "macos", feature = "updater"))]
 mod window_ui;
 
 #[cfg(target_os = "macos")]
 fn main() {
-    use clap::Parser as _;
-
-    let result = match cli::Cli::parse().command {
+    let result = match cli::parse().command {
         None => macos::run(),
         Some(cli::Command::AppCenter(arguments)) => {
             #[cfg(feature = "updater")]
             {
-                update_center::run(arguments)
+                app_center::run(arguments)
             }
             #[cfg(not(feature = "updater"))]
             {

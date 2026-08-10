@@ -192,25 +192,23 @@ pub(crate) fn render_inline(ui: &mut egui::Ui, inline: &InlineText, size: f32, s
     }
 }
 
-pub(crate) fn render_release_notes(
-    ui: &mut egui::Ui,
-    releases: &[ReleaseNotes],
-    show_release_titles: bool,
-    title_size: f32,
-) {
+/// Renders every release of a set of notes, titles included. The Changelog tab
+/// renders one release per collapsible card instead, so it calls
+/// [`render_release_sections`] directly.
+pub(crate) fn render_release_notes(ui: &mut egui::Ui, releases: &[ReleaseNotes]) {
     for (release_index, release) in releases.iter().enumerate() {
         if release_index > 0 {
             ui.add_space(12.0);
         }
-        if show_release_titles {
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 3.0;
-                render_inline(ui, &release.title, title_size, true);
-            });
-        }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            render_inline(ui, &release.title, RELEASE_TITLE_SIZE, true);
+        });
         render_release_sections(ui, release);
     }
 }
+
+const RELEASE_TITLE_SIZE: f32 = 17.0;
 
 pub(crate) fn render_release_sections(ui: &mut egui::Ui, release: &ReleaseNotes) {
     for section in &release.sections {
@@ -234,5 +232,44 @@ pub(crate) fn render_release_sections(ui: &mut egui::Ui, release: &ReleaseNotes)
 impl InlineText {
     pub(crate) fn plain(&self) -> String {
         self.spans.iter().map(|span| span.text.as_str()).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cards_share_the_available_width_regardless_of_padding_or_content() {
+        for width in [540.0, 700.0] {
+            egui::__run_test_ui(|ui| {
+                ui.set_width(width);
+                let description = full_width_card(ui, 24, |ui| ui.label("Longer description"));
+                let action = full_width_card(ui, 20, |ui| ui.label("Short"));
+                assert!(
+                    (description.response.rect.width() - action.response.rect.width()).abs() < 0.1
+                );
+                assert!((description.response.rect.width() - width).abs() < 0.1);
+            });
+        }
+    }
+
+    #[test]
+    fn inline_links_keep_their_target_and_drop_their_markup() {
+        let inline = parse_inline("**bold** [1.6.0](https://example.test/tag) `code`");
+        assert_eq!(inline.plain(), "bold 1.6.0 code");
+        assert_eq!(
+            inline.spans.iter().find_map(|span| span.url.as_deref()),
+            Some("https://example.test/tag")
+        );
+    }
+
+    #[test]
+    fn notes_before_any_section_heading_still_belong_to_the_release() {
+        let releases = parse_release_notes("## 1.6.0\n\n* an unsectioned note\n");
+        let sections = &releases.first().expect("one release").sections;
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].title, "Overview");
+        assert_eq!(sections[0].notes[0].plain(), "an unsectioned note");
     }
 }

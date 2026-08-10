@@ -1,10 +1,11 @@
 use std::io::BufRead;
 
+use clap::ValueEnum;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-pub const MAX_UPDATE_IPC_LINE_BYTES: usize = 4 * 1024;
-const UPDATE_PROTOCOL_VERSION: u32 = 1;
+pub const MAX_IPC_LINE_BYTES: usize = 4 * 1024;
+const IPC_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
 struct Envelope<T> {
@@ -20,12 +21,23 @@ pub enum UpdateRequest {
     QuitForReplacement,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppCenterPage {
     About,
     Changelog,
     Updates,
+}
+
+impl AppCenterPage {
+    /// The `--tab` value the child parses back into this page. Reading it from
+    /// the same `ValueEnum` the child parses keeps one list of tab names.
+    pub fn argument(self) -> String {
+        self.to_possible_value()
+            .expect("every page is a selectable tab")
+            .get_name()
+            .to_owned()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,46 +64,46 @@ pub enum UpdateResponse {
 
 pub fn encode<T: Serialize>(message: T) -> Result<Vec<u8>, String> {
     let mut encoded = serde_json::to_vec(&Envelope {
-        version: UPDATE_PROTOCOL_VERSION,
+        version: IPC_PROTOCOL_VERSION,
         message,
     })
     .map_err(|error| error.to_string())?;
     encoded.push(b'\n');
-    if encoded.len() > MAX_UPDATE_IPC_LINE_BYTES {
-        return Err("Update Center IPC message exceeds its bound".to_owned());
+    if encoded.len() > MAX_IPC_LINE_BYTES {
+        return Err("app window IPC message exceeds its bound".to_owned());
     }
     Ok(encoded)
 }
 
 pub fn read<T: DeserializeOwned>(reader: &mut impl BufRead) -> Result<Option<T>, String> {
-    let mut line = Vec::with_capacity(MAX_UPDATE_IPC_LINE_BYTES);
+    let mut line = Vec::with_capacity(MAX_IPC_LINE_BYTES);
     loop {
         let available = reader.fill_buf().map_err(|error| error.to_string())?;
         if available.is_empty() {
             return if line.is_empty() {
                 Ok(None)
             } else {
-                Err("Update Center IPC ended inside a message".to_owned())
+                Err("app window IPC ended inside a message".to_owned())
             };
         }
         if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
-            if line.len() + newline > MAX_UPDATE_IPC_LINE_BYTES {
-                return Err("Update Center IPC message exceeds its bound".to_owned());
+            if line.len() + newline > MAX_IPC_LINE_BYTES {
+                return Err("app window IPC message exceeds its bound".to_owned());
             }
             line.extend_from_slice(&available[..newline]);
             reader.consume(newline + 1);
             let envelope: Envelope<T> =
                 serde_json::from_slice(&line).map_err(|error| error.to_string())?;
-            if envelope.version != UPDATE_PROTOCOL_VERSION {
+            if envelope.version != IPC_PROTOCOL_VERSION {
                 return Err(format!(
-                    "unsupported Update Center IPC version {}",
+                    "unsupported app window IPC version {}",
                     envelope.version
                 ));
             }
             return Ok(Some(envelope.message));
         }
-        if line.len() + available.len() > MAX_UPDATE_IPC_LINE_BYTES {
-            return Err("Update Center IPC message exceeds its bound".to_owned());
+        if line.len() + available.len() > MAX_IPC_LINE_BYTES {
+            return Err("app window IPC message exceeds its bound".to_owned());
         }
         line.extend_from_slice(available);
         let consumed = available.len();
@@ -111,8 +123,18 @@ mod tests {
             read(&mut Cursor::new(encoded)).unwrap(),
             Some(UpdateRequest::SuspendBridge)
         ));
-        let oversized = vec![b'x'; MAX_UPDATE_IPC_LINE_BYTES + 1];
+        let oversized = vec![b'x'; MAX_IPC_LINE_BYTES + 1];
         assert!(read::<UpdateRequest>(&mut Cursor::new(oversized)).is_err());
+    }
+
+    #[test]
+    fn every_page_survives_its_launch_argument() {
+        for page in AppCenterPage::value_variants() {
+            assert_eq!(
+                AppCenterPage::from_str(&page.argument(), true).ok(),
+                Some(*page)
+            );
+        }
     }
 
     #[test]
