@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use semver::Version;
@@ -73,6 +74,8 @@ struct CachedMetadata {
     manifest: Vec<u8>,
     signatures: Vec<u8>,
 }
+
+static CACHE_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 impl ReleaseCache {
     #[must_use]
@@ -180,7 +183,7 @@ impl ReleaseCache {
             .map_or(true, |age| age >= interval)
     }
 
-    pub fn mark_check_attempt(&self) -> Result<(), CacheError> {
+    pub(crate) fn mark_check_success(&self) -> Result<(), CacheError> {
         atomic_write(&self.last_check_path(), b"checked\n")?;
         Ok(())
     }
@@ -192,11 +195,12 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .ok_or_else(|| io::Error::other("cache path has no parent"))?;
     fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(
-        ".{}.{}.tmp",
+        ".{}.{}.{}.tmp",
         path.file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("update"),
-        std::process::id()
+        std::process::id(),
+        CACHE_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     let result = (|| {
         let mut file = OpenOptions::new()
@@ -217,71 +221,22 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::engine::general_purpose::STANDARD as BASE64;
-    use base64::Engine as _;
-    use ed25519_dalek::{Signer as _, SigningKey};
-    use serde_json::json;
-
-    fn signed_metadata(version: &str, revision: u16) -> (Vec<u8>, Vec<u8>, TrustedPublicKey) {
-        let manifest = serde_json::to_vec(&json!({
-            "schema_version": 1,
-            "release_tag": format!("v{version}"),
-            "application_version": version,
-            "minimum_macos": "13.0.0",
-            "release_notes": "notes",
-            "application": {
-                "bundle_identifier": "com.lynxware.steam-controller-bridge",
-                "version": version,
-                "artifact": { "name": "app.zip", "size": 1, "sha256": "11".repeat(32) }
-            },
-            "firmware": {
-                "target": "seeed-xiao-nrf52840",
-                "revision": revision,
-                "minimum_application_version": version,
-                "protocol_version": 1,
-                "device_info_format": 1,
-                "board_id": "Seeed_XIAO_nRF52840",
-                "uf2_family_id": 0xADA5_2840_u32,
-                "usb_vendor_id": 0x045e,
-                "usb_product_id": 0x028e,
-                "usb_manufacturer": "Lynxware",
-                "usb_product": "Steam Controller Bridge",
-                "artifact": { "name": "firmware.uf2", "size": 1, "sha256": "22".repeat(32) }
-            }
-        }))
-        .unwrap();
-        let signing = SigningKey::from_bytes(&[9; 32]);
-        let signatures = serde_json::to_vec(&json!({
-            "schema_version": 1,
-            "signatures": [{
-                "key_id": "fixture",
-                "signature": BASE64.encode(signing.sign(&manifest).to_bytes())
-            }]
-        }))
-        .unwrap();
-        let key = TrustedPublicKey {
-            key_id: "fixture".to_owned(),
-            bytes: signing.verifying_key().to_bytes(),
-        };
-        (manifest, signatures, key)
-    }
+    use crate::test_support::{signed_metadata, temporary_directory};
 
     #[test]
     fn due_when_missing_and_not_immediately_after_write() {
-        let root =
-            std::env::temp_dir().join(format!("release-updater-cache-{}", std::process::id()));
+        let root = temporary_directory("cache");
         let _ = fs::remove_dir_all(&root);
         let cache = ReleaseCache::new(root.clone());
         assert!(cache.check_due(Duration::from_mins(1)));
-        cache.mark_check_attempt().unwrap();
+        cache.mark_check_success().unwrap();
         assert!(!cache.check_due(Duration::from_mins(1)));
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn cache_replacement_is_atomic_and_refuses_either_version_rollback() {
-        let root =
-            std::env::temp_dir().join(format!("release-updater-rollback-{}", std::process::id()));
+        let root = temporary_directory("rollback");
         let _ = fs::remove_dir_all(&root);
         let cache = ReleaseCache::new(root.clone());
         let (manifest, signatures, key) = signed_metadata("1.5.0", 5);

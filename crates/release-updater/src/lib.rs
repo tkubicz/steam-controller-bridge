@@ -17,6 +17,8 @@ mod cache;
 mod firmware;
 mod manifest;
 mod network;
+#[cfg(test)]
+mod test_support;
 
 #[cfg(target_os = "macos")]
 pub use application::{

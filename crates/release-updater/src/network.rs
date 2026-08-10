@@ -2,6 +2,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     ArtifactDescriptor, ReleaseCache, ReleaseManifestV1, TrustedPublicKey, MANIFEST_ASSET,
@@ -28,6 +29,9 @@ const CURL_DOWNLOAD_ARGS: &[&str] = &[
     "60",
     "--max-filesize",
 ];
+
+static DOWNLOAD_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static METADATA_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
 pub enum DownloadError {
@@ -126,14 +130,27 @@ pub fn refresh_catalog_if_due(
             .load_manifest(trusted_keys)
             .map_err(|error| error.to_string());
     }
-    cache
-        .mark_check_attempt()
-        .map_err(|error| error.to_string())?;
-    let temporary = cache.root().join("metadata-download");
-    match source.fetch_metadata(&temporary) {
-        Ok((manifest, signatures)) => cache
-            .store_manifest(&manifest, &signatures, trusted_keys)
-            .map_err(|error| error.to_string()),
+    let temporary = cache.root().join(format!(
+        ".metadata-download.{}.{}",
+        std::process::id(),
+        METADATA_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let refreshed = source
+        .fetch_metadata(&temporary)
+        .map_err(|error| error.to_string())
+        .and_then(|(manifest, signatures)| {
+            cache
+                .store_manifest(&manifest, &signatures, trusted_keys)
+                .map_err(|error| error.to_string())
+        });
+    let _ = fs::remove_dir_all(&temporary);
+    match refreshed {
+        Ok(manifest) => {
+            // The marker is only a network-throttling optimization. Verified
+            // metadata remains usable if writing the marker itself fails.
+            let _ = cache.mark_check_success();
+            Ok(manifest)
+        }
         Err(error) => cache.load_manifest(trusted_keys).map_err(|_| {
             format!("Cannot check releases and no verified cache is available: {error}")
         }),
@@ -187,12 +204,13 @@ pub fn download_to_path(
         .ok_or_else(|| io::Error::other("download destination has no parent"))?;
     fs::create_dir_all(parent)?;
     let temporary: PathBuf = parent.join(format!(
-        ".{}.{}.download",
+        ".{}.{}.{}.download",
         destination
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("update"),
-        std::process::id()
+        std::process::id(),
+        DOWNLOAD_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     let output = Command::new("/usr/bin/curl")
         .args(CURL_DOWNLOAD_ARGS)
@@ -222,6 +240,11 @@ pub fn download_to_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::time::Duration;
+
+    use crate::test_support::{signed_metadata, temporary_directory};
 
     #[test]
     fn release_components_cannot_escape_the_repository() {
@@ -245,9 +268,66 @@ mod tests {
             .any(|arguments| arguments == ["--max-redirs", "5"]));
     }
 
-    struct FakeSource;
+    enum MetadataReply {
+        Metadata(Vec<u8>, Vec<u8>),
+        Failure,
+    }
 
-    impl ReleaseSource for FakeSource {
+    struct MetadataSource {
+        replies: Mutex<VecDeque<MetadataReply>>,
+        directories: Mutex<Vec<PathBuf>>,
+        barrier: Option<Barrier>,
+    }
+
+    impl MetadataSource {
+        fn new(replies: impl IntoIterator<Item = MetadataReply>) -> Self {
+            Self {
+                replies: Mutex::new(replies.into_iter().collect()),
+                directories: Mutex::new(Vec::new()),
+                barrier: None,
+            }
+        }
+
+        fn concurrent(replies: impl IntoIterator<Item = MetadataReply>) -> Self {
+            Self {
+                barrier: Some(Barrier::new(2)),
+                ..Self::new(replies)
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.directories.lock().unwrap().len()
+        }
+    }
+
+    impl ReleaseSource for MetadataSource {
+        fn fetch_metadata(&self, directory: &Path) -> Result<(Vec<u8>, Vec<u8>), DownloadError> {
+            self.directories.lock().unwrap().push(directory.to_owned());
+            if let Some(barrier) = &self.barrier {
+                barrier.wait();
+            }
+            match self.replies.lock().unwrap().pop_front().unwrap() {
+                MetadataReply::Metadata(manifest, signatures) => Ok((manifest, signatures)),
+                MetadataReply::Failure => Err(DownloadError::Io(io::Error::other(
+                    "fixture metadata failure",
+                ))),
+            }
+        }
+
+        fn download_release_asset(
+            &self,
+            _release_tag: &str,
+            _name: &str,
+            _destination: &Path,
+            _maximum_size: u64,
+        ) -> Result<(), DownloadError> {
+            unreachable!()
+        }
+    }
+
+    struct ArtifactSource;
+
+    impl ReleaseSource for ArtifactSource {
         fn fetch_metadata(&self, _directory: &Path) -> Result<(Vec<u8>, Vec<u8>), DownloadError> {
             unreachable!()
         }
@@ -266,9 +346,93 @@ mod tests {
     }
 
     #[test]
+    fn failed_first_check_is_immediately_retryable() {
+        let root = temporary_directory("network-retry");
+        let cache = ReleaseCache::new(root.clone());
+        let (manifest, signatures, key) = signed_metadata("1.5.0", 5);
+        let source = MetadataSource::new([
+            MetadataReply::Failure,
+            MetadataReply::Metadata(manifest, signatures),
+        ]);
+
+        assert!(refresh_catalog_if_due(
+            &source,
+            &cache,
+            std::slice::from_ref(&key),
+            Duration::from_hours(24)
+        )
+        .is_err());
+        assert!(cache.check_due(Duration::from_hours(24)));
+        assert_eq!(
+            refresh_catalog_if_due(
+                &source,
+                &cache,
+                std::slice::from_ref(&key),
+                Duration::from_hours(24)
+            )
+            .unwrap()
+            .application_version,
+            semver::Version::new(1, 5, 0)
+        );
+        assert_eq!(source.calls(), 2);
+        assert!(!cache.check_due(Duration::from_hours(24)));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_refresh_falls_back_to_verified_cache_without_replacing_it() {
+        let root = temporary_directory("network-fallback");
+        let cache = ReleaseCache::new(root.clone());
+        let (manifest, signatures, key) = signed_metadata("1.5.0", 5);
+        let source = MetadataSource::new([
+            MetadataReply::Metadata(manifest, signatures),
+            MetadataReply::Metadata(b"{}".to_vec(), b"{}".to_vec()),
+        ]);
+
+        refresh_catalog_if_due(&source, &cache, std::slice::from_ref(&key), Duration::ZERO)
+            .unwrap();
+        let fallback = refresh_catalog_if_due(&source, &cache, &[key], Duration::ZERO).unwrap();
+        assert_eq!(fallback.application_version, semver::Version::new(1, 5, 0));
+        assert_eq!(source.calls(), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_refreshes_use_private_directories_and_clean_them() {
+        let root = temporary_directory("network-concurrent");
+        let cache = Arc::new(ReleaseCache::new(root.clone()));
+        let (manifest, signatures, key) = signed_metadata("1.5.0", 5);
+        let source = Arc::new(MetadataSource::concurrent([
+            MetadataReply::Metadata(manifest.clone(), signatures.clone()),
+            MetadataReply::Metadata(manifest, signatures),
+        ]));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let cache = Arc::clone(&cache);
+            let source = Arc::clone(&source);
+            let key = key.clone();
+            workers.push(std::thread::spawn(move || {
+                refresh_catalog_if_due(source.as_ref(), &cache, &[key], Duration::from_hours(24))
+                    .unwrap()
+            }));
+        }
+        for worker in workers {
+            assert_eq!(
+                worker.join().unwrap().application_version,
+                semver::Version::new(1, 5, 0)
+            );
+        }
+        let directories = source.directories.lock().unwrap();
+        assert_eq!(directories.len(), 2);
+        assert_ne!(directories[0], directories[1]);
+        assert!(directories.iter().all(|directory| !directory.exists()));
+        drop(directories);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn fake_network_artifact_is_verified_and_then_reused_offline() {
-        let root =
-            std::env::temp_dir().join(format!("release-updater-network-{}", std::process::id()));
+        let root = temporary_directory("network-artifact");
         let _ = fs::remove_dir_all(&root);
         let cache = ReleaseCache::new(root.clone());
         let artifact = ArtifactDescriptor {
@@ -276,9 +440,9 @@ mod tests {
             size: 3,
             sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_owned(),
         };
-        let path = ensure_release_artifact(&FakeSource, &cache, "v1.0.0", &artifact).unwrap();
+        let path = ensure_release_artifact(&ArtifactSource, &cache, "v1.0.0", &artifact).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"abc");
-        let path = ensure_release_artifact(&FakeSource, &cache, "v1.0.0", &artifact).unwrap();
+        let path = ensure_release_artifact(&ArtifactSource, &cache, "v1.0.0", &artifact).unwrap();
         assert_eq!(fs::read(path).unwrap(), b"abc");
         let _ = fs::remove_dir_all(root);
     }
