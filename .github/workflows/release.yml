@@ -28,7 +28,7 @@ jobs:
       contents: read
     steps:
       - name: Check out enough history to inspect the push
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -84,7 +84,7 @@ jobs:
       # pushed with these credentials, and a push made with GITHUB_TOKEN would
       # be blocked from starting CI in the same way.
       - name: Check out the target branch
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           token: ${{ steps.app-token.outputs.token }}
 
@@ -126,10 +126,10 @@ jobs:
     if: needs.release_please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release_please.outputs.release_sha }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           components: rustfmt, clippy
       - name: Check product version invariant
@@ -138,7 +138,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
       - run: cargo build --workspace --all-targets
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
 
   firmware:
     needs: release_please
@@ -147,18 +147,18 @@ jobs:
     # Linux recipe instead expects an unavailable executable on PATH.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release_please.outputs.release_sha }}
       - name: Install Arduino CLI
-        uses: arduino/setup-arduino-cli@v2
+        uses: arduino/setup-arduino-cli@81d310742121c928ea9c8bbd407b4217b432ae02 # v2
       - name: Install pinned Seeed nRF52 core
         run: make -C firmware/xiao-nrf52840 setup
       - name: Run native firmware tests
         run: make -C firmware/xiao-nrf52840 test
       - name: Build UF2 and DFU artifacts
         run: make -C firmware/xiao-nrf52840 artifacts
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: firmware
           path: firmware/xiao-nrf52840/build/artifacts/
@@ -168,10 +168,10 @@ jobs:
     if: needs.release_please.outputs.release_created == 'true'
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release_please.outputs.release_sha }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
       - name: Build and ad-hoc sign menu-bar application
         env:
           # Public verification keys are safe repository/environment variables.
@@ -198,7 +198,7 @@ jobs:
           ditto -x -k steam-controller-bridge-macos.zip archive-check
           test "$(find archive-check -maxdepth 1 -name '*.app' -type d | wc -l | tr -d ' ')" = 1
           /usr/bin/codesign --verify --deep --strict "archive-check/Steam Controller Bridge.app"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: macos-app
           path: steam-controller-bridge-macos.zip
@@ -213,11 +213,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.release_please.outputs.release_sha }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/download-artifact@v7
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: artifacts
       - name: Collect release files
