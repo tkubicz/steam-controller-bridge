@@ -107,6 +107,14 @@ impl GuiCapture {
             .map_err(|_| "capture worker stopped unexpectedly".to_owned())
     }
 
+    /// The queued command lets a live guided worker record the specific
+    /// cancel reason; the stop flag reaches a worker still blocked inside
+    /// controller discovery, where no command loop is running yet.
+    pub(crate) fn cancel(&self) {
+        let _ = self.commands.send(GuiCaptureCommand::Cancel);
+        self.stop.store(true, Ordering::Release);
+    }
+
     pub(crate) fn try_event(&self) -> Option<GuiCaptureEvent> {
         self.events.try_recv().ok()
     }
@@ -122,8 +130,7 @@ impl GuiCapture {
 
 impl Drop for GuiCapture {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        let _ = self.commands.send(GuiCaptureCommand::Cancel);
+        self.cancel();
         let _ = self.join();
     }
 }
@@ -519,7 +526,10 @@ mod macos {
         if terminal_free {
             eprintln!("Press Ctrl+C to finish.");
         }
-        merge_until_done(&receiver, &shared, &mut writer)?;
+        // A write failure must not skip the stop/join teardown or the final
+        // validity trailer: without `valid: false`, a truncated file would
+        // later read as "legacy" instead of invalid.
+        let merge_result = merge_until_done(&receiver, &shared, &mut writer);
         stop.store(true, Ordering::Release);
         hid.join()
             .map_err(|_| "HID capture thread panicked".to_owned())?;
@@ -529,6 +539,11 @@ mod macos {
             handle
                 .join()
                 .map_err(|_| "capture control thread panicked".to_owned())?;
+        }
+        if let Err(error) = merge_result {
+            if let Ok(mut slot) = invalid_reason.lock() {
+                slot.get_or_insert(format!("capture write failed: {error}"));
+            }
         }
 
         let states = state_count.load(Ordering::Acquire);

@@ -3,3 +3,4 @@
 /firmware/xiao-nrf52840/build/
 *.frames
 .DS_Store
+/temp/

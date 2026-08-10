@@ -97,7 +97,11 @@ impl LabUi {
 
     pub(crate) fn ui(&mut self, ui: &mut egui::Ui) -> LabAction {
         self.poll_workers();
-        ui.ctx().request_repaint_after(Duration::from_millis(25));
+        // Landing and Results are purely input-driven; only live capture and
+        // background processing need timed repaints to observe worker events.
+        if matches!(self.screen, Screen::Capturing | Screen::Processing) {
+            ui.ctx().request_repaint_after(Duration::from_millis(25));
+        }
         let mut action = LabAction::Stay;
         egui::Panel::top("lizard_lab_header").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -397,7 +401,12 @@ impl LabUi {
     }
 
     fn cancel_capture(&mut self) {
-        let _ = self.send_capture(GuiCaptureCommand::Cancel);
+        // `GuiCapture::cancel` also raises the stop flag: a worker still
+        // blocked in controller discovery has no command loop yet, and a
+        // command alone would leave this Processing screen waiting forever.
+        if let Some(capture) = &self.capture {
+            capture.cancel();
+        }
         self.screen = Screen::Processing;
         "Canceling safely and finalizing the partial capture…".clone_into(&mut self.status);
     }
@@ -642,17 +651,27 @@ impl LabUi {
                     }
                 }
                 GuiCaptureEvent::Finished(result) => {
+                    let completed = result.is_ok();
                     if let Err(error) = result {
                         self.error = Some(error);
                     }
                     if let Some(mut capture) = self.capture.take() {
                         let _ = capture.join();
                     }
-                    if let Some(paths) = self.paths.clone() {
+                    if self.pending_exit {
+                        // The user is leaving the lab; the finalized capture
+                        // file is preserved, but do not hold the exit on an
+                        // analysis pass or write reports beside it.
+                        self.paths = None;
+                    } else if let Some(paths) = self.paths.clone() {
+                        // A canceled or invalidated capture is still analyzed
+                        // for the Results screen, but reports are only written
+                        // automatically for a completed one; the explicit
+                        // "Write reports beside capture" button remains.
                         self.result_worker = Some(ResultWorker::start(
                             paths,
                             self.selected_profile().clone(),
-                            true,
+                            completed,
                         ));
                         self.screen = Screen::Processing;
                         "Analyzing capture and comparing the production mouse engine…"

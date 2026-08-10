@@ -12,10 +12,6 @@ pub const DEFAULT_PROFILE_NAME: &str = "Default";
 pub const MIN_PAD_SPEED_PERCENT: u16 = 25;
 pub const MAX_PAD_SPEED_PERCENT: u16 = 300;
 pub const DEFAULT_PAD_SPEED_PERCENT: u16 = 100;
-// Compatibility aliases for the version-3 scrolling API.
-pub const MIN_SCROLL_SPEED_PERCENT: u16 = MIN_PAD_SPEED_PERCENT;
-pub const MAX_SCROLL_SPEED_PERCENT: u16 = MAX_PAD_SPEED_PERCENT;
-pub const DEFAULT_SCROLL_SPEED_PERCENT: u16 = DEFAULT_PAD_SPEED_PERCENT;
 
 pub(super) const PAD_MOTION_DEADZONE_COUNTS: i32 = 192;
 pub(super) const PAD_EDGE_DEADZONE_START_COUNTS: i32 = 16_384;

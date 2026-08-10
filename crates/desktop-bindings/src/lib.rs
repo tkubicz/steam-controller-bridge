@@ -11,9 +11,8 @@ pub use model::{
     BindableControl, BindingAction, BindingProfile, ControlBindings, DesktopInputSnapshot,
     KeyboardKey, Modifier, MouseButton, PadBindings, PadFeedbackConfig, PadFeedbackRequest,
     PadFeedbackStrength, PadFunctionConfig, PadSample, ScrollPadConfig, BINDINGS_VERSION,
-    DEFAULT_PAD_SPEED_PERCENT, DEFAULT_PROFILE_ID, DEFAULT_PROFILE_NAME,
-    DEFAULT_SCROLL_SPEED_PERCENT, MAX_PAD_SPEED_PERCENT, MAX_PROFILES, MAX_PROFILE_NAME_CHARS,
-    MAX_SCROLL_SPEED_PERCENT, MIN_PAD_SPEED_PERCENT, MIN_SCROLL_SPEED_PERCENT,
+    DEFAULT_PAD_SPEED_PERCENT, DEFAULT_PROFILE_ID, DEFAULT_PROFILE_NAME, MAX_PAD_SPEED_PERCENT,
+    MAX_PROFILES, MAX_PROFILE_NAME_CHARS, MIN_PAD_SPEED_PERCENT,
 };
 #[cfg(target_os = "macos")]
 pub use platform::{

@@ -88,7 +88,7 @@ fn store_round_trips_and_defaults_are_unbound() {
     assert!(store.profiles[0].pads.left_scroll.feedback.enabled);
     assert_eq!(
         store.profiles[0].pads.left_scroll.speed_percent,
-        DEFAULT_SCROLL_SPEED_PERCENT
+        DEFAULT_PAD_SPEED_PERCENT
     );
     assert!(store.profiles[0].pads.left_scroll.momentum);
     assert_eq!(
@@ -351,16 +351,16 @@ fn loading_version_two_preserves_pads_and_adds_scroll_defaults() {
     let scroll = store.profiles[0].pads.left_scroll;
     assert!(scroll.enabled);
     assert_eq!(scroll.feedback.strength, PadFeedbackStrength::High);
-    assert_eq!(scroll.speed_percent, DEFAULT_SCROLL_SPEED_PERCENT);
+    assert_eq!(scroll.speed_percent, DEFAULT_PAD_SPEED_PERCENT);
     assert!(scroll.momentum);
 }
 
 #[test]
 fn store_rejects_scroll_speed_outside_supported_range() {
     let mut store = BindingStore::default();
-    store.profiles[0].pads.left_scroll.speed_percent = MIN_SCROLL_SPEED_PERCENT - 1;
+    store.profiles[0].pads.left_scroll.speed_percent = MIN_PAD_SPEED_PERCENT - 1;
     assert!(store.validate().is_err());
-    store.profiles[0].pads.left_scroll.speed_percent = MAX_SCROLL_SPEED_PERCENT + 1;
+    store.profiles[0].pads.left_scroll.speed_percent = MAX_PAD_SPEED_PERCENT + 1;
     assert!(store.validate().is_err());
 }
 
@@ -369,11 +369,11 @@ fn store_rejects_pointer_speed_outside_supported_range_and_defaults_it() {
     let mut store = BindingStore::default();
     assert_eq!(
         store.profiles[0].pads.right_mouse.speed_percent,
-        DEFAULT_SCROLL_SPEED_PERCENT
+        DEFAULT_PAD_SPEED_PERCENT
     );
-    store.profiles[0].pads.right_mouse.speed_percent = MIN_SCROLL_SPEED_PERCENT - 1;
+    store.profiles[0].pads.right_mouse.speed_percent = MIN_PAD_SPEED_PERCENT - 1;
     assert!(store.validate().unwrap_err().contains("pointer speed"));
-    store.profiles[0].pads.right_mouse.speed_percent = MAX_SCROLL_SPEED_PERCENT + 1;
+    store.profiles[0].pads.right_mouse.speed_percent = MAX_PAD_SPEED_PERCENT + 1;
     assert!(store.validate().is_err());
     store.profiles[0].pads.right_mouse.speed_percent = 150;
     store.validate().unwrap();
@@ -400,7 +400,7 @@ fn store_rejects_pointer_speed_outside_supported_range_and_defaults_it() {
     let parsed = parse_store(json).unwrap();
     assert_eq!(
         parsed.profiles[0].pads.right_mouse.speed_percent,
-        DEFAULT_SCROLL_SPEED_PERCENT
+        DEFAULT_PAD_SPEED_PERCENT
     );
 }
 
