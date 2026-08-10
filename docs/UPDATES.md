@@ -54,3 +54,22 @@ Source builds intentionally embed no trust anchor unless their builder sets
 `SC_BRIDGE_UPDATE_PUBLIC_KEYS`. Fixture keys belong only in tests and pull
 request validation; never place the production private seed in the repository,
 artifacts, logs, or ordinary repository secrets.
+
+## Local UI preview
+
+Preview an available update without trusted keys, network access, release
+assets, or connected hardware:
+
+```sh
+cargo run -p sc-bridge-menu -- --update-center-demo
+```
+
+Preview the fully up-to-date state, including the collapsed current release
+notes and firmware reinstall action:
+
+```sh
+cargo run -p sc-bridge-menu -- --update-center-demo current
+```
+
+Demo actions only advance the preview state. They never download files, open
+hardware, suspend the bridge, or quit the application.

@@ -25,6 +25,8 @@ mod update_check;
 mod update_host;
 #[cfg(target_os = "macos")]
 mod update_protocol;
+#[cfg(all(target_os = "macos", any(feature = "about", feature = "updater")))]
+mod window_ui;
 
 #[cfg(target_os = "macos")]
 fn main() {
@@ -36,7 +38,9 @@ fn main() {
         about |= argument == "--about";
         editor |= argument == "--bindings-editor";
         overlay |= argument == overlay_protocol::OVERLAY_ARGUMENT;
-        updater |= argument == update_protocol::UPDATE_CENTER_ARGUMENT;
+        updater |= argument == update_protocol::UPDATE_CENTER_ARGUMENT
+            || argument == update_protocol::UPDATE_CENTER_DEMO_ARGUMENT
+            || argument.starts_with("--update-center-demo=");
     }
     let result = if about {
         #[cfg(feature = "about")]

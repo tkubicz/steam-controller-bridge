@@ -4,6 +4,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub const UPDATE_CENTER_ARGUMENT: &str = "--update-center";
+pub const UPDATE_CENTER_DEMO_ARGUMENT: &str = "--update-center-demo";
 pub const MAX_UPDATE_IPC_LINE_BYTES: usize = 4 * 1024;
 const UPDATE_PROTOCOL_VERSION: u32 = 1;
 
