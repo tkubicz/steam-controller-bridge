@@ -12,6 +12,6 @@ The squash-merge title must use `type(scope)!: summary`; `scope` and `!` are
 optional. Use `feat`, `fix`, or `perf` for user-visible changes.
 
 If this pull request contains multiple independently useful release-note items,
-add a `BEGIN_COMMIT_OVERRIDE` / `END_COMMIT_OVERRIDE` block to its description,
-with one Conventional Commit entry per item. See `CONTRIBUTING.md` for the exact
-format. Remove this section when no override is needed.
+add the commit-override block documented in `CONTRIBUTING.md`, with one
+Conventional Commit entry per item. Remove this section when no override is
+needed.

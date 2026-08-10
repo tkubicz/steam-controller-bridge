@@ -43,6 +43,8 @@ TITLE_PATTERN = re.compile(
     rf"^(?P<type>{'|'.join(SUPPORTED_TYPES)})"
     r"(?:\((?P<scope>[a-z0-9][a-z0-9._/-]*)\))?!?: \S(?:.*\S)?$"
 )
+OVERRIDE_START = "BEGIN_COMMIT_OVERRIDE"
+OVERRIDE_END = "END_COMMIT_OVERRIDE"
 
 
 def scope_root(scope: str | None) -> str | None:
@@ -63,3 +65,21 @@ def is_valid_title(title: str) -> bool:
             and is_internal_scope(match.group("scope"))
         )
     )
+
+
+def override_block(body: str) -> tuple[list[str] | None, list[str]]:
+    """Extract one ordered override block and reject marker substrings elsewhere."""
+    lines = body.splitlines()
+    starts = [index for index, line in enumerate(lines) if line.strip() == OVERRIDE_START]
+    ends = [index for index, line in enumerate(lines) if line.strip() == OVERRIDE_END]
+    start_occurrences = body.count(OVERRIDE_START)
+    end_occurrences = body.count(OVERRIDE_END)
+    if start_occurrences == 0 and end_occurrences == 0:
+        return None, []
+    if start_occurrences != len(starts) or end_occurrences != len(ends):
+        return None, ["commit override markers must appear only on standalone lines"]
+    if len(starts) != 1 or len(ends) != 1:
+        return None, ["commit override markers must form exactly one complete block"]
+    if ends[0] <= starts[0]:
+        return None, ["commit override end marker must follow its start marker"]
+    return lines[starts[0] + 1 : ends[0]], []

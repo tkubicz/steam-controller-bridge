@@ -7,11 +7,9 @@ import argparse
 import re
 import sys
 
-from release_metadata import TITLE_PATTERN, is_valid_title
+from release_metadata import ROOT, TITLE_PATTERN, is_valid_title, override_block
 
 
-OVERRIDE_START = "BEGIN_COMMIT_OVERRIDE"
-OVERRIDE_END = "END_COMMIT_OVERRIDE"
 BREAKING_FOOTER = re.compile(r"BREAKING(?: |-)CHANGE: \S(?:.*\S)?$")
 
 
@@ -20,19 +18,13 @@ def metadata_errors(title: str, body: str) -> list[str]:
     if not is_valid_title(title):
         errors.append(f"invalid pull-request title: {title}")
 
-    lines = body.splitlines()
-    starts = [index for index, line in enumerate(lines) if line.strip() == OVERRIDE_START]
-    ends = [index for index, line in enumerate(lines) if line.strip() == OVERRIDE_END]
-    if len(starts) != len(ends) or len(starts) > 1:
-        errors.append("commit override markers must form at most one complete block")
+    block, block_errors = override_block(body)
+    errors.extend(block_errors)
+    if block_errors:
         return errors
 
-    if starts:
-        start, end = starts[0], ends[0]
-        if end <= start:
-            errors.append("commit override end marker must follow its start marker")
-            return errors
-        override_lines = [line.strip() for line in lines[start + 1 : end] if line.strip()]
+    if block is not None:
+        override_lines = [line.strip() for line in block if line.strip()]
         if not override_lines:
             errors.append("commit override block must contain at least one entry")
         entries: list[str] = []
@@ -49,7 +41,7 @@ def metadata_errors(title: str, body: str) -> list[str]:
         errors.extend(f"duplicate commit override entry: {entry}" for entry in duplicates)
     else:
         conventional_body_lines = [
-            line.strip() for line in lines if TITLE_PATTERN.fullmatch(line.strip())
+            line.strip() for line in body.splitlines() if TITLE_PATTERN.fullmatch(line.strip())
         ]
         errors.extend(
             f"Conventional Commit line requires a commit override block: {entry}"
@@ -91,6 +83,10 @@ def self_test() -> None:
     assert metadata_errors("feat(menu): add profiles", "ordinary description") == []
     assert metadata_errors(
         "feat(menu): add profiles",
+        (ROOT / ".github/pull_request_template.md").read_text(encoding="utf-8"),
+    ) == []
+    assert metadata_errors(
+        "feat(menu): add profiles",
         "BEGIN_COMMIT_OVERRIDE\nfeat(menu): add profiles\n\nfix(runtime): recover safely\nEND_COMMIT_OVERRIDE",
     ) == []
     assert metadata_errors(
@@ -111,6 +107,10 @@ def self_test() -> None:
         "feat(menu): add profiles",
         "BEGIN_COMMIT_OVERRIDE\nfeat(menu): add profiles\nunsupported body\nEND_COMMIT_OVERRIDE",
     ) == ["invalid commit override content: unsupported body"]
+    assert metadata_errors(
+        "feat(menu): add profiles",
+        "Add a BEGIN_COMMIT_OVERRIDE / END_COMMIT_OVERRIDE block when needed.",
+    ) == ["commit override markers must appear only on standalone lines"]
 
 
 def main() -> int:
