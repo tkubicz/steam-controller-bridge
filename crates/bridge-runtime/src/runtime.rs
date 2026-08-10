@@ -164,6 +164,19 @@ pub struct BridgeHandle {
 }
 
 impl BridgeHandle {
+    /// Reports whether the runtime worker has terminated or has already been joined.
+    ///
+    /// Frontends use this to distinguish a recoverable command timeout from a
+    /// dead runtime that can no longer own hardware or acknowledge cleanup.
+    #[must_use]
+    pub fn is_terminated(&self) -> bool {
+        self.join
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_none_or(JoinHandle::is_finished)
+    }
+
     /// Queues an idempotent start without blocking the caller.
     ///
     /// # Errors

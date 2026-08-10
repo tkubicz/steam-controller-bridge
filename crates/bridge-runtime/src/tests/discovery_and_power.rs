@@ -515,6 +515,7 @@ fn start_stop_and_shutdown_are_idempotent_while_waiting() {
         output: OutputSelection::Mock,
         ..RuntimeConfig::default()
     });
+    assert!(!handle.is_terminated());
     handle
         .set_idle_shutdown_timeout(Some(Duration::from_mins(5)))
         .unwrap();
@@ -547,6 +548,7 @@ fn start_stop_and_shutdown_are_idempotent_while_waiting() {
     // automatic restart just as an explicit user stop would.
     handle.stop().unwrap();
     handle.shutdown().unwrap();
+    assert!(handle.is_terminated());
 }
 
 #[test]

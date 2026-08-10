@@ -564,6 +564,16 @@ impl MenuApp {
         }
         match self.runtime.resume_from_update() {
             Ok(()) => self.app_center_host.complete_suspension_recovery(),
+            Err(error) if self.runtime.is_terminated() => {
+                let join = self.runtime.join();
+                eprintln!(
+                    "level=error event=app_center_recovery_abandoned reason=runtime_terminated error={error:?} join={join:?}"
+                );
+                // A joined runtime cannot still own HID or serial handles, so
+                // retaining the updater's quit interlock would only strand the
+                // menu process after its worker has already ended.
+                self.app_center_host.complete_suspension_recovery();
+            }
             Err(error) => eprintln!("cannot recover bridge after app window exit: {error}"),
         }
     }
