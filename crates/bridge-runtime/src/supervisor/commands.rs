@@ -68,6 +68,7 @@ impl Supervisor {
             }
             RuntimeCommand::ResumeFromUpdate(ack) => {
                 self.suspension.update = false;
+                self.publish_state_after_update_resume();
                 let _ = ack.send(Ok(()));
             }
             RuntimeCommand::Shutdown(ack) => {
@@ -121,6 +122,16 @@ impl Supervisor {
                 self.update_status(|status| status.profile_picker = picker_status);
                 let _ = ack.send(Ok(()));
             }
+        }
+    }
+
+    fn publish_state_after_update_resume(&self) {
+        if let Some(detail) = self.suspension.detail() {
+            self.transition(RuntimeState::Stopped, detail, None);
+        } else if self.desired_running {
+            self.transition(RuntimeState::Waiting, "Restarting bridge", None);
+        } else {
+            self.transition(RuntimeState::Stopped, "Bridge stopped", None);
         }
     }
 
