@@ -5,6 +5,39 @@ not edit release entries by hand; correct the originating pull-request metadata
 and let the release pull request regenerate them. Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.4.0...v1.5.0) (2026-08-10)
+
+
+### Features
+
+* bindable left and right pad clicks with one-tick click feedback ([0a9eb50](https://github.com/tkubicz/steam-controller-bridge/commit/0a9eb5009333221d230b81a030655fe38bb0b3e2))
+* capture-matched pad pointer motion with press-freeze, drag intent, and pointer speed ([0a9eb50](https://github.com/tkubicz/steam-controller-bridge/commit/0a9eb5009333221d230b81a030655fe38bb0b3e2))
+* **cli:** add validated clap interfaces to controller tools ([bdccf33](https://github.com/tkubicz/steam-controller-bridge/commit/bdccf335cb3262dc4ef631b257d1e3fef1d5a978))
+* Common visual identity ([#21](https://github.com/tkubicz/steam-controller-bridge/issues/21)) ([e712087](https://github.com/tkubicz/steam-controller-bridge/commit/e712087bb7d9f4cb18224dece323072072ce2b1c))
+* **menu:** add a dedicated About window with browsable release notes ([b1bafbf](https://github.com/tkubicz/steam-controller-bridge/commit/b1bafbf20f20726c1f1ab59e4a62b9eb8bd3f345))
+* **menu:** reorganize bridge controls, profiles, shutdown, and troubleshooting ([e49648e](https://github.com/tkubicz/steam-controller-bridge/commit/e49648e5ba9410cd2ef1c79bd9f6e478773e68ab))
+* **menu:** report XIAO firmware revisions and update recommendations ([4418454](https://github.com/tkubicz/steam-controller-bridge/commit/4418454f98c6fcebedc15ad02b39459e9f053610))
+* **updater:** add signed application and XIAO firmware updates ([e49648e](https://github.com/tkubicz/steam-controller-bridge/commit/e49648e5ba9410cd2ef1c79bd9f6e478773e68ab))
+* use common, higher quality font for every GUI window ([b1bafbf](https://github.com/tkubicz/steam-controller-bridge/commit/b1bafbf20f20726c1f1ab59e4a62b9eb8bd3f345))
+* **visualizer:** add responsive controller diagnostics with automatic discovery ([bdccf33](https://github.com/tkubicz/steam-controller-bridge/commit/bdccf335cb3262dc4ef631b257d1e3fef1d5a978))
+* **visualizer:** guided Lizard Mouse Lab for capture, analysis, and comparison ([0a9eb50](https://github.com/tkubicz/steam-controller-bridge/commit/0a9eb5009333221d230b81a030655fe38bb0b3e2))
+
+
+### Bug Fixes
+
+* **firmware:** suppress duplicate HID reports during macOS sleep ([4418454](https://github.com/tkubicz/steam-controller-bridge/commit/4418454f98c6fcebedc15ad02b39459e9f053610))
+* **menu:** rename binding menus to profiles and clarify menu grouping ([b1bafbf](https://github.com/tkubicz/steam-controller-bridge/commit/b1bafbf20f20726c1f1ab59e4a62b9eb8bd3f345))
+* **menu:** show profile overlay above screen-saver-level windows ([4418454](https://github.com/tkubicz/steam-controller-bridge/commit/4418454f98c6fcebedc15ad02b39459e9f053610))
+* **menu:** stop settings saves from clobbering each other and leaving stale temp files ([2cf931a](https://github.com/tkubicz/steam-controller-bridge/commit/2cf931abbed6b03798420466bfc593229ba7d314))
+* **visualizer:** align dead-zone guides and touch-gated pad input with the mapper ([bdccf33](https://github.com/tkubicz/steam-controller-bridge/commit/bdccf335cb3262dc4ef631b257d1e3fef1d5a978))
+* **visualizer:** neutralize stale output across disconnects, timeouts, and failures ([bdccf33](https://github.com/tkubicz/steam-controller-bridge/commit/bdccf335cb3262dc4ef631b257d1e3fef1d5a978))
+
+
+### Performance Improvements
+
+* **serial:** yield while waiting for firmware handshake ([4418454](https://github.com/tkubicz/steam-controller-bridge/commit/4418454f98c6fcebedc15ad02b39459e9f053610))
+* **visualizer:** preserve 250 Hz input fidelity and record off the UI thread ([bdccf33](https://github.com/tkubicz/steam-controller-bridge/commit/bdccf335cb3262dc4ef631b257d1e3fef1d5a978))
+
 ## [1.4.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.3.0...v1.4.0) (2026-08-07)
 
 
