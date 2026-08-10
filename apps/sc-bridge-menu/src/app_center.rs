@@ -1,6 +1,5 @@
 use std::io::{BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -27,6 +26,7 @@ use crate::app_center_protocol::{
     UpdateResponse, UpdateResult,
 };
 use crate::cli::{AppCenterArgs, DemoMode};
+use crate::macos::{open_path, reveal_path};
 use crate::update_check::{running_version, update_context, CHECK_INTERVAL};
 use crate::window_ui::{
     activate_window, configure_window_style, full_width_card, hero_transition, load_texture,
@@ -524,9 +524,10 @@ impl AppCenter {
         let Some(path) = self.staged_application.as_ref() else {
             return;
         };
-        let selected = Command::new("/usr/bin/open").arg("-R").arg(path).spawn();
-        let applications = Command::new("/usr/bin/open").arg("/Applications").spawn();
-        if selected.is_err() || applications.is_err() {
+        if reveal_path(path)
+            .and_then(|()| open_path("/Applications"))
+            .is_err()
+        {
             "Finder could not be opened; the verified app remains cached."
                 .clone_into(&mut self.status);
             self.status_tone = StatusTone::Error;

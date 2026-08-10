@@ -445,7 +445,7 @@ impl MenuApp {
                 Err(error) => eprintln!("cannot launch bindings editor: {error}"),
             },
             LOGS_ID => {
-                if let Err(error) = open_path(&self.logger.directory.to_string_lossy()) {
+                if let Err(error) = open_path(&self.logger.directory) {
                     eprintln!("cannot open log folder: {error}");
                 }
             }

@@ -57,9 +57,9 @@ use support::{
     PermissionStage, PickerEventMailbox, OVERLAY_HOLD_CHOICES,
 };
 use system::{
-    activate_child_application, copy_text, launch_bindings_editor, open_path, open_privacy_pane,
-    PrivacyPane,
+    activate_child_application, copy_text, launch_bindings_editor, open_privacy_pane, PrivacyPane,
 };
+pub(crate) use system::{open_path, reveal_path};
 
 #[cfg(test)]
 mod tests;

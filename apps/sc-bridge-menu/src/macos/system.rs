@@ -74,9 +74,19 @@ pub(super) fn launch_bindings_editor() -> Result<std::process::Child, String> {
         .map_err(|error| error.to_string())
 }
 
-pub(super) fn open_path(path: &str) -> Result<(), String> {
+pub(crate) fn open_path(path: impl AsRef<std::ffi::OsStr>) -> Result<(), String> {
+    run_open(std::iter::once(path.as_ref()))
+}
+
+pub(crate) fn reveal_path(path: impl AsRef<std::ffi::OsStr>) -> Result<(), String> {
+    run_open([std::ffi::OsStr::new("-R"), path.as_ref()])
+}
+
+fn run_open(
+    arguments: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+) -> Result<(), String> {
     let status = Command::new("/usr/bin/open")
-        .arg(path)
+        .args(arguments)
         .status()
         .map_err(|error| error.to_string())?;
     if status.success() {
