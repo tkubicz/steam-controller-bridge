@@ -46,6 +46,34 @@ pub enum FirmwareFlashProgress {
     Verifying,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirmwareReleaseState {
+    Pending,
+    UpdateAvailable,
+    Current,
+    Newer,
+}
+
+#[must_use]
+pub const fn classify_firmware_release(
+    version: FirmwareVersion,
+    target: u16,
+) -> FirmwareReleaseState {
+    match version {
+        FirmwareVersion::Pending => FirmwareReleaseState::Pending,
+        FirmwareVersion::Reported(revision) if revision < target => {
+            FirmwareReleaseState::UpdateAvailable
+        }
+        FirmwareVersion::Reported(revision) if revision == target => FirmwareReleaseState::Current,
+        FirmwareVersion::Reported(_) | FirmwareVersion::UnsupportedFormat(_) => {
+            FirmwareReleaseState::Newer
+        }
+        FirmwareVersion::Unreported | FirmwareVersion::Malformed => {
+            FirmwareReleaseState::UpdateAvailable
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum FirmwareFlashError {
     Io(io::Error),
@@ -354,15 +382,10 @@ fn validate_version_policy(
     version: FirmwareVersion,
     target: u16,
 ) -> Result<(), FirmwareFlashError> {
-    match version {
-        FirmwareVersion::Reported(revision) if revision > target => {
-            Err(FirmwareFlashError::NewerFirmware)
-        }
-        FirmwareVersion::UnsupportedFormat(_) => Err(FirmwareFlashError::NewerFirmware),
-        FirmwareVersion::Pending => Err(FirmwareFlashError::VersionUnavailable),
-        FirmwareVersion::Reported(_) | FirmwareVersion::Unreported | FirmwareVersion::Malformed => {
-            Ok(())
-        }
+    match classify_firmware_release(version, target) {
+        FirmwareReleaseState::Pending => Err(FirmwareFlashError::VersionUnavailable),
+        FirmwareReleaseState::Newer => Err(FirmwareFlashError::NewerFirmware),
+        FirmwareReleaseState::UpdateAvailable | FirmwareReleaseState::Current => Ok(()),
     }
 }
 
@@ -733,6 +756,32 @@ mod tests {
 
     #[test]
     fn downgrade_policy_is_fail_closed_for_newer_and_unknown_formats() {
+        assert_eq!(
+            classify_firmware_release(FirmwareVersion::Pending, 4),
+            FirmwareReleaseState::Pending
+        );
+        assert_eq!(
+            classify_firmware_release(FirmwareVersion::Reported(3), 4),
+            FirmwareReleaseState::UpdateAvailable
+        );
+        assert_eq!(
+            classify_firmware_release(FirmwareVersion::Reported(4), 4),
+            FirmwareReleaseState::Current
+        );
+        assert_eq!(
+            classify_firmware_release(FirmwareVersion::Reported(5), 4),
+            FirmwareReleaseState::Newer
+        );
+        assert_eq!(
+            classify_firmware_release(FirmwareVersion::UnsupportedFormat(2), 4),
+            FirmwareReleaseState::Newer
+        );
+        for version in [FirmwareVersion::Unreported, FirmwareVersion::Malformed] {
+            assert_eq!(
+                classify_firmware_release(version, 4),
+                FirmwareReleaseState::UpdateAvailable
+            );
+        }
         assert!(validate_version_policy(FirmwareVersion::Reported(5), 4).is_err());
         assert!(validate_version_policy(FirmwareVersion::UnsupportedFormat(2), 4).is_err());
         assert!(validate_version_policy(FirmwareVersion::Pending, 4).is_err());

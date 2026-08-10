@@ -6,7 +6,7 @@ use std::thread;
 use bridge_runtime::FirmwareVersion;
 
 use crate::app_center_protocol::{
-    encode, read, AppCenterCommand, AppCenterPage, UpdateRequest, UpdateResponse,
+    encode, read, AppCenterCommand, AppCenterPage, FirmwareStatus, UpdateRequest, UpdateResponse,
 };
 use crate::cli::APP_CENTER_COMMAND;
 
@@ -19,7 +19,7 @@ pub struct AppCenterHost {
     sender: SyncSender<UpdateRequest>,
     suspended: bool,
     resume_after: bool,
-    last_firmware_version: Option<String>,
+    last_firmware: Option<FirmwareStatus>,
     /// A child went away and its exit has not been reported yet. Relaunching
     /// consumes the exit that [`Self::reap`] would otherwise observe, and a
     /// child that owned the bridge suspension must not leave it stopped.
@@ -36,7 +36,7 @@ impl AppCenterHost {
             sender,
             suspended: false,
             resume_after: false,
-            last_firmware_version: None,
+            last_firmware: None,
             lost_child: false,
         }
     }
@@ -48,16 +48,14 @@ impl AppCenterHost {
         page: AppCenterPage,
         firmware: FirmwareVersion,
     ) -> Result<bool, String> {
-        let firmware_version = firmware_argument(firmware);
+        let firmware = FirmwareStatus::from(firmware);
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(None) => {
-                    let navigated = self.send_command(&AppCenterCommand::Navigate {
-                        page,
-                        firmware_version: firmware_version.clone(),
-                    });
+                    let navigated =
+                        self.send_command(&AppCenterCommand::Navigate { page, firmware });
                     if navigated.is_ok() {
-                        self.last_firmware_version = Some(firmware_version);
+                        self.last_firmware = Some(firmware);
                         return Ok(true);
                     }
                     // The child is running but unreachable, so it can no longer
@@ -69,8 +67,8 @@ impl AppCenterHost {
             }
             self.discard_child();
         }
-        self.spawn(page, &firmware_version)?;
-        self.last_firmware_version = Some(firmware_version);
+        self.spawn(page, firmware)?;
+        self.last_firmware = Some(firmware);
         Ok(false)
     }
 
@@ -82,19 +80,19 @@ impl AppCenterHost {
             cleanup_child(&mut child);
         }
         self.input = None;
-        self.last_firmware_version = None;
+        self.last_firmware = None;
         self.lost_child = true;
     }
 
-    fn spawn(&mut self, page: AppCenterPage, firmware_version: &str) -> Result<(), String> {
+    fn spawn(&mut self, page: AppCenterPage, firmware: FirmwareStatus) -> Result<(), String> {
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let mut command = Command::new(executable);
         command
             .arg(APP_CENTER_COMMAND)
             .arg("--tab")
             .arg(page.argument())
-            .arg("--firmware-version")
-            .arg(firmware_version)
+            .arg("--firmware")
+            .arg(firmware.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -139,14 +137,12 @@ impl AppCenterHost {
         if self.child.is_none() {
             return Ok(());
         }
-        let firmware_version = firmware_argument(firmware);
-        if self.last_firmware_version.as_deref() == Some(&firmware_version) {
+        let firmware = FirmwareStatus::from(firmware);
+        if self.last_firmware == Some(firmware) {
             return Ok(());
         }
-        self.send_command(&AppCenterCommand::FirmwareVersion {
-            firmware_version: firmware_version.clone(),
-        })?;
-        self.last_firmware_version = Some(firmware_version);
+        self.send_command(&AppCenterCommand::FirmwareVersion { firmware })?;
+        self.last_firmware = Some(firmware);
         Ok(())
     }
 
@@ -181,7 +177,7 @@ impl AppCenterHost {
         if exited {
             self.child = None;
             self.input = None;
-            self.last_firmware_version = None;
+            self.last_firmware = None;
         }
         exited | std::mem::take(&mut self.lost_child)
     }
@@ -193,7 +189,7 @@ impl AppCenterHost {
             cleanup_child(&mut child);
         }
         self.input = None;
-        self.last_firmware_version = None;
+        self.last_firmware = None;
         self.lost_child = false;
     }
 
@@ -205,17 +201,6 @@ impl AppCenterHost {
 fn cleanup_child(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
-}
-
-/// The argument the child reads its hero firmware badge from.
-fn firmware_argument(version: FirmwareVersion) -> String {
-    match version {
-        FirmwareVersion::Reported(revision) => revision.to_string(),
-        FirmwareVersion::UnsupportedFormat(_) => "newer".to_owned(),
-        FirmwareVersion::Unreported | FirmwareVersion::Malformed | FirmwareVersion::Pending => {
-            "unknown".to_owned()
-        }
-    }
 }
 
 #[cfg(test)]

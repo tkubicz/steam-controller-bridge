@@ -4,6 +4,8 @@ use clap::ValueEnum;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use bridge_runtime::FirmwareVersion;
+
 pub const MAX_IPC_LINE_BYTES: usize = 4 * 1024;
 const IPC_PROTOCOL_VERSION: u32 = 1;
 
@@ -29,6 +31,77 @@ pub enum AppCenterPage {
     Updates,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "value")]
+pub enum FirmwareStatus {
+    Pending,
+    Reported(u16),
+    UnsupportedFormat(u8),
+    Malformed,
+    Unreported,
+}
+
+impl From<FirmwareVersion> for FirmwareStatus {
+    fn from(value: FirmwareVersion) -> Self {
+        match value {
+            FirmwareVersion::Pending => Self::Pending,
+            FirmwareVersion::Reported(revision) => Self::Reported(revision),
+            FirmwareVersion::UnsupportedFormat(format) => Self::UnsupportedFormat(format),
+            FirmwareVersion::Malformed => Self::Malformed,
+            FirmwareVersion::Unreported => Self::Unreported,
+        }
+    }
+}
+
+impl From<FirmwareStatus> for FirmwareVersion {
+    fn from(value: FirmwareStatus) -> Self {
+        match value {
+            FirmwareStatus::Pending => Self::Pending,
+            FirmwareStatus::Reported(revision) => Self::Reported(revision),
+            FirmwareStatus::UnsupportedFormat(format) => Self::UnsupportedFormat(format),
+            FirmwareStatus::Malformed => Self::Malformed,
+            FirmwareStatus::Unreported => Self::Unreported,
+        }
+    }
+}
+
+impl std::fmt::Display for FirmwareStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => formatter.write_str("pending"),
+            Self::Reported(revision) => write!(formatter, "reported:{revision}"),
+            Self::UnsupportedFormat(format) => write!(formatter, "unsupported:{format}"),
+            Self::Malformed => formatter.write_str("malformed"),
+            Self::Unreported => formatter.write_str("unreported"),
+        }
+    }
+}
+
+impl std::str::FromStr for FirmwareStatus {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Some(revision) = value.strip_prefix("reported:") {
+            return revision
+                .parse()
+                .map(Self::Reported)
+                .map_err(|_| "invalid reported firmware revision".to_owned());
+        }
+        if let Some(format) = value.strip_prefix("unsupported:") {
+            return format
+                .parse()
+                .map(Self::UnsupportedFormat)
+                .map_err(|_| "invalid unsupported firmware format".to_owned());
+        }
+        match value {
+            "pending" => Ok(Self::Pending),
+            "malformed" => Ok(Self::Malformed),
+            "unreported" => Ok(Self::Unreported),
+            _ => Err("invalid firmware status".to_owned()),
+        }
+    }
+}
+
 impl AppCenterPage {
     /// The `--tab` value the child parses back into this page. Reading it from
     /// the same `ValueEnum` the child parses keeps one list of tab names.
@@ -45,10 +118,10 @@ impl AppCenterPage {
 pub enum AppCenterCommand {
     Navigate {
         page: AppCenterPage,
-        firmware_version: String,
+        firmware: FirmwareStatus,
     },
     FirmwareVersion {
-        firmware_version: String,
+        firmware: FirmwareStatus,
     },
     UpdateResponse(UpdateResponse),
 }
@@ -141,15 +214,28 @@ mod tests {
     fn host_commands_distinguish_navigation_from_update_responses() {
         let encoded = encode(AppCenterCommand::Navigate {
             page: AppCenterPage::Updates,
-            firmware_version: "7".to_owned(),
+            firmware: FirmwareStatus::Reported(7),
         })
         .unwrap();
         assert!(matches!(
             read(&mut Cursor::new(encoded)).unwrap(),
             Some(AppCenterCommand::Navigate {
                 page: AppCenterPage::Updates,
-                firmware_version
-            }) if firmware_version == "7"
+                firmware: FirmwareStatus::Reported(7)
+            })
         ));
+    }
+
+    #[test]
+    fn every_firmware_status_survives_a_launch_argument() {
+        for status in [
+            FirmwareStatus::Pending,
+            FirmwareStatus::Reported(7),
+            FirmwareStatus::UnsupportedFormat(2),
+            FirmwareStatus::Malformed,
+            FirmwareStatus::Unreported,
+        ] {
+            assert_eq!(status.to_string().parse(), Ok(status));
+        }
     }
 }

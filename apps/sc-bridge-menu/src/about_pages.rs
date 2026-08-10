@@ -1,4 +1,5 @@
 use eframe::egui;
+use semver::Version;
 use ui_theme::{ACCENT, MUTED_TEXT, ON_ACCENT, SUCCESS, TEXT};
 
 use crate::window_ui::{
@@ -10,20 +11,21 @@ const REPOSITORY_URL: &str = "https://github.com/tkubicz/steam-controller-bridge
 const CHANGELOG_URL: &str =
     "https://github.com/tkubicz/steam-controller-bridge/blob/main/CHANGELOG.md";
 const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
-const BUNDLE_VERSION: &str = include_str!("../../../version.txt");
 const GITHUB_MARK: &[u8] = include_bytes!("../../../packaging/macos/GitHubMark.png");
 
 /// Static About and Changelog content shared by the tabbed application window.
 pub(crate) struct AboutContent {
     github_mark: egui::TextureHandle,
     releases: Vec<ReleaseNotes>,
+    running_version: String,
 }
 
 impl AboutContent {
-    pub(crate) fn new(ctx: &egui::Context) -> Self {
+    pub(crate) fn new(ctx: &egui::Context, running_version: &Version) -> Self {
         Self {
             github_mark: load_texture(ctx, "github-mark", GITHUB_MARK),
             releases: parse_release_notes(CHANGELOG),
+            running_version: running_version.to_string(),
         }
     }
 
@@ -111,7 +113,7 @@ impl AboutContent {
         for (index, release) in self.releases.iter().enumerate() {
             full_width_card(ui, 20, |ui| {
                 let title = release.title.plain();
-                let is_current = title.starts_with(BUNDLE_VERSION.trim());
+                let is_current = title.starts_with(&self.running_version);
                 let id = ui.make_persistent_id(("changelog-release", title.as_str()));
                 egui::collapsing_header::CollapsingState::load_with_default_open(
                     ui.ctx(),
@@ -145,7 +147,10 @@ mod tests {
     fn embedded_changelog_contains_the_current_release() {
         let releases = parse_release_notes(CHANGELOG);
         let current = releases.first().expect("at least one release");
-        assert!(current.title.plain().starts_with(BUNDLE_VERSION.trim()));
+        assert!(current
+            .title
+            .plain()
+            .starts_with(&crate::update_check::running_version().to_string()));
         assert!(!current.sections.is_empty());
         assert!(current
             .sections

@@ -7,9 +7,10 @@ use std::thread;
 
 use eframe::egui;
 use release_updater::{
-    ensure_release_artifact, flash_firmware, guided_replacement_supported, installed_macos_version,
-    refresh_catalog_if_due, stage_application, ApplicationRelease, ArtifactDescriptor,
-    FirmwareFlashProgress, FirmwareRelease, LatestReleaseClient, ReleaseCache, ReleaseManifestV1,
+    classify_firmware_release, ensure_release_artifact, flash_firmware,
+    guided_replacement_supported, installed_macos_version, refresh_catalog_if_due,
+    stage_application, ApplicationRelease, ArtifactDescriptor, FirmwareFlashProgress,
+    FirmwareRelease, FirmwareReleaseState, LatestReleaseClient, ReleaseCache, ReleaseManifestV1,
     APPLICATION_BUNDLE_ID, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID,
     XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
 };
@@ -21,10 +22,10 @@ use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
 use crate::about_pages::AboutContent;
 use crate::app_center_protocol::{
-    encode, read, AppCenterCommand, AppCenterPage, UpdateRequest, UpdateResponse,
+    encode, read, AppCenterCommand, AppCenterPage, FirmwareStatus, UpdateRequest, UpdateResponse,
 };
 use crate::cli::{AppCenterArgs, DemoMode};
-use crate::update_check::{update_context, CHECK_INTERVAL};
+use crate::update_check::{running_version, update_context, CHECK_INTERVAL};
 use crate::window_ui::{
     activate_window, configure_window_style, full_width_card, hero_transition, load_texture,
     parse_release_notes, render_release_notes, ReleaseNotes,
@@ -38,7 +39,7 @@ const MIN_WINDOW_SIZE: [f32; 2] = [640.0, 540.0];
 pub fn run(arguments: AppCenterArgs) -> Result<(), String> {
     let demo = arguments.demo;
     let page = arguments.page();
-    let firmware = arguments.firmware_version;
+    let firmware = arguments.firmware;
     let icon = eframe::icon_data::from_png_bytes(APP_ICON).map_err(|error| error.to_string())?;
     let options = eframe::NativeOptions {
         event_loop_builder: Some(Box::new(|builder| {
@@ -150,7 +151,7 @@ struct AppCenter {
     catalog: Option<ReleaseManifestV1>,
     release_notes: Vec<ReleaseNotes>,
     installed: Version,
-    firmware_version: String,
+    firmware: FirmwareStatus,
     status: String,
     activity: Activity,
     staged_application: Option<PathBuf>,
@@ -210,7 +211,7 @@ impl CatalogStatus {
 impl AppCenter {
     fn new(
         ctx: &egui::Context,
-        firmware_version: String,
+        firmware: FirmwareStatus,
         demo: Option<DemoMode>,
         page: AppCenterPage,
     ) -> Self {
@@ -220,25 +221,29 @@ impl AppCenter {
         let release_notes = catalog.as_ref().map_or_else(Vec::new, |manifest| {
             parse_release_notes(&manifest.release_notes)
         });
+        let running = running_version();
         let installed = match demo {
-            Some(DemoMode::Available) => Version::new(1, 5, 0),
-            Some(DemoMode::Current) => Version::new(1, 6, 0),
-            None => Version::parse(env!("CARGO_PKG_VERSION")).expect("package version"),
+            Some(DemoMode::Available) => running.clone(),
+            Some(DemoMode::Current) => catalog.as_ref().map_or_else(
+                || running.clone(),
+                |manifest| manifest.application_version.clone(),
+            ),
+            None => running,
         };
-        let firmware_version = match demo {
-            Some(DemoMode::Available) => "1".to_owned(),
-            Some(DemoMode::Current) => "2".to_owned(),
-            None => firmware_version,
+        let firmware = match demo {
+            Some(DemoMode::Available) => FirmwareStatus::Reported(1),
+            Some(DemoMode::Current) => FirmwareStatus::Reported(2),
+            None => firmware,
         };
         // A window that opens on Updates starts its check in `ensure_catalog`
         // on the first frame, so opening and navigating share one path.
         Self {
             page,
-            about: AboutContent::new(ctx),
+            about: AboutContent::new(ctx, &installed),
             catalog,
             release_notes,
             installed,
-            firmware_version,
+            firmware,
             status: if demo.is_some() {
                 "Demo preview — updater networking, files, and hardware are disabled.".to_owned()
             } else {
@@ -295,7 +300,7 @@ impl AppCenter {
 
     fn install_firmware(&mut self, manifest: ReleaseManifestV1, ctx: egui::Context) {
         if self.demo.is_some() {
-            self.firmware_version = manifest.firmware.revision.to_string();
+            self.firmware = FirmwareStatus::Reported(manifest.firmware.revision);
             "Demo: firmware installation completed and verified.".clone_into(&mut self.status);
             self.status_tone = StatusTone::Success;
             return;
@@ -398,10 +403,12 @@ impl AppCenter {
                 WorkerEvent::Firmware(Ok(())) => {
                     "Firmware updated and verified. The bridge has restarted."
                         .clone_into(&mut self.status);
-                    self.firmware_version = self.catalog.as_ref().map_or_else(
-                        || "unknown".to_owned(),
-                        |item| item.firmware.revision.to_string(),
-                    );
+                    self.firmware = self
+                        .catalog
+                        .as_ref()
+                        .map_or(FirmwareStatus::Unreported, |item| {
+                            FirmwareStatus::Reported(item.firmware.revision)
+                        });
                     self.activity = Activity::Idle;
                     self.status_tone = StatusTone::Success;
                     self.firmware_write_started = false;
@@ -426,18 +433,15 @@ impl AppCenter {
     fn drain_host_commands(&mut self) {
         while let Ok(command) = self.host_commands.try_recv() {
             match command {
-                AppCenterCommand::Navigate {
-                    page,
-                    firmware_version,
-                } => {
-                    self.firmware_version = firmware_version;
+                AppCenterCommand::Navigate { page, firmware } => {
+                    self.firmware = firmware;
                     if self.firmware_write_started {
                         continue;
                     }
                     self.navigate_to(page);
                 }
-                AppCenterCommand::FirmwareVersion { firmware_version } => {
-                    self.firmware_version = firmware_version;
+                AppCenterCommand::FirmwareVersion { firmware } => {
+                    self.firmware = firmware;
                 }
                 AppCenterCommand::UpdateResponse(_) => {
                     // Responses are routed to the worker waiting in HostClient.
@@ -516,7 +520,7 @@ impl AppCenter {
                         ui.add_space(7.0);
                         ui.horizontal_wrapped(|ui| {
                             hero_badge(ui, &format!("App {}", self.installed), ACCENT);
-                            hero_badge(ui, &firmware_badge(&self.firmware_version), ACCENT);
+                            hero_badge(ui, &firmware_badge(self.firmware), ACCENT);
                             if let Some(mode) = self.demo {
                                 hero_badge(ui, &format!("Demo · {}", mode.label()), MUTED_TEXT);
                             }
@@ -765,19 +769,13 @@ impl AppCenter {
             let installed = &self.installed;
             let app_pending = installed < &manifest.application_version;
             let app_incompatible = installed < &manifest.firmware.minimum_application_version;
-            let target_revision = manifest.firmware.revision.to_string();
-            let current_firmware = self.firmware_version == target_revision;
-            let newer_firmware = self
-                .firmware_version
-                .parse::<u16>()
-                .is_ok_and(|revision| revision > manifest.firmware.revision)
-                || self.firmware_version == "newer";
-            let (badge, badge_colour) = if newer_firmware {
-                ("Newer firmware", MUTED_TEXT)
-            } else if current_firmware {
-                ("Up to date", SUCCESS)
-            } else {
-                ("Update available", ACCENT)
+            let release_state =
+                classify_firmware_release(self.firmware.into(), manifest.firmware.revision);
+            let (badge, badge_colour) = match release_state {
+                FirmwareReleaseState::Pending => ("Checking firmware", MUTED_TEXT),
+                FirmwareReleaseState::UpdateAvailable => ("Update available", ACCENT),
+                FirmwareReleaseState::Current => ("Up to date", SUCCESS),
+                FirmwareReleaseState::Newer => ("Newer firmware", MUTED_TEXT),
             };
             card_header(
                 ui,
@@ -785,7 +783,7 @@ impl AppCenter {
                 &format!("XIAO firmware revision {}", manifest.firmware.revision),
                 &format!(
                     "Connected revision {} · non-Sense XIAO nRF52840",
-                    self.firmware_version
+                    firmware_description(self.firmware)
                 ),
                 badge,
                 badge_colour,
@@ -807,14 +805,21 @@ impl AppCenter {
                     "Newer application required",
                     "The installed application cannot communicate with this firmware revision.",
                 );
-            } else if newer_firmware {
+            } else if release_state == FirmwareReleaseState::Pending {
+                status_callout(
+                    ui,
+                    MUTED_TEXT,
+                    "Waiting for firmware information",
+                    "Reconnect the board if its firmware revision does not appear shortly.",
+                );
+            } else if release_state == FirmwareReleaseState::Newer {
                 status_callout(
                     ui,
                     MUTED_TEXT,
                     "Firmware is newer than stable",
                     "Downgrading the connected board is disabled.",
                 );
-            } else if current_firmware {
+            } else if release_state == FirmwareReleaseState::Current {
                 status_callout(
                     ui,
                     SUCCESS,
@@ -920,11 +925,24 @@ fn hero_badge(ui: &mut egui::Ui, label: &str, colour: egui::Color32) {
         });
 }
 
-fn firmware_badge(version: &str) -> String {
-    match version {
-        "newer" => "Firmware newer".to_owned(),
-        "unknown" => "Firmware unknown".to_owned(),
-        revision => format!("Firmware rev {revision}"),
+fn firmware_description(status: FirmwareStatus) -> String {
+    match status {
+        FirmwareStatus::Reported(revision) => revision.to_string(),
+        FirmwareStatus::Pending => "checking".to_owned(),
+        FirmwareStatus::UnsupportedFormat(format) => format!("newer format {format}"),
+        FirmwareStatus::Malformed => "invalid report".to_owned(),
+        FirmwareStatus::Unreported => "not reported".to_owned(),
+    }
+}
+
+fn firmware_badge(status: FirmwareStatus) -> String {
+    match status {
+        FirmwareStatus::Reported(revision) => format!("Firmware rev {revision}"),
+        FirmwareStatus::UnsupportedFormat(_) => "Firmware newer".to_owned(),
+        FirmwareStatus::Pending => "Checking firmware".to_owned(),
+        FirmwareStatus::Malformed | FirmwareStatus::Unreported => {
+            "Firmware update needed".to_owned()
+        }
     }
 }
 
@@ -1096,9 +1114,15 @@ mod tests {
 
     #[test]
     fn hero_firmware_badges_are_explicit() {
-        assert_eq!(firmware_badge("3"), "Firmware rev 3");
-        assert_eq!(firmware_badge("newer"), "Firmware newer");
-        assert_eq!(firmware_badge("unknown"), "Firmware unknown");
+        assert_eq!(
+            firmware_badge(FirmwareStatus::Reported(3)),
+            "Firmware rev 3"
+        );
+        assert_eq!(
+            firmware_badge(FirmwareStatus::UnsupportedFormat(2)),
+            "Firmware newer"
+        );
+        assert_eq!(firmware_badge(FirmwareStatus::Pending), "Checking firmware");
     }
 
     #[test]

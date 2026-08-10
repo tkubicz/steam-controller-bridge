@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use bridge_runtime::FirmwareVersion;
 use release_updater::{
-    embedded_trusted_keys, refresh_catalog_if_due, ArtifactDescriptor, LatestReleaseClient,
-    ReleaseCache, ReleaseManifestV1, TrustedPublicKey,
+    classify_firmware_release, embedded_trusted_keys, refresh_catalog_if_due, ArtifactDescriptor,
+    FirmwareReleaseState, LatestReleaseClient, ReleaseCache, ReleaseManifestV1, TrustedPublicKey,
 };
 use semver::Version;
 
@@ -96,11 +96,8 @@ impl UpdateChecker {
             return true;
         }
         self.running_version >= manifest.firmware.minimum_application_version
-            && match firmware {
-                FirmwareVersion::Reported(revision) => revision < manifest.firmware.revision,
-                FirmwareVersion::Unreported | FirmwareVersion::Malformed => true,
-                FirmwareVersion::Pending | FirmwareVersion::UnsupportedFormat(_) => false,
-            }
+            && classify_firmware_release(firmware, manifest.firmware.revision)
+                == FirmwareReleaseState::UpdateAvailable
     }
 }
 
@@ -109,6 +106,6 @@ fn remove_obsolete_application_cache(cache: &ReleaseCache, artifact: &ArtifactDe
     let _ = fs::remove_file(cache.artifact_path(artifact));
 }
 
-fn running_version() -> Version {
+pub(crate) fn running_version() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).expect("package version is semver")
 }

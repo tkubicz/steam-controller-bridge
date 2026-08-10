@@ -2,7 +2,7 @@ use std::ffi::OsString;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::app_center_protocol::AppCenterPage;
+use crate::app_center_protocol::{AppCenterPage, FirmwareStatus};
 
 pub const APP_CENTER_COMMAND: &str = "app-center";
 pub const BINDINGS_EDITOR_COMMAND: &str = "bindings-editor";
@@ -46,7 +46,7 @@ pub enum Command {
     ProfileOverlay,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Copy, Args)]
 pub struct AppCenterArgs {
     /// Page to open. Defaults to About, or Updates in demo mode.
     #[arg(long, value_enum)]
@@ -57,14 +57,14 @@ pub struct AppCenterArgs {
     pub demo: Option<DemoMode>,
 
     /// Firmware revision reported by the parent menu process.
-    #[arg(long, default_value = "unknown", hide = true)]
-    pub firmware_version: String,
+    #[arg(long, default_value = "pending", hide = true)]
+    pub firmware: FirmwareStatus,
 }
 
 impl AppCenterArgs {
     #[cfg(any(feature = "updater", test))]
     #[must_use]
-    pub fn page(&self) -> AppCenterPage {
+    pub fn page(self) -> AppCenterPage {
         self.tab.unwrap_or(if self.demo.is_some() {
             AppCenterPage::Updates
         } else {
@@ -96,15 +96,15 @@ mod tests {
             "app-center",
             "--tab",
             "changelog",
-            "--firmware-version",
-            "7",
+            "--firmware",
+            "reported:7",
         ])
         .expect("app center arguments");
         let Some(Command::AppCenter(arguments)) = cli.command else {
             panic!("expected app center command");
         };
         assert_eq!(arguments.page(), AppCenterPage::Changelog);
-        assert_eq!(arguments.firmware_version, "7");
+        assert_eq!(arguments.firmware, FirmwareStatus::Reported(7));
         assert_eq!(arguments.demo, None);
     }
 

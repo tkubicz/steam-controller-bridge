@@ -32,8 +32,9 @@ pub use bridge_output::{
 };
 pub use cache::{CacheError, ReleaseCache};
 pub use firmware::{
-    discover_bootloader_volumes, discover_firmware_devices, flash_firmware, validate_uf2,
-    BootloaderVolume, FirmwareDevice, FirmwareFlashError, FirmwareFlashProgress,
+    classify_firmware_release, discover_bootloader_volumes, discover_firmware_devices,
+    flash_firmware, validate_uf2, BootloaderVolume, FirmwareDevice, FirmwareFlashError,
+    FirmwareFlashProgress, FirmwareReleaseState,
 };
 pub use manifest::{
     embedded_trusted_keys, verify_signed_manifest, ApplicationRelease, ArtifactDescriptor,
@@ -53,12 +54,3 @@ pub const APPLICATION_BUNDLE_ID: &str = "com.lynxware.steam-controller-bridge";
 pub const FIRMWARE_TARGET_ID: &str = "seeed-xiao-nrf52840";
 pub const FIRMWARE_BOARD_ID: &str = "Seeed_XIAO_nRF52840";
 pub const UF2_FAMILY_ID: u32 = 0xADA5_2840;
-
-/// Coarse state shared by the menu label and the Updates tab.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdateCatalog {
-    Unavailable(String),
-    Checking,
-    Current(ReleaseManifestV1),
-    Available(ReleaseManifestV1),
-}
