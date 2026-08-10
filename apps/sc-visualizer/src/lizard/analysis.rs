@@ -6,102 +6,102 @@ use std::path::Path;
 use recording::HostPointerEventKind;
 use serde::Serialize;
 
-use crate::metrics::{
+use crate::lizard::metrics::{
     angle_error, click_windows, right_pad_intervals, MotionTimeline, SpeedBand,
     FAST_SPEED_COUNTS_PER_SECOND, STATIONARY_SPEED_COUNTS_PER_SECOND,
 };
-use crate::trace::Trace;
+use crate::lizard::trace::Trace;
 
 #[derive(Debug, Serialize)]
-struct AnalysisReport {
-    tool_version: &'static str,
-    format_event_count: usize,
-    unknown_event_count: usize,
-    decoded_state_count: usize,
-    lizard_mouse_report_count: usize,
-    host_pointer_event_count: usize,
-    marker_count: usize,
-    duration_seconds: f64,
-    cadence: Cadence,
-    touch_session_count: usize,
-    response_latency_us: Distribution,
-    stationary_leakage_pixels: u64,
-    click_displacement_pixels: u64,
-    output_speed_curve: Vec<SpeedResponse>,
-    directional_response: DirectionalResponse,
-    raw_to_screen: RawToScreen,
-    guided_stages: Vec<GuidedStageAnalysis>,
-    capture_validity: CaptureValidity,
+pub(crate) struct AnalysisReport {
+    pub(crate) tool_version: &'static str,
+    pub(crate) format_event_count: usize,
+    pub(crate) unknown_event_count: usize,
+    pub(crate) decoded_state_count: usize,
+    pub(crate) lizard_mouse_report_count: usize,
+    pub(crate) host_pointer_event_count: usize,
+    pub(crate) marker_count: usize,
+    pub(crate) duration_seconds: f64,
+    pub(crate) cadence: Cadence,
+    pub(crate) touch_session_count: usize,
+    pub(crate) response_latency_us: Distribution,
+    pub(crate) stationary_leakage_pixels: u64,
+    pub(crate) click_displacement_pixels: u64,
+    pub(crate) output_speed_curve: Vec<SpeedResponse>,
+    pub(crate) directional_response: DirectionalResponse,
+    pub(crate) raw_to_screen: RawToScreen,
+    pub(crate) guided_stages: Vec<GuidedStageAnalysis>,
+    pub(crate) capture_validity: CaptureValidity,
 }
 
 #[derive(Debug, Default, Serialize)]
-struct Cadence {
-    state_hz: f64,
-    lizard_hz: f64,
-    state_median_interval_us: Option<u64>,
-    lizard_median_interval_us: Option<u64>,
+pub(crate) struct Cadence {
+    pub(crate) state_hz: f64,
+    pub(crate) lizard_hz: f64,
+    pub(crate) state_median_interval_us: Option<u64>,
+    pub(crate) lizard_median_interval_us: Option<u64>,
 }
 
 #[derive(Debug, Default, Serialize)]
-struct Distribution {
-    samples: usize,
-    minimum: Option<u64>,
-    median: Option<u64>,
-    maximum: Option<u64>,
+pub(crate) struct Distribution {
+    pub(crate) samples: usize,
+    pub(crate) minimum: Option<u64>,
+    pub(crate) median: Option<u64>,
+    pub(crate) maximum: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
-struct SpeedResponse {
-    label: &'static str,
-    minimum_counts_per_second: f64,
-    maximum_counts_per_second: Option<f64>,
-    samples: usize,
-    input_counts: f64,
-    output_pixels: u64,
-    pixels_per_thousand_input_counts: Option<f64>,
+pub(crate) struct SpeedResponse {
+    pub(crate) label: &'static str,
+    pub(crate) minimum_counts_per_second: f64,
+    pub(crate) maximum_counts_per_second: Option<f64>,
+    pub(crate) samples: usize,
+    pub(crate) input_counts: f64,
+    pub(crate) output_pixels: u64,
+    pub(crate) pixels_per_thousand_input_counts: Option<f64>,
 }
 
 #[derive(Debug, Default, Serialize)]
-struct DirectionalResponse {
-    measured_sessions: usize,
-    mean_angular_error_degrees: Option<f64>,
-    maximum_angular_error_degrees: Option<f64>,
+pub(crate) struct DirectionalResponse {
+    pub(crate) measured_sessions: usize,
+    pub(crate) mean_angular_error_degrees: Option<f64>,
+    pub(crate) maximum_angular_error_degrees: Option<f64>,
 }
 
 #[derive(Debug, Default, Serialize)]
-struct RawToScreen {
-    available: bool,
-    raw_lizard_pixels: u64,
-    host_delta_pixels: u64,
-    host_to_raw_ratio: Option<f64>,
-    unmatched_host_events: usize,
-    cursor_edge_clipping_events: usize,
+pub(crate) struct RawToScreen {
+    pub(crate) available: bool,
+    pub(crate) raw_lizard_pixels: u64,
+    pub(crate) host_delta_pixels: u64,
+    pub(crate) host_to_raw_ratio: Option<f64>,
+    pub(crate) unmatched_host_events: usize,
+    pub(crate) cursor_edge_clipping_events: usize,
 }
 
 #[derive(Debug, Serialize)]
-struct GuidedStageAnalysis {
-    name: String,
-    duration_seconds: f64,
-    touched_state_samples: usize,
-    click_presses: usize,
-    input_path_counts: f64,
-    reference_motion_reports: usize,
-    reference_path_pixels: u64,
-    reference_net_x: i64,
-    reference_net_y: i64,
-    input_counts_per_reference_pixel: Option<f64>,
-    host_pointer_events: usize,
-    host_path_pixels: u64,
-    host_to_reference_ratio: Option<f64>,
+pub(crate) struct GuidedStageAnalysis {
+    pub(crate) name: String,
+    pub(crate) duration_seconds: f64,
+    pub(crate) touched_state_samples: usize,
+    pub(crate) click_presses: usize,
+    pub(crate) input_path_counts: f64,
+    pub(crate) reference_motion_reports: usize,
+    pub(crate) reference_path_pixels: u64,
+    pub(crate) reference_net_x: i64,
+    pub(crate) reference_net_y: i64,
+    pub(crate) input_counts_per_reference_pixel: Option<f64>,
+    pub(crate) host_pointer_events: usize,
+    pub(crate) host_path_pixels: u64,
+    pub(crate) host_to_reference_ratio: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
-struct CaptureValidity {
-    metadata_valid: Option<bool>,
-    invalid_reason: Option<String>,
-    has_state_reports: bool,
-    has_lizard_mouse_reports: bool,
-    has_host_pointer_events: bool,
+pub(crate) struct CaptureValidity {
+    pub(crate) metadata_valid: Option<bool>,
+    pub(crate) invalid_reason: Option<String>,
+    pub(crate) has_state_reports: bool,
+    pub(crate) has_lizard_mouse_reports: bool,
+    pub(crate) has_host_pointer_events: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -129,7 +129,7 @@ pub(crate) fn write_report(trace: &Trace, output: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn analyze(trace: &Trace) -> AnalysisReport {
+pub(crate) fn analyze(trace: &Trace) -> AnalysisReport {
     let sessions = sessions(trace);
     let motion = trace.reference_motion();
     let timeline = MotionTimeline::new(&motion);
@@ -467,7 +467,7 @@ fn last_timestamp(trace: &Trace) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::Motion;
+    use crate::lizard::trace::Motion;
     use recording::HostPointerEvent;
     use steam_controller_protocol::{SteamButtons, SteamControllerState};
 
@@ -476,8 +476,8 @@ mod tests {
         touched: bool,
         x: i16,
         pressed: bool,
-    ) -> crate::trace::Timed<SteamControllerState> {
-        crate::trace::Timed {
+    ) -> crate::lizard::trace::Timed<SteamControllerState> {
+        crate::lizard::trace::Timed {
             timestamp_us,
             value: SteamControllerState {
                 report_id: 0x42,
@@ -535,7 +535,7 @@ mod tests {
         let trace = Trace {
             states: vec![state(10, true, 0, false), state(20, false, 0, false)],
             host_pointer: vec![
-                crate::trace::Timed {
+                crate::lizard::trace::Timed {
                     timestamp_us: 5,
                     value: HostPointerEvent {
                         event_kind: HostPointerEventKind::Moved,
@@ -547,7 +547,7 @@ mod tests {
                         scroll_y: 0,
                     },
                 },
-                crate::trace::Timed {
+                crate::lizard::trace::Timed {
                     timestamp_us: 15,
                     value: HostPointerEvent {
                         event_kind: HostPointerEventKind::Moved,
@@ -602,7 +602,7 @@ mod tests {
     fn guided_analysis_uses_marker_boundaries() {
         let trace = Trace {
             states: vec![state(10, true, 0, false), state(20, true, 128, true)],
-            host_pointer: vec![crate::trace::Timed {
+            host_pointer: vec![crate::lizard::trace::Timed {
                 timestamp_us: 20,
                 value: HostPointerEvent {
                     event_kind: HostPointerEventKind::Moved,
@@ -615,15 +615,21 @@ mod tests {
                 },
             }],
             markers: vec![
-                crate::trace::Marker {
+                crate::lizard::trace::Marker {
                     timestamp_us: 5,
                     name: "precision".to_owned(),
-                    phase: Some(crate::trace::MarkerPhase::Start),
+                    phase: Some(crate::lizard::trace::MarkerPhase::Start),
+                    protocol: None,
+                    trial_id: None,
+                    attempt: None,
                 },
-                crate::trace::Marker {
+                crate::lizard::trace::Marker {
                     timestamp_us: 25,
                     name: "precision".to_owned(),
-                    phase: Some(crate::trace::MarkerPhase::End),
+                    phase: Some(crate::lizard::trace::MarkerPhase::End),
+                    protocol: None,
+                    trial_id: None,
+                    attempt: None,
                 },
             ],
             ..Trace::default()

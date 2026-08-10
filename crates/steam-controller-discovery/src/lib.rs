@@ -430,12 +430,32 @@ impl ActiveControllerFinder {
         })
     }
 
+    /// Releases every retained candidate session while preserving the native
+    /// enumeration context for a later scan on the same thread.
+    pub fn clear_candidates(&mut self) {
+        self.discovery.clear();
+    }
+
     /// Probes retained candidates and refreshes their inventory only when due.
     ///
     /// # Errors
     ///
     /// Returns a displayable search state when no unique active source exists.
     pub fn find(&mut self) -> Result<(HidDeviceInfo, HidSession), ControllerSearch> {
+        self.find_with_index()
+            .map(|(_, info, session)| (info, session))
+    }
+
+    /// Finds the active source while retaining its path-sorted global HID
+    /// index for diagnostics that need to report the exact selected
+    /// collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a displayable search state when no unique active source exists.
+    pub fn find_with_index(
+        &mut self,
+    ) -> Result<(usize, HidDeviceInfo, HidSession), ControllerSearch> {
         if self.discovery.scan_due() {
             let discovered = self
                 .enumerator
@@ -471,8 +491,9 @@ impl ActiveControllerFinder {
         let probe = self.discovery.probe();
         match choose_unique_active(&probe.active_indices) {
             Ok(Some(selected)) => {
+                let enumeration_index = self.discovery.candidate(selected).enumeration_index();
                 let (info, session) = self.discovery.select(selected).into_parts();
-                Ok((info, session))
+                Ok((enumeration_index, info, session))
             }
             Ok(None) => Err(match self.discovery.current_errors(&probe.failures) {
                 Some(detail) => ControllerSearch::CannotOpen(detail),

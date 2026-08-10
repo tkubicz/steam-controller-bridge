@@ -269,15 +269,22 @@ macOS may reject protected keyboard/gamepad collections with an IOKit `not permi
 
 ## Lizard mouse comparison lab
 
-`sc-lizard-lab` captures the controller's original lizard-mode mouse reports
-without sending the bridge's lizard-off heartbeat, then analyzes or compares
-them against the current mouse-only `BindingEngine`:
+`sc-visualizer` includes a full-window Lizard Mouse Lab. Open the visualizer and
+use the mode switch at the top of the dashboard to start a guided capture or
+open an existing JSONL recording. Entering the lab finishes an ordinary
+visualizer recording, neutralizes and disables mock/serial output, and joins
+the ordinary HID worker before the measurement worker takes controller
+ownership. Leaving the lab restarts ordinary discovery with a clean decoder and
+mapper baseline.
+
+The same capture, analysis, comparison, and safe replay tools are available as
+nested headless commands:
 
 ```bash
-cargo run -p sc-lizard-lab -- capture --output lizard.jsonl --guided
-cargo run -p sc-lizard-lab -- analyze lizard.jsonl --output analysis.json
-cargo run -p sc-lizard-lab -- compare lizard.jsonl --output comparison.json
-cargo run -p sc-lizard-lab -- replay lizard.jsonl --source reference --output dump
+cargo run -p sc-visualizer -- lizard capture --output lizard.jsonl --guided
+cargo run -p sc-visualizer -- lizard analyze lizard.jsonl --output analysis.json
+cargo run -p sc-visualizer -- lizard compare lizard.jsonl --output comparison.json
+cargo run -p sc-visualizer -- lizard replay lizard.jsonl --source reference --output dump
 ```
 
 Capture auto-detects the unique active controller using the same shared
@@ -286,8 +293,9 @@ multi-controller/debug override. Capture is macOS-only and needs Input
 Monitoring because it installs a passive HID-entry event tap. It uses an
 8,192-event bounded queue and a timestamp reorder window; overflow, disconnect,
 and tap disable explicitly invalidate the file.
-Do not use another mouse or trackpad during a guided run. Analysis, comparison,
-and textual replay are portable and also accept older visualizer JSONL files.
+Do not use another mouse or trackpad during measured intervals. Analysis,
+comparison, the GUI results view, and textual replay are portable and also
+accept older visualizer JSONL files.
 Desktop replay must be explicitly requested with `--output desktop`; it injects
 pointer motion only and never replays lizard keyboard or mouse-button actions.
 See [the lab guide](docs/LIZARD_MOUSE_LAB.md).

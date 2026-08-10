@@ -3,6 +3,13 @@
 #[cfg(any(target_os = "macos", test))]
 use std::collections::VecDeque;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread;
+
+use crate::device::HidBrokerClient;
 
 #[cfg(any(target_os = "macos", test))]
 use recording::RecordingEvent;
@@ -11,6 +18,115 @@ use recording::RecordingEvent;
 const QUEUE_CAPACITY: usize = 8_192;
 #[cfg(any(target_os = "macos", test))]
 const REORDER_WINDOW_US: u64 = 10_000;
+
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "portable GUI code creates commands whose fields are consumed only by macOS capture"
+    )
+)]
+pub(crate) enum GuiCaptureCommand {
+    Start { trial_id: String, attempt: u32 },
+    End { trial_id: String, attempt: u32 },
+    Accept { trial_id: String, attempt: u32 },
+    Discard { trial_id: String, attempt: u32 },
+    Finish,
+    Cancel,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CapturePreflight {
+    pub(crate) controller_index: usize,
+    pub(crate) controller: String,
+    pub(crate) transport: String,
+    pub(crate) state_reports: usize,
+    pub(crate) lizard_reports: usize,
+    pub(crate) event_tap_ready: bool,
+    pub(crate) displays: Vec<String>,
+    pub(crate) invalid_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(
+        dead_code,
+        reason = "capture progress events are produced only by the macOS measurement worker"
+    )
+)]
+pub(crate) enum GuiCaptureEvent {
+    Preflight(CapturePreflight),
+    TrialPreview {
+        trial_id: String,
+        points: Vec<(i64, i64)>,
+    },
+    Finished(Result<(), String>),
+}
+
+pub(crate) struct GuiCapture {
+    commands: mpsc::Sender<GuiCaptureCommand>,
+    events: mpsc::Receiver<GuiCaptureEvent>,
+    stop: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl GuiCapture {
+    pub(crate) fn start(
+        index: Option<usize>,
+        output: PathBuf,
+        hid_broker: HidBrokerClient,
+    ) -> Self {
+        let (command_sender, command_receiver) = mpsc::channel();
+        let (event_sender, event_receiver) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            let result = run_gui(
+                index,
+                &output,
+                &worker_stop,
+                command_receiver,
+                event_sender.clone(),
+                &hid_broker,
+            );
+            let _ = event_sender.send(GuiCaptureEvent::Finished(result));
+        });
+        Self {
+            commands: command_sender,
+            events: event_receiver,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    pub(crate) fn send(&self, command: GuiCaptureCommand) -> Result<(), String> {
+        self.commands
+            .send(command)
+            .map_err(|_| "capture worker stopped unexpectedly".to_owned())
+    }
+
+    pub(crate) fn try_event(&self) -> Option<GuiCaptureEvent> {
+        self.events.try_recv().ok()
+    }
+
+    pub(crate) fn join(&mut self) -> Result<(), String> {
+        self.worker.take().map_or(Ok(()), |worker| {
+            worker
+                .join()
+                .map_err(|_| "capture worker panicked".to_owned())
+        })
+    }
+}
+
+impl Drop for GuiCapture {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = self.commands.send(GuiCaptureCommand::Cancel);
+        let _ = self.join();
+    }
+}
 
 #[cfg(any(target_os = "macos", test))]
 #[derive(Debug)]
@@ -70,6 +186,7 @@ impl EventMerger {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use std::collections::BTreeSet;
     use std::fs::File;
     use std::io::{self, BufRead as _, BufWriter, Write as _};
     use std::path::Path;
@@ -96,7 +213,24 @@ mod macos {
     use steam_controller_discovery::{same_controller_collection, ActiveControllerFinder};
     use steam_controller_protocol::{DecodedReport, SteamControllerDecoder};
 
-    use super::{EventMerger, QueuedEvent, QUEUE_CAPACITY};
+    use crate::lizard::protocol::{guided_trials, GUIDED_PROTOCOL};
+    use crate::{cli::Source, device::HidBrokerClient};
+
+    use super::{
+        CapturePreflight, EventMerger, GuiCaptureCommand, GuiCaptureEvent, QueuedEvent,
+        QUEUE_CAPACITY,
+    };
+
+    enum CaptureControl {
+        Terminal {
+            guided: bool,
+            duration_secs: Option<u64>,
+        },
+        Gui {
+            commands: Receiver<GuiCaptureCommand>,
+            events: mpsc::Sender<GuiCaptureEvent>,
+        },
+    }
 
     enum Message {
         Event(QueuedEvent),
@@ -116,7 +250,16 @@ mod macos {
         sequence: Arc<AtomicU64>,
         stop: Arc<AtomicBool>,
         invalid_reason: Arc<Mutex<Option<String>>>,
+        preview: Arc<Mutex<TrialPreviewBuffer>>,
+        completed: Arc<AtomicBool>,
         started: Instant,
+    }
+
+    #[derive(Default)]
+    struct TrialPreviewBuffer {
+        active: bool,
+        points: Vec<(i64, i64)>,
+        current: (i64, i64),
     }
 
     impl Shared {
@@ -161,6 +304,36 @@ mod macos {
         fn done(&self) {
             let _ = self.sender.send(Message::ProducerDone);
         }
+
+        fn begin_preview(&self) {
+            if let Ok(mut preview) = self.preview.lock() {
+                preview.active = true;
+                preview.current = (0, 0);
+                preview.points.clear();
+                preview.points.push((0, 0));
+            }
+        }
+
+        fn push_reference_motion(&self, x: i8, y: i8) {
+            if let Ok(mut preview) = self.preview.lock() {
+                if preview.active && (x != 0 || y != 0) {
+                    preview.current.0 += i64::from(x);
+                    preview.current.1 += i64::from(y);
+                    let current = preview.current;
+                    preview.points.push(current);
+                }
+            }
+        }
+
+        fn end_preview(&self) -> Vec<(i64, i64)> {
+            self.preview.lock().map_or_else(
+                |_| Vec::new(),
+                |mut preview| {
+                    preview.active = false;
+                    std::mem::take(&mut preview.points)
+                },
+            )
+        }
     }
 
     pub(super) fn run(
@@ -171,31 +344,110 @@ mod macos {
     ) -> Result<(), String> {
         let stop = Arc::new(AtomicBool::new(false));
         install_ctrl_c(Arc::clone(&stop))?;
-        let OpenedController {
-            index,
-            info,
-            session,
-            announce_connection,
-        } = open_controller(requested_index, &stop)?;
+        run_capture(
+            requested_index,
+            output,
+            &stop,
+            None,
+            CaptureControl::Terminal {
+                guided,
+                duration_secs,
+            },
+        )
+    }
+
+    pub(super) fn run_gui(
+        requested_index: Option<usize>,
+        output: &Path,
+        stop: &Arc<AtomicBool>,
+        commands: Receiver<GuiCaptureCommand>,
+        events: mpsc::Sender<GuiCaptureEvent>,
+        hid_broker: &HidBrokerClient,
+    ) -> Result<(), String> {
+        run_capture(
+            requested_index,
+            output,
+            stop,
+            Some(hid_broker),
+            CaptureControl::Gui { commands, events },
+        )
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "capture setup and teardown stay linear so every producer is finalized in order"
+    )]
+    fn run_capture(
+        requested_index: Option<usize>,
+        output: &Path,
+        stop: &Arc<AtomicBool>,
+        hid_broker: Option<&HidBrokerClient>,
+        control: CaptureControl,
+    ) -> Result<(), String> {
+        let guided = matches!(
+            &control,
+            CaptureControl::Terminal { guided: true, .. } | CaptureControl::Gui { .. }
+        );
+        let gui_mode = matches!(&control, CaptureControl::Gui { .. });
+        let terminal_free = matches!(
+            &control,
+            CaptureControl::Terminal {
+                guided: false,
+                duration_secs: None
+            }
+        );
         let file = File::create(output)
             .map_err(|error| format!("cannot create capture '{}': {error}", output.display()))?;
         let mut writer = RecordingWriter::new(BufWriter::with_capacity(64 * 1024, file));
-        let started = Instant::now();
-        let initial_metadata = metadata(index, &info, guided);
+        let mut initial_metadata = metadata(requested_index.unwrap_or(0), None, guided);
         writer
             .write_event_buffered(
                 &RecordingEvent::capture_metadata(0, &initial_metadata)
                     .map_err(|error| error.to_string())?,
             )
             .map_err(|error| error.to_string())?;
+        let OpenedController {
+            index,
+            info,
+            session,
+            announce_connection,
+        } = match open_controller(requested_index, stop, hid_broker) {
+            Ok(opened) => opened,
+            Err(error) => {
+                initial_metadata.valid = Some(false);
+                initial_metadata.invalid_reason = Some(error.clone());
+                writer
+                    .write_event(
+                        &RecordingEvent::capture_metadata(0, &initial_metadata)
+                            .map_err(|write_error| write_error.to_string())?,
+                    )
+                    .map_err(|write_error| write_error.to_string())?;
+                return Err(format!(
+                    "{error}; invalid capture metadata remains in '{}'",
+                    output.display()
+                ));
+            }
+        };
+        initial_metadata.controller_index = index;
+        initial_metadata.source_device_id.clone_from(&info.id);
+        initial_metadata.transport.clone_from(&info.transport);
+        writer
+            .write_event_buffered(
+                &RecordingEvent::capture_metadata(0, &initial_metadata)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+        let started = Instant::now();
 
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let invalid_reason = Arc::new(Mutex::new(None));
         let shared = Shared {
             sender,
             sequence: Arc::new(AtomicU64::new(0)),
-            stop: Arc::clone(&stop),
+            stop: Arc::clone(stop),
             invalid_reason: Arc::clone(&invalid_reason),
+            preview: Arc::new(Mutex::new(TrialPreviewBuffer::default())),
+            completed: Arc::new(AtomicBool::new(false)),
             started,
         };
         let state_count = Arc::new(AtomicUsize::new(0));
@@ -224,14 +476,47 @@ mod macos {
         );
         eprintln!("Preflight: waiting up to 3 seconds for state and 0x40 reports...");
         preflight(&shared, &state_count, &lizard_count, &tap_ready);
+        if let CaptureControl::Gui { events, .. } = &control {
+            let _ = events.send(GuiCaptureEvent::Preflight(CapturePreflight {
+                controller_index: index,
+                controller: info.product.clone().unwrap_or_else(|| info.id.clone()),
+                transport: info.transport.clone(),
+                state_reports: state_count.load(Ordering::Acquire),
+                lizard_reports: lizard_count.load(Ordering::Acquire),
+                event_tap_ready: tap_ready.load(Ordering::Acquire),
+                displays: initial_metadata
+                    .displays
+                    .iter()
+                    .map(|display| {
+                        format!(
+                            "display {}: {:.0}×{:.0} at ({:.0}, {:.0}), {:.2}× scale",
+                            display.id,
+                            display.width,
+                            display.height,
+                            display.x,
+                            display.y,
+                            display.scale
+                        )
+                    })
+                    .collect(),
+                invalid_reason: invalid_reason.lock().ok().and_then(|reason| reason.clone()),
+            }));
+        }
         let guide = if stop.load(Ordering::Acquire) {
             None
-        } else if guided {
-            Some(spawn_guide(shared.clone()))
         } else {
-            duration_secs.map(|seconds| spawn_timer(Arc::clone(&stop), seconds))
+            match control {
+                CaptureControl::Terminal { guided: true, .. } => Some(spawn_guide(shared.clone())),
+                CaptureControl::Terminal {
+                    guided: false,
+                    duration_secs,
+                } => duration_secs.map(|seconds| spawn_timer(Arc::clone(stop), seconds)),
+                CaptureControl::Gui { commands, events } => {
+                    Some(spawn_gui_guide(shared.clone(), commands, events))
+                }
+            }
         };
-        if !guided && duration_secs.is_none() {
+        if terminal_free {
             eprintln!("Press Ctrl+C to finish.");
         }
         merge_until_done(&receiver, &shared, &mut writer)?;
@@ -248,6 +533,14 @@ mod macos {
 
         let states = state_count.load(Ordering::Acquire);
         let lizard = lizard_count.load(Ordering::Acquire);
+        if gui_mode
+            && !shared.completed.load(Ordering::Acquire)
+            && invalid_reason.lock().is_ok_and(|reason| reason.is_none())
+        {
+            if let Ok(mut reason) = invalid_reason.lock() {
+                *reason = Some("guided capture ended before every trial was accepted".to_owned());
+            }
+        }
         let reason = invalid_reason
             .lock()
             .map_err(|_| "capture validity lock poisoned".to_owned())?
@@ -272,10 +565,96 @@ mod macos {
         }
     }
 
+    fn spawn_gui_guide(
+        shared: Shared,
+        commands: Receiver<GuiCaptureCommand>,
+        events: mpsc::Sender<GuiCaptureEvent>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let required: BTreeSet<_> = guided_trials().into_iter().map(|trial| trial.id).collect();
+            let mut accepted = BTreeSet::new();
+            while !shared.stop.load(Ordering::Acquire) {
+                let command = match commands.recv_timeout(Duration::from_millis(25)) {
+                    Ok(command) => command,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => GuiCaptureCommand::Cancel,
+                };
+                match command {
+                    GuiCaptureCommand::Start { trial_id, attempt } => {
+                        shared.begin_preview();
+                        shared.event(guided_marker(&shared, &trial_id, attempt, "start"));
+                    }
+                    GuiCaptureCommand::End { trial_id, attempt } => {
+                        shared.event(guided_marker(&shared, &trial_id, attempt, "end"));
+                        let _ = events.send(GuiCaptureEvent::TrialPreview {
+                            trial_id,
+                            points: shared.end_preview(),
+                        });
+                    }
+                    GuiCaptureCommand::Accept { trial_id, attempt } => {
+                        shared.event(guided_marker(&shared, &trial_id, attempt, "accepted"));
+                        accepted.insert(trial_id);
+                    }
+                    GuiCaptureCommand::Discard { trial_id, attempt } => {
+                        shared.event(guided_marker(&shared, &trial_id, attempt, "discarded"));
+                    }
+                    GuiCaptureCommand::Finish => {
+                        if accepted == required {
+                            shared.completed.store(true, Ordering::Release);
+                            shared.stop.store(true, Ordering::Release);
+                        } else {
+                            shared.invalidate(format!(
+                                "guided capture finished with {} of {} required trials accepted",
+                                accepted.len(),
+                                required.len()
+                            ));
+                        }
+                    }
+                    GuiCaptureCommand::Cancel => {
+                        shared.invalidate("guided capture cancelled before completion".to_owned());
+                    }
+                }
+            }
+        })
+    }
+
+    fn guided_marker(shared: &Shared, trial_id: &str, attempt: u32, phase: &str) -> RecordingEvent {
+        RecordingEvent::new(
+            shared.elapsed_us(),
+            KIND_MARKER,
+            json!({
+                "name": trial_id,
+                "phase": phase,
+                "protocol": GUIDED_PROTOCOL,
+                "trial_id": trial_id,
+                "attempt": attempt,
+            }),
+        )
+    }
+
     fn open_controller(
         requested_index: Option<usize>,
-        stop: &AtomicBool,
+        stop: &Arc<AtomicBool>,
+        hid_broker: Option<&HidBrokerClient>,
     ) -> Result<OpenedController, String> {
+        if let Some(broker) = hid_broker {
+            let source = requested_index.map_or(Source::Discover, Source::Collection);
+            let opened = broker.open(source, Arc::clone(stop), |status| {
+                eprintln!("{status}");
+            })?;
+            if !opened.info.is_supported_controller_source() {
+                return Err(format!(
+                    "index {} is not a supported Steam Controller input collection",
+                    opened.index
+                ));
+            }
+            return Ok(OpenedController {
+                index: opened.index,
+                info: opened.info,
+                session: opened.session,
+                announce_connection: opened.announce_connection,
+            });
+        }
         if let Some(index) = requested_index {
             let devices = enumerate().map_err(|error| error.to_string())?;
             let info = devices
@@ -422,6 +801,7 @@ mod macos {
                             }
                             Ok(DecodedReport::LizardMouse(mouse)) => {
                                 lizard_count.fetch_add(1, Ordering::Relaxed);
+                                shared.push_reference_motion(mouse.x, mouse.y);
                                 match RecordingEvent::decoded_lizard_mouse(timestamp_us, &mouse) {
                                     Ok(event) => shared.event(event),
                                     Err(error) => shared.invalidate(error.to_string()),
@@ -496,7 +876,7 @@ mod macos {
             );
             if result.is_err() {
                 shared.invalidate(
-                    "cannot install passive HID event tap; grant Input Monitoring to the terminal or app running sc-lizard-lab, then relaunch it".to_owned(),
+                    "cannot install passive HID event tap; grant Input Monitoring to the terminal or app running sc-visualizer, then relaunch it".to_owned(),
                 );
             }
             shared.done();
@@ -544,104 +924,112 @@ mod macos {
 
     fn spawn_guide(shared: Shared) -> thread::JoinHandle<()> {
         thread::spawn(move || {
-            const STAGES: &[(&str, &str, u64)] = &[
-                ("center_hold", "Hold one finger still at pad center", 4),
-                ("top_left_hold", "Hold still at the top-left corner", 4),
-                ("top_right_hold", "Hold still at the top-right corner", 4),
-                (
-                    "bottom_left_hold",
-                    "Hold still at the bottom-left corner",
-                    4,
-                ),
-                (
-                    "bottom_right_hold",
-                    "Hold still at the bottom-right corner",
-                    4,
-                ),
-                (
-                    "slow_cardinal_swipes",
-                    "Slowly swipe left-right and up-down across the pad, lifting between passes",
-                    6,
-                ),
-                (
-                    "fast_cardinal_swipes",
-                    "Quickly swipe left-right and up-down across the pad, lifting between passes",
-                    6,
-                ),
-                (
-                    "slow_diagonal_swipes",
-                    "Slowly swipe between opposite pad corners, lifting between passes",
-                    6,
-                ),
-                (
-                    "fast_diagonal_swipes",
-                    "Quickly swipe between opposite pad corners, lifting between passes",
-                    6,
-                ),
-                ("center_precision", "Tiny precision motions near center", 6),
-                ("rim_precision", "Tiny precision motions near the rim", 6),
-                ("clicks", "Stationary clicks at center and corners", 6),
-                ("click_drags", "Click, deliberately drag, and release", 6),
-            ];
+            let trials = guided_trials();
             eprintln!(
-                "Guided capture: do not touch any other mouse or trackpad. Press Enter before each stage."
+                "Guided capture: do not touch any other mouse or trackpad during a measured interval. Press Enter to start each trial."
             );
             let (input_sender, input_receiver) = mpsc::channel();
             thread::spawn(move || {
                 let stdin = io::stdin();
                 for line in stdin.lock().lines() {
-                    let input = line
-                        .map(|_| ())
-                        .map_err(|error| format!("cannot read guided input: {error}"));
+                    let input = line.map_err(|error| format!("cannot read guided input: {error}"));
                     if input_sender.send(input).is_err() {
                         break;
                     }
                 }
             });
-            for (name, instruction, seconds) in STAGES {
+            let mut completed = 0;
+            for (trial_index, trial) in trials.iter().enumerate() {
                 if shared.stop.load(Ordering::Acquire) {
                     break;
                 }
-                eprint!("\n{name}: {instruction}. Press Enter when ready... ");
-                let _ = io::stderr().flush();
-                if !wait_for_guided_input(&input_receiver, &shared) {
-                    break;
+                let mut attempt = 1_u32;
+                loop {
+                    eprint!(
+                        "\nTrial {}/{} — {}\n{} Press Enter when ready... ",
+                        trial_index + 1,
+                        trials.len(),
+                        trial.title,
+                        trial.instruction
+                    );
+                    let _ = io::stderr().flush();
+                    if wait_for_guided_input(&input_receiver, &shared).is_none() {
+                        break;
+                    }
+                    eprintln!("Starting in one second...");
+                    let countdown = Instant::now() + Duration::from_secs(1);
+                    while !shared.stop.load(Ordering::Acquire) && Instant::now() < countdown {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    let marker = |phase: &str| {
+                        RecordingEvent::new(
+                            shared.elapsed_us(),
+                            KIND_MARKER,
+                            json!({
+                                "name": trial.id,
+                                "phase": phase,
+                                "protocol": GUIDED_PROTOCOL,
+                                "trial_id": trial.id,
+                                "attempt": attempt,
+                            }),
+                        )
+                    };
+                    shared.event(marker("start"));
+                    let deadline = Instant::now() + trial.duration;
+                    while !shared.stop.load(Ordering::Acquire) && Instant::now() < deadline {
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    if shared.stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    shared.event(marker("end"));
+                    eprint!("Accept trial with Enter, or type r then Enter to retry... ");
+                    let _ = io::stderr().flush();
+                    let Some(decision) = wait_for_guided_input(&input_receiver, &shared) else {
+                        break;
+                    };
+                    if decision.trim().eq_ignore_ascii_case("r") {
+                        shared.event(marker("discarded"));
+                        attempt = attempt.saturating_add(1);
+                    } else {
+                        shared.event(marker("accepted"));
+                        completed += 1;
+                        break;
+                    }
                 }
-                shared.event(RecordingEvent::new(
-                    shared.elapsed_us(),
-                    KIND_MARKER,
-                    json!({"name": name, "phase": "start"}),
-                ));
-                let deadline = Instant::now() + Duration::from_secs(*seconds);
-                while !shared.stop.load(Ordering::Acquire) && Instant::now() < deadline {
-                    thread::sleep(Duration::from_millis(25));
-                }
-                shared.event(RecordingEvent::new(
-                    shared.elapsed_us(),
-                    KIND_MARKER,
-                    json!({"name": name, "phase": "end"}),
-                ));
             }
-            shared.stop.store(true, Ordering::Release);
+            if completed == trials.len() {
+                shared.stop.store(true, Ordering::Release);
+            } else if shared
+                .invalid_reason
+                .lock()
+                .is_ok_and(|reason| reason.is_none())
+            {
+                shared
+                    .invalidate("guided capture ended before every trial was accepted".to_owned());
+            }
         })
     }
 
-    fn wait_for_guided_input(receiver: &Receiver<Result<(), String>>, shared: &Shared) -> bool {
+    fn wait_for_guided_input(
+        receiver: &Receiver<Result<String, String>>,
+        shared: &Shared,
+    ) -> Option<String> {
         while !shared.stop.load(Ordering::Acquire) {
             match receiver.recv_timeout(Duration::from_millis(25)) {
-                Ok(Ok(())) => return true,
+                Ok(Ok(input)) => return Some(input),
                 Ok(Err(error)) => {
                     shared.invalidate(error);
-                    return false;
+                    return None;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     shared.invalidate("guided input ended before all stages".to_owned());
-                    return false;
+                    return None;
                 }
             }
         }
-        false
+        None
     }
 
     fn merge_until_done(
@@ -686,15 +1074,15 @@ mod macos {
         }
     }
 
-    fn metadata(index: usize, info: &HidDeviceInfo, guided: bool) -> CaptureMetadata {
+    fn metadata(index: usize, info: Option<&HidDeviceInfo>, guided: bool) -> CaptureMetadata {
         CaptureMetadata {
             tool_version: env!("CARGO_PKG_VERSION").to_owned(),
             platform: "macos".to_owned(),
             os_version: command_output("sw_vers", &["-productVersion"]),
             os_build: command_output("sw_vers", &["-buildVersion"]),
             controller_index: index,
-            source_device_id: info.id.clone(),
-            transport: info.transport.clone(),
+            source_device_id: info.map_or_else(|| "pending".to_owned(), |info| info.id.clone()),
+            transport: info.map_or_else(|| "pending".to_owned(), |info| info.transport.clone()),
             capture_mode: if guided { "guided" } else { "free" }.to_owned(),
             displays: display_metadata(),
             mouse_scaling: command_output("defaults", &["read", "-g", "com.apple.mouse.scaling"])
@@ -764,6 +1152,8 @@ mod macos {
                     sequence: Arc::new(AtomicU64::new(0)),
                     stop: Arc::new(AtomicBool::new(false)),
                     invalid_reason: Arc::new(Mutex::new(None)),
+                    preview: Arc::new(Mutex::new(TrialPreviewBuffer::default())),
+                    completed: Arc::new(AtomicBool::new(false)),
                     started: Instant::now(),
                 },
                 receiver,
@@ -798,20 +1188,20 @@ mod macos {
         #[test]
         fn guided_input_wait_honors_capture_cancellation() {
             let (shared, _events) = shared_with_capacity(1);
-            let (_sender, receiver) = mpsc::channel();
+            let (_sender, receiver) = mpsc::channel::<Result<String, String>>();
             shared.stop.store(true, Ordering::Release);
 
-            assert!(!wait_for_guided_input(&receiver, &shared));
+            assert!(wait_for_guided_input(&receiver, &shared).is_none());
             assert!(shared.invalid_reason.lock().unwrap().is_none());
         }
 
         #[test]
         fn guided_input_disconnect_invalidates_capture() {
             let (shared, _events) = shared_with_capacity(1);
-            let (sender, receiver) = mpsc::channel::<Result<(), String>>();
+            let (sender, receiver) = mpsc::channel::<Result<String, String>>();
             drop(sender);
 
-            assert!(!wait_for_guided_input(&receiver, &shared));
+            assert!(wait_for_guided_input(&receiver, &shared).is_none());
             assert_eq!(
                 shared.invalid_reason.lock().unwrap().as_deref(),
                 Some("guided input ended before all stages")
@@ -835,6 +1225,28 @@ pub(crate) fn run(
         let _ = (index, output, guided, duration_secs);
         Err("capture is implemented only on macOS; analyze, compare, and dump replay remain portable"
             .to_owned())
+    }
+}
+
+fn run_gui(
+    index: Option<usize>,
+    output: &Path,
+    stop: &Arc<AtomicBool>,
+    commands: mpsc::Receiver<GuiCaptureCommand>,
+    events: mpsc::Sender<GuiCaptureEvent>,
+    hid_broker: &HidBrokerClient,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::run_gui(index, output, stop, commands, events, hid_broker)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (index, output, stop, commands, events, hid_broker);
+        Err(
+            "capture is implemented only on macOS; existing captures can still be analyzed"
+                .to_owned(),
+        )
     }
 }
 

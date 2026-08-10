@@ -7,9 +7,9 @@ use desktop_bindings::DesktopInputSink;
 #[cfg(target_os = "macos")]
 use desktop_bindings::{KeyboardKey, Modifier, MouseButton};
 
-use crate::compare::{bridge_motion, load_profile};
-use crate::trace::{Motion, Trace};
-use crate::{ReplayOutput, ReplaySource};
+use crate::lizard::compare::{bridge_motion, load_profile};
+use crate::lizard::trace::{Motion, Trace};
+use crate::lizard::{ReplayOutput, ReplaySource};
 
 pub(crate) fn run(
     trace: &Trace,

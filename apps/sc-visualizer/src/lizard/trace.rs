@@ -32,12 +32,17 @@ pub(crate) struct Marker {
     pub(crate) timestamp_us: u64,
     pub(crate) name: String,
     pub(crate) phase: Option<MarkerPhase>,
+    pub(crate) protocol: Option<String>,
+    pub(crate) trial_id: Option<String>,
+    pub(crate) attempt: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MarkerPhase {
     Start,
     End,
+    Accepted,
+    Discarded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +72,10 @@ pub(crate) struct Trace {
 }
 
 impl Trace {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one ordered format dispatch keeps additive v1 event compatibility auditable"
+    )]
     pub(crate) fn read(path: &Path) -> Result<Self, String> {
         let file = File::open(path)
             .map_err(|error| format!("cannot open capture '{}': {error}", path.display()))?;
@@ -123,8 +132,25 @@ impl Trace {
                     {
                         Some("start") => Some(MarkerPhase::Start),
                         Some("end") => Some(MarkerPhase::End),
+                        Some("accepted") => Some(MarkerPhase::Accepted),
+                        Some("discarded") => Some(MarkerPhase::Discarded),
                         _ => None,
                     },
+                    protocol: event
+                        .payload
+                        .get("protocol")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    trial_id: event
+                        .payload
+                        .get("trial_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    attempt: event
+                        .payload
+                        .get("attempt")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok()),
                 }),
                 KIND_RAW_HID => {
                     let (report_id, bytes) =
@@ -165,26 +191,77 @@ impl Trace {
 
     pub(crate) fn guided_stages(&self) -> Vec<GuidedStage> {
         let mut open = BTreeMap::new();
-        let mut stages = Vec::new();
+        let mut completed = Vec::new();
+        let mut decisions = BTreeMap::new();
         for marker in &self.markers {
+            let key = marker_key(marker);
             match marker.phase {
                 Some(MarkerPhase::Start) => {
-                    open.insert(marker.name.clone(), marker.timestamp_us);
+                    open.insert(
+                        key,
+                        (
+                            marker.timestamp_us,
+                            marker
+                                .trial_id
+                                .clone()
+                                .unwrap_or_else(|| marker.name.clone()),
+                            marker.protocol.is_some(),
+                        ),
+                    );
                 }
                 Some(MarkerPhase::End) => {
-                    if let Some(start_us) = open.remove(&marker.name) {
-                        stages.push(GuidedStage {
-                            name: marker.name.clone(),
-                            start_us,
-                            end_us: marker.timestamp_us,
-                        });
+                    if let Some((start_us, name, requires_acceptance)) = open.remove(&key) {
+                        completed.push((
+                            key,
+                            GuidedStage {
+                                name,
+                                start_us,
+                                end_us: marker.timestamp_us,
+                            },
+                            requires_acceptance,
+                        ));
                     }
+                }
+                Some(MarkerPhase::Accepted) => {
+                    decisions.insert(key, true);
+                }
+                Some(MarkerPhase::Discarded) => {
+                    decisions.insert(key, false);
                 }
                 None => {}
             }
         }
+        let mut stages = Vec::new();
+        let mut accepted_by_trial = BTreeMap::new();
+        for (key, stage, requires_acceptance) in completed {
+            if requires_acceptance {
+                if decisions.get(&key) == Some(&true) {
+                    // A well-formed v2 capture has one accepted attempt. If a
+                    // manually edited or interrupted file contains more, use
+                    // the latest deterministically instead of double-counting
+                    // the required trial.
+                    accepted_by_trial.insert(stage.name.clone(), stage);
+                }
+            } else {
+                stages.push(stage);
+            }
+        }
+        stages.extend(accepted_by_trial.into_values());
         stages.sort_by_key(|stage| stage.start_us);
         stages
+    }
+
+    pub(crate) fn guided_attempt_counts(&self) -> (usize, usize) {
+        let mut accepted = 0;
+        let mut discarded = 0;
+        for marker in &self.markers {
+            match marker.phase {
+                Some(MarkerPhase::Accepted) => accepted += 1,
+                Some(MarkerPhase::Discarded) => discarded += 1,
+                _ => {}
+            }
+        }
+        (accepted, discarded)
     }
 
     pub(crate) fn reference_motion(&self) -> Vec<Motion> {
@@ -201,6 +278,14 @@ impl Trace {
             })
             .collect()
     }
+}
+
+fn marker_key(marker: &Marker) -> String {
+    format!(
+        "{}#{}",
+        marker.trial_id.as_deref().unwrap_or(&marker.name),
+        marker.attempt.unwrap_or(0)
+    )
 }
 
 pub(crate) fn snapshot(state: &SteamControllerState) -> DesktopInputSnapshot {
@@ -222,16 +307,25 @@ mod tests {
                     timestamp_us: 10,
                     name: "hold".to_owned(),
                     phase: Some(MarkerPhase::Start),
+                    protocol: None,
+                    trial_id: None,
+                    attempt: None,
                 },
                 Marker {
                     timestamp_us: 20,
                     name: "ignored".to_owned(),
                     phase: None,
+                    protocol: None,
+                    trial_id: None,
+                    attempt: None,
                 },
                 Marker {
                     timestamp_us: 30,
                     name: "hold".to_owned(),
                     phase: Some(MarkerPhase::End),
+                    protocol: None,
+                    trial_id: None,
+                    attempt: None,
                 },
             ],
             ..Trace::default()
@@ -249,7 +343,7 @@ mod tests {
     #[test]
     fn old_raw_v1_recording_falls_back_to_state_and_lizard_decoding() {
         let path = std::env::temp_dir().join(format!(
-            "sc-lizard-lab-trace-{}-{}.jsonl",
+            "sc-visualizer-lizard-trace-{}-{}.jsonl",
             process::id(),
             std::thread::current().name().unwrap_or("test")
         ));
@@ -271,5 +365,68 @@ mod tests {
         assert_eq!((trace.lizard[0].value.x, trace.lizard[0].value.y), (-1, 2));
         assert_eq!(trace.lizard[0].value.horizontal_wheel, -4);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn guided_v2_uses_only_the_accepted_attempt() {
+        let marker = |timestamp_us, attempt, phase| Marker {
+            timestamp_us,
+            name: "hold_center".to_owned(),
+            phase: Some(phase),
+            protocol: Some("lizard-guided-v2".to_owned()),
+            trial_id: Some("hold_center".to_owned()),
+            attempt: Some(attempt),
+        };
+        let trace = Trace {
+            markers: vec![
+                marker(10, 1, MarkerPhase::Start),
+                marker(20, 1, MarkerPhase::End),
+                marker(21, 1, MarkerPhase::Discarded),
+                marker(30, 2, MarkerPhase::Start),
+                marker(40, 2, MarkerPhase::End),
+                marker(41, 2, MarkerPhase::Accepted),
+            ],
+            ..Trace::default()
+        };
+        assert_eq!(
+            trace.guided_stages(),
+            [GuidedStage {
+                name: "hold_center".to_owned(),
+                start_us: 30,
+                end_us: 40,
+            }]
+        );
+        assert_eq!(trace.guided_attempt_counts(), (1, 1));
+    }
+
+    #[test]
+    fn guided_v2_never_counts_a_required_trial_twice() {
+        let marker = |timestamp_us, attempt, phase| Marker {
+            timestamp_us,
+            name: "hold_center".to_owned(),
+            phase: Some(phase),
+            protocol: Some("lizard-guided-v2".to_owned()),
+            trial_id: Some("hold_center".to_owned()),
+            attempt: Some(attempt),
+        };
+        let trace = Trace {
+            markers: vec![
+                marker(10, 1, MarkerPhase::Start),
+                marker(20, 1, MarkerPhase::End),
+                marker(21, 1, MarkerPhase::Accepted),
+                marker(30, 2, MarkerPhase::Start),
+                marker(40, 2, MarkerPhase::End),
+                marker(41, 2, MarkerPhase::Accepted),
+            ],
+            ..Trace::default()
+        };
+        assert_eq!(
+            trace.guided_stages(),
+            [GuidedStage {
+                name: "hold_center".to_owned(),
+                start_us: 30,
+                end_us: 40,
+            }]
+        );
     }
 }

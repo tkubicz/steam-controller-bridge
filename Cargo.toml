@@ -19,7 +19,6 @@ members = [
     "apps/gamepad-simulator",
     "apps/sc-replay",
     "apps/sc-probe",
-    "apps/sc-lizard-lab",
     "apps/sc-visualizer",
     "apps/sc-bridge",
     "apps/sc-bridge-menu",
@@ -43,6 +42,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 hidapi = { version = "2.6.6", default-features = false, features = ["macos-shared-device"] }
 rustix = { version = "1.1.4", features = ["fs"] }
+rfd = "0.17.2"
 eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow"] }
 tray-icon = "0.24.2"
 tiny-skia = { version = "0.12.0", default-features = false, features = ["simd", "std"] }

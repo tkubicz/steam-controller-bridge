@@ -10,11 +10,11 @@ use desktop_bindings::{
 };
 use serde::Serialize;
 
-use crate::metrics::{
+use crate::lizard::metrics::{
     angle_error, click_windows, right_pad_intervals, MotionTimeline, SpeedBand,
     FAST_SPEED_COUNTS_PER_SECOND, STATIONARY_SPEED_COUNTS_PER_SECOND,
 };
-use crate::trace::{snapshot, Motion, Trace};
+use crate::lizard::trace::{snapshot, Motion, Trace};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct Leakage {
@@ -24,62 +24,62 @@ pub(crate) struct Leakage {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct ComparisonReport {
-    tool_version: &'static str,
-    profile_name: String,
-    state_count: usize,
-    reference_motion_count: usize,
-    bridge_motion_count: usize,
-    endpoint_error: PointError,
-    rms_path_error_pixels: f64,
-    angular_error_degrees: Option<f64>,
-    latency_error_us: Option<i64>,
-    stationary_leakage: Leakage,
-    click_leakage: Leakage,
-    speed_bin_response: Vec<SpeedBin>,
-    guided_summary: Option<GuidedComparisonSummary>,
-    guided_stages: Vec<GuidedStageComparison>,
+    pub(crate) tool_version: &'static str,
+    pub(crate) profile_name: String,
+    pub(crate) state_count: usize,
+    pub(crate) reference_motion_count: usize,
+    pub(crate) bridge_motion_count: usize,
+    pub(crate) endpoint_error: PointError,
+    pub(crate) rms_path_error_pixels: f64,
+    pub(crate) angular_error_degrees: Option<f64>,
+    pub(crate) latency_error_us: Option<i64>,
+    pub(crate) stationary_leakage: Leakage,
+    pub(crate) click_leakage: Leakage,
+    pub(crate) speed_bin_response: Vec<SpeedBin>,
+    pub(crate) guided_summary: Option<GuidedComparisonSummary>,
+    pub(crate) guided_stages: Vec<GuidedStageComparison>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-struct PointError {
-    x: i64,
-    y: i64,
-    distance_pixels: f64,
+pub(crate) struct PointError {
+    pub(crate) x: i64,
+    pub(crate) y: i64,
+    pub(crate) distance_pixels: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-struct SpeedBin {
-    label: &'static str,
-    minimum_counts_per_second: f64,
-    maximum_counts_per_second: Option<f64>,
-    samples: usize,
-    reference_pixels: u64,
-    bridge_pixels: u64,
+pub(crate) struct SpeedBin {
+    pub(crate) label: &'static str,
+    pub(crate) minimum_counts_per_second: f64,
+    pub(crate) maximum_counts_per_second: Option<f64>,
+    pub(crate) samples: usize,
+    pub(crate) reference_pixels: u64,
+    pub(crate) bridge_pixels: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-struct GuidedStageComparison {
-    name: String,
-    state_samples: usize,
-    reference_motion_reports: usize,
-    bridge_motion_reports: usize,
-    reference_path_pixels: u64,
-    bridge_path_pixels: u64,
-    bridge_to_reference_ratio: Option<f64>,
-    endpoint_error: PointError,
-    rms_path_error_pixels: f64,
+pub(crate) struct GuidedStageComparison {
+    pub(crate) name: String,
+    pub(crate) state_samples: usize,
+    pub(crate) reference_motion_reports: usize,
+    pub(crate) bridge_motion_reports: usize,
+    pub(crate) reference_path_pixels: u64,
+    pub(crate) bridge_path_pixels: u64,
+    pub(crate) bridge_to_reference_ratio: Option<f64>,
+    pub(crate) endpoint_error: PointError,
+    pub(crate) rms_path_error_pixels: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
-struct GuidedComparisonSummary {
-    stage_count: usize,
-    state_samples: usize,
-    reference_motion_reports: usize,
-    bridge_motion_reports: usize,
-    reference_path_pixels: u64,
-    bridge_path_pixels: u64,
-    bridge_to_reference_ratio: Option<f64>,
-    rms_path_error_pixels: f64,
+pub(crate) struct GuidedComparisonSummary {
+    pub(crate) stage_count: usize,
+    pub(crate) state_samples: usize,
+    pub(crate) reference_motion_reports: usize,
+    pub(crate) bridge_motion_reports: usize,
+    pub(crate) reference_path_pixels: u64,
+    pub(crate) bridge_path_pixels: u64,
+    pub(crate) bridge_to_reference_ratio: Option<f64>,
+    pub(crate) rms_path_error_pixels: f64,
 }
 
 pub(crate) fn write_report(
@@ -121,7 +121,7 @@ pub(crate) fn load_profile(
     profile_path: Option<&Path>,
     profile_name: Option<&str>,
 ) -> Result<BindingProfile, String> {
-    let mut profile = if let Some(path) = profile_path {
+    let profile = if let Some(path) = profile_path {
         let store = load_store(path)?;
         let name = profile_name.ok_or("--profile-name is required with --profile")?;
         store
@@ -131,12 +131,16 @@ pub(crate) fn load_profile(
     } else {
         BindingProfile::default()
     };
+    Ok(mouse_only_profile(profile))
+}
+
+pub(crate) fn mouse_only_profile(mut profile: BindingProfile) -> BindingProfile {
     profile.bindings = ControlBindings::default();
     profile.pads.left_scroll.enabled = false;
     profile.pads.right_mouse.enabled = true;
     profile.pads.left_scroll.feedback.enabled = false;
     profile.pads.right_mouse.feedback.enabled = false;
-    Ok(profile)
+    profile
 }
 
 pub(crate) fn bridge_motion(trace: &Trace, profile: BindingProfile) -> Result<Vec<Motion>, String> {
@@ -151,6 +155,16 @@ pub(crate) fn bridge_motion(trace: &Trace, profile: BindingProfile) -> Result<Ve
         )?;
     }
     Ok(sink.motion)
+}
+
+pub(crate) fn compare_with_profile(
+    trace: &Trace,
+    profile: BindingProfile,
+) -> Result<(ComparisonReport, Vec<Motion>), String> {
+    let profile_name = profile.name.clone();
+    let candidate = bridge_motion(trace, profile)?;
+    let report = build_report(trace, &candidate, profile_name);
+    Ok((report, candidate))
 }
 
 #[derive(Default)]
@@ -188,7 +202,11 @@ impl DesktopInputSink for MotionSink {
     }
 }
 
-fn build_report(trace: &Trace, candidate: &[Motion], profile_name: String) -> ComparisonReport {
+pub(crate) fn build_report(
+    trace: &Trace,
+    candidate: &[Motion],
+    profile_name: String,
+) -> ComparisonReport {
     let reference = trace.reference_motion();
     let sample_times: Vec<_> = trace
         .states
@@ -510,15 +528,21 @@ mod tests {
         let trace = Trace {
             states: vec![],
             markers: vec![
-                crate::trace::Marker {
+                crate::lizard::trace::Marker {
                     timestamp_us: 5,
                     name: "first".to_owned(),
-                    phase: Some(crate::trace::MarkerPhase::Start),
+                    phase: Some(crate::lizard::trace::MarkerPhase::Start),
+                    protocol: None,
+                    trial_id: None,
+                    attempt: None,
                 },
-                crate::trace::Marker {
+                crate::lizard::trace::Marker {
                     timestamp_us: 15,
                     name: "first".to_owned(),
-                    phase: Some(crate::trace::MarkerPhase::End),
+                    phase: Some(crate::lizard::trace::MarkerPhase::End),
+                    protocol: None,
+                    trial_id: None,
+                    attempt: None,
                 },
             ],
             ..Trace::default()

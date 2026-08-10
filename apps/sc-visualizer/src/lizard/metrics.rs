@@ -1,6 +1,6 @@
 #![allow(clippy::cast_precision_loss)] // Bounded capture coordinates become f64 metrics.
 
-use crate::trace::{Motion, Trace};
+use super::trace::{Motion, Trace};
 
 pub(crate) const STATIONARY_SPEED_COUNTS_PER_SECOND: f64 = 1_000.0;
 pub(crate) const FAST_SPEED_COUNTS_PER_SECOND: f64 = 15_000.0;

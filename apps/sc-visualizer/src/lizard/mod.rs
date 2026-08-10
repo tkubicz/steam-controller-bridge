@@ -1,27 +1,29 @@
+//! Lizard-mode mouse capture, analysis, comparison, and safe replay.
+
 mod analysis;
 mod capture;
 mod compare;
 mod metrics;
+mod protocol;
 mod replay;
+mod results;
 mod trace;
+mod ui;
+
+pub(crate) use ui::{LabAction, LabUi};
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "sc-lizard-lab",
-    version,
-    about = "Capture and compare Steam Controller lizard-mode mouse behavior"
-)]
-struct Cli {
+#[derive(Debug, Clone, Args)]
+pub(crate) struct LizardArgs {
     #[command(subcommand)]
-    command: Command,
+    pub(crate) command: LizardCommand,
 }
 
-#[derive(Debug, Subcommand)]
-enum Command {
+#[derive(Debug, Clone, Subcommand)]
+pub(crate) enum LizardCommand {
     /// Capture raw controller and passive macOS pointer events.
     Capture {
         /// Override automatic active-controller detection with a global HID index.
@@ -60,43 +62,52 @@ enum Command {
         source: ReplaySource,
         #[arg(long, value_enum, default_value_t = ReplayOutput::Dump)]
         output: ReplayOutput,
-        #[arg(long, default_value_t = 1.0)]
+        #[arg(
+            long,
+            default_value_t = 1.0,
+            allow_hyphen_values = true,
+            value_parser = parse_replay_speed
+        )]
         speed: f64,
     },
 }
 
+fn parse_replay_speed(value: &str) -> Result<f64, String> {
+    let speed = value
+        .parse::<f64>()
+        .map_err(|error| format!("invalid replay speed {value:?}: {error}"))?;
+    if speed.is_finite() && speed > 0.0 {
+        Ok(speed)
+    } else {
+        Err("replay speed must be finite and positive".to_owned())
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum ReplaySource {
+pub(crate) enum ReplaySource {
     Reference,
     Bridge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum ReplayOutput {
+pub(crate) enum ReplayOutput {
     Dump,
     Desktop,
 }
 
-fn main() {
-    if let Err(error) = run() {
-        eprintln!("sc-lizard-lab: {error}");
-        std::process::exit(1);
-    }
-}
-
-fn run() -> Result<(), String> {
-    match Cli::parse().command {
-        Command::Capture {
+pub(crate) fn run(command: LizardCommand) -> Result<(), String> {
+    match command {
+        LizardCommand::Capture {
             index,
             output,
             guided,
             duration_secs,
         } => capture::run(index, &output, guided, duration_secs),
-        Command::Analyze { input, output } => {
+        LizardCommand::Analyze { input, output } => {
             let trace = trace::Trace::read(&input)?;
             analysis::write_report(&trace, &output)
         }
-        Command::Compare {
+        LizardCommand::Compare {
             input,
             output,
             profile,
@@ -105,7 +116,7 @@ fn run() -> Result<(), String> {
             let trace = trace::Trace::read(&input)?;
             compare::write_report(&trace, &output, profile.as_deref(), profile_name.as_deref())
         }
-        Command::Replay {
+        LizardCommand::Replay {
             input,
             source,
             output,
@@ -114,43 +125,5 @@ fn run() -> Result<(), String> {
             let trace = trace::Trace::read(&input)?;
             replay::run(&trace, source, output, speed)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn capture_auto_detects_when_index_is_omitted() {
-        let cli = Cli::try_parse_from([
-            "sc-lizard-lab",
-            "capture",
-            "--output",
-            "capture.jsonl",
-            "--guided",
-        ])
-        .unwrap();
-        let Command::Capture { index, .. } = cli.command else {
-            panic!("expected capture command");
-        };
-        assert_eq!(index, None);
-    }
-
-    #[test]
-    fn capture_accepts_an_explicit_index_override() {
-        let cli = Cli::try_parse_from([
-            "sc-lizard-lab",
-            "capture",
-            "--index",
-            "43",
-            "--output",
-            "capture.jsonl",
-        ])
-        .unwrap();
-        let Command::Capture { index, .. } = cli.command else {
-            panic!("expected capture command");
-        };
-        assert_eq!(index, Some(43));
     }
 }

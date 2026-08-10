@@ -117,16 +117,20 @@ For lizard-mouse characterization, grant Input Monitoring, stop the bridge and
 other lizard-off heartbeats, and collect three guided runs per transport:
 
 ```bash
-cargo run -p sc-lizard-lab -- capture --output /tmp/lizard-1.jsonl --guided
-cargo run -p sc-lizard-lab -- analyze /tmp/lizard-1.jsonl --output /tmp/lizard-analysis.json
-cargo run -p sc-lizard-lab -- compare /tmp/lizard-1.jsonl --output /tmp/lizard-compare.json
+cargo run -p sc-visualizer -- lizard capture --output /tmp/lizard-1.jsonl --guided
+cargo run -p sc-visualizer -- lizard analyze /tmp/lizard-1.jsonl --output /tmp/lizard-analysis.json
+cargo run -p sc-visualizer -- lizard compare /tmp/lizard-1.jsonl --output /tmp/lizard-compare.json
 ```
 
-Acceptance requires final `capture_metadata.valid: true`, observed state and
-`0x40` reports, no unmatched external mouse events in guided markers, and no
-cursor-edge clipping in motion stages. Automated tests cover decoding,
-recording compatibility, timestamp ordering, analysis, and comparator math;
-they do not prove Input Monitoring, live event-tap behavior, or hardware motion.
+Use the visualizer's Lizard Mouse Lab for the illustrated protocol, per-trial
+retry, automatic reports, and offline trajectory comparison. A usable capture
+requires final `capture_metadata.valid: true` plus observed state and `0x40`
+reports. Treat unmatched external mouse events and cursor-edge clipping as
+contamination warnings; the results intentionally define no behavioral
+pass/fail threshold yet. Automated tests cover decoding, recording
+compatibility, timestamp ordering, analysis, and comparator math; they do not
+prove Input Monitoring, live event-tap behavior, hardware motion, or the
+ordinary-worker ownership transition on actual hardware.
 
 After identifying an active exact supported Puck or Bluetooth collection and
 fully quitting Steam, the whitelisted hardware test is:
