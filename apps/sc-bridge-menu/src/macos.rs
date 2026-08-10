@@ -80,6 +80,21 @@ const BINDING_PROFILE_PREFIX: &str = "binding-profile:";
 const LOGS_ID: &str = "open-logs";
 const ABOUT_ID: &str = "about";
 const UPDATES_ID: &str = "updates";
+
+const fn app_center_available() -> bool {
+    cfg!(feature = "updater")
+}
+
+fn app_center_page_for_menu(id: &str) -> Option<AppCenterPage> {
+    if !app_center_available() {
+        return None;
+    }
+    match id {
+        ABOUT_ID => Some(AppCenterPage::About),
+        UPDATES_ID => Some(AppCenterPage::Updates),
+        _ => None,
+    }
+}
 const QUIT_ID: &str = "quit";
 const IDLE_NEVER_ID: &str = "idle-never";
 const IDLE_5_ID: &str = "idle-5";

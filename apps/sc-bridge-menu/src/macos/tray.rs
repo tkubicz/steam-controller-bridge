@@ -28,8 +28,13 @@ impl MenuApp {
             MenuItem::with_id(ENABLE_BINDINGS_ID, "Request Permissions…", true, None);
         let edit_profiles = MenuItem::with_id(EDIT_BINDINGS_ID, EDIT_PROFILES_LABEL, true, None);
         let logs = MenuItem::with_id(LOGS_ID, "Open Log Folder", true, None);
-        let updates = MenuItem::with_id(UPDATES_ID, "Check for Updates…", true, None);
-        let about = MenuItem::with_id(ABOUT_ID, "About", true, None);
+        let updates = MenuItem::with_id(
+            UPDATES_ID,
+            "Check for Updates…",
+            app_center_available(),
+            None,
+        );
+        let about = MenuItem::with_id(ABOUT_ID, "About", app_center_available(), None);
         let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
         let idle_shutdown = vec![
             (
@@ -444,8 +449,11 @@ impl MenuApp {
                     eprintln!("cannot open log folder: {error}");
                 }
             }
-            ABOUT_ID => self.show_app_center(AppCenterPage::About),
-            UPDATES_ID => self.show_app_center(AppCenterPage::Updates),
+            ABOUT_ID | UPDATES_ID => {
+                if let Some(page) = app_center_page_for_menu(id) {
+                    self.show_app_center(page);
+                }
+            }
             QUIT_ID => {
                 if self.shutdown() {
                     event_loop.exit();
