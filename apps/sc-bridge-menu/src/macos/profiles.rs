@@ -321,11 +321,17 @@ impl MenuApp {
                 .append(item)
                 .map_err(|error| error.to_string())?;
         }
-        // The permission items live in their own submenu, so this one only
-        // carries the profiles and the editor.
-        let separator = PredefinedMenuItem::separator();
+        // Keep profile selection, editing, and wheel behavior together even
+        // after an external profile edit rebuilds the dynamic entries.
+        let editor_separator = PredefinedMenuItem::separator();
+        let wheel_separator = PredefinedMenuItem::separator();
         let edit = MenuItem::with_id(EDIT_BINDINGS_ID, EDIT_PROFILES_LABEL, true, None);
-        for item in [&separator as &dyn tray_icon::menu::IsMenuItem, &edit] {
+        for item in [
+            &editor_separator as &dyn tray_icon::menu::IsMenuItem,
+            &edit,
+            &wheel_separator,
+            &items.overlay_submenu,
+        ] {
             items
                 .bindings_submenu
                 .append(item)

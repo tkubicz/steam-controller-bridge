@@ -15,7 +15,7 @@ impl MenuApp {
         let firmware = MenuItem::new("Firmware: Unknown", false, None);
         let battery = MenuItem::new("Battery: Unknown", false, None);
         let haptics = MenuItem::new("Haptics: Idle", false, None);
-        let bindings = MenuItem::new("Bindings: Disabled", false, None);
+        let current_profile = MenuItem::new("Current Profile: None · Disabled", false, None);
         let automatic_shutdown = MenuItem::new("Auto shutdown: Idle 0:00 / 15:00", false, None);
         let problem = MenuItem::new("Problem: None", false, None);
         let run_toggle = MenuItem::with_id(RUN_TOGGLE_ID, "Start Bridge", false, None);
@@ -99,6 +99,15 @@ impl MenuApp {
             self.settings.power_off_on_puck,
             None,
         );
+        let shutdown_submenu = Submenu::with_items(
+            "Shutdown Settings",
+            true,
+            &[
+                &idle_submenu as &dyn tray_icon::menu::IsMenuItem,
+                &puck_dock,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
         let overlay_enabled = CheckMenuItem::with_id(
             OVERLAY_ENABLED_ID,
             "Hold Quick Access for Profile Wheel",
@@ -153,26 +162,33 @@ impl MenuApp {
         bindings_submenu
             .append(&edit_profiles)
             .map_err(|error| error.to_string())?;
-        // Everything that asks macOS for a permission, or sends you to the
-        // pane that grants it, lives together rather than being scattered
-        // through the menu.
-        let permissions_submenu = Submenu::with_items(
-            "Permissions",
+        bindings_submenu
+            .append(&PredefinedMenuItem::separator())
+            .map_err(|error| error.to_string())?;
+        bindings_submenu
+            .append(&overlay_submenu)
+            .map_err(|error| error.to_string())?;
+        let troubleshooting_submenu = Submenu::with_items(
+            "Troubleshooting",
             true,
             &[
                 &enable_bindings,
                 &PredefinedMenuItem::separator(),
                 &settings,
                 &accessibility,
+                &PredefinedMenuItem::separator(),
+                &copy,
+                &logs,
             ],
         )
         .map_err(|error| error.to_string())?;
-        let separators: [PredefinedMenuItem; 8] =
+        let separators: [PredefinedMenuItem; 6] =
             std::array::from_fn(|_| PredefinedMenuItem::separator());
         let copy_error_visible = self.runtime.status().last_error.is_some();
         let mut root_items: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![
             &bridge,
             &status,
+            &run_toggle,
             &separators[0],
             &controller,
             &input,
@@ -180,7 +196,6 @@ impl MenuApp {
             &firmware,
             &battery,
             &haptics,
-            &bindings,
             &separators[1],
             &problem,
         ];
@@ -188,23 +203,17 @@ impl MenuApp {
             root_items.push(&copy_error);
         }
         root_items.extend([
-            &separators[2] as &dyn tray_icon::menu::IsMenuItem,
-            &run_toggle,
-            &separators[3],
+            &troubleshooting_submenu as &dyn tray_icon::menu::IsMenuItem,
+            &separators[2],
             &automatic_shutdown,
-            &idle_submenu,
-            &puck_dock,
-            &separators[4],
+            &shutdown_submenu,
+            &separators[3],
+            &current_profile,
             &bindings_submenu,
-            &overlay_submenu,
-            &separators[5],
-            &permissions_submenu,
-            &copy,
-            &logs,
-            &separators[6],
+            &separators[4],
             &updates,
             &about,
-            &separators[7],
+            &separators[5],
             &quit,
         ]);
         let menu = Menu::with_items(&root_items).map_err(|error| error.to_string())?;
@@ -227,7 +236,7 @@ impl MenuApp {
             firmware,
             battery,
             haptics,
-            bindings,
+            current_profile,
             automatic_shutdown,
             problem,
             run_toggle,
@@ -238,6 +247,7 @@ impl MenuApp {
             puck_dock,
             bindings_submenu,
             binding_profiles,
+            overlay_submenu,
             overlay_enabled,
             overlay_hold,
         });
@@ -286,7 +296,7 @@ impl MenuApp {
                 items.firmware.set_text(&model.firmware);
                 items.battery.set_text(&model.battery);
                 items.haptics.set_text(&model.haptics);
-                items.bindings.set_text(&model.bindings);
+                items.current_profile.set_text(&model.current_profile);
                 items.automatic_shutdown.set_text(&model.automatic_shutdown);
                 items.problem.set_text(&model.problem);
                 items.run_toggle.set_text(model.run_action.label());

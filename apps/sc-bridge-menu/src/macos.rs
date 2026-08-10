@@ -117,7 +117,7 @@ struct MenuItems {
     firmware: MenuItem,
     battery: MenuItem,
     haptics: MenuItem,
-    bindings: MenuItem,
+    current_profile: MenuItem,
     automatic_shutdown: MenuItem,
     problem: MenuItem,
     run_toggle: MenuItem,
@@ -128,6 +128,7 @@ struct MenuItems {
     puck_dock: CheckMenuItem,
     bindings_submenu: Submenu,
     binding_profiles: Vec<(String, CheckMenuItem)>,
+    overlay_submenu: Submenu,
     overlay_enabled: CheckMenuItem,
     overlay_hold: Vec<(u64, CheckMenuItem)>,
 }
