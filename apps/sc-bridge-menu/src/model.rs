@@ -121,6 +121,13 @@ impl MenuModel {
             permission_required: status.bindings.state == DesktopBindingsState::PermissionRequired,
         }
     }
+
+    pub(crate) fn apply_external_error(&mut self, error: &str) {
+        self.problem = format!("{WARNING} Problem: {}", friendly_error(error));
+        self.has_error = true;
+        self.tray_state = TrayState::Error;
+        "Status: Action required".clone_into(&mut self.status);
+    }
 }
 
 /// A warning here never flips the tray icon or the Problem line: the bridge
@@ -260,6 +267,9 @@ fn input_label(status: &BridgeStatus) -> String {
 
 fn friendly_error(error: &str) -> String {
     let lower = error.to_ascii_lowercase();
+    if lower.contains("updater suspension recovery") {
+        return "Update cleanup delayed; Quit will retry".to_owned();
+    }
     if lower.contains("not permitted") || lower.contains("e00002e2") {
         return "Input Monitoring permission required".to_owned();
     }
@@ -579,6 +589,21 @@ mod tests {
         let summary = friendly_error(&error);
         assert!(summary.chars().count() <= MAX_PROBLEM_CHARS + 1);
         assert!(summary.ends_with('…'));
+    }
+
+    #[test]
+    fn external_recovery_errors_override_a_healthy_runtime_model() {
+        let mut model = MenuModel::from_status(&ready_status(ControllerTransport::Puck));
+
+        model.apply_external_error("Updater suspension recovery timed out");
+
+        assert_eq!(
+            model.problem,
+            "⚠ Problem: Update cleanup delayed; Quit will retry"
+        );
+        assert_eq!(model.status, "Status: Action required");
+        assert_eq!(model.tray_state, TrayState::Error);
+        assert!(model.has_error);
     }
 
     #[test]

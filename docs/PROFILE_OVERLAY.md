@@ -161,9 +161,9 @@ so a stick flick shows up in the next frame without an unbounded UI backlog.
 
 ## The overlay process
 
-The overlay is a second process of the same binary, started with
-`--profile-overlay`. It is separate because `eframe::run_native` owns an event
-loop and the menu app's is already committed to the status item.
+The overlay is a second process of the same binary, started with the hidden
+`profile-overlay` subcommand. It is separate because `eframe::run_native` owns
+an event loop and the menu app's is already committed to the status item.
 
 The child never writes back. Every decision is the runtime's, which is what lets
 the window be non-activating, click-through, and completely input-free.

@@ -1,378 +1,102 @@
 # Testing
 
-## Firmware
+Automated gates prove portable logic, lifecycle ordering, packaging structure,
+and signed-update policy. They do not prove physical controls, permissions,
+USB re-enumeration, browser behavior, or visual acceptance.
 
-Run the portable parser/session tests without hardware:
-
-```bash
-make -C firmware/xiao-nrf52840 test
-```
-
-With Arduino CLI and the pinned Seeed core installed, compile the actual sketch:
+## CI-equivalent gates
 
 ```bash
-make -C firmware/xiao-nrf52840 build
-```
-
-Physical acceptance additionally covers CDC/gamepad enumeration, every report
-field, a 30-second unchanged hold, host termination neutralization within 125
-ms, malformed recovery, reconnect/sequence wrap, Chrome and Safari Gamepad API
-behavior, one streaming service, and an extended play session. Detailed steps are
-in the firmware README; these results must not be inferred from native or CI
-builds.
-
-The workspace has no hardware-dependent tests. Run the same gates as CI:
-
-```bash
+python3 tools/check-workspace-versions.py --self-test
+python3 tools/check-workspace-versions.py
+python3 tools/check-changelog.py --self-test
+python3 tools/check-changelog.py
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo build --workspace --all-targets
-./tools/build-macos-app.sh
+make -C firmware/xiao-nrf52840 test
 ```
 
-Runtime lifecycle tests additionally prove that system-sleep suspension enters
-the stopped state, serial output and controller-discovery ownership are dropped
-before the command acknowledgement is observable, desktop shutdown retains a
-real timeout even when a platform sink is blocked, and control/event mailboxes
-stay bounded. On macOS, launching either serial frontend also exercises the
-fail-closed `IOKit` monitor registration; a registration failure must leave the
-runtime in Error without opening hardware. A real sleep/wake cycle with the
-XIAO attached remains a physical acceptance gate because a unit test cannot
-exercise CDC re-enumeration or the operating-system power callback.
+On macOS, also build and verify the packaged application:
 
-The optimized desktop-worker latency probe is repeatable with:
+```bash
+./tools/build-macos-app.sh
+codesign --verify --deep --strict "dist/Steam Controller Bridge.app"
+```
+
+CI additionally builds the pinned Arduino firmware artifacts. `cargo deny
+check` covers advisories, licenses, bans, and sources for the shipped macOS
+dependency graph.
+
+## Automated coverage map
+
+| Boundary | What tests establish |
+| --- | --- |
+| Steam protocol and device | Complete report decoding, typed failures, exact collection allowlists, fixed write vectors, and masked diagnostics. |
+| Mapper and bridge core | Control mapping, filter reset, timeout/disconnect neutralization, changed-state policy, and reconnect accounting. |
+| Serial and wire protocol | Negotiation, framing/CRC recovery, bounded queues, ping/pong health, sequence handling, and unchanged-state refresh. |
+| Runtime | Discovery, transition retention, neutral-before-release, sleep/update suspension, automatic shutdown, feedback leasing, and command acknowledgement. |
+| Desktop profiles | Schema migration, validation, atomic persistence, edge/reference counts, pad motion, feedback cadence, and sink-failure cleanup. |
+| Recording and replay | Typed round trips, ordering, unknown events, seeking, malformed input, and deterministic replay. |
+| Updater | Signature-before-parse, rollback prevention, exact artifact verification, retry/cache semantics, concurrent temporaries, UF2 validation, cancellation, and post-flash revision policy. |
+| Menu and child processes | Settings migration, status rendering, bounded IPC, request correlation, stale-generation rejection, process reaping, diagnostics, and feature gates. |
+| Firmware native tests | Parser/session recovery, handshake gating, watchdog behavior, rumble feedback, and malformed-frame handling without hardware. |
+
+Test names and fixtures are the source of truth for individual cases. This file
+records maintained contracts rather than duplicating every assertion.
+
+## Focused performance and lifecycle gates
 
 ```bash
 cargo test --release -p bridge-runtime \
   tests::desktop_worker_input_latency_stays_within_budget -- --exact --nocapture
-```
-
-Its p95 must stay below the 10 ms runtime tick. For a release menu-app resource
-check, take at least two idle samples of `%CPU`, RSS, open descriptors, threads,
-and `leaks -quiet` output from the same PID. Counts must remain stable after
-startup; the overlay host's repeated-child test separately exercises kill,
-reap, and writer-thread join across 32 process cycles. Restricted-process leak
-reports can include stable AppKit/AppIntents framework cycles, so treat growth
-between samples or project-owned roots as a failure rather than attributing an
-unchanged framework root to this code.
-
-The protocol tests cover every message type, fixed axis endpoints, the static CRC vector, partial and combined reads, garbage, truncation, invalid versions, oversized lengths, corruption, and recovery. A deterministic pseudo-random byte-stream test checks that framing never panics.
-
-Rumble coverage includes the protocol type-8 little-endian vector, exact
-eight-byte Xbox command validation and `u8 * 257` scaling, the complete
-ten-byte SC2 output vector, independent/zero/full-scale channels, latest-value
-coalescing, 25 ms firmware feedback, 40 ms actuator refresh, 100 ms lease
-expiry, 500 ms degraded retry, reconnect clearing, and safety-zero priority.
-
-Automatic-shutdown coverage includes the complete 64-byte `0x9f`/`off!`
-feature vector, exact device allowlist, charge-state typing, meaningful
-activity without report-arrival resets, timeout changes, Puck-only fresh-dock
-detection, one-shot placement latching, scheduled three-write bursts,
-disconnect-after-success handling, failure recovery, runtime command updates,
-and neutral-before-power-off ordering. These portable tests do not prove that
-real hardware accepts or remains asleep after the command.
-
-Recording tests cover typed raw and gamepad round trips, timestamp ordering, unknown events, seeking, deterministic replay, malformed/truncated input, version rejection, and identical simulator-state replay.
-
-Steam Controller protocol tests cover all 30 OpenPuck button bits, every
-trigger/stick/pad/pressure/motion field, both `0x45` and extended `0x42`,
-connection/battery/signal reports, anonymized observed Bluetooth `0x45`/`0x43`
-goldens, typed recording round trips, incorrect sizes, mismatched IDs, unknown
-IDs, and arbitrary truncated lengths.
-
-The same crate commits the complete 64-byte SDL-compatible lizard-off golden
-vector. Device tests cover exact classification and rejection boundaries for
-the `28de:1304` USB/`ff00:0001`/interface 2–5 Puck and `28de:1303`
-Bluetooth/`ff00:0001`/interface -1 collection, plus immediate, three-second,
-disconnect, and reconnect heartbeat scheduling. Bridge tests cover
-safe-default option parsing, unique active-source selection, initial
-suppression, periodic refresh, leave mode, and fail-closed write behavior. The
-macOS device tests also verify that a second project process cannot acquire the
-same per-input ownership lock and that ownership is released when the first
-session ends.
-
-The tested Puck cannot be opened with HIDAPI's macOS exclusive seize option:
-it returns `0xE00002E2 not permitted`, including after Steam's persistent IPC
-LaunchAgent is removed. Hardware validation therefore uses shared native HID
-access plus the project-level per-slot lock. Contention with Steam or another
-non-project HID consumer remains a manual unsupported-use check.
-
-Mapper tests cover every documented button and hat mapping, neutral state,
-stick/pad/trigger normalization, pad release, the default physical-right-stick
-mapping and explicit alternate right-pad profile, independent and radial dead
-zones, inversion, sensitivity, saturation, finite clamping, smoothing
-convergence and reset, and immediate discrete controls while smoothing is
-active.
-
-The HID device crate unit-tests platform-neutral collection grouping. On macOS,
-enumeration and metadata inspection remain read-only:
-
-```bash
-cargo run -p sc-probe -- list
-cargo run -p sc-probe -- inspect --index 0
-```
-
-For lizard-mouse characterization, grant Input Monitoring, stop the bridge and
-other lizard-off heartbeats, and collect three guided runs per transport:
-
-```bash
-cargo run -p sc-visualizer -- lizard capture --output /tmp/lizard-1.jsonl --guided
-cargo run -p sc-visualizer -- lizard analyze /tmp/lizard-1.jsonl --output /tmp/lizard-analysis.json
-cargo run -p sc-visualizer -- lizard compare /tmp/lizard-1.jsonl --output /tmp/lizard-compare.json
-```
-
-Use the visualizer's Lizard Mouse Lab for the illustrated protocol, per-trial
-retry, automatic reports, and offline trajectory comparison. A usable capture
-requires final `capture_metadata.valid: true` plus observed state and `0x40`
-reports. Treat unmatched external mouse events and cursor-edge clipping as
-contamination warnings; the results intentionally define no behavioral
-pass/fail threshold yet. Automated tests cover decoding, recording
-compatibility, timestamp ordering, analysis, and comparator math; they do not
-prove Input Monitoring, live event-tap behavior, hardware motion, or the
-ordinary-worker ownership transition on actual hardware.
-
-After identifying an active exact supported Puck or Bluetooth collection and
-fully quitting Steam, the whitelisted hardware test is:
-
-```bash
-cargo run -p sc-probe -- suppress-lizard --index N --duration-secs 15
-```
-
-While it runs, controller `A` must not emit Space and touchpads must not move the
-pointer. After it stops, desktop behavior must return within about 10 seconds.
-Never run this alongside the visualizer, monitor, Steam, or another bridge.
-
-Test the controller actuators without the XIAO:
-
-```bash
-cargo run -p sc-probe -- rumble --index N --low 32768 --high 0
-cargo run -p sc-probe -- rumble --index N --low 0 --high 32768
-cargo run -p sc-probe -- rumble --index N --low 65535 --high 65535 \
-  --duration-ms 1000
-```
-
-Then flash the updated firmware, start `./sc-bridge`, and verify GamepadTester's
-one-second and infinite vibration actions. Hardware acceptance covers unequal
-strong/weak magnitudes, Boosteroid, GeForce NOW, rapid and continuous effects,
-and zero within 100 ms after effect stop, browser exit, bridge termination, or
-controller/XIAO disconnect. These physical results must not be inferred from unit
-tests or a successful firmware build.
-
-Test the fixed controller power-off command separately before enabling an
-automatic policy on development hardware:
-
-```bash
-cargo run -p sc-probe -- power-off --index N
-```
-
-Run the command for the exact active Puck collection with the controller both
-undocked and docked/charging, then for the exact supported Bluetooth collection.
-Record the `0x43` charge-state sequence for placement and removal. Acceptance
-requires that charging continues while powered off, the controller does not
-immediately reconnect while still docked, pressing Steam wakes it, and the
-post-command state tail fits inside the 2.5-second discovery cooldown. A
-Bluetooth disconnect after at least one successful write is a successful
-outcome. Do not infer any of these results from unit tests.
-
-After that gate, exercise live automatic shutdown with:
-
-```bash
-./sc-bridge --idle-shutdown 5
-./sc-bridge --idle-shutdown never --puck-dock-action power-off
-```
-
-For the idle path, hold every meaningful control beyond the deadline, then
-release to neutral and verify exactly one shutdown after the full interval.
-Verify IMU motion, state-report traffic, rumble, and sub-dead-zone noise do not
-reset the timer. For the Puck path, verify immediate shutdown from a fresh
-charging report, no Bluetooth/USB-cable false positive, no repeat when waking
-on the same placement, re-arming only after `Discharging`, and safe recovery
-from an injected write failure. Stop/Quit must neutralize and restore lizard
-mode without powering the controller off.
-
-Linux CI compiles the hardware-independent API and explicit unsupported-platform implementation; it does not require `hidapi` system libraries or physical hardware.
-
-The optional GUI remains part of the workspace build and strict Clippy gates.
-
-The visualizer's release-mode pipeline checks exercise one nominal second of
-250 Hz input drained in four-report UI batches without loss, and a worst-case
-three-records-per-report second through the bounded background recording sink:
-
-```bash
 cargo test --release -p sc-visualizer \
   mailbox::tests::nominal_device_rate_with_sixty_hz_drains_loses_no_reports -- --exact
 cargo test --release -p sc-visualizer \
   recording_sink::tests::background_sink_preserves_an_nominal_second_of_three_event_reports -- --exact
 ```
 
-The first gate requires zero coalesced, dropped, or overflowed reports. The
-second requires all 750 accepted JSONL events to be readable after the worker
-flushes. Static demo views are event-driven rather than force-repainted, and
-live mapper smoothing derives elapsed time from report timestamps so a
-pressure-coalesced gap does not slow the filter clock.
+The runtime latency p95 must remain below its 10 ms tick. The visualizer gates
+require no nominal-rate loss and a readable flush of every accepted recording
+event. Menu child-host tests repeatedly spawn, kill, reap, and join process and
+pipe resources.
 
-For visual checks that do not need hardware, run each deterministic state and
-capture it at 1100x760 and at the 820x600 minimum, with the sidebar at both
-260 px and 360 px:
+## Manual release acceptance
 
-```bash
-cargo run -p sc-visualizer -- --demo-state digital
-```
+Run these on the exact packaged candidate; automated results are not substitutes.
 
-`digital` activates every drawable control at once and holds the two grip-shell
-touch bits, which have no artwork and must still appear in the button grid.
-`analog` puts each stick and pad in a different quadrant, touches both pads, and
-pulls one trigger halfway and one fully, so a mirrored axis or a broken trigger
-fill is obvious. Confirm the front and rear views switch from side-by-side to
-stacked below roughly 280 px per face, that button grids change style rather
-than reflowing, and that the hex rows scroll sideways instead of wrapping.
+- Verify clean-state Input Monitoring and Accessibility prompts, grant
+  detection, Stop/Quit cleanup, and log/diagnostic redaction.
+- Test Puck and direct Bluetooth discovery, every control and axis direction,
+  battery/charge reports, reconnect, lizard restoration, and ownership
+  contention. Direct USB-C input remains unsupported.
+- Verify left/right actuator orientation, unequal magnitudes, continuous and
+  rapid effects, and zero after effect stop, process exit, or either disconnect.
+- Verify pad pointer/scroll behavior, click edges, feedback strength and side,
+  stationary noise, profile changes, and permission revocation.
+- Exercise idle and fresh-Puck-dock power-off, charging behavior, wake, one-shot
+  latching, and injected failure recovery.
+- Flash the exact release UF2 through the App Center, including manual
+  double-RESET recovery, wrong/multiple-board refusal, close/Quit interlocks,
+  exact revision reconnect, and unplug/failure messaging.
+- Sleep and wake with the XIAO attached; confirm hardware closes before sleep,
+  CDC re-enumerates, a previously running bridge resumes, and a user-stopped
+  bridge stays stopped.
+- Check the App Center and visualizer at minimum and normal sizes, the profile
+  overlay above native fullscreen and borderless games, and menu status icons.
+- Verify Safari/Chrome standard mapping plus the supported streaming services
+  on the release hardware identity.
 
-On macOS with hardware, `cargo run -p sc-visualizer` discovers a supported
-controller by itself; pass `--index N` from `sc-probe list` to pin a specific
-collection. Verify live report rate, decoded controls, mapped output, recording
-controls, and disconnect-to-neutral behavior. Unplugging should return the view
-to neutral and the app should reconnect on its own when the controller comes
-back.
+Hardware command sequences and cautions are maintained in
+[USER_GUIDE.md](USER_GUIDE.md), [BRIDGE.md](BRIDGE.md), the
+[firmware README](../firmware/xiao-nrf52840/README.md), and
+[LIZARD_MOUSE_LAB.md](LIZARD_MOUSE_LAB.md).
 
-**Axis orientation is a release gate, not an assumption.** The repository does
-not establish the physical sign of the stick and pad axes. Move each stick and
-each pad separately through left, right, up and down and confirm the dot on the
-illustration follows the physical motion; a circular sweep alone will not catch
-a transposed or mirrored axis. Correct the per-control transform in
-`apps/sc-visualizer/src/hero.rs` if the hardware disagrees, and record the
-verified signs in [STEAM_CONTROLLER_PROTOCOL.md](STEAM_CONTROLLER_PROTOCOL.md).
-Pull each trigger slowly from rest to full and confirm the fill reaches the top;
-it is calibrated against `MapperConfig::trigger_full_scale`, not `u16::MAX`.
+## Evidence records
 
-Serial tests use an in-memory `ByteTransport` and cover hello success,
-latest-only queued state flush and sequence ownership, version rejection,
-handshake timeout, bounded overflow, ping/pong timeout, firmware-originated
-ping response, and corrupted-frame accounting. Bridge tests additionally cover
-replacement of a stale raw HID report before decoding and deferral of the input
-timeout while newer HID input is waiting. Physical-port negotiation and
-refreshed state delivery have been exercised with a flashed XIAO.
-
-Runtime and CLI tests cover zero-argument defaults, explicit controller/port
-overrides, exact XIAO metadata filtering, callout-versus-tty filtering,
-battery-range handling, transition-preserving report coalescing and overflow,
-paired live binding-profile flags, replay injection rejection, and replay's
-unchanged dump default. Desktop-binding tests cover schema/profile validation,
-version-1/version-2 migration, atomic default creation and persistence, baseline
-suppression, edge ordering, overlapping reference counts, profile-switch
-suppression, pad direction/scaling/residuals, the recentered two-dimensional
-motion deadzone, stationary-noise rejection for cursor and feedback, net
-feedback displacement, velocity-dependent tick cadence without a delayed
-backlog, linear pointer transfer, scroll acceleration, configurable scroll speed, optional decaying
-momentum, rapid transitions, disconnect cleanup, sink failure recovery, and explicit
-macOS key, pointer, and smooth-scroll conversions. Protocol and runtime tests
-cover all nine side/strength `0x82` tick vectors, side coalescing, separate
-feedback backoff, mailbox touch-edge retention, and unchanged Xbox output.
-Menu tests cover settings-v1 migration plus Puck/Bluetooth source rendering, battery
-unknown/percentage, haptics state, error visibility, and Start/Stop enablement.
-macOS tests build the tray frontend, diagnostics renderer, and template icon.
-On a clean TCC state, launching the packaged menu app must request Input
-Monitoring with `IOHIDRequestAccess`, including when no controller is attached.
-It must not issue `PostEvent` or Accessibility while Input Monitoring is still
-pending. After the IOHID grant is detected, it requests `PostEvent` and then the
-adapter's Accessibility trust, even when the Default profile is all-unbound.
-The app must appear in both Privacy & Security lists without using the `+` file
-picker; grants must be detected without a restart.
-
-The `macos-app` CI job builds the current-architecture release binary with the
-configured update public keys, creates
-an `LSUIElement` `.app`, ad-hoc signs and verifies it, archives it, and uploads
-the bundle artifact. This proves source packaging, not Developer ID trust or
-notarization.
-
-The Release Please workflow separately validates the exact tagged source and
-builds both firmware formats and the macOS application into a draft release.
-The protected publication job validates UF2 metadata, generates a unified
-manifest, signs its exact bytes with Ed25519, and checksums all assets. Only
-after tests, dependency policy, artifact validation, signature generation,
-checksums, upload, and generated release-note comparison succeed does it publish
-the draft. A failed release run
-therefore leaves an inspectable draft instead of an incomplete public release.
-
-The menu app renders and retains one native image for each of its four status
-states at startup. A native memory stress run cycles them 1,000 times and
-compares `leaks` memory graphs before and after. Acceptance requires the 352 KiB
-CoreUI/ColorSync allocation count, decoded 48 KiB image count, and
-definite leaked-byte count to remain unchanged; ordinary Rust heap tests cannot
-substitute for this AppKit check.
-
-The 2026-07-27 development-hardware smoke test additionally confirmed:
-
-- the active Puck slot produced valid extended `0x42` reports at about 250 Hz;
-- the XIAO enumerated CDC plus an Xbox-layout gamepad and bound to macOS's
-  `Xbox360Gamepad` DriverKit class;
-- Safari reported a connected standard-mapped gamepad;
-- Boosteroid detected the XIAO as a valid gamepad;
-- an unchanged active state refreshed for more than 30 seconds without an
-  unintended firmware neutral;
-- the Puck accepted the fixed lizard-off feature report, and a 30-second
-  end-to-end serial run completed ten suppression refreshes with zero
-  lizard-write, decode, dropped-report, or serial failures.
-- zero-argument discovery selected active Puck interface 2 and the
-  `/dev/cu.usbmodem11201` XIAO by exact metadata plus Hello, reached `Running`,
-  enabled suppression, and surfaced a valid 94% battery report.
-- on 2026-07-28, active Puck index 43 accepted separate left-only and right-only
-  50% diagnostics, each with seven 40 ms writes and a successful final zero.
-  The updated firmware then flashed successfully; a bounded live bridge
-  re-negotiated, stayed Running, and shut down cleanly.
-
-Subsequent hardware acceptance confirmed full control-by-control mapping,
-Boosteroid and GeForce NOW as a standard gamepad, end-to-end dual rumble with
-correct strong/weak actuator orientation, and that `A` emits no Space while
-touchpads do not move the pointer, with desktop mode returning after exit.
-Continuous play of more than an hour completed without degradation.
-
-On 2026-07-28, direct Bluetooth was additionally observed as `28de:1303`,
-transport Bluetooth, usage `ff00:0001`, interface `-1`. Its vendor collection
-produced complete 46-byte `0x45` states at approximately 67–68 Hz, including
-normal sequence wrap, and compatible `0x43` battery reports reporting 97%.
-With the idle four-slot Puck still attached, the rebuilt zero-argument bridge
-selected only the active Bluetooth source, completed Hello with the XIAO at
-`/dev/cu.usbmodem11201`, reached `Running`, surfaced the battery, and shut down
-cleanly. A separate seven-second diagnostic completed the initial Bluetooth
-lizard-off write and two three-second refreshes with no failures. Independent
-left-only and right-only 50% rumble diagnostics each completed seven output
-writes and an explicit final zero without a HID error.
-
-Bluetooth full-control mapping, lizard suppression, rumble, reconnect,
-sleep/wake, refresh failure handling, and fault timing remain hardware
-acceptance work until explicitly recorded here.
-
-Desktop bindings also require hardware acceptance on both Puck `0x42` and
-Bluetooth `0x45`: capture each of L4/L5/R4/R5/Quick Access individually, verify
-rapid taps and held outputs, F5/F9 in a foreground test app, all five mouse
-buttons where recognized, and no stuck input across Stop, disconnect, profile
-switch, and Accessibility revocation. Enable the right-pad mouse and left-pad
-scroll functions one at a time, verify both axes and touch baselines, then
-compare Low/Medium/High feedback on the correct physical pad. Stationary touch
-must not tick; disabling feedback must leave motion active; rapid motion must
-not become a continuous buzz. Finally combine pad feedback with game rumble and
-verify that neither effect sticks or interrupts lizard-suppression refreshes.
-
-Bridge-core tests cover changed-state suppression, timeout neutralization,
-disconnect/reset/shutdown neutralization, repeated decode failures, and HID
-reconnect accounting. An end-to-end hardware-independent bridge replay smoke
-test can reuse a simulator recording:
-
-```bash
-cargo run -p gamepad-simulator -- automated --interval-ms 0 \
-  --output recording --file /tmp/bridge-input.jsonl
-cargo run -p sc-bridge -- --input replay --file /tmp/bridge-input.jsonl \
-  --deterministic --output file --output-file /tmp/bridge-output.frames
-```
-
-An end-to-end pre-hardware smoke test is:
-
-```bash
-cargo run -p gamepad-simulator -- automated --interval-ms 0 \
-  --output recording --file /tmp/sc-session.jsonl
-cargo run -p sc-replay -- /tmp/sc-session.jsonl --deterministic \
-  --output file --output-file /tmp/sc-session.frames
-```
-
-The resulting `.frames` file contains fixed-size, CRC-protected protocol frames suitable for inspection and firmware parser testing.
+Historical observations belong in dated evidence records so they are not
+mistaken for current qualification. See
+[July 2026 development hardware](testing-evidence/2026-07-hardware.md). A release
+candidate needs a new record when hardware, firmware, packaging, or acceptance
+scope changes.

@@ -313,7 +313,7 @@ impl Default for BridgeStatus {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeError(pub(crate) String);
 
 impl std::fmt::Display for RuntimeError {

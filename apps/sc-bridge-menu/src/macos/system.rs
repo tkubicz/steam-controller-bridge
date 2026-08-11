@@ -45,17 +45,6 @@ pub(super) fn open_privacy_pane(pane: PrivacyPane) {
     }
 }
 
-pub(super) fn launch_about_window() -> Result<std::process::Child, String> {
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    Command::new(executable)
-        .arg("--about")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| error.to_string())
-}
-
 #[allow(deprecated)] // Required on macOS 13; the replacement API starts at macOS 14.
 pub(super) fn activate_child_application(child: &std::process::Child) -> bool {
     let Ok(pid) = i32::try_from(child.id()) else {
@@ -77,7 +66,7 @@ pub(super) fn activate_child_application(child: &std::process::Child) -> bool {
 pub(super) fn launch_bindings_editor() -> Result<std::process::Child, String> {
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
     Command::new(executable)
-        .arg("--bindings-editor")
+        .arg(crate::cli::BINDINGS_EDITOR_COMMAND)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -85,9 +74,20 @@ pub(super) fn launch_bindings_editor() -> Result<std::process::Child, String> {
         .map_err(|error| error.to_string())
 }
 
-pub(super) fn open_path(path: &str) -> Result<(), String> {
+pub(crate) fn open_path(path: impl AsRef<std::ffi::OsStr>) -> Result<(), String> {
+    run_open(std::iter::once(path.as_ref()))
+}
+
+#[cfg(feature = "updater")]
+pub(crate) fn reveal_path(path: impl AsRef<std::ffi::OsStr>) -> Result<(), String> {
+    run_open([std::ffi::OsStr::new("-R"), path.as_ref()])
+}
+
+fn run_open(
+    arguments: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+) -> Result<(), String> {
     let status = Command::new("/usr/bin/open")
-        .arg(path)
+        .args(arguments)
         .status()
         .map_err(|error| error.to_string())?;
     if status.success() {

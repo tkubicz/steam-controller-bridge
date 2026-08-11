@@ -24,13 +24,11 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let arguments = Arguments::try_parse().map_err(|error| error.to_string())?;
-    if arguments.key_id.is_empty() {
-        return Err("key id must not be empty".to_owned());
-    }
-    let version = Version::parse(&arguments.version).map_err(|error| error.to_string())?;
-    if arguments.release_tag != format!("v{version}") {
-        return Err("release tag and version disagree".to_owned());
-    }
+    let version = validate_release_identity(
+        &arguments.release_tag,
+        &arguments.version,
+        &arguments.key_id,
+    )?;
     let firmware_revision = parse_firmware_revision(&arguments.firmware_header)?;
     validate_uf2(&arguments.firmware, UF2_FAMILY_ID).map_err(|error| error.to_string())?;
     let application = artifact(&arguments.application)?;
@@ -124,6 +122,24 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+fn validate_release_identity(
+    release_tag: &str,
+    version: &str,
+    key_id: &str,
+) -> Result<Version, String> {
+    if key_id.is_empty() {
+        return Err("key id must not be empty".to_owned());
+    }
+    let version = Version::parse(version).map_err(|error| error.to_string())?;
+    if !version.pre.is_empty() || !version.build.is_empty() {
+        return Err("release version must be a stable SemVer core version".to_owned());
+    }
+    if release_tag != format!("v{version}") {
+        return Err("release tag and version disagree".to_owned());
+    }
+    Ok(version)
+}
+
 #[derive(Parser)]
 #[command(name = "release-manifest")]
 struct Arguments {
@@ -159,6 +175,10 @@ fn artifact(path: &Path) -> Result<ArtifactDescriptor, String> {
 
 fn parse_firmware_revision(path: &Path) -> Result<u16, String> {
     let source = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    parse_firmware_revision_source(&source)
+}
+
+fn parse_firmware_revision_source(source: &str) -> Result<u16, String> {
     let marker = "constexpr uint16_t kFirmwareRevision = ";
     let matches = source
         .lines()
@@ -169,5 +189,39 @@ fn parse_firmware_revision(path: &Path) -> Result<u16, String> {
     match matches.as_slice() {
         [revision] => Ok(*revision),
         _ => Err("firmware header must define kFirmwareRevision exactly once".to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_identity_requires_one_stable_version() {
+        assert_eq!(
+            validate_release_identity("v1.5.0", "1.5.0", "release-2026").expect("valid release"),
+            Version::new(1, 5, 0)
+        );
+        assert!(validate_release_identity("v1.5.1", "1.5.0", "release-2026").is_err());
+        assert!(validate_release_identity("v1.5.0-rc.1", "1.5.0-rc.1", "release-2026").is_err());
+        assert!(validate_release_identity("v1.5.0", "1.5.0", "").is_err());
+    }
+
+    #[test]
+    fn firmware_revision_requires_one_exact_declaration() {
+        assert_eq!(
+            parse_firmware_revision_source("constexpr uint16_t kFirmwareRevision = 7;\n")
+                .expect("valid revision"),
+            7
+        );
+        assert!(parse_firmware_revision_source("").is_err());
+        assert!(parse_firmware_revision_source(
+            "constexpr uint16_t kFirmwareRevision = 7;\nconstexpr uint16_t kFirmwareRevision = 8;\n"
+        )
+        .is_err());
+        assert!(parse_firmware_revision_source(
+            "constexpr uint16_t kFirmwareRevision = not_a_number;\n"
+        )
+        .is_err());
     }
 }

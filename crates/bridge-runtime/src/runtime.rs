@@ -23,6 +23,10 @@ pub(crate) enum RuntimeCommand {
     SuspendForSleep(CommandAck),
     /// Let discovery run again after a system wake.
     ResumeFromWake(CommandAck),
+    /// Park the device for an updater operation without changing user intent.
+    SuspendForUpdate(CommandAck),
+    /// Release only the updater suspension; system sleep still wins.
+    ResumeFromUpdate(CommandAck),
 }
 
 /// Where picker events go. Called on the runtime thread, so it must not block.
@@ -159,7 +163,75 @@ pub struct BridgeHandle {
     power_monitor: Mutex<Option<PowerMonitor>>,
 }
 
+/// The result of polling a non-blocking updater-resume request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateResumePoll {
+    Pending,
+    /// The deadline elapsed, but the original command remains queued and may
+    /// still acknowledge later. Reported at most once per request.
+    TimedOut,
+    Complete(Result<(), RuntimeError>),
+}
+
+/// A queued updater-resume request whose acknowledgement can be polled by a UI.
+pub struct PendingUpdateResume {
+    receiver: mpsc::Receiver<Result<(), String>>,
+    deadline: std::time::Instant,
+    timeout_reported: bool,
+    completion: Option<Result<(), RuntimeError>>,
+}
+
+impl PendingUpdateResume {
+    fn new(receiver: mpsc::Receiver<Result<(), String>>) -> Self {
+        Self {
+            receiver,
+            deadline: std::time::Instant::now() + COMMAND_TIMEOUT,
+            timeout_reported: false,
+            completion: None,
+        }
+    }
+
+    /// Checks for completion without blocking the caller.
+    #[must_use]
+    pub fn poll(&mut self) -> UpdateResumePoll {
+        if let Some(result) = &self.completion {
+            return UpdateResumePoll::Complete(result.clone());
+        }
+        let result = match self.receiver.try_recv() {
+            Ok(result) => UpdateResumePoll::Complete(result.map_err(RuntimeError)),
+            Err(mpsc::TryRecvError::Empty) if std::time::Instant::now() < self.deadline => {
+                UpdateResumePoll::Pending
+            }
+            Err(mpsc::TryRecvError::Empty) if !self.timeout_reported => {
+                self.timeout_reported = true;
+                UpdateResumePoll::TimedOut
+            }
+            Err(mpsc::TryRecvError::Empty) => UpdateResumePoll::Pending,
+            Err(mpsc::TryRecvError::Disconnected) => UpdateResumePoll::Complete(Err(RuntimeError(
+                "bridge runtime stopped before acknowledging recovery".to_owned(),
+            ))),
+        };
+        if let UpdateResumePoll::Complete(completion) = &result {
+            self.completion = Some(completion.clone());
+        }
+        result
+    }
+}
+
 impl BridgeHandle {
+    /// Reports whether the runtime worker has terminated or has already been joined.
+    ///
+    /// Frontends use this to distinguish a recoverable command timeout from a
+    /// dead runtime that can no longer own hardware or acknowledge cleanup.
+    #[must_use]
+    pub fn is_terminated(&self) -> bool {
+        self.join
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_none_or(JoinHandle::is_finished)
+    }
+
     /// Queues an idempotent start without blocking the caller.
     ///
     /// # Errors
@@ -250,6 +322,40 @@ impl BridgeHandle {
     /// Returns an error if the runtime thread stops or the teardown fails.
     pub fn suspend_for_sleep(&self) -> Result<(), RuntimeError> {
         self.command(RuntimeCommand::SuspendForSleep)
+    }
+
+    /// Parks every device for an updater operation while preserving whether the
+    /// user wanted the bridge running. The acknowledgement is sent only after
+    /// neutralization and hardware release complete.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread stops or teardown fails.
+    pub fn suspend_for_update(&self) -> Result<(), RuntimeError> {
+        self.command(RuntimeCommand::SuspendForUpdate)
+    }
+
+    /// Releases an updater suspension. A concurrent system-sleep suspension
+    /// remains active, and a bridge the user stopped while updating stays
+    /// stopped.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread stops.
+    pub fn resume_from_update(&self) -> Result<(), RuntimeError> {
+        self.command(RuntimeCommand::ResumeFromUpdate)
+    }
+
+    /// Queues release of an updater suspension without blocking the caller.
+    ///
+    /// The returned request enforces the same acknowledgement deadline as the
+    /// synchronous command API. [`UpdateResumePoll::TimedOut`] is a visible but
+    /// non-terminal delay; frontends must retain the request until it returns
+    /// [`UpdateResumePoll::Complete`].
+    ///
+    /// # Errors
+    /// Returns an error if the runtime thread has already stopped.
+    pub fn begin_resume_from_update(&self) -> Result<PendingUpdateResume, RuntimeError> {
+        self.begin_command(RuntimeCommand::ResumeFromUpdate)
+            .map(PendingUpdateResume::new)
     }
 
     /// Lets the bridge look for its hardware again after a system wake.
@@ -354,11 +460,7 @@ impl BridgeHandle {
         &self,
         make_command: impl FnOnce(CommandAck) -> RuntimeCommand,
     ) -> Result<(), RuntimeError> {
-        let (sender, receiver) = mpsc::channel();
-        self.command_sender
-            .send(make_command(sender))
-            .map_err(|_| RuntimeError("bridge runtime is no longer running".to_owned()))?;
-        receiver
+        self.begin_command(make_command)?
             .recv_timeout(COMMAND_TIMEOUT)
             .map_err(|_| RuntimeError("bridge runtime command timed out".to_owned()))?
             .map_err(RuntimeError)
@@ -368,10 +470,18 @@ impl BridgeHandle {
         &self,
         make_command: impl FnOnce(CommandAck) -> RuntimeCommand,
     ) -> Result<(), RuntimeError> {
-        let (sender, _receiver) = mpsc::channel();
+        self.begin_command(make_command).map(drop)
+    }
+
+    fn begin_command(
+        &self,
+        make_command: impl FnOnce(CommandAck) -> RuntimeCommand,
+    ) -> Result<mpsc::Receiver<Result<(), String>>, RuntimeError> {
+        let (sender, receiver) = mpsc::channel();
         self.command_sender
             .send(make_command(sender))
-            .map_err(|_| RuntimeError("bridge runtime is no longer running".to_owned()))
+            .map_err(|_| RuntimeError("bridge runtime is no longer running".to_owned()))?;
+        Ok(receiver)
     }
 
     #[cfg(target_os = "macos")]
@@ -388,5 +498,47 @@ impl BridgeHandle {
 impl Drop for BridgeHandle {
     fn drop(&mut self) {
         let _ = self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_resume_acknowledgements_are_polled_without_waiting() {
+        let (sender, receiver) = mpsc::channel();
+        let mut request = PendingUpdateResume::new(receiver);
+
+        assert!(matches!(request.poll(), UpdateResumePoll::Pending));
+        sender.send(Ok(())).unwrap();
+        assert_eq!(request.poll(), UpdateResumePoll::Complete(Ok(())));
+        assert_eq!(request.poll(), UpdateResumePoll::Complete(Ok(())));
+    }
+
+    #[test]
+    fn update_resume_timeout_keeps_waiting_for_the_original_acknowledgement() {
+        let (sender, receiver) = mpsc::channel();
+        let mut timed_out = PendingUpdateResume::new(receiver);
+        timed_out.deadline = std::time::Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(timed_out.poll(), UpdateResumePoll::TimedOut);
+        assert_eq!(timed_out.poll(), UpdateResumePoll::Pending);
+        sender.send(Ok(())).unwrap();
+        assert_eq!(timed_out.poll(), UpdateResumePoll::Complete(Ok(())));
+        assert_eq!(timed_out.poll(), UpdateResumePoll::Complete(Ok(())));
+    }
+
+    #[test]
+    fn update_resume_poll_reports_a_stable_disconnection() {
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        let mut disconnected = PendingUpdateResume::new(receiver);
+        let expected = UpdateResumePoll::Complete(Err(RuntimeError(
+            "bridge runtime stopped before acknowledging recovery".to_owned(),
+        )));
+        assert_eq!(disconnected.poll(), expected);
+        assert_eq!(disconnected.poll(), expected);
     }
 }

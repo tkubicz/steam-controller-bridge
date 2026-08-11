@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bridge_runtime::{
-    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, PickerConfig,
-    PickerEvent, PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord, StatusLogTracker,
+    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, PendingUpdateResume,
+    PickerConfig, PickerEvent, PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord,
+    StatusLogTracker, UpdateResumePoll,
 };
 use desktop_bindings::{
     default_store_path, input_monitoring_access, load_or_create_store, parse_store,
@@ -32,12 +33,14 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::window::WindowId;
 
+use crate::app_center_host::AppCenterHost;
+use crate::app_center_protocol::{
+    AppCenterPage, UpdateOperation, UpdateRequest, UpdateResponse, UpdateResult,
+};
 use crate::model::{MenuModel, RunAction, TrayState};
 use crate::overlay_host::OverlayHost;
 #[cfg(feature = "updater")]
 use crate::update_check::UpdateChecker;
-use crate::update_host::UpdateHost;
-use crate::update_protocol::{UpdateRequest, UpdateResponse};
 
 mod icons;
 mod logging;
@@ -54,9 +57,11 @@ use support::{
     resolve_picker_commit, save_settings, settings_path, AppSettings, BindingsFileFingerprint,
     PermissionStage, PickerEventMailbox, OVERLAY_HOLD_CHOICES,
 };
+pub(crate) use system::open_path;
+#[cfg(feature = "updater")]
+pub(crate) use system::reveal_path;
 use system::{
-    activate_child_application, copy_text, launch_about_window, launch_bindings_editor, open_path,
-    open_privacy_pane, PrivacyPane,
+    activate_child_application, copy_text, launch_bindings_editor, open_privacy_pane, PrivacyPane,
 };
 
 #[cfg(test)]
@@ -78,6 +83,21 @@ const BINDING_PROFILE_PREFIX: &str = "binding-profile:";
 const LOGS_ID: &str = "open-logs";
 const ABOUT_ID: &str = "about";
 const UPDATES_ID: &str = "updates";
+
+const fn app_center_available() -> bool {
+    cfg!(feature = "updater")
+}
+
+fn app_center_page_for_menu(id: &str) -> Option<AppCenterPage> {
+    if !app_center_available() {
+        return None;
+    }
+    match id {
+        ABOUT_ID => Some(AppCenterPage::About),
+        UPDATES_ID => Some(AppCenterPage::Updates),
+        _ => None,
+    }
+}
 const QUIT_ID: &str = "quit";
 const IDLE_NEVER_ID: &str = "idle-never";
 const IDLE_5_ID: &str = "idle-5";
@@ -166,6 +186,7 @@ struct MenuApp {
     items: Option<MenuItems>,
     last_revision: u64,
     last_model: Option<MenuModel>,
+    last_recovery_problem: Option<String>,
     next_poll: Instant,
     logger: StatusLogger,
     settings: AppSettings,
@@ -194,16 +215,35 @@ struct MenuApp {
     picker_roster_dirty: bool,
     /// Spawned bindings editors, reaped on the status poll once they exit.
     editor_children: Vec<std::process::Child>,
-    /// The dedicated About window runs in one child process because eframe and
-    /// the menu host each own a native event loop. Keeping a single child also
-    /// makes repeated About clicks focus the existing window instead of
-    /// stacking copies.
-    about_child: Option<std::process::Child>,
-    update_host: UpdateHost,
+    /// About, Changelog, and Updates share one child native event loop. The
+    /// host also owns the updater's safety-ordered bridge lifecycle requests.
+    app_center_host: AppCenterHost,
+    app_center_recovery: AppCenterRecovery,
     #[cfg(feature = "updater")]
     update_checker: UpdateChecker,
     #[cfg(feature = "updater")]
     last_update_available: Option<bool>,
+}
+
+enum AppCenterRecovery {
+    Idle,
+    Waiting {
+        request: PendingUpdateResume,
+        error: Option<String>,
+    },
+    Failed(String),
+}
+
+impl AppCenterRecovery {
+    fn problem(&self) -> Option<&str> {
+        match self {
+            Self::Waiting {
+                error: Some(error), ..
+            }
+            | Self::Failed(error) => Some(error),
+            Self::Idle | Self::Waiting { error: None, .. } => None,
+        }
+    }
 }
 
 impl MenuApp {
@@ -264,6 +304,7 @@ impl MenuApp {
             items: None,
             last_revision: u64::MAX,
             last_model: None,
+            last_recovery_problem: None,
             next_poll: Instant::now(),
             logger: StatusLogger::new()?,
             settings,
@@ -281,8 +322,8 @@ impl MenuApp {
             picker_roster_publishes: 0,
             picker_roster_dirty: false,
             editor_children: Vec::new(),
-            about_child: None,
-            update_host: UpdateHost::new(),
+            app_center_host: AppCenterHost::new(),
+            app_center_recovery: AppCenterRecovery::Idle,
             #[cfg(feature = "updater")]
             update_checker: UpdateChecker::new(),
             #[cfg(feature = "updater")]
@@ -296,7 +337,7 @@ impl ApplicationHandler for MenuApp {
         if self.tray.is_none() {
             if let Err(error) = self.create_tray() {
                 eprintln!("cannot create menu-bar icon: {error}");
-                self.shutdown();
+                let _ = self.shutdown();
                 event_loop.exit();
                 return;
             }
@@ -323,6 +364,7 @@ impl ApplicationHandler for MenuApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.recover_app_center_suspension();
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             self.handle_menu_event(event.id.as_ref(), event_loop);
         }
@@ -338,19 +380,7 @@ impl ApplicationHandler for MenuApp {
             }
             self.editor_children
                 .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
-            if self
-                .about_child
-                .as_mut()
-                .is_some_and(|child| !matches!(child.try_wait(), Ok(None)))
-            {
-                self.about_child = None;
-            }
             self.handle_update_requests(event_loop);
-            if self.update_host.reap() && self.update_host.clear_suspended() {
-                if let Err(error) = self.runtime.request_start() {
-                    eprintln!("cannot restart bridge after Update Center exit: {error}");
-                }
-            }
             self.reload_bindings_if_changed();
             self.observe_permission_grants();
             self.refresh_status();
@@ -360,6 +390,6 @@ impl ApplicationHandler for MenuApp {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        self.shutdown();
+        let _ = self.shutdown();
     }
 }

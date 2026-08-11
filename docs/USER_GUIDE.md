@@ -60,7 +60,7 @@ rumble, tones, or scripted haptics.
   the Puck. Charge-only cables will not work.
 
 You do not need the project source, Terminal, Rust, Homebrew, or Arduino CLI for
-the normal packaged-app and Update Center workflow. Those tools are needed only
+the normal packaged-app and in-app update workflow. Those tools are needed only
 for development and deep recovery later in this guide.
 
 The intended connection is:
@@ -85,12 +85,13 @@ Settings live under Application Support and survive replacing the application.
 macOS may nevertheless ask you to grant Input Monitoring or Accessibility again
 after replacement because v1 does not yet use Developer ID signing.
 
-## 2. Use the Update Center
+## 2. Use the Updates tab
 
-Choose **Check for Updates…** from the menu-bar app. The label changes to
-**Updates Available…** after the daily signed-metadata check discovers a newer
-application or firmware revision. The check ignores draft and prerelease builds
-and does not download either artifact.
+Choose **Check for Updates…** from the menu-bar app. It opens the Updates tab of
+the Steam Controller Bridge window, where **About** and **Changelog** are the
+other two tabs. The menu label changes to **Updates Available…** after the daily
+signed-metadata check discovers a newer application or firmware revision. The
+check ignores draft and prerelease builds and does not download either artifact.
 
 When an application update is available:
 
@@ -115,17 +116,18 @@ re-evaluates compatibility.
 ### Install or update XIAO firmware
 
 Connect exactly one non-Sense Seeed XIAO nRF52840 with a data-capable cable, then
-choose **Install/Update Firmware**. The same revision can be reinstalled for
-recovery, but a board reporting a newer revision is never downgraded.
+choose **Install Firmware Update**, or **Reinstall Firmware** when the board
+already reports the signed revision. A board reporting a newer revision is never
+downgraded.
 
-The Update Center verifies the cached or downloaded UF2, asks the running bridge
+The app verifies the cached or downloaded UF2, asks the running bridge
 to neutralize output and release hardware, tries automatic 1200-baud bootloader
 entry, validates `INFO_UF2.TXT` and the UF2 family, writes and flushes the file,
 then waits for a fresh protocol handshake. Success is shown only after the board
 reports the exact signed revision. The bridge restarts automatically after
 success, cancellation, or a bounded failure when it was running beforehand.
 
-If automatic entry does not work, double-tap RESET while the Update Center says
+If automatic entry does not work, double-tap RESET while the Updates tab says
 it is waiting for the bootloader. You may cancel until writing begins. Once the
 write starts, leave the board connected until verification or the 30-second
 failure bound. Error text distinguishes extra/wrong boards, cable or reset
@@ -909,10 +911,11 @@ but a broadly distributable product should additionally provide:
   direct USB-C remains a separate future transport;
 - hardware qualification of the narrow lizard-mode suppression lifecycle;
 - automated hardware acceptance and long-duration testing;
-- signed/notarized macOS binaries and downloadable firmware artifacts;
+- Developer ID-signed and notarized macOS binaries (current release bundles
+  are ad-hoc signed; firmware artifacts are already published and verified);
 - an owned or licensed USB VID/PID plus a macOS recognition path that does not
   depend on another vendor's Xbox 360 compatibility identity;
 - hardware qualification of dual-rumble expiry and disconnect timing, beyond
   the confirmed delivery path;
-- Developer ID signing, notarization, and a supported upgrade/recovery
-  procedure beyond the current versioned GitHub downloads.
+- broader distribution such as a DMG or package manager beyond the current
+  signed-metadata in-app updater and versioned GitHub recovery downloads.

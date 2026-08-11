@@ -1,8 +1,13 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
+use crate::temporary::unique_temporary_path;
 use crate::{
     ArtifactDescriptor, ReleaseCache, ReleaseManifestV1, TrustedPublicKey, MANIFEST_ASSET,
     SIGNATURES_ASSET, UPDATE_REPOSITORY,
@@ -35,6 +40,7 @@ pub enum DownloadError {
     Curl(String),
     TooLarge { maximum: u64, actual: u64 },
     InvalidAssetName,
+    Cancelled,
 }
 
 impl std::fmt::Display for DownloadError {
@@ -46,6 +52,7 @@ impl std::fmt::Display for DownloadError {
                 write!(formatter, "download is {actual} bytes; limit is {maximum}")
             }
             Self::InvalidAssetName => write!(formatter, "invalid release asset name"),
+            Self::Cancelled => write!(formatter, "update download cancelled"),
         }
     }
 }
@@ -59,7 +66,18 @@ impl From<io::Error> for DownloadError {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct LatestReleaseClient;
+pub struct LatestReleaseClient {
+    cancellation: Option<Arc<AtomicBool>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogRefresh {
+    Current(ReleaseManifestV1),
+    Stale {
+        manifest: ReleaseManifestV1,
+        refresh_error: String,
+    },
+}
 
 pub trait ReleaseSource {
     fn fetch_metadata(&self, directory: &Path) -> Result<(Vec<u8>, Vec<u8>), DownloadError>;
@@ -73,12 +91,29 @@ pub trait ReleaseSource {
 }
 
 impl LatestReleaseClient {
+    #[must_use]
+    pub fn cancellable(cancellation: Arc<AtomicBool>) -> Self {
+        Self {
+            cancellation: Some(cancellation),
+        }
+    }
+
     pub fn fetch_metadata(&self, directory: &Path) -> Result<(Vec<u8>, Vec<u8>), DownloadError> {
         fs::create_dir_all(directory)?;
         let manifest = directory.join(MANIFEST_ASSET);
         let signatures = directory.join(SIGNATURES_ASSET);
-        download_to_path(&latest_asset_url(MANIFEST_ASSET)?, &manifest, 128 * 1024)?;
-        download_to_path(&latest_asset_url(SIGNATURES_ASSET)?, &signatures, 16 * 1024)?;
+        download_to_path_cancellable(
+            &latest_asset_url(MANIFEST_ASSET)?,
+            &manifest,
+            128 * 1024,
+            self.cancellation.as_deref(),
+        )?;
+        download_to_path_cancellable(
+            &latest_asset_url(SIGNATURES_ASSET)?,
+            &signatures,
+            16 * 1024,
+            self.cancellation.as_deref(),
+        )?;
         Ok((fs::read(manifest)?, fs::read(signatures)?))
     }
 
@@ -95,7 +130,12 @@ impl LatestReleaseClient {
         let url = format!(
             "https://github.com/{UPDATE_REPOSITORY}/releases/download/{release_tag}/{name}"
         );
-        download_to_path(&url, destination, maximum_size)
+        download_to_path_cancellable(
+            &url,
+            destination,
+            maximum_size,
+            self.cancellation.as_deref(),
+        )
     }
 }
 
@@ -120,23 +160,56 @@ pub fn refresh_catalog_if_due(
     cache: &ReleaseCache,
     trusted_keys: &[TrustedPublicKey],
     interval: std::time::Duration,
-) -> Result<ReleaseManifestV1, String> {
+) -> Result<CatalogRefresh, String> {
     if !cache.check_due(interval) {
         return cache
             .load_manifest(trusted_keys)
+            .map(CatalogRefresh::Current)
             .map_err(|error| error.to_string());
     }
-    cache
-        .mark_check_attempt()
+    fs::create_dir_all(cache.root()).map_err(|error| error.to_string())?;
+    let refresh_lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(cache.root().join("catalog-refresh.lock"))
         .map_err(|error| error.to_string())?;
-    let temporary = cache.root().join("metadata-download");
-    match source.fetch_metadata(&temporary) {
-        Ok((manifest, signatures)) => cache
-            .store_manifest(&manifest, &signatures, trusted_keys)
-            .map_err(|error| error.to_string()),
-        Err(error) => cache.load_manifest(trusted_keys).map_err(|_| {
-            format!("Cannot check releases and no verified cache is available: {error}")
-        }),
+    rustix::fs::flock(&refresh_lock, rustix::fs::FlockOperation::LockExclusive)
+        .map_err(|error| error.to_string())?;
+    if !cache.check_due(interval) {
+        return cache
+            .load_manifest(trusted_keys)
+            .map(CatalogRefresh::Current)
+            .map_err(|error| error.to_string());
+    }
+    let temporary =
+        unique_temporary_path(cache.root(), std::ffi::OsStr::new("metadata"), "download");
+    let refreshed = source
+        .fetch_metadata(&temporary)
+        .map_err(|error| error.to_string())
+        .and_then(|(manifest, signatures)| {
+            cache
+                .store_manifest(&manifest, &signatures, trusted_keys)
+                .map_err(|error| error.to_string())
+        });
+    let _ = fs::remove_dir_all(&temporary);
+    match refreshed {
+        Ok(manifest) => {
+            // The marker is only a network-throttling optimization. Verified
+            // metadata remains usable if writing the marker itself fails.
+            let _ = cache.mark_check_success();
+            Ok(CatalogRefresh::Current(manifest))
+        }
+        Err(refresh_error) => cache
+            .load_manifest(trusted_keys)
+            .map(|manifest| CatalogRefresh::Stale {
+                manifest,
+                refresh_error: refresh_error.clone(),
+            })
+            .map_err(|_| {
+                format!("Cannot check releases and no verified cache is available: {refresh_error}")
+            }),
     }
 }
 
@@ -182,25 +255,40 @@ pub fn download_to_path(
     destination: &Path,
     maximum_size: u64,
 ) -> Result<(), DownloadError> {
+    download_to_path_cancellable(url, destination, maximum_size, None)
+}
+
+fn download_to_path_cancellable(
+    url: &str,
+    destination: &Path,
+    maximum_size: u64,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(), DownloadError> {
     let parent = destination
         .parent()
         .ok_or_else(|| io::Error::other("download destination has no parent"))?;
     fs::create_dir_all(parent)?;
-    let temporary: PathBuf = parent.join(format!(
-        ".{}.{}.download",
+    let temporary = unique_temporary_path(
+        parent,
         destination
             .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("update"),
-        std::process::id()
-    ));
-    let output = Command::new("/usr/bin/curl")
+            .unwrap_or_else(|| std::ffi::OsStr::new("update")),
+        "download",
+    );
+    let mut command = Command::new("/usr/bin/curl");
+    command
         .args(CURL_DOWNLOAD_ARGS)
         .arg(maximum_size.to_string())
         .arg("--output")
         .arg(&temporary)
-        .arg(url)
-        .output()?;
+        .arg(url);
+    let output = match cancellable_output(&mut command, cancellation) {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+    };
     if !output.status.success() {
         let _ = fs::remove_file(&temporary);
         return Err(DownloadError::Curl(
@@ -219,9 +307,33 @@ pub fn download_to_path(
     Ok(())
 }
 
+fn cancellable_output(
+    command: &mut Command,
+    cancellation: Option<&AtomicBool>,
+) -> Result<Output, DownloadError> {
+    command.stdout(Stdio::null()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    loop {
+        if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(DownloadError::Cancelled);
+        }
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map_err(DownloadError::Io);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::time::Duration;
+
+    use crate::test_support::{signed_metadata, temporary_directory};
 
     #[test]
     fn release_components_cannot_escape_the_repository() {
@@ -245,9 +357,82 @@ mod tests {
             .any(|arguments| arguments == ["--max-redirs", "5"]));
     }
 
-    struct FakeSource;
+    #[test]
+    fn cancellation_reaps_a_spawned_download_process() {
+        let cancelled = AtomicBool::new(true);
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 10"]);
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            cancellable_output(&mut command, Some(&cancelled)),
+            Err(DownloadError::Cancelled)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
-    impl ReleaseSource for FakeSource {
+    #[test]
+    fn cancellable_processes_preserve_exit_status_and_diagnostics() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf diagnostic >&2"]);
+        let output = cancellable_output(&mut command, None).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stderr, b"diagnostic");
+    }
+
+    enum MetadataReply {
+        Metadata(Vec<u8>, Vec<u8>),
+        Failure,
+    }
+
+    struct MetadataSource {
+        replies: Mutex<VecDeque<MetadataReply>>,
+        directories: Mutex<Vec<PathBuf>>,
+    }
+
+    impl MetadataSource {
+        fn new(replies: impl IntoIterator<Item = MetadataReply>) -> Self {
+            Self {
+                replies: Mutex::new(replies.into_iter().collect()),
+                directories: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.directories.lock().unwrap().len()
+        }
+    }
+
+    impl ReleaseSource for MetadataSource {
+        fn fetch_metadata(&self, directory: &Path) -> Result<(Vec<u8>, Vec<u8>), DownloadError> {
+            self.directories.lock().unwrap().push(directory.to_owned());
+            match self.replies.lock().unwrap().pop_front().unwrap() {
+                MetadataReply::Metadata(manifest, signatures) => Ok((manifest, signatures)),
+                MetadataReply::Failure => Err(DownloadError::Io(io::Error::other(
+                    "fixture metadata failure",
+                ))),
+            }
+        }
+
+        fn download_release_asset(
+            &self,
+            _release_tag: &str,
+            _name: &str,
+            _destination: &Path,
+            _maximum_size: u64,
+        ) -> Result<(), DownloadError> {
+            unreachable!()
+        }
+    }
+
+    struct ArtifactSource;
+
+    fn refreshed_manifest(refresh: &CatalogRefresh) -> &ReleaseManifestV1 {
+        match refresh {
+            CatalogRefresh::Current(manifest) | CatalogRefresh::Stale { manifest, .. } => manifest,
+        }
+    }
+
+    impl ReleaseSource for ArtifactSource {
         fn fetch_metadata(&self, _directory: &Path) -> Result<(Vec<u8>, Vec<u8>), DownloadError> {
             unreachable!()
         }
@@ -266,9 +451,108 @@ mod tests {
     }
 
     #[test]
+    fn failed_first_check_is_immediately_retryable() {
+        let root = temporary_directory("network-retry");
+        let cache = ReleaseCache::new(root.clone());
+        let (manifest, signatures, key) = signed_metadata("1.5.0", 5);
+        let source = MetadataSource::new([
+            MetadataReply::Failure,
+            MetadataReply::Metadata(manifest, signatures),
+        ]);
+
+        assert!(refresh_catalog_if_due(
+            &source,
+            &cache,
+            std::slice::from_ref(&key),
+            Duration::from_hours(24)
+        )
+        .is_err());
+        assert!(cache.check_due(Duration::from_hours(24)));
+        assert_eq!(
+            refreshed_manifest(
+                &refresh_catalog_if_due(
+                    &source,
+                    &cache,
+                    std::slice::from_ref(&key),
+                    Duration::from_hours(24)
+                )
+                .unwrap()
+            )
+            .application_version,
+            semver::Version::new(1, 5, 0)
+        );
+        assert_eq!(source.calls(), 2);
+        assert!(!cache.check_due(Duration::from_hours(24)));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_refresh_falls_back_to_verified_cache_without_replacing_it() {
+        let root = temporary_directory("network-fallback");
+        let cache = ReleaseCache::new(root.clone());
+        let (manifest, signatures, key) = signed_metadata("1.5.0", 5);
+        let source = MetadataSource::new([
+            MetadataReply::Metadata(manifest, signatures),
+            MetadataReply::Metadata(b"{}".to_vec(), b"{}".to_vec()),
+        ]);
+
+        refresh_catalog_if_due(&source, &cache, std::slice::from_ref(&key), Duration::ZERO)
+            .unwrap();
+        let fallback = refresh_catalog_if_due(&source, &cache, &[key], Duration::ZERO).unwrap();
+        let CatalogRefresh::Stale {
+            manifest,
+            refresh_error,
+        } = fallback
+        else {
+            panic!("failed refresh must report stale provenance");
+        };
+        assert_eq!(manifest.application_version, semver::Version::new(1, 5, 0));
+        assert!(
+            refresh_error.contains("invalid release signature envelope"),
+            "unexpected refresh error: {refresh_error}"
+        );
+        assert_eq!(source.calls(), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_refreshes_are_single_flight_and_clean_their_directory() {
+        let root = temporary_directory("network-concurrent");
+        let cache = Arc::new(ReleaseCache::new(root.clone()));
+        let (manifest, signatures, key) = signed_metadata("1.5.0", 5);
+        let source = Arc::new(MetadataSource::new([MetadataReply::Metadata(
+            manifest, signatures,
+        )]));
+        let start = Arc::new(Barrier::new(2));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let cache = Arc::clone(&cache);
+            let source = Arc::clone(&source);
+            let start = Arc::clone(&start);
+            let key = key.clone();
+            workers.push(std::thread::spawn(move || {
+                start.wait();
+                refresh_catalog_if_due(source.as_ref(), &cache, &[key], Duration::from_hours(24))
+                    .unwrap()
+            }));
+        }
+        for worker in workers {
+            let refresh = worker.join().unwrap();
+            assert_eq!(
+                refreshed_manifest(&refresh).application_version,
+                semver::Version::new(1, 5, 0)
+            );
+        }
+        let directories = source.directories.lock().unwrap();
+        assert_eq!(directories.len(), 1);
+        assert!(directories.iter().all(|directory| !directory.exists()));
+        drop(directories);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn fake_network_artifact_is_verified_and_then_reused_offline() {
-        let root =
-            std::env::temp_dir().join(format!("release-updater-network-{}", std::process::id()));
+        let root = temporary_directory("network-artifact");
         let _ = fs::remove_dir_all(&root);
         let cache = ReleaseCache::new(root.clone());
         let artifact = ArtifactDescriptor {
@@ -276,9 +560,9 @@ mod tests {
             size: 3,
             sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_owned(),
         };
-        let path = ensure_release_artifact(&FakeSource, &cache, "v1.0.0", &artifact).unwrap();
+        let path = ensure_release_artifact(&ArtifactSource, &cache, "v1.0.0", &artifact).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"abc");
-        let path = ensure_release_artifact(&FakeSource, &cache, "v1.0.0", &artifact).unwrap();
+        let path = ensure_release_artifact(&ArtifactSource, &cache, "v1.0.0", &artifact).unwrap();
         assert_eq!(fs::read(path).unwrap(), b"abc");
         let _ = fs::remove_dir_all(root);
     }

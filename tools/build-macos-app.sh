@@ -11,14 +11,7 @@ cd "$PROJECT_DIR"
 # Release Please maintains version.txt; the bundle takes its version from there
 # rather than carrying a second copy that silently goes stale. Refuse to build
 # something mislabelled instead of shipping the wrong version.
-VERSION=$(tr -d '[:space:]' < "$PROJECT_DIR/version.txt")
-case "$VERSION" in
-  [0-9]*.[0-9]*.[0-9]*) ;;
-  *)
-    echo "version.txt does not contain a release version: '$VERSION'" >&2
-    exit 1
-    ;;
-esac
+VERSION=$(python3 "$PROJECT_DIR/tools/check-workspace-versions.py" --print-version)
 
 cargo build --release -p sc-bridge-menu
 

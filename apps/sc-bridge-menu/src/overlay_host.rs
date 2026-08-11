@@ -7,13 +7,17 @@
 //! game's Space is not free to the compositor, and the wheel is up for a few
 //! seconds at a time, so it does not get to exist the rest of the time.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::overlay_protocol::{OverlayEnvelope, OverlayMessage, OVERLAY_ARGUMENT};
+use crate::cli::PROFILE_OVERLAY_COMMAND;
+use crate::line_protocol::read_bounded_line;
+use crate::overlay_protocol::{OverlayEnvelope, OverlayMessage};
+
+const MAX_DIAGNOSTIC_LINE_BYTES: usize = 16 * 1024;
 
 /// An overlay binary that cannot even start must not be re-executed on every
 /// hold of a determined user.
@@ -270,7 +274,7 @@ impl OverlayHost {
     fn spawn(&mut self) -> Result<(), String> {
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let mut command = Command::new(executable);
-        command.arg(OVERLAY_ARGUMENT);
+        command.arg(PROFILE_OVERLAY_COMMAND);
         self.spawn_command(&mut command)
     }
 
@@ -290,9 +294,15 @@ impl OverlayHost {
         self.stderr_thread = child.stderr.take().map(|stderr| {
             let diagnostics = self.diagnostic_sender.clone();
             std::thread::spawn(move || {
-                for line in BufReader::new(stderr).lines() {
-                    let Ok(line) = line else { return };
-                    let _ = diagnostics.try_send(line);
+                let mut reader = BufReader::new(stderr);
+                loop {
+                    match read_bounded_line(&mut reader, MAX_DIAGNOSTIC_LINE_BYTES) {
+                        Ok(Some(line)) => {
+                            let _ =
+                                diagnostics.try_send(String::from_utf8_lossy(&line).into_owned());
+                        }
+                        Ok(None) | Err(_) => return,
+                    }
                 }
             })
         });

@@ -515,6 +515,7 @@ fn start_stop_and_shutdown_are_idempotent_while_waiting() {
         output: OutputSelection::Mock,
         ..RuntimeConfig::default()
     });
+    assert!(!handle.is_terminated());
     handle
         .set_idle_shutdown_timeout(Some(Duration::from_mins(5)))
         .unwrap();
@@ -545,6 +546,35 @@ fn start_stop_and_shutdown_are_idempotent_while_waiting() {
     handle.request_resume_from_wake().unwrap();
     // Stopping during the wake-settle window must cancel the pending
     // automatic restart just as an explicit user stop would.
+    handle.stop().unwrap();
+    handle.shutdown().unwrap();
+    assert!(handle.is_terminated());
+}
+
+#[test]
+fn updater_suspension_preserves_user_intent_and_composes_with_sleep() {
+    let handle = BridgeRuntime::spawn(RuntimeConfig {
+        controller: ControllerSelection::Index(usize::MAX),
+        output: OutputSelection::Mock,
+        ..RuntimeConfig::default()
+    });
+
+    handle.suspend_for_update().unwrap();
+    let suspended = handle.status();
+    assert_eq!(suspended.state, RuntimeState::Stopped);
+    assert_eq!(suspended.detail, "Suspended for application update");
+
+    handle.stop().unwrap();
+    handle.resume_from_update().unwrap();
+    assert_eq!(handle.status().detail, "Bridge stopped");
+
+    handle.start().unwrap();
+    handle.suspend_for_update().unwrap();
+    handle.suspend_for_sleep().unwrap();
+    handle.resume_from_update().unwrap();
+    assert_eq!(handle.status().detail, "Suspended for system sleep");
+
+    handle.request_resume_from_wake().unwrap();
     handle.stop().unwrap();
     handle.shutdown().unwrap();
 }

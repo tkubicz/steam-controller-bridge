@@ -1,7 +1,17 @@
-#[cfg(all(target_os = "macos", feature = "about"))]
-mod about_window;
+#[cfg(all(target_os = "macos", feature = "updater"))]
+mod about_pages;
+#[cfg(all(target_os = "macos", feature = "updater"))]
+mod app_center;
+#[cfg(target_os = "macos")]
+mod app_center_host;
+#[cfg(target_os = "macos")]
+mod app_center_protocol;
 #[cfg(all(target_os = "macos", feature = "editor"))]
 mod bindings_editor;
+#[cfg(target_os = "macos")]
+mod cli;
+#[cfg(target_os = "macos")]
+mod line_protocol;
 #[cfg(target_os = "macos")]
 mod macos;
 // Only `macos` renders the model, so a non-macOS build would see it as dead code.
@@ -18,64 +28,45 @@ mod overlay_protocol;
 #[cfg(all(target_os = "macos", feature = "overlay"))]
 mod profile_overlay;
 #[cfg(all(target_os = "macos", feature = "updater"))]
-mod update_center;
-#[cfg(all(target_os = "macos", feature = "updater"))]
 mod update_check;
-#[cfg(target_os = "macos")]
-mod update_host;
-#[cfg(target_os = "macos")]
-mod update_protocol;
+#[cfg(all(target_os = "macos", feature = "updater"))]
+mod window_ui;
 
 #[cfg(target_os = "macos")]
 fn main() {
-    let mut about = false;
-    let mut editor = false;
-    let mut overlay = false;
-    let mut updater = false;
-    for argument in std::env::args() {
-        about |= argument == "--about";
-        editor |= argument == "--bindings-editor";
-        overlay |= argument == overlay_protocol::OVERLAY_ARGUMENT;
-        updater |= argument == update_protocol::UPDATE_CENTER_ARGUMENT;
-    }
-    let result = if about {
-        #[cfg(feature = "about")]
-        {
-            about_window::run()
+    let result = match cli::parse().command {
+        None => macos::run(),
+        Some(cli::Command::AppCenter(arguments)) => {
+            #[cfg(feature = "updater")]
+            {
+                app_center::run(arguments)
+            }
+            #[cfg(not(feature = "updater"))]
+            {
+                let _ = arguments;
+                Err("this build has no application information window".to_owned())
+            }
         }
-        #[cfg(not(feature = "about"))]
-        {
-            Err("this build has no About window".to_owned())
+        Some(cli::Command::BindingsEditor) => {
+            #[cfg(feature = "editor")]
+            {
+                bindings_editor::run()
+            }
+            #[cfg(not(feature = "editor"))]
+            {
+                Err("this build has no bindings editor".to_owned())
+            }
         }
-    } else if editor {
-        #[cfg(feature = "editor")]
-        {
-            bindings_editor::run()
+        Some(cli::Command::ProfileOverlay) => {
+            #[cfg(feature = "overlay")]
+            {
+                profile_overlay::run()
+            }
+            #[cfg(not(feature = "overlay"))]
+            {
+                Err("this build has no profile overlay".to_owned())
+            }
         }
-        #[cfg(not(feature = "editor"))]
-        {
-            Err("this build has no bindings editor".to_owned())
-        }
-    } else if overlay {
-        #[cfg(feature = "overlay")]
-        {
-            profile_overlay::run()
-        }
-        #[cfg(not(feature = "overlay"))]
-        {
-            Err("this build has no profile overlay".to_owned())
-        }
-    } else if updater {
-        #[cfg(feature = "updater")]
-        {
-            update_center::run()
-        }
-        #[cfg(not(feature = "updater"))]
-        {
-            Err("this build has no Update Center".to_owned())
-        }
-    } else {
-        macos::run()
     };
     if let Err(error) = result {
         eprintln!("Steam Controller Bridge menu app failed: {error}");

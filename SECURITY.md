@@ -2,12 +2,12 @@
 
 ## Supported versions
 
-This project is pre-1.0. Only the latest release receives fixes.
+Only the latest published release receives security fixes.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x | Yes |
-| < 0.1 | No |
+| Latest GitHub release | Yes |
+| Older releases | No |
 
 ## Reporting a vulnerability
 

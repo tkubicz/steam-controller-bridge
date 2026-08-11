@@ -28,8 +28,13 @@ impl MenuApp {
             MenuItem::with_id(ENABLE_BINDINGS_ID, "Request Permissions…", true, None);
         let edit_profiles = MenuItem::with_id(EDIT_BINDINGS_ID, EDIT_PROFILES_LABEL, true, None);
         let logs = MenuItem::with_id(LOGS_ID, "Open Log Folder", true, None);
-        let updates = MenuItem::with_id(UPDATES_ID, "Check for Updates…", true, None);
-        let about = MenuItem::with_id(ABOUT_ID, "About", true, None);
+        let updates = MenuItem::with_id(
+            UPDATES_ID,
+            "Check for Updates…",
+            app_center_available(),
+            None,
+        );
+        let about = MenuItem::with_id(ABOUT_ID, "About", app_center_available(), None);
         let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
         let idle_shutdown = vec![
             (
@@ -259,6 +264,10 @@ impl MenuApp {
 
     pub(super) fn refresh_status(&mut self) {
         let status = self.runtime.status();
+        let recovery_problem = self.app_center_recovery.problem().map(str::to_owned);
+        if let Err(error) = self.app_center_host.update_firmware(status.xiao.firmware) {
+            eprintln!("cannot update app window firmware status: {error}");
+        }
         #[cfg(feature = "updater")]
         {
             self.update_checker.poll();
@@ -278,10 +287,13 @@ impl MenuApp {
             eprintln!("cannot write menu-app diagnostics: {error}");
         }
         self.sync_overlay_process(&status);
-        if status.revision == self.last_revision {
+        if status.revision == self.last_revision && recovery_problem == self.last_recovery_problem {
             return;
         }
-        let model = MenuModel::from_status(&status);
+        let mut model = MenuModel::from_status(&status);
+        if let Some(error) = recovery_problem.as_deref() {
+            model.apply_external_error(error);
+        }
         let icon_changed = self
             .last_model
             .as_ref()
@@ -341,24 +353,23 @@ impl MenuApp {
             self.last_model = Some(model);
         }
         self.last_revision = status.revision;
+        self.last_recovery_problem = recovery_problem;
     }
 
-    pub(super) fn show_about(&mut self) {
-        if let Some(child) = self.about_child.as_mut() {
-            match child.try_wait() {
-                Ok(None) => {
-                    if !activate_child_application(child) {
-                        eprintln!("level=warn event=about_window_focus_deferred");
-                    }
-                    return;
+    pub(super) fn show_app_center(&mut self, page: AppCenterPage) {
+        let firmware = self.runtime.status().xiao.firmware;
+        match self.app_center_host.launch(page, firmware) {
+            Ok(reused) => {
+                if reused
+                    && self
+                        .app_center_host
+                        .child()
+                        .is_some_and(|child| !activate_child_application(child))
+                {
+                    eprintln!("level=warn event=app_window_focus_deferred");
                 }
-                Ok(Some(_)) | Err(_) => self.about_child = None,
             }
-        }
-
-        match launch_about_window() {
-            Ok(child) => self.about_child = Some(child),
-            Err(error) => eprintln!("cannot launch About window: {error}"),
+            Err(error) => eprintln!("cannot open Steam Controller Bridge window: {error}"),
         }
     }
 
@@ -418,7 +429,8 @@ impl MenuApp {
                 self.update_setting_checkmarks();
             }
             COPY_ERROR_ID => {
-                if let Some(error) = self.runtime.status().last_error {
+                let recovery_error = self.app_center_recovery.problem().map(str::to_owned);
+                if let Some(error) = recovery_error.or_else(|| self.runtime.status().last_error) {
                     if let Err(copy_error) = copy_text(&error) {
                         eprintln!("cannot copy full error: {copy_error}");
                     }
@@ -439,20 +451,19 @@ impl MenuApp {
                 Err(error) => eprintln!("cannot launch bindings editor: {error}"),
             },
             LOGS_ID => {
-                if let Err(error) = open_path(&self.logger.directory.to_string_lossy()) {
+                if let Err(error) = open_path(&self.logger.directory) {
                     eprintln!("cannot open log folder: {error}");
                 }
             }
-            ABOUT_ID => self.show_about(),
-            UPDATES_ID => {
-                let firmware = self.runtime.status().xiao.firmware;
-                if let Err(error) = self.update_host.launch(firmware) {
-                    eprintln!("cannot launch Update Center: {error}");
+            ABOUT_ID | UPDATES_ID => {
+                if let Some(page) = app_center_page_for_menu(id) {
+                    self.show_app_center(page);
                 }
             }
             QUIT_ID => {
-                self.shutdown();
-                event_loop.exit();
+                if self.shutdown() {
+                    event_loop.exit();
+                }
             }
             OVERLAY_ENABLED_ID => {
                 self.settings.profile_overlay_enabled = !self.settings.profile_overlay_enabled;
@@ -484,66 +495,146 @@ impl MenuApp {
         }
     }
 
-    pub(super) fn shutdown(&mut self) {
+    pub(super) fn shutdown(&mut self) -> bool {
         if self.shutting_down {
-            return;
+            return true;
+        }
+        if self.app_center_host.firmware_session_active() {
+            eprintln!("level=warn event=quit_deferred reason=firmware_update_active");
+            if let Some(child) = self.app_center_host.child() {
+                let _ = activate_child_application(child);
+            }
+            return false;
         }
         self.shutting_down = true;
         self.overlay.stop();
-        self.update_host.stop();
+        let _ = self.app_center_host.stop();
         self.flush_overlay_diagnostics();
-        if let Some(mut child) = self.about_child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
         if let Err(error) = self.runtime.shutdown() {
             eprintln!("bridge shutdown failed: {error}");
         }
+        true
     }
 
     pub(super) fn handle_update_requests(&mut self, event_loop: &ActiveEventLoop) {
-        let requests: Vec<_> = self.update_host.drain().collect();
-        for request in requests {
-            let response = match request {
-                UpdateRequest::SuspendBridge => {
-                    let resume_after = self
-                        .last_model
-                        .as_ref()
-                        .is_some_and(|model| model.run_action == RunAction::Stop);
-                    match self.runtime.stop() {
-                        Ok(()) => {
-                            self.update_host.set_suspended(resume_after);
-                            UpdateResponse::Suspended { resume_after }
+        for session_request in self.app_center_host.drain() {
+            let UpdateRequest { id, operation } = session_request.request;
+            let result = match operation {
+                UpdateOperation::SuspendBridge => match self.runtime.suspend_for_update() {
+                    Ok(()) => match self
+                        .app_center_host
+                        .claim_suspension(session_request.generation)
+                    {
+                        Ok(()) => UpdateResult::Suspended,
+                        Err(error) => {
+                            let _ = self.runtime.resume_from_update();
+                            UpdateResult::Error { message: error }
                         }
-                        Err(error) => UpdateResponse::Error {
-                            message: format!("Bridge could not release its devices: {error}"),
-                        },
-                    }
-                }
-                UpdateRequest::ResumeBridge => {
-                    let restart = self.update_host.clear_suspended();
-                    if restart {
-                        match self.runtime.request_start() {
-                            Ok(()) => UpdateResponse::Resumed,
-                            Err(error) => UpdateResponse::Error {
-                                message: format!("Bridge could not restart: {error}"),
-                            },
-                        }
-                    } else {
-                        UpdateResponse::Resumed
-                    }
-                }
-                UpdateRequest::QuitForReplacement => {
-                    let response = UpdateResponse::Quitting;
-                    let _ = self.update_host.respond(&response);
-                    self.shutdown();
-                    event_loop.exit();
-                    continue;
-                }
+                    },
+                    Err(error) => UpdateResult::Error {
+                        message: format!("Bridge could not release its devices: {error}"),
+                    },
+                },
+                UpdateOperation::ResumeBridge => match self.runtime.resume_from_update() {
+                    Ok(()) => match self
+                        .app_center_host
+                        .release_suspension(session_request.generation)
+                    {
+                        Ok(()) => UpdateResult::Resumed,
+                        Err(error) => UpdateResult::Error { message: error },
+                    },
+                    Err(error) => UpdateResult::Error {
+                        message: format!("Bridge could not resume: {error}"),
+                    },
+                },
+                UpdateOperation::QuitForReplacement => UpdateResult::Quitting,
             };
-            if let Err(error) = self.update_host.respond(&response) {
-                eprintln!("cannot answer Update Center: {error}");
+            let response = UpdateResponse { id, result };
+            if let Err(error) = self
+                .app_center_host
+                .respond(session_request.generation, &response)
+            {
+                eprintln!("cannot answer app window: {error}");
             }
+            if operation == UpdateOperation::QuitForReplacement && self.shutdown() {
+                event_loop.exit();
+                return;
+            }
+        }
+    }
+
+    pub(super) fn recover_app_center_suspension(&mut self) {
+        self.app_center_host.reap();
+        if !self.app_center_host.suspension_recovery_needed() {
+            self.app_center_recovery = AppCenterRecovery::Idle;
+            return;
+        }
+        let state = std::mem::replace(&mut self.app_center_recovery, AppCenterRecovery::Idle);
+        match state {
+            AppCenterRecovery::Waiting {
+                mut request,
+                mut error,
+            } => match request.poll() {
+                UpdateResumePoll::Pending => {
+                    self.app_center_recovery = AppCenterRecovery::Waiting { request, error };
+                }
+                UpdateResumePoll::TimedOut => {
+                    let message = "Updater suspension recovery is not responding. Quit remains deferred while the original recovery request is pending.".to_owned();
+                    eprintln!("level=error event=app_center_recovery_delayed");
+                    error = Some(message);
+                    self.app_center_recovery = AppCenterRecovery::Waiting { request, error };
+                }
+                UpdateResumePoll::Complete(Ok(())) => {
+                    self.app_center_host.complete_suspension_recovery();
+                }
+                UpdateResumePoll::Complete(Err(error)) => {
+                    self.fail_app_center_recovery(&error.to_string());
+                }
+            },
+            AppCenterRecovery::Failed(error) => {
+                if !self.complete_terminated_app_center_recovery(&error) {
+                    self.app_center_recovery = AppCenterRecovery::Failed(error);
+                }
+            }
+            AppCenterRecovery::Idle => self.start_app_center_recovery(),
+        }
+    }
+
+    fn start_app_center_recovery(&mut self) {
+        match self.runtime.begin_resume_from_update() {
+            Ok(request) => {
+                self.app_center_recovery = AppCenterRecovery::Waiting {
+                    request,
+                    error: None,
+                };
+            }
+            Err(error) => self.fail_app_center_recovery(&error.to_string()),
+        }
+    }
+
+    fn fail_app_center_recovery(&mut self, error: &str) {
+        if self.complete_terminated_app_center_recovery(error) {
+            return;
+        }
+        let message = format!("Updater suspension recovery failed: {error}. Quit remains deferred because bridge ownership could not be proven safe.");
+        eprintln!("level=error event=app_center_recovery_failed error={error:?}");
+        self.app_center_recovery = AppCenterRecovery::Failed(message);
+    }
+
+    fn complete_terminated_app_center_recovery(&mut self, error: &str) -> bool {
+        if self.runtime.is_terminated() {
+            let join = self.runtime.join();
+            eprintln!(
+                "level=error event=app_center_recovery_abandoned reason=runtime_terminated error={error:?} join={join:?}"
+            );
+            // A joined runtime cannot still own HID or serial handles, so
+            // retaining the updater's quit interlock would only strand the
+            // menu process after its worker has already ended.
+            self.app_center_host.complete_suspension_recovery();
+            self.app_center_recovery = AppCenterRecovery::Idle;
+            true
+        } else {
+            false
         }
     }
 }

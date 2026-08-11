@@ -1,4 +1,4 @@
-# Update Center security and release operations
+# Updater security and release operations
 
 The menu app checks the latest stable GitHub release at most once every 24
 hours. It downloads only the manifest and signature envelope during that check.
@@ -54,3 +54,29 @@ Source builds intentionally embed no trust anchor unless their builder sets
 `SC_BRIDGE_UPDATE_PUBLIC_KEYS`. Fixture keys belong only in tests and pull
 request validation; never place the production private seed in the repository,
 artifacts, logs, or ordinary repository secrets.
+
+## Local UI preview
+
+Preview the unified window on its Updates tab with an available update, without
+trusted keys, updater network access, release assets, or connected hardware:
+
+```sh
+cargo run -p sc-bridge-menu -- app-center --demo --tab updates
+```
+
+Preview the fully up-to-date state, including the collapsed current release
+notes and firmware reinstall action:
+
+```sh
+cargo run -p sc-bridge-menu -- app-center --demo current --tab updates
+```
+
+The same fixture can open the other tabs directly:
+
+```sh
+cargo run -p sc-bridge-menu -- app-center --demo --tab about
+cargo run -p sc-bridge-menu -- app-center --demo current --tab changelog
+```
+
+Demo actions only advance the preview state. They never download files, open
+hardware, suspend the bridge, or quit the application.

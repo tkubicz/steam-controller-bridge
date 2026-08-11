@@ -1,9 +1,9 @@
 # Changelog
 
-Release Please generates this file from Conventional Commit squash merges. Do
-not edit release entries by hand; correct the originating pull-request metadata
-and let the release pull request regenerate them. Versions follow
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Release Please generates new entries from Conventional Commit squash merges.
+Published history may be corrected directly when this file and the matching
+GitHub Release are updated together. Versions follow [Semantic
+Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.5.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.4.0...v1.5.0) (2026-08-10)
 
@@ -64,12 +64,10 @@ and let the release pull request regenerate them. Versions follow
 ### Features
 
 * **bindings:** map grip paddles and Quick Access to keyboard and mouse actions ([54f52d1](https://github.com/tkubicz/steam-controller-bridge/commit/54f52d13751fde76a08421c4175b0fb4108aa285))
-* **ci:** fix release using github app ([#16](https://github.com/tkubicz/steam-controller-bridge/issues/16)) ([6334279](https://github.com/tkubicz/steam-controller-bridge/commit/6334279dc5ed1fb4f131b804166859427937f36b))
 
 
 ### Bug Fixes
 
-* **ci:** commit message release gate ([#15](https://github.com/tkubicz/steam-controller-bridge/issues/15)) ([e9732b0](https://github.com/tkubicz/steam-controller-bridge/commit/e9732b0b5a0e618488b436f89d09df50b8365c5c))
 * **menu:** keep the tray menu open when a submenu is first opened ([54f52d1](https://github.com/tkubicz/steam-controller-bridge/commit/54f52d13751fde76a08421c4175b0fb4108aa285))
 * **menu:** request Input Monitoring and Accessibility from the menu ([54f52d1](https://github.com/tkubicz/steam-controller-bridge/commit/54f52d13751fde76a08421c4175b0fb4108aa285))
 
@@ -84,7 +82,6 @@ and let the release pull request regenerate them. Versions follow
 ### Features
 
 * log status changes as deltas with periodic snapshots ([bfacf56](https://github.com/tkubicz/steam-controller-bridge/commit/bfacf56bdacc08ae051fa518523b56f4a4e78977))
-* log status changes as deltas with periodic snapshots ([#10](https://github.com/tkubicz/steam-controller-bridge/issues/10)) ([bfacf56](https://github.com/tkubicz/steam-controller-bridge/commit/bfacf56bdacc08ae051fa518523b56f4a4e78977))
 
 ## [1.1.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.0.0...v1.1.0) (2026-08-04)
 
@@ -98,30 +95,27 @@ and let the release pull request regenerate them. Versions follow
 
 * **menu:** reuse native status images to bound memory usage ([05f399c](https://github.com/tkubicz/steam-controller-bridge/commit/05f399ca55dcc44f6e13cf16b9f50f01cdb96b62))
 
-## [1.0.0](https://github.com/tkubicz/steam-controller-bridge/releases/tag/v1.0.0) (2026-07-30)
+## [1.0.0](https://github.com/tkubicz/steam-controller-bridge/releases/tag/v1.0.0) (2026-08-01)
 
 
 ### Features
 
-* First public release for macOS and Steam Controller 2 (2026)
-* **controller:** support Steam Controller 2 input over the official Proteus Puck (`28de:1304`, USB interfaces 2–5) and direct Bluetooth (`28de:1303`, interface -1), with zero-argument discovery that refuses ambiguous collections
-* **firmware:** expose the XIAO nRF52840 as a composite CDC ACM and Xbox 360-compatible USB device that macOS, browsers, and streaming clients recognize as a standard-mapped gamepad
-* **haptics:** route end-to-end dual rumble to the correct strong and weak actuators with a 100 ms host lease that prevents latched output
-* **controller:** suppress lizard mode with the SDL-compatible feature report refreshed every three seconds
-* **menu:** provide a macOS menu-bar application with bridge, device, battery, haptics, diagnostics, permission, and rotated-log controls
-* **tools:** add `sc-probe`, `sc-visualizer`, `gamepad-simulator`, and `sc-replay` for hardware diagnostics, visualization, simulation, and replay
-* **release:** publish reproducible firmware artifacts and an ad-hoc-signed macOS application bundle with SHA-256 sums
+* **bridge:** translate Steam Controller 2 input through the Proteus Puck into a standard gamepad ([f6d5c08](https://github.com/tkubicz/steam-controller-bridge/commit/f6d5c088169750f8cb6bb7c42365599f00268a4b))
+* **controller:** add direct Bluetooth input with automatic transport discovery ([#2](https://github.com/tkubicz/steam-controller-bridge/issues/2)) ([426e2f9](https://github.com/tkubicz/steam-controller-bridge/commit/426e2f9a904c129c100c3c82e34b1bd9bc594966))
+* **firmware:** add XIAO nRF52840 CDC/gamepad firmware and pinned build tooling ([bde2a1f](https://github.com/tkubicz/steam-controller-bridge/commit/bde2a1fb9959354b2fb4368f44243fcf682f0685))
+* **haptics:** add end-to-end dual-actuator rumble with a bounded host lease ([91838ab](https://github.com/tkubicz/steam-controller-bridge/commit/91838ab1816a95a0cf67abc84ae4734d85f794d6))
+* **menu:** add native macOS menu-bar controls and diagnostics ([4d5891c](https://github.com/tkubicz/steam-controller-bridge/commit/4d5891c9ebfd0da093f402b602b4730b86c2b030))
+* **recording:** add deterministic capture and replay ([244c8a7](https://github.com/tkubicz/steam-controller-bridge/commit/244c8a714997e9d41a1619cf52dc66d470672fbd))
+* **tools:** add controller probing and report decoding ([84d4bf4](https://github.com/tkubicz/steam-controller-bridge/commit/84d4bf46857d694fe71922fc860f59a23296212d))
+* **visualizer:** add live controller diagnostics ([bb54cde](https://github.com/tkubicz/steam-controller-bridge/commit/bb54cdeb4767402381ce9dcbb08de92288bfd793))
+* **release:** publish firmware and macOS application artifacts with checksums ([#3](https://github.com/tkubicz/steam-controller-bridge/issues/3)) ([6f0542b](https://github.com/tkubicz/steam-controller-bridge/commit/6f0542be5176ad33bd17290e41182c4b913aa260))
 
-### Security
 
-* Restrict controller writes to the fixed lizard-off feature report and exact standard dual-rumble output, gated by vendor, product, usage, interface, and transport
-* Set `unsafe_code = "forbid"` across all crates
-* Mask hardware serials in status, logs, and diagnostics while retaining full serials only in explicitly share-sensitive capture and recording files
+### Bug Fixes
 
-### Known Limitations
+* stabilize packaging, hardware selection, and documentation before the public release ([#1](https://github.com/tkubicz/steam-controller-bridge/issues/1)) ([abb30e1](https://github.com/tkubicz/steam-controller-bridge/commit/abb30e1a70a9af8283b553aa51d834d3ed843332))
 
-* Firmware uses the Xbox 360 compatibility VID/PID `045e:028e`; a distributable product requires an owned or licensed USB identity
-* Button and axis mapping is fixed with no configuration file
-* The macOS application is ad-hoc signed rather than notarized and requires a one-time right-click → Open
-* GitHub Releases is the only distribution channel; there is no Homebrew cask, App Store build, or crates.io publication
-* Steam coexistence, multiple simultaneous controllers, and other HID consumers against the selected collection are unsupported
+
+### Performance Improvements
+
+* **runtime:** reduce idle CPU use and keep status publication off the controller hot path ([#3](https://github.com/tkubicz/steam-controller-bridge/issues/3)) ([6f0542b](https://github.com/tkubicz/steam-controller-bridge/commit/6f0542be5176ad33bd17290e41182c4b913aa260))

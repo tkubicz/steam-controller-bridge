@@ -7,10 +7,11 @@ license.workspace = true
 publish = false
 
 [features]
-default = ["about", "editor", "overlay", "updater"]
-about = ["dep:eframe", "dep:ui-theme"]
+default = ["editor", "overlay", "updater"]
 editor = ["dep:eframe", "dep:ui-theme", "dep:controller-art"]
 overlay = ["dep:eframe", "dep:ui-theme"]
+# About, Changelog, and Updates are tabs of one window, so the former `about`
+# feature no longer names anything that can be built on its own.
 updater = ["dep:eframe", "dep:ui-theme", "dep:release-updater", "dep:semver"]
 
 [dependencies]
@@ -24,6 +25,7 @@ serde_json.workspace = true
 steam-controller-device = { path = "../../crates/steam-controller-device" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+clap.workspace = true
 eframe = { workspace = true, optional = true }
 ui-theme = { path = "../../crates/ui-theme", optional = true }
 # Only the editor draws a controller; the overlay does not.

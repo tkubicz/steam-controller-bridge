@@ -240,3 +240,14 @@ fn allow_power_change(root_port: io_connect_t, message_argument: *mut c_void) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registration_and_teardown_are_owned_by_the_safe_wrapper() {
+        let monitor = PowerMonitor::new(|_| {}).expect("register system-power notifications");
+        drop(monitor);
+    }
+}

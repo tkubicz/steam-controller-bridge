@@ -15,6 +15,8 @@ The scope and breaking-change `!` are optional. Supported types are `feat`,
 patch. Add `!` or a `BREAKING CHANGE:` footer for a SemVer major change.
 Internal documentation, test, build, CI, chore, and refactoring entries are
 hidden from release notes and do not create a release by themselves.
+Scopes do not change that visibility: use `ci: repair release automation`, not
+`fix(ci): repair release automation`, for an internal CI-only change.
 
 When one squash merge contains multiple user-visible changes, add this block to
 the pull-request description before merging:
@@ -27,9 +29,10 @@ fix(menu): reuse native status images to bound memory usage
 END_COMMIT_OVERRIDE
 ```
 
-Release Please uses that block in place of the squash title. Correct inaccurate
-notes in the merged pull-request metadata and rerun Release Please; do not edit
-`CHANGELOG.md` or the GitHub Release independently.
+Release Please uses that block in place of the squash title. Before publication,
+correct inaccurate notes in the merged pull-request metadata and rerun Release
+Please. For already-published history, a direct correction is acceptable when
+`CHANGELOG.md` and the matching GitHub Release are updated together.
 
 ## Releasing
 
@@ -58,10 +61,14 @@ failed jobs** on that workflow run. The successful Release Please job and its
 release outputs are retained, while artifact uploads safely replace files with
 the same names.
 
-Do not manually edit the generated changelog, create a version tag, or compose a
-second GitHub Release description. Automated prereleases are not supported yet.
+Do not create a version tag or compose a second GitHub Release description.
+When correcting an already-published entry directly, update the checked-in
+changelog and that tag's existing GitHub Release in the same change. Automated
+prereleases are not supported yet.
 
 Repository administrators must enable **Allow GitHub Actions to create and
-approve pull requests**. The workflow uses the built-in `GITHUB_TOKEN`; it
-explicitly dispatches CI for the generated release branch, so no personal token
-or long-lived release credential is required.
+approve pull requests** and configure `RELEASE_APP_ID` plus
+`RELEASE_APP_PRIVATE_KEY`. The workflow exchanges those GitHub App credentials
+for a short-lived installation token that can update the release pull-request
+branch; the resulting push triggers ordinary pull-request CI. No personal
+access token is used.

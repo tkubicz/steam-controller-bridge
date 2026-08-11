@@ -10,15 +10,13 @@
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const MAX_OVERLAY_LINE_BYTES: usize = 64 * 1024;
 
 /// Identifies the overlay's window so it can be found in `NSApp.windows()` and
 /// given the level and collection behaviour that float it over a fullscreen
 /// game. Nothing shows this string to the user: the window has no title bar.
 #[cfg(feature = "overlay")]
 pub const OVERLAY_WINDOW_TITLE: &str = "Steam Controller Bridge Profile Wheel";
-
-/// The command-line flag that runs this binary as the overlay.
-pub const OVERLAY_ARGUMENT: &str = "--profile-overlay";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -57,9 +55,12 @@ impl OverlayEnvelope {
     /// # Errors
     /// Returns an error if the message cannot be serialized.
     pub fn to_line(&self) -> Result<String, String> {
-        serde_json::to_string(self)
-            .map(|line| format!("{line}\n"))
-            .map_err(|error| error.to_string())
+        let mut line = serde_json::to_string(self).map_err(|error| error.to_string())?;
+        line.push('\n');
+        if line.len() > MAX_OVERLAY_LINE_BYTES {
+            return Err("overlay message exceeds its bound".to_owned());
+        }
+        Ok(line)
     }
 
     /// Parses one line from the parent.
@@ -143,5 +144,15 @@ mod tests {
         for line in ["", "{", "null", r#"{"v":1}"#, r#"{"v":1,"kind":"nope"}"#] {
             assert!(OverlayEnvelope::from_line(line).is_err(), "{line:?}");
         }
+    }
+
+    #[test]
+    fn oversized_messages_are_rejected_before_they_reach_the_pipe() {
+        let envelope = OverlayEnvelope::new(OverlayMessage::Roster {
+            names: vec!["x".repeat(MAX_OVERLAY_LINE_BYTES)],
+            active: None,
+            sectors_per_page: 8,
+        });
+        assert!(envelope.to_line().is_err());
     }
 }

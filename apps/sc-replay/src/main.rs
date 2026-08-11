@@ -85,6 +85,7 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
+    validate_cli(&cli)?;
     let path = &cli.recording;
     let session = ReplaySession::read(BufReader::new(
         File::open(path).map_err(|error| format!("cannot open '{}': {error}", path.display()))?,
@@ -121,6 +122,22 @@ fn run() -> Result<(), String> {
         }
     }
     output.send_neutral().map_err(|error| error.to_string())
+}
+
+fn validate_cli(cli: &Cli) -> Result<(), String> {
+    if !cli.speed.is_finite() || cli.speed <= 0.0 {
+        return Err("--speed must be a finite number greater than zero".to_owned());
+    }
+    match cli.output {
+        OutputArg::File if cli.output_file.is_none() => {
+            Err("--output file requires --output-file PATH".to_owned())
+        }
+        OutputArg::Serial if cli.port.is_none() => {
+            Err("--output serial requires --port PATH".to_owned())
+        }
+        OutputArg::Serial if cli.baud == 0 => Err("--baud must be greater than zero".to_owned()),
+        _ => Ok(()),
+    }
 }
 
 fn play_step(
@@ -201,4 +218,60 @@ fn make_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
             .map_err(|error| error.to_string())?,
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(arguments: &[&str]) -> Cli {
+        Cli::try_parse_from(arguments).expect("valid CLI syntax")
+    }
+
+    #[test]
+    fn output_specific_arguments_are_validated_before_playback() {
+        assert!(validate_cli(&parse(&["sc-replay", "recording.jsonl"])).is_ok());
+        assert!(validate_cli(&parse(&[
+            "sc-replay",
+            "recording.jsonl",
+            "--output",
+            "file"
+        ]))
+        .is_err());
+        assert!(validate_cli(&parse(&[
+            "sc-replay",
+            "recording.jsonl",
+            "--output",
+            "serial"
+        ]))
+        .is_err());
+        assert!(validate_cli(&parse(&[
+            "sc-replay",
+            "recording.jsonl",
+            "--output",
+            "serial",
+            "--port",
+            "/dev/null",
+            "--baud",
+            "0"
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn speed_must_be_finite_and_positive() {
+        for value in ["0", "NaN", "inf"] {
+            let cli = parse(&["sc-replay", "recording.jsonl", "--speed", value]);
+            assert!(validate_cli(&cli).is_err(), "accepted speed {value}");
+        }
+        let negative = parse(&["sc-replay", "recording.jsonl", "--speed=-1"]);
+        assert!(validate_cli(&negative).is_err());
+        assert!(validate_cli(&parse(&["sc-replay", "recording.jsonl", "--speed", "2.5"])).is_ok());
+    }
+
+    #[test]
+    fn compact_remains_an_alias_for_dump() {
+        let cli = parse(&["sc-replay", "recording.jsonl", "--output", "compact"]);
+        assert_eq!(cli.output, OutputArg::Dump);
+    }
 }

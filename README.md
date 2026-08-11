@@ -4,17 +4,9 @@ Use a Steam Controller 2 as a standard USB Xbox gamepad on macOS — without Ste
 running — in browsers, games, and cloud gaming services. A Seeed Studio XIAO
 nRF52840 does the translation in hardware.
 
-<!-- Uncomment once the asset is captured; see docs/images/README.md
-![Steam Controller 2 connected through its Puck to a Mac, with the XIAO nRF52840 bridge](docs/images/hardware-topology.jpg)
--->
-
 > **Requirements:** macOS 13 or later, a **Steam Controller 2 (2026)**, and a
 > non-Sense XIAO nRF52840. The original 2015 Steam Controller and its receiver
 > use a different protocol and are not supported.
-
-<!-- Uncomment once the asset is captured; see docs/images/README.md
-![The bridge driving a standard-mapped gamepad in a browser gamepad tester](docs/images/gamepad-tester.gif)
--->
 
 For hardware requirements, firmware flashing, Steam Controller 2 pairing,
 macOS permissions, daily startup, verification, and troubleshooting, start with
@@ -29,12 +21,12 @@ Grab the latest [release](https://github.com/tkubicz/steam-controller-bridge/rel
 | `steam-controller-bridge-xiao-nrf52840.uf2` | Firmware. Double-tap RESET on the XIAO and copy this onto the drive that mounts. |
 | `steam-controller-bridge-macos.zip` | The menu-bar application. |
 | `steam-controller-bridge-xiao-nrf52840-dfu.zip` | Firmware for serial DFU flashing, if you prefer `make flash`. |
-| `steam-controller-bridge-update-manifest.json` | Signed application and firmware release metadata used by the Update Center. |
+| `steam-controller-bridge-update-manifest.json` | Signed application and firmware release metadata used by the in-app updater. |
 | `steam-controller-bridge-update-signatures.json` | Ed25519 signatures for the exact manifest bytes. |
 
 After installing the menu app, use **Check for Updates…** for normal application
-and firmware updates. The Update Center downloads nothing beyond signed metadata
-until you choose an action. Application replacement is Finder-guided in v1;
+and firmware updates. It opens the Updates tab, which downloads nothing beyond
+signed metadata until you choose an action. Application replacement is Finder-guided in v1;
 firmware flashing is performed by the app and does not require Arduino CLI.
 
 Verify a download against the published sums before flashing:
@@ -311,10 +303,6 @@ See [the lab guide](docs/LIZARD_MOUSE_LAB.md).
 
 ## Visualizer
 
-<!-- Uncomment once the asset is captured; see docs/images/README.md
-![sc-visualizer showing raw, decoded, and mapped controller state side by side](docs/images/visualizer.png)
--->
-
 The visualizer finds a supported controller on its own, so it usually needs no
 arguments. It keeps looking while none is present, so you can start it first and
 plug the controller in afterwards:
@@ -334,7 +322,7 @@ error diagnostics; edits the mapping filters; and records raw, decoded, mapped,
 lifecycle, and marker events to JSONL. It supports mock and negotiated serial
 output.
 
-See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [serial transport](docs/SERIAL_TRANSPORT.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [desktop bindings](docs/DESKTOP_BINDINGS.md), [lizard mouse lab](docs/LIZARD_MOUSE_LAB.md), [recording format](docs/RECORDING_FORMAT.md), [Update Center operations](docs/UPDATES.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware plan](docs/FIRMWARE_PLAN.md).
+See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [serial transport](docs/SERIAL_TRANSPORT.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [desktop bindings](docs/DESKTOP_BINDINGS.md), [lizard mouse lab](docs/LIZARD_MOUSE_LAB.md), [recording format](docs/RECORDING_FORMAT.md), [updater operations](docs/UPDATES.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware architecture](docs/FIRMWARE_ARCHITECTURE.md).
 
 Firmware setup, native tests, UF2/DFU builds, flashing, recovery, LED states,
 and hardware validation are documented in
@@ -359,10 +347,6 @@ bridge. See [the bridge guide](docs/BRIDGE.md).
 
 ## macOS menu-bar app
 
-<!-- Uncomment once the asset is captured; see docs/images/README.md
-![The menu-bar dropdown showing bridge, input, controller, XIAO, battery, and haptics status](docs/images/menu-bar.png)
--->
-
 Build an ad-hoc-signed, dockless local application:
 
 ```bash
@@ -386,12 +370,15 @@ and is documented in [docs/PROFILE_OVERLAY.md](docs/PROFILE_OVERLAY.md).
 Friendly problem summaries stay bounded; use
 `Copy Full Error`, `Copy Diagnostics`, or the rotated log folder for the
 complete technical detail. Start/Stop, Input Monitoring settings, and Quit are
-also available. `About` opens a dedicated foreground window with a project
-summary, GitHub link, packaged version, and browsable release notes. Logs write
+also available. `About` and `Check for Updates…` open the corresponding tab in
+one foreground Steam Controller Bridge window. Its hero reports the installed
+application and connected firmware revisions alongside the project summary,
+collapsible changelog, and signed update workflow. Logs write
 concise `status_change` records immediately, full `status_snapshot` records at
 startup and every five minutes, and an immediate full snapshot when an error or
-failure appears. This source-built application is not notarized; release
-signing, a DMG, and Launch at Login remain future work.
+failure appears. Release metadata is Ed25519-signed and application bundles are
+ad-hoc code-signed. Developer ID signing, notarization, a DMG, and Launch at
+Login remain future work.
 
 ## Known limitations
 

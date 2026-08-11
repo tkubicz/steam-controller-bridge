@@ -5,6 +5,19 @@ use super::system::privacy_pane_url;
 use super::*;
 
 #[test]
+fn app_center_menu_actions_follow_build_capability() {
+    assert_eq!(
+        app_center_page_for_menu(ABOUT_ID),
+        app_center_available().then_some(AppCenterPage::About)
+    );
+    assert_eq!(
+        app_center_page_for_menu(UPDATES_ID),
+        app_center_available().then_some(AppCenterPage::Updates)
+    );
+    assert_eq!(app_center_page_for_menu("not-an-app-center-item"), None);
+}
+
+#[test]
 fn a_refused_permission_sends_the_user_to_the_pane_that_grants_it() {
     // macOS shows no dialog once it has recorded a refusal, so the pane is
     // the only remaining route, and each permission has its own.

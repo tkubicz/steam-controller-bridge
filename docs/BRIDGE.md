@@ -195,12 +195,13 @@ The template icon reflects the whole usable path: an x badge means Off,
 ellipsis means On but waiting for hardware, a check means the controller
 source and XIAO are both ready, and an exclamation mark means Action required.
 The app starts the runtime automatically and exposes Start, Stop, a dynamic
-Profiles submenu/editor, Profile Wheel settings, permission shortcuts, a
-dedicated About window with a project summary, GitHub link, packaged version,
-and browsable release notes, the unified Update Center, the log folder, and
-Quit. The Update Center runs as a child process and communicates through
-bounded line-delimited JSON; only an acknowledged firmware action or final app
-replacement shutdown releases runtime resources. Binding failures have
+Profiles submenu/editor, Profile Wheel settings, permission shortcuts, About,
+updates, the log folder, and Quit. About, Changelog, and Updates are tabs in one
+foreground Steam Controller Bridge child window; the hero reports both the
+application version and connected firmware revision. Bounded line-delimited
+JSON carries tab navigation, firmware status changes, and updater lifecycle
+requests. Only an acknowledged firmware action or final app replacement
+shutdown releases runtime resources. Binding failures have
 their own ready/permission/degraded status and never stop gamepad output.
 
 Structured status transitions are written with bounded rotation under

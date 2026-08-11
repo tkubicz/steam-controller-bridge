@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use bridge_runtime::FirmwareVersion;
 use release_updater::{
-    embedded_trusted_keys, refresh_catalog_if_due, ArtifactDescriptor, LatestReleaseClient,
-    ReleaseCache, ReleaseManifestV1, TrustedPublicKey,
+    classify_firmware_release, embedded_trusted_keys, refresh_catalog_if_due, ArtifactDescriptor,
+    CatalogRefresh, FirmwareReleaseState, LatestReleaseClient, ReleaseCache, ReleaseManifestV1,
+    TrustedPublicKey,
 };
 use semver::Version;
 
@@ -28,7 +29,7 @@ pub fn update_context() -> Result<(Vec<TrustedPublicKey>, ReleaseCache), String>
 
 pub struct UpdateChecker {
     manifest: Option<ReleaseManifestV1>,
-    result: Option<Receiver<Result<ReleaseManifestV1, String>>>,
+    result: Option<Receiver<Result<CatalogRefresh, String>>>,
     running_version: Version,
 }
 
@@ -60,7 +61,7 @@ impl UpdateChecker {
                 remove_obsolete_application_cache(&cache, &artifact);
             }
             let _ = sender.send(refresh_catalog_if_due(
-                &LatestReleaseClient,
+                &LatestReleaseClient::default(),
                 &cache,
                 &keys,
                 CHECK_INTERVAL,
@@ -75,7 +76,17 @@ impl UpdateChecker {
             return;
         };
         match result.try_recv() {
-            Ok(Ok(manifest)) => {
+            Ok(Ok(CatalogRefresh::Current(manifest))) => {
+                self.manifest = Some(manifest);
+                self.result = None;
+            }
+            Ok(Ok(CatalogRefresh::Stale {
+                manifest,
+                refresh_error,
+            })) => {
+                eprintln!(
+                    "level=warn event=automatic_update_check_stale message={refresh_error:?}"
+                );
                 self.manifest = Some(manifest);
                 self.result = None;
             }
@@ -96,11 +107,8 @@ impl UpdateChecker {
             return true;
         }
         self.running_version >= manifest.firmware.minimum_application_version
-            && match firmware {
-                FirmwareVersion::Reported(revision) => revision < manifest.firmware.revision,
-                FirmwareVersion::Unreported | FirmwareVersion::Malformed => true,
-                FirmwareVersion::Pending | FirmwareVersion::UnsupportedFormat(_) => false,
-            }
+            && classify_firmware_release(firmware, manifest.firmware.revision)
+                == FirmwareReleaseState::UpdateAvailable
     }
 }
 
@@ -109,6 +117,6 @@ fn remove_obsolete_application_cache(cache: &ReleaseCache, artifact: &ArtifactDe
     let _ = fs::remove_file(cache.artifact_path(artifact));
 }
 
-fn running_version() -> Version {
+pub(crate) fn running_version() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).expect("package version is semver")
 }
