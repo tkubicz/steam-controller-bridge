@@ -5,7 +5,7 @@ running - in browsers, games, and cloud gaming services. A Seeed Studio XIAO
 nRF52840 does the translation in hardware.
 
 > **Requirements:** macOS 13 or later, a **Steam Controller 2 (2026)**, and a
-> non-Sense XIAO nRF52840. The original 2015 Steam Controller and its receiver
+> XIAO nRF52840 or XIAO nRF52840 Sense. The original 2015 Steam Controller and its receiver
 > use a different protocol and are not supported.
 
 For hardware requirements, firmware flashing, Steam Controller 2 pairing,
@@ -18,9 +18,8 @@ Grab the latest [release](https://github.com/tkubicz/steam-controller-bridge/rel
 
 | File | What it is |
 | --- | --- |
-| `steam-controller-bridge-xiao-nrf52840.uf2` | Firmware. Double-tap RESET on the XIAO and copy this onto the drive that mounts. |
+| `steam-controller-bridge-xiao-nrf52840.uf2` | Signed firmware used by App Center. Manual copying is a recovery path. |
 | `steam-controller-bridge-macos.zip` | The menu-bar application. |
-| `steam-controller-bridge-xiao-nrf52840-dfu.zip` | Firmware for serial DFU flashing, if you prefer `make flash`. |
 | `steam-controller-bridge-update-manifest.json` | Signed application and firmware release metadata used by the in-app updater. |
 | `steam-controller-bridge-update-signatures.json` | Ed25519 signatures for the exact manifest bytes. |
 
@@ -28,6 +27,9 @@ After installing the menu app, use **Check for Updates…** for normal applicati
 and firmware updates. It opens the Updates tab, which downloads nothing beyond
 signed metadata until you choose an action. Application replacement is Finder-guided in v1;
 firmware flashing is performed by the app and does not require Arduino CLI.
+Firmware revision 2 enters the UF2 bootloader automatically. Revision 1 needs
+two quick presses of the tiny reset button beside the USB-C connector before
+later installs become automatic.
 
 Verify a download against the published sums before flashing:
 
@@ -42,6 +44,11 @@ first launch. Right-click the app and choose **Open** once; see
 Building from source instead is fully supported - see [build and test](#build-and-test).
 Source builds do not trust production updates unless the builder deliberately
 embeds the release public keys.
+
+App Center shows a device-stored installation receipt with the Mac's
+verification time, a random 128-bit installation ID, and whether App Center
+verified the install or the runtime first observed a manual flash. Reinstalling
+the same revision must change both the time and ID.
 
 GitHub releases are the only distribution channel today. A Homebrew cask and an
 App Store build are intended later. Nothing here is published to crates.io: every
@@ -350,7 +357,7 @@ bridge. See [the bridge guide](BRIDGE.md).
 Build an ad-hoc-signed, dockless local application:
 
 ```bash
-./tools/build-macos-app.sh
+./tools/build-macos-app.py
 open "dist/Steam Controller Bridge.app"
 ```
 

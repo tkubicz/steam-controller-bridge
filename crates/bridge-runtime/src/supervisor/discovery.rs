@@ -13,7 +13,11 @@ impl Supervisor {
                     self.update_status(|status| {
                         status.xiao = XiaoStatus::default();
                     });
-                    Discovery::Ready(OutputSession { output, xiao: None })
+                    Discovery::Ready(OutputSession {
+                        output,
+                        xiao: None,
+                        first_observed_receipt: FirstObservedReceiptState::Idle,
+                    })
                 },
             );
         }
@@ -80,7 +84,7 @@ impl Supervisor {
         // DeviceInfo can land in the same read burst as the HelloResponse
         // during the blocking handshake, so read it rather than assume
         // Pending.
-        let firmware = output.firmware_version().unwrap_or_default();
+        let firmware = output.firmware_info().unwrap_or_default();
         self.update_status(|status| {
             status.xiao = XiaoStatus {
                 path: Some(info.path.clone()),
@@ -97,6 +101,7 @@ impl Supervisor {
         Discovery::Ready(OutputSession {
             output: Box::new(output),
             xiao: Some(info),
+            first_observed_receipt: FirstObservedReceiptState::Idle,
         })
     }
 

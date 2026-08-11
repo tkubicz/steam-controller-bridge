@@ -4,7 +4,13 @@
 )]
 use super::*;
 
-use bridge_output::MINIMUM_FIRMWARE_REVISION;
+use bridge_output::{
+    new_firmware_install_receipt, random_firmware_request_id, FirmwareInfo, FirmwareInstallReceipt,
+    FirmwareInstallSource, FirmwareInstallState, MINIMUM_FIRMWARE_REVISION,
+};
+
+const FIRST_OBSERVED_RECEIPT_RETRY: Duration = Duration::from_secs(5);
+const FIRST_OBSERVED_RECEIPT_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl Supervisor {
     pub(super) fn service_idle_commands(&mut self) {
@@ -321,14 +327,23 @@ impl Supervisor {
     /// each transition once. Skips backends without a live device connection,
     /// so a torn-down serial session keeps the last known value until the
     /// existing output-lost reset clears it.
-    pub(super) fn refresh_xiao_firmware(&self, output: &OutputSession) {
-        let Some(reported) = output.output.firmware_version() else {
+    pub(crate) fn refresh_xiao_firmware(&self, output: &mut OutputSession) {
+        let Some(mut reported) = output.output.firmware_info() else {
             return;
         };
+        if reported.install_state == FirmwareInstallState::Pending {
+            service_first_observed_receipt(output, &mut reported, Instant::now());
+        } else {
+            output.first_observed_receipt = FirstObservedReceiptState::Idle;
+        }
+        self.publish_firmware(reported);
+    }
+
+    fn publish_firmware(&self, reported: FirmwareInfo) {
         if !self.update_status(|status| status.xiao.firmware = reported) {
             return;
         }
-        if reported.update_recommended() {
+        if reported.version.update_recommended() {
             eprintln!(
                 "level=warn event=xiao_firmware_outdated firmware={reported:?} \
                  minimum={MINIMUM_FIRMWARE_REVISION}"
@@ -365,4 +380,104 @@ impl Supervisor {
         }
         changed
     }
+}
+
+fn service_first_observed_receipt(
+    output: &mut OutputSession,
+    reported: &mut FirmwareInfo,
+    now: Instant,
+) {
+    if let FirstObservedReceiptState::Waiting { request, deadline } = output.first_observed_receipt
+    {
+        match output
+            .output
+            .poll_firmware_install_receipt(request.request_id, request.receipt)
+        {
+            Some(Ok(recorded)) => {
+                output.first_observed_receipt = FirstObservedReceiptState::Idle;
+                reported.install_state = FirmwareInstallState::Recorded(recorded);
+                eprintln!("level=info event=xiao_install_receipt_recorded source=first_observed");
+            }
+            Some(Err(error)) => {
+                output.first_observed_receipt = FirstObservedReceiptState::Backoff {
+                    request: Some(request),
+                    retry_at: now + FIRST_OBSERVED_RECEIPT_RETRY,
+                };
+                eprintln!("level=warn event=xiao_install_receipt_failed error={error:?}");
+            }
+            None if now >= deadline => {
+                output.first_observed_receipt = FirstObservedReceiptState::Backoff {
+                    request: Some(request),
+                    retry_at: now + FIRST_OBSERVED_RECEIPT_RETRY,
+                };
+                eprintln!("level=warn event=xiao_install_receipt_failed error=response_timeout");
+            }
+            None => {}
+        }
+    }
+
+    if reported.install_state == FirmwareInstallState::Pending {
+        start_first_observed_receipt(output, now);
+    }
+}
+
+fn start_first_observed_receipt(output: &mut OutputSession, now: Instant) {
+    let request = match output.first_observed_receipt {
+        FirstObservedReceiptState::Idle => {
+            first_observed_receipt().map(|(request_id, receipt)| FirstObservedReceiptRequest {
+                request_id,
+                receipt,
+            })
+        }
+        FirstObservedReceiptState::Backoff { request, retry_at } if now >= retry_at => request
+            .map_or_else(
+                || {
+                    first_observed_receipt().map(|(request_id, receipt)| {
+                        FirstObservedReceiptRequest {
+                            request_id,
+                            receipt,
+                        }
+                    })
+                },
+                Ok,
+            ),
+        FirstObservedReceiptState::Waiting { .. } | FirstObservedReceiptState::Backoff { .. } => {
+            return
+        }
+    };
+    match request {
+        Ok(request) => match output
+            .output
+            .request_firmware_install_receipt(request.request_id, request.receipt)
+        {
+            Ok(()) => {
+                output.first_observed_receipt = FirstObservedReceiptState::Waiting {
+                    request,
+                    deadline: now + FIRST_OBSERVED_RECEIPT_TIMEOUT,
+                };
+            }
+            Err(error) => {
+                output.first_observed_receipt = FirstObservedReceiptState::Backoff {
+                    request: Some(request),
+                    retry_at: now + FIRST_OBSERVED_RECEIPT_RETRY,
+                };
+                eprintln!("level=warn event=xiao_install_receipt_failed error={error:?}");
+            }
+        },
+        Err(error) => {
+            output.first_observed_receipt = FirstObservedReceiptState::Backoff {
+                request: None,
+                retry_at: now + FIRST_OBSERVED_RECEIPT_RETRY,
+            };
+            eprintln!("level=warn event=xiao_install_receipt_failed error={error:?}");
+        }
+    }
+}
+
+fn first_observed_receipt() -> Result<(u32, FirmwareInstallReceipt), String> {
+    Ok((
+        random_firmware_request_id().map_err(|error| error.to_string())?,
+        new_firmware_install_receipt(FirmwareInstallSource::FirstObserved)
+            .map_err(|error| error.to_string())?,
+    ))
 }

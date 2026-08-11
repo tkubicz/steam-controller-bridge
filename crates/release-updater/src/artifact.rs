@@ -8,6 +8,15 @@ use crate::ArtifactDescriptor;
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
+pub(crate) fn lower_hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        encoded.push(HEX_DIGITS[usize::from(byte >> 4)] as char);
+        encoded.push(HEX_DIGITS[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
+}
+
 #[derive(Debug)]
 pub enum ArtifactError {
     Io(io::Error),
@@ -46,13 +55,7 @@ pub fn sha256_hex(path: &Path) -> Result<String, ArtifactError> {
         }
         digest.update(&buffer[..read]);
     }
-    let digest = digest.finalize();
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        encoded.push(HEX_DIGITS[usize::from(byte >> 4)] as char);
-        encoded.push(HEX_DIGITS[usize::from(byte & 0x0f)] as char);
-    }
-    Ok(encoded)
+    Ok(lower_hex(&digest.finalize()))
 }
 
 pub fn verify_artifact(path: &Path, descriptor: &ArtifactDescriptor) -> Result<(), ArtifactError> {

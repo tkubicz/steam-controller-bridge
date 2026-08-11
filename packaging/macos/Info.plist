@@ -18,7 +18,7 @@
     <string>Steam Controller Bridge</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
-    <!-- Both are replaced from version.txt by tools/build-macos-app.sh. The
+    <!-- Both are replaced from version.txt by tools/build-macos-app.py. The
          placeholder is deliberately obvious: a bundle reporting it was built
          some other way. -->
     <key>CFBundleShortVersionString</key>

@@ -1,6 +1,8 @@
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 #include <nrf.h>
+#include <nrf_sdm.h>
+#include <nrf_soc.h>
 #include <type_traits>
 
 extern "C" {
@@ -9,6 +11,7 @@ extern "C" {
 
 #include "src/bridge_protocol.h"
 #include "src/bridge_session.h"
+#include "src/install_receipt.h"
 #include "src/xinput_gamepad.h"
 
 namespace xinput_usb {
@@ -226,6 +229,8 @@ namespace {
 constexpr size_t kCdcChunkSize = 64;
 constexpr size_t kTxQueueDepth = 4;
 constexpr uint32_t kHardwareWatchdogTicks = 2U * 32768U;
+constexpr uint32_t kUf2DrainDelayMs = 100;
+constexpr uint32_t kReceiptWriteTimeoutMs = 2000;
 
 struct QueuedFrame {
   size_t length;
@@ -266,12 +271,90 @@ class UsbCdcQueue final : public scbridge::SessionSink {
     count_ = 0;
   }
 
+  bool empty() const { return count_ == 0U; }
+
+  scbridge::InstallReceiptStatus install_receipt() const override {
+    return scbridge::read_install_receipt(scbridge::kInstallReceiptPage);
+  }
+
+  bool record_install_receipt(
+      const scbridge::InstallReceiptData& receipt) override;
+
  private:
   QueuedFrame queue_[kTxQueueDepth]{};
   size_t head_ = 0;
   size_t tail_ = 0;
   size_t count_ = 0;
 };
+
+class FlashReceiptWriter final : public scbridge::ReceiptWordWriter {
+ public:
+  FlashReceiptWriter() : started_at_(millis()) {}
+
+  bool write_word(size_t page_offset, uint32_t value) override {
+    const uintptr_t page =
+        reinterpret_cast<uintptr_t>(&scbridge::kInstallReceiptPage);
+    // Volatile keeps the flash store ordered against the NVMC register
+    // accesses instead of relying on the readback to pin it.
+    auto* destination =
+        reinterpret_cast<volatile uint32_t*>(page + page_offset);
+    const volatile uint32_t* observed = destination;
+    if (*observed == value) {
+      return true;
+    }
+    if ((*observed & value) != value) {
+      return false;
+    }
+
+    uint8_t softdevice_enabled = 0;
+    if (sd_softdevice_is_enabled(&softdevice_enabled) != NRF_SUCCESS) {
+      return false;
+    }
+    // This USB-only firmware never enables the SoftDevice. Refuse to program
+    // if that invariant changes, because SoftDevice flash writes are
+    // asynchronous and require ownership of their completion event.
+    if (softdevice_enabled != 0U) {
+      return false;
+    }
+
+    if (!wait_for_nvmc()) {
+      return false;
+    }
+    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Wen << NVMC_CONFIG_WEN_Pos;
+    bool written = wait_for_nvmc();
+    if (written) {
+      *destination = value;
+      written = wait_for_nvmc() && *observed == value;
+    }
+    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Ren << NVMC_CONFIG_WEN_Pos;
+    return wait_for_nvmc() && written;
+  }
+
+ private:
+  bool timed_out() const {
+    return static_cast<uint32_t>(millis() - started_at_) >=
+           kReceiptWriteTimeoutMs;
+  }
+
+  bool wait_for_nvmc() const {
+    while (NRF_NVMC->READY == NVMC_READY_READY_Busy) {
+      if (timed_out()) {
+        return false;
+      }
+      NRF_WDT->RR[0] = WDT_RR_RR_Reload;
+    }
+    return true;
+  }
+
+  uint32_t started_at_;
+};
+
+bool UsbCdcQueue::record_install_receipt(
+    const scbridge::InstallReceiptData& receipt) {
+  FlashReceiptWriter writer;
+  return scbridge::write_install_receipt(
+      scbridge::kInstallReceiptPage, receipt, writer);
+}
 
 UsbCdcQueue cdc_tx;
 scbridge::BridgeSession session(cdc_tx);
@@ -287,6 +370,9 @@ void decode_error(void*, scbridge::DecodeError error) {
 scbridge::StreamDecoder decoder(decoded_frame, decode_error, nullptr);
 bool previous_usb_mounted = false;
 bool previous_dtr = false;
+bool uf2_transition_started = false;
+bool uf2_queue_drained = false;
+uint32_t uf2_queue_drained_at = 0;
 
 void set_led(bool red, bool green, bool blue) {
 #if defined(LED_RED) && defined(LED_GREEN) && defined(LED_BLUE)
@@ -390,6 +476,28 @@ void service_gamepad(uint32_t now_ms) {
   }
 }
 
+void service_uf2_transition(uint32_t now_ms) {
+  if (!uf2_transition_started && session.uf2_bootloader_ready()) {
+    uf2_transition_started = true;
+  }
+  if (!uf2_transition_started) {
+    return;
+  }
+  if (!uf2_queue_drained) {
+    if (!cdc_tx.empty()) {
+      return;
+    }
+    Serial.flush();
+    uf2_queue_drained = true;
+    uf2_queue_drained_at = now_ms;
+    return;
+  }
+  if (static_cast<uint32_t>(now_ms - uf2_queue_drained_at) >=
+      kUf2DrainDelayMs) {
+    enterUf2Dfu();
+  }
+}
+
 }  // namespace
 
 void setup() {
@@ -442,6 +550,7 @@ void loop() {
   const uint32_t after_cdc_ms = millis();
   session.tick(after_cdc_ms);
   service_gamepad(after_cdc_ms);
+  service_uf2_transition(after_cdc_ms);
   service_led(after_cdc_ms);
   feed_hardware_watchdog();
 }

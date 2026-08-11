@@ -17,7 +17,7 @@ The following paths have been verified on development hardware:
 - direct Bluetooth enumerates as `28de:1303`, transport `Bluetooth`, usage
   `ff00:0001`, interface `-1`, and produces 46-byte `0x45` state reports at
   approximately 67-68 Hz plus compatible `0x43` battery reports;
-- the non-Sense XIAO flashes through its serial bootloader and exposes CDC plus
+- the XIAO nRF52840 or XIAO nRF52840 Sense flashes through its UF2 bootloader and exposes CDC plus
   an Xbox-layout gamepad;
 - macOS binds the gamepad to its built-in `Xbox360Gamepad` driver;
 - Safari's Gamepad API sees a connected controller with `mapping: standard`;
@@ -55,7 +55,7 @@ rumble, tones, or scripted haptics.
 - A Steam Controller 2 (2026).
 - Either its official Steam Controller Puck or a Mac with Bluetooth available.
   The Puck is recommended when minimum latency or maximum reliability matters.
-- One non-Sense Seeed Studio XIAO nRF52840.
+- One Seeed Studio XIAO nRF52840 or XIAO nRF52840 Sense.
 - A USB-C data cable for the XIAO and, in Puck mode, another data connection for
   the Puck. Charge-only cables will not work.
 
@@ -115,30 +115,147 @@ re-evaluates compatibility.
 
 ### Install or update XIAO firmware
 
-Connect exactly one non-Sense Seeed XIAO nRF52840 with a data-capable cable, then
+Connect exactly one Seeed XIAO nRF52840 or XIAO nRF52840 Sense with a data-capable cable, then
 choose **Install Firmware Update**, or **Reinstall Firmware** when the board
 already reports the signed revision. A board reporting a newer revision is never
 downgraded.
 
-The app verifies the cached or downloaded UF2, asks the running bridge
-to neutralize output and release hardware, tries automatic 1200-baud bootloader
-entry, validates `INFO_UF2.TXT` and the UF2 family, writes and flushes the file,
-then waits for a fresh protocol handshake. Success is shown only after the board
-reports the exact signed revision. The bridge restarts automatically after
-success, cancellation, or a bounded failure when it was running beforehand.
+The app verifies the cached or downloaded UF2 and asks the running bridge to
+neutralize output and release hardware. Firmware revision 2 enters its UF2
+bootloader automatically. Revision 1 requires one final manual migration: when
+the recovery prompt appears, quickly press the tiny reset button beside the
+USB-C connector twice.
+The app validates `INFO_UF2.TXT` and the UF2 family, writes and flushes the file,
+then waits for a fresh protocol handshake.
 
-If automatic entry does not work, double-tap RESET while the Updates tab says
-it is waiting for the bootloader. You may cancel until writing begins. Once the
-write starts, leave the board connected until verification or the 30-second
-failure bound. Error text distinguishes extra/wrong boards, cable or reset
-problems, copy failure, reconnect timeout, and revision mismatch. The last
-verified UF2 stays cached for an offline reinstall.
+The temporary XIAO UF2 drive disconnects automatically as soon as its
+bootloader accepts the complete image. macOS may consequently show a harmless
+**Disk Not Ejected Properly** notification. App Center does not report success
+until the board has restarted and the new firmware and installation receipt
+have both been verified.
+
+Success requires more than the revision number. The new image must report a
+blank receipt marker, accept a Mac-provided UTC installation time and random
+128-bit installation ID, acknowledge that exact receipt, and return it on a
+second read. App Center shows the time in the Mac's local timezone. A normal
+reconnect or power cycle does not change it; reinstalling the same UF2 does.
+
+You may cancel until writing begins. Once the write starts, leave the board
+connected until verification or the 30-second reconnect failure bound. The
+automatic UF2 drive wait is 15 seconds, followed by a 60-second manual recovery
+window if necessary. Error text distinguishes
+extra/wrong boards, cable or reset problems, copy failure, reconnect timeout,
+and revision mismatch. The last verified UF2 stays cached for an offline
+reinstall.
 
 ## Development and recovery workflow
 
 The remaining build, Makefile, checksum, Arduino CLI, and manual UF2 instructions
 are retained for contributors and for recovery when the guided path cannot
 complete.
+
+### Test an unreleased firmware through App Center
+
+This procedure replaces the installed bridge application on the XIAO with
+Seeed's Blink example, then exercises the same first-install path as a new
+factory board. It does not replace the factory UF2 bootloader.
+
+First prepare the local signed update directory while the current bridge is
+still available:
+
+```bash
+tools/prepare-local-update.py
+```
+
+Save the launch command printed at the end, but do not run it yet. The helper
+builds firmware revision 2 from the current source and stores the catalog below
+`temp/steam-controller-bridge-local-update`.
+
+This works only in a debug build. It does not disable signature, manifest,
+artifact-hash, UF2, board, revision, or installation-receipt verification. The
+helper's application artifact is an intentional placeholder pinned to the
+current application version and must not be installed.
+
+Quit every running copy of Steam Controller Bridge. Compile Blink for the XIAO
+nRF52840 Sense used by this project:
+
+```bash
+ARDUINO_DATA_DIR=$(arduino-cli config get directories.data)
+BLINK_SKETCH="$ARDUINO_DATA_DIR/packages/Seeeduino/hardware/nrf52/1.1.13/libraries/Bluefruit52Lib/examples/Hardware/blinky"
+ARDUINO_TOOL_PATH="$PWD/firmware/xiao-nrf52840/tools:$PATH"
+
+env PATH="$ARDUINO_TOOL_PATH" arduino-cli compile \
+  --fqbn Seeeduino:nrf52:xiaonRF52840Sense \
+  --output-dir temp/xiao-stock-blinky \
+  "$BLINK_SKETCH"
+```
+
+#### Upload Blink
+
+The firmware's TinyUSB serial interface supports Arduino's 1200-baud reset
+shortcut. This developer upload path is separate from App Center's verified UF2
+flow. Confirm that Steam Controller Bridge is fully quit, then inspect the
+current USB ports:
+
+```bash
+arduino-cli board list --format json
+```
+
+Arduino CLI can label the board `Unknown`. Use the Steam Controller Bridge port
+with vendor ID `0x045e` and product ID `0x028e`. Do not use a Valve device with
+vendor ID `0x28de`; that is the Puck. Pass the current bridge application port
+to the upload command:
+
+```bash
+XIAO_APPLICATION_PORT=/dev/cu.usbmodemXXXX
+
+env PATH="$ARDUINO_TOOL_PATH" arduino-cli upload \
+  --fqbn Seeeduino:nrf52:xiaonRF52840Sense \
+  --port "$XIAO_APPLICATION_PORT" \
+  --input-dir temp/xiao-stock-blinky
+```
+
+Arduino CLI opens that port at 1200 baud, waits for the serial DFU port, and
+uploads Blink. The port can change during this operation; Arduino CLI tracks the
+new port automatically.
+
+If automatic serial DFU times out, use manual recovery: quickly press the tiny
+reset button beside the USB-C connector twice, wait for the `XIAO-SENSE` volume,
+and rerun the upload command with the newly enumerated bootloader port. The
+Sense bootloader has vendor ID `0x2886` and product ID `0x0045`; a non-Sense
+bootloader uses product ID `0x0044`.
+
+For a non-Sense XIAO, use `Seeeduino:nrf52:xiaonRF52840` instead. After upload,
+`arduino-cli board list` should show a Seeed application rather than Steam
+Controller Bridge. A Sense application normally reports USB ID `2886:8045`.
+The `ARDUINO_TOOL_PATH` prefix supplies the `python` compatibility shim required
+by Seeed's Arduino core on current macOS installations.
+
+Run the saved local-source launch command from the repository root. Open
+Updates and confirm that the `Local development updates` notice names
+`temp/steam-controller-bridge-local-update`. The factory Blink application has
+no bridge protocol, so the firmware card shows `Firmware information
+unavailable`. Choose **Install or Recover Firmware**. When App Center enters
+the 60-second manual recovery phase, quickly press the reset button twice.
+Arduino's 1200-baud reset is not used here because it selects serial-only DFU;
+App Center verifies and copies the signed UF2 artifact and therefore needs the
+`XIAO-SENSE` UF2 drive. After this first installation, bridge firmware can enter
+UF2 mode automatically through its verified update protocol.
+
+Accept the first installation only when all of these checks pass:
+
+1. The temporary `XIAO-SENSE` UF2 drive appears and revision 2 is written.
+2. The board reconnects as Steam Controller Bridge without manual unplugging.
+3. App Center reports firmware revision 2 and an `AppCenter` installation
+   receipt with a date and installation ID.
+4. **Reinstall Firmware** completes without pressing the reset button.
+5. The reinstall keeps revision 2 but produces a different date and
+   installation ID.
+6. Unplugging and reconnecting the board does not change the second receipt.
+
+macOS can show `Disk Not Ejected Properly` when the UF2 bootloader disconnects
+itself after a successful write. This notification is expected if App Center
+subsequently reconnects to the board and verifies the new receipt.
 
 ### Install build tools
 
@@ -174,7 +291,7 @@ make -C firmware/xiao-nrf52840 test
 make -C firmware/xiao-nrf52840 artifacts
 ```
 
-The release files are:
+The local developer artifacts are:
 
 ```text
 firmware/xiao-nrf52840/build/artifacts/
@@ -186,7 +303,9 @@ Rumble requires firmware containing protocol-v1 message type 8. An older XIAO
 remains input-compatible but cannot return Xbox vibration requests to the host,
 so reflash the board after updating the project.
 
-The menu bar shows the flashed firmware under "Firmware:". A "⚠ Firmware:
+The menu bar shows the flashed firmware under "Firmware:". App Center shows
+the installation receipt and distinguishes an App Center verified install from
+the first observation after a manual developer flash. A "⚠ Firmware:
 Update recommended" line means the board runs firmware older than this app
 depends on - including any board that predates version reporting entirely.
 The bridge keeps working, but reflash the current UF2 (above, or the matching
@@ -207,10 +326,11 @@ Flash through the serial bootloader, substituting the actual port:
 make -C firmware/xiao-nrf52840 flash PORT=/dev/cu.usbmodemXXXX
 ```
 
-If serial flashing cannot reset the XIAO, double-tap RESET. A bootloader volume
-will mount in Finder; drag the generated `.uf2` file onto it. The board should
-reboot as a composite device named `Steam Controller Bridge` with both CDC and
-an Xbox-layout gamepad interface.
+If serial flashing cannot reset the XIAO, quickly press the tiny reset button
+beside the USB-C connector twice. A bootloader volume will mount in Finder;
+drag the generated `.uf2` file onto it. The board should reboot as a composite
+device named `Steam Controller Bridge` with both CDC and an Xbox-layout gamepad
+interface.
 
 The development firmware uses Xbox 360 compatibility VID/PID `045e:028e` so
 macOS's built-in driver publishes the device to GameController, Safari, and
@@ -627,7 +747,7 @@ indices and serial paths after reconnects.
 Build the current-architecture local application:
 
 ```bash
-./tools/build-macos-app.sh
+./tools/build-macos-app.py
 ```
 
 Move `dist/Steam Controller Bridge.app` to `/Applications` if desired, then
@@ -702,7 +822,7 @@ app. Permission granted to Terminal does not automatically cover the app.
 ### Opening an unnotarized build
 
 The app is ad-hoc signed, not notarized, whether it came from a release download
-or a local `./tools/build-macos-app.sh`. A downloaded copy also carries macOS's
+or a local `./tools/build-macos-app.py`. A downloaded copy also carries macOS's
 quarantine flag, so double-clicking it reports that the app is damaged or cannot
 be opened. This is Gatekeeper refusing an unknown developer, not a broken build.
 
@@ -832,7 +952,8 @@ rather than continuing with duplicate keyboard/gamepad input.
 ### No XIAO serial port appears
 
 - Use a known data-capable cable and approve the USB accessory in macOS.
-- Double-tap RESET and check `arduino-cli board list` again.
+- Quickly press the tiny reset button beside the USB-C connector twice, then
+  check `arduino-cli board list` again.
 - If the bootloader volume appears, reflash the UF2.
 - A slow-blue XIAO means no CDC host has opened the firmware session.
 

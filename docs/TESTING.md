@@ -11,6 +11,8 @@ python3 tools/check-workspace-versions.py --self-test
 python3 tools/check-workspace-versions.py
 python3 tools/check-changelog.py --self-test
 python3 tools/check-changelog.py
+python3 tools/build-macos-app.py --self-test
+python3 tools/prepare-local-update.py --self-test
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
@@ -21,7 +23,7 @@ make -C firmware/xiao-nrf52840 test
 On macOS, also build and verify the packaged application:
 
 ```bash
-./tools/build-macos-app.sh
+./tools/build-macos-app.py
 codesign --verify --deep --strict "dist/Steam Controller Bridge.app"
 ```
 
@@ -39,7 +41,7 @@ dependency graph.
 | Runtime | Discovery, transition retention, neutral-before-release, sleep/update suspension, automatic shutdown, feedback leasing, and command acknowledgement. |
 | Desktop profiles | Schema migration, validation, atomic persistence, edge/reference counts, pad motion, feedback cadence, and sink-failure cleanup. |
 | Recording and replay | Typed round trips, ordering, unknown events, seeking, malformed input, and deterministic replay. |
-| Updater | Signature-before-parse, rollback prevention, exact artifact verification, retry/cache semantics, concurrent temporaries, UF2 validation, cancellation, and post-flash revision policy. |
+| Updater | Signature-before-parse, rollback prevention, exact artifact verification, retry/cache semantics, concurrent temporaries, UF2 validation, automatic entry, cancellation, and receipt verification. |
 | Menu and child processes | Settings migration, status rendering, bounded IPC, request correlation, stale-generation rejection, process reaping, diagnostics, and feature gates. |
 | Firmware native tests | Parser/session recovery, handshake gating, watchdog behavior, rumble feedback, and malformed-frame handling without hardware. |
 
@@ -77,9 +79,19 @@ Run these on the exact packaged candidate; automated results are not substitutes
   stationary noise, profile changes, and permission revocation.
 - Exercise idle and fresh-Puck-dock power-off, charging behavior, wake, one-shot
   latching, and injected failure recovery.
-- Flash the exact release UF2 through the App Center, including manual
-  double-RESET recovery, wrong/multiple-board refusal, close/Quit interlocks,
-  exact revision reconnect, and unplug/failure messaging.
+- Install revision 2 once through manual reset-button recovery. Save its
+  displayed timestamp and installation ID, then reinstall revision 2 without
+  pressing the reset button. Confirm automatic UF2 entry, the same revision,
+  and a changed timestamp and installation ID. Power-cycle without flashing
+  and confirm the receipt does not change. Also verify wrong/multiple-board
+  refusal, close/Quit interlocks, and interruption before writing, during UF2
+  writing, and before receipt commit.
+- For an unreleased candidate, run `tools/prepare-local-update.py`, launch the
+  debug menu app with the printed environment, and confirm the Updates page
+  names the local development source. Restore Seeed Blink before the first
+  installation so factory VID/PID detection, the manual recovery window, the
+  revision-2 receipt, and the following automatic reinstall are exercised in
+  one sequence. Confirm a non-debug build ignores the local-source variable.
 - Sleep and wake with the XIAO attached; confirm hardware closes before sleep,
   CDC re-enumerates, a previously running bridge resumes, and a user-stopped
   bridge stays stopped.

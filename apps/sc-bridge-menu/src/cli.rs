@@ -2,7 +2,7 @@ use std::ffi::OsString;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::app_center_protocol::{AppCenterPage, FirmwareStatus};
+use crate::app_center_protocol::{AppCenterPage, FirmwareDetails};
 
 pub const APP_CENTER_COMMAND: &str = "app-center";
 pub const BINDINGS_EDITOR_COMMAND: &str = "bindings-editor";
@@ -56,9 +56,10 @@ pub struct AppCenterArgs {
     #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "available")]
     pub demo: Option<DemoMode>,
 
-    /// Firmware revision reported by the parent menu process.
-    #[arg(long, default_value = "pending", hide = true)]
-    pub firmware: FirmwareStatus,
+    /// Firmware version, capabilities, and installation receipt state
+    /// reported by the parent menu process.
+    #[arg(long, default_value_t = FirmwareDetails::default(), hide = true)]
+    pub firmware: FirmwareDetails,
 }
 
 impl AppCenterArgs {
@@ -82,6 +83,7 @@ pub enum DemoMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_center_protocol::FirmwareStatus;
 
     #[test]
     fn no_subcommand_launches_the_menu() {
@@ -91,20 +93,24 @@ mod tests {
 
     #[test]
     fn app_center_arguments_are_typed() {
-        let cli = Cli::try_parse_from([
-            "sc-bridge-menu",
-            "app-center",
-            "--tab",
-            "changelog",
-            "--firmware",
-            "reported:7",
+        let details = FirmwareDetails {
+            version: FirmwareStatus::Reported(7),
+            ..FirmwareDetails::default()
+        };
+        let cli = Cli::try_parse_from(vec![
+            "sc-bridge-menu".to_owned(),
+            "app-center".to_owned(),
+            "--tab".to_owned(),
+            "changelog".to_owned(),
+            "--firmware".to_owned(),
+            details.to_string(),
         ])
         .expect("app center arguments");
         let Some(Command::AppCenter(arguments)) = cli.command else {
             panic!("expected app center command");
         };
         assert_eq!(arguments.page(), AppCenterPage::Changelog);
-        assert_eq!(arguments.firmware, FirmwareStatus::Reported(7));
+        assert_eq!(arguments.firmware, details);
         assert_eq!(arguments.demo, None);
     }
 
@@ -148,12 +154,12 @@ mod tests {
     }
 
     #[test]
-    fn malformed_firmware_status_is_rejected() {
+    fn malformed_firmware_details_are_rejected() {
         assert!(Cli::try_parse_from([
             "sc-bridge-menu",
             "app-center",
             "--firmware",
-            "reported:not-a-number"
+            r#"{"version":{"state":"reported","value":"not-a-number"},"capabilities":3,"install":{"state":"pending"}}"#
         ])
         .is_err());
     }

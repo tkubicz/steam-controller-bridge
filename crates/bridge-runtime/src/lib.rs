@@ -37,7 +37,10 @@ pub use runtime::{
 };
 // Re-exported so frontends can render firmware status without depending on
 // bridge-output directly.
-pub use bridge_output::{FirmwareVersion, MINIMUM_FIRMWARE_REVISION};
+pub use bridge_output::{
+    new_firmware_install_receipt, FirmwareCapabilities, FirmwareInfo, FirmwareInstallReceipt,
+    FirmwareInstallSource, FirmwareInstallState, FirmwareVersion, MINIMUM_FIRMWARE_REVISION,
+};
 pub(crate) use supervisor::Supervisor;
 #[cfg(test)]
 #[allow(clippy::wildcard_imports)]

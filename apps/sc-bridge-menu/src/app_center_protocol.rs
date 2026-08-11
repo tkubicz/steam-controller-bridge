@@ -4,12 +4,17 @@ use clap::ValueEnum;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use bridge_runtime::FirmwareVersion;
+use bridge_runtime::{FirmwareInfo, FirmwareInstallSource, FirmwareInstallState, FirmwareVersion};
+
+#[cfg(test)]
+use bridge_runtime::FirmwareCapabilities;
 
 use crate::line_protocol::read_bounded_line;
 
 pub const MAX_IPC_LINE_BYTES: usize = 4 * 1024;
-const IPC_PROTOCOL_VERSION: u32 = 1;
+// Version 2: `Navigate`/`FirmwareVersion` carry `FirmwareDetails` instead of
+// the bare `FirmwareStatus`, so a replaced-on-disk binary fails cleanly.
+const IPC_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct Envelope<T> {
@@ -41,14 +46,72 @@ pub enum AppCenterPage {
     Updates,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "value")]
 pub enum FirmwareStatus {
+    #[default]
     Pending,
     Reported(u16),
     UnsupportedFormat(u8),
     Malformed,
     Unreported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwareReceiptSource {
+    AppCenter,
+    FirstObserved,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirmwareReceiptStatus {
+    pub installed_at: u64,
+    pub install_id: [u8; 16],
+    pub source: FirmwareReceiptSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "receipt")]
+pub enum FirmwareInstallStatus {
+    #[default]
+    Unsupported,
+    Pending,
+    Recorded(FirmwareReceiptStatus),
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FirmwareDetails {
+    pub version: FirmwareStatus,
+    pub capabilities: u32,
+    pub install: FirmwareInstallStatus,
+}
+
+impl From<FirmwareInfo> for FirmwareDetails {
+    fn from(value: FirmwareInfo) -> Self {
+        Self {
+            version: value.version.into(),
+            capabilities: value.capabilities.bits(),
+            install: match value.install_state {
+                FirmwareInstallState::Unsupported => FirmwareInstallStatus::Unsupported,
+                FirmwareInstallState::Pending => FirmwareInstallStatus::Pending,
+                FirmwareInstallState::Invalid => FirmwareInstallStatus::Invalid,
+                FirmwareInstallState::Recorded(receipt) => {
+                    FirmwareInstallStatus::Recorded(FirmwareReceiptStatus {
+                        installed_at: receipt.installed_at,
+                        install_id: receipt.install_id,
+                        source: match receipt.source {
+                            FirmwareInstallSource::AppCenter => FirmwareReceiptSource::AppCenter,
+                            FirmwareInstallSource::FirstObserved => {
+                                FirmwareReceiptSource::FirstObserved
+                            }
+                        },
+                    })
+                }
+            },
+        }
+    }
 }
 
 impl From<FirmwareVersion> for FirmwareStatus {
@@ -75,40 +138,18 @@ impl From<FirmwareStatus> for FirmwareVersion {
     }
 }
 
-impl std::fmt::Display for FirmwareStatus {
+impl std::fmt::Display for FirmwareDetails {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Pending => formatter.write_str("pending"),
-            Self::Reported(revision) => write!(formatter, "reported:{revision}"),
-            Self::UnsupportedFormat(format) => write!(formatter, "unsupported:{format}"),
-            Self::Malformed => formatter.write_str("malformed"),
-            Self::Unreported => formatter.write_str("unreported"),
-        }
+        let encoded = serde_json::to_string(self).map_err(|_| std::fmt::Error)?;
+        formatter.write_str(&encoded)
     }
 }
 
-impl std::str::FromStr for FirmwareStatus {
+impl std::str::FromStr for FirmwareDetails {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        if let Some(revision) = value.strip_prefix("reported:") {
-            return revision
-                .parse()
-                .map(Self::Reported)
-                .map_err(|_| "invalid reported firmware revision".to_owned());
-        }
-        if let Some(format) = value.strip_prefix("unsupported:") {
-            return format
-                .parse()
-                .map(Self::UnsupportedFormat)
-                .map_err(|_| "invalid unsupported firmware format".to_owned());
-        }
-        match value {
-            "pending" => Ok(Self::Pending),
-            "malformed" => Ok(Self::Malformed),
-            "unreported" => Ok(Self::Unreported),
-            _ => Err("invalid firmware status".to_owned()),
-        }
+        serde_json::from_str(value).map_err(|error| error.to_string())
     }
 }
 
@@ -129,10 +170,10 @@ pub enum AppCenterCommand {
     Close,
     Navigate {
         page: AppCenterPage,
-        firmware: FirmwareStatus,
+        firmware: FirmwareDetails,
     },
     FirmwareVersion {
-        firmware: FirmwareStatus,
+        firmware: FirmwareDetails,
     },
     UpdateResponse(UpdateResponse),
 }
@@ -195,6 +236,15 @@ mod tests {
             read::<UpdateRequest>(&mut Cursor::new(encoded)).unwrap(),
             Some(decoded) if decoded == request
         ));
+
+        let mut old_version = serde_json::to_vec(&Envelope {
+            version: IPC_PROTOCOL_VERSION - 1,
+            message: request,
+        })
+        .unwrap();
+        old_version.push(b'\n');
+        assert!(read::<UpdateRequest>(&mut Cursor::new(old_version)).is_err());
+
         let oversized = vec![b'x'; MAX_IPC_LINE_BYTES + 1];
         assert!(read::<UpdateRequest>(&mut Cursor::new(oversized)).is_err());
     }
@@ -211,18 +261,22 @@ mod tests {
 
     #[test]
     fn host_commands_distinguish_navigation_from_update_responses() {
+        let firmware = FirmwareDetails {
+            version: FirmwareStatus::Reported(7),
+            ..FirmwareDetails::default()
+        };
         let encoded = encode(AppCenterCommand::Navigate {
             page: AppCenterPage::Updates,
-            firmware: FirmwareStatus::Reported(7),
+            firmware,
         })
         .unwrap();
-        assert!(matches!(
+        assert_eq!(
             read(&mut Cursor::new(encoded)).unwrap(),
             Some(AppCenterCommand::Navigate {
                 page: AppCenterPage::Updates,
-                firmware: FirmwareStatus::Reported(7)
+                firmware,
             })
-        ));
+        );
 
         let response = AppCenterCommand::UpdateResponse(UpdateResponse {
             id: 42,
@@ -241,15 +295,29 @@ mod tests {
     }
 
     #[test]
-    fn every_firmware_status_survives_a_launch_argument() {
-        for status in [
-            FirmwareStatus::Pending,
-            FirmwareStatus::Reported(7),
-            FirmwareStatus::UnsupportedFormat(2),
-            FirmwareStatus::Malformed,
-            FirmwareStatus::Unreported,
+    fn every_firmware_detail_survives_a_launch_argument() {
+        for details in [
+            FirmwareDetails::default(),
+            FirmwareDetails {
+                version: FirmwareStatus::Reported(7),
+                capabilities: (FirmwareCapabilities::ENTER_UF2_BOOTLOADER
+                    | FirmwareCapabilities::INSTALL_RECEIPT)
+                    .bits(),
+                install: FirmwareInstallStatus::Pending,
+            },
+            FirmwareDetails {
+                version: FirmwareStatus::Reported(2),
+                capabilities: (FirmwareCapabilities::ENTER_UF2_BOOTLOADER
+                    | FirmwareCapabilities::INSTALL_RECEIPT)
+                    .bits(),
+                install: FirmwareInstallStatus::Recorded(FirmwareReceiptStatus {
+                    installed_at: 1_786_456_920,
+                    install_id: [0xa5; 16],
+                    source: FirmwareReceiptSource::AppCenter,
+                }),
+            },
         ] {
-            assert_eq!(status.to_string().parse(), Ok(status));
+            assert_eq!(details.to_string().parse(), Ok(details));
         }
     }
 }

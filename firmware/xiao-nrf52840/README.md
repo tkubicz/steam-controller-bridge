@@ -1,6 +1,6 @@
 # XIAO nRF52840 firmware
 
-This firmware turns a non-Sense Seeed Studio XIAO nRF52840 into the physical
+This firmware turns a Seeed Studio XIAO nRF52840 or XIAO nRF52840 Sense into the physical
 USB endpoint for the macOS bridge. It exposes one composite USB device:
 
 - CDC ACM carries protocol-v1 frames from the host.
@@ -28,7 +28,12 @@ make artifacts
 `make setup` installs the board core using Seeed's package index without
 replacing an existing Arduino CLI configuration. `make test` is host-native and does not require Arduino or hardware.
 Build products are written below `build/`, and `make artifacts` collects the
-UF2 and DFU zip in `build/artifacts/`.
+UF2 and developer DFU zip in `build/artifacts/`. The release publishes only the
+UF2; the DFU zip remains available for `make flash` development workflows.
+
+The pinned core gives the standard and Sense variants the same MCU memory
+layout, pin map, and UF2 family. Their bootloaders use different USB product and
+board IDs; the App Center recognizes and validates both.
 
 ## Flash and recovery
 
@@ -39,10 +44,14 @@ arduino-cli board list
 make flash PORT=/dev/cu.usbmodemXXXX
 ```
 
-If serial upload cannot reset the board, double-tap RESET. The XIAO bootloader
-mounts a USB drive; copy the generated UF2 onto it, or rerun `make flash` using
-the bootloader's newly enumerated serial port. A charge-only USB-C cable will
-not enumerate either interface.
+App Center is the normal update path. Firmware revision 2 acknowledges a
+correlated bootloader request, drains CDC, waits 100 ms, and enters the Adafruit
+UF2 bootloader automatically. Revision 1 needs one final manual installation.
+For that migration or later recovery, quickly press the tiny reset button beside
+the USB-C connector twice. The XIAO bootloader mounts a USB drive; copy the
+generated UF2 onto it, or rerun `make flash` using the bootloader's newly
+enumerated serial port. A charge-only USB-C cable will not enumerate either
+interface.
 
 The application identifies itself as `Lynxware / Steam Controller Bridge`, and
 the nRF52 core derives its serial number from the MCU identifier.
@@ -104,8 +113,16 @@ watchdog and does not compete with a pending neutral input report.
 `src/firmware_version.h` holds `kFirmwareRevision`, a hand-maintained
 monotonic counter independent of release numbering. After every successful
 Hello negotiation the firmware queues one protocol `DeviceInfo` frame carrying
-it, retried until the CDC transmit queue accepts it; hosts and firmware that
-predate the message ignore it, so mixed pairings stay compatible.
+the revision, capability flags, and installation receipt state. A revision 1
+three-byte report remains valid, so mixed pairings stay compatible.
+
+Revision 2 includes a dedicated 4 KiB flash page with two initially blank
+receipt slots. The page is part of every UF2, so even a same-version reinstall
+restores the blank marker. Firmware programs a blank slot without erasing the
+page, validates field bounds and CRC, and writes the commit word last. The
+second slot recovers an interrupted first write. `make artifacts` inspects the
+actual ELF, Intel HEX, and UF2 to prove page alignment, isolation, blank slots,
+and exactly one marker.
 
 Bump `kFirmwareRevision` in the same commit as any behavior-affecting firmware
 change. Raise the host's `MINIMUM_FIRMWARE_REVISION`
@@ -155,7 +172,7 @@ cargo run -p sc-probe -- rumble --index N --low 65535 --high 65535 \
 
 Hardware evidence on 2026-07-27:
 
-- serial flashing and CDC reconnect succeeded on a non-Sense XIAO;
+- serial flashing and CDC reconnect succeeded on XIAO nRF52840 hardware;
 - macOS matched `Xbox360Gamepad` and accepted continuously refreshed reports;
 - Safari's Gamepad API reported a connected `Controller Extended Gamepad` with
   `mapping: standard`;

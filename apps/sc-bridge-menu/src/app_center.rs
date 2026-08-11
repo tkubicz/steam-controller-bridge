@@ -4,6 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 
+use bridge_runtime::{
+    new_firmware_install_receipt, FirmwareCapabilities, FirmwareInfo, FirmwareInstallSource,
+    FirmwareInstallState, FirmwareVersion,
+};
 use eframe::egui;
 use release_updater::{
     flash_firmware, guided_replacement_supported, ApplicationRelease, ArtifactDescriptor,
@@ -17,11 +21,11 @@ use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
 use crate::about_pages::AboutContent;
 use crate::app_center_protocol::{
-    AppCenterCommand, AppCenterPage, FirmwareStatus, UpdateOperation,
+    AppCenterCommand, AppCenterPage, FirmwareDetails, FirmwareStatus, UpdateOperation,
 };
 use crate::cli::{AppCenterArgs, DemoMode};
 use crate::macos::{open_path, reveal_path};
-use crate::update_check::running_version;
+use crate::update_check::{running_version, update_context, UpdateContext};
 use crate::window_ui::{
     activate_window, configure_window_style, hero_transition, load_texture, parse_release_notes,
     ReleaseNotes,
@@ -81,15 +85,27 @@ enum WorkerEvent {
     Catalog(Box<Result<CatalogRefresh, String>>),
     Application(Result<PathBuf, String>),
     FirmwareProgress(FirmwareFlashProgress),
-    Firmware(Result<(), FirmwareOperationError>),
+    Firmware(Result<FirmwareInfo, FirmwareOperationError>),
     Quit(Result<(), String>),
+}
+
+impl WorkerEvent {
+    fn status_placement(&self) -> StatusPlacement {
+        match self {
+            Self::FirmwareProgress(_) | Self::Firmware(_) => StatusPlacement::Firmware,
+            Self::Catalog(_) | Self::Application(_) | Self::Quit(_) => StatusPlacement::Page,
+        }
+    }
 }
 
 #[derive(Debug)]
 enum FirmwareOperationError {
     Preparation(String),
     Flash(FirmwareFlashError),
-    Resume(String),
+    Resume {
+        firmware: FirmwareInfo,
+        error: String,
+    },
     FlashAndResume {
         flash: FirmwareFlashError,
         resume: String,
@@ -99,11 +115,18 @@ enum FirmwareOperationError {
 }
 
 impl FirmwareOperationError {
+    fn verified_firmware(&self) -> Option<FirmwareInfo> {
+        match self {
+            Self::Resume { firmware, .. } => Some(*firmware),
+            _ => None,
+        }
+    }
+
     fn message(self) -> String {
         match self {
             Self::Preparation(error) => error,
             Self::Flash(error) => flash_failure_message(&error),
-            Self::Resume(error) => format!(
+            Self::Resume { error, .. } => format!(
                 "Firmware was written and verified, but bridge recovery failed: {error}"
             ),
             Self::FlashAndResume { flash, resume } => {
@@ -136,13 +159,13 @@ fn flash_failure_message(error: &FirmwareFlashError) -> String {
 }
 
 fn combine_flash_and_resume(
-    flash: Result<(), FirmwareFlashError>,
+    flash: Result<FirmwareInfo, FirmwareFlashError>,
     resume: Result<(), String>,
-) -> Result<(), FirmwareOperationError> {
+) -> Result<FirmwareInfo, FirmwareOperationError> {
     match (flash, resume) {
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(firmware), Ok(())) => Ok(firmware),
         (Err(error), Ok(())) => Err(FirmwareOperationError::Flash(error)),
-        (Ok(()), Err(error)) => Err(FirmwareOperationError::Resume(error)),
+        (Ok(firmware), Err(error)) => Err(FirmwareOperationError::Resume { firmware, error }),
         (Err(flash), Err(resume)) => Err(FirmwareOperationError::FlashAndResume { flash, resume }),
     }
 }
@@ -175,7 +198,7 @@ struct AppCenter {
     catalog: Option<ReleaseManifestV1>,
     release_notes: Vec<ReleaseNotes>,
     installed: Version,
-    firmware: FirmwareStatus,
+    firmware: FirmwareDetails,
     status: String,
     activity: Activity,
     staged_application: Option<PathBuf>,
@@ -186,7 +209,9 @@ struct AppCenter {
     replacement_supported: bool,
     app_icon: egui::TextureHandle,
     demo: Option<DemoMode>,
+    updates: Option<Result<UpdateContext, String>>,
     status_tone: StatusTone,
+    status_placement: StatusPlacement,
     host_commands: mpsc::Receiver<AppCenterCommand>,
     catalog_status: CatalogStatus,
     firmware_write_started: bool,
@@ -229,11 +254,30 @@ enum StatusTone {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusPlacement {
+    Page,
+    Firmware,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CatalogStatus {
     NotRequested,
     Checking,
     Loaded,
     Failed,
+}
+
+fn demo_firmware_details() -> FirmwareDetails {
+    FirmwareInfo {
+        version: FirmwareVersion::Reported(2),
+        capabilities: FirmwareCapabilities::ENTER_UF2_BOOTLOADER
+            | FirmwareCapabilities::INSTALL_RECEIPT,
+        install_state: new_firmware_install_receipt(FirmwareInstallSource::AppCenter).map_or(
+            FirmwareInstallState::Pending,
+            FirmwareInstallState::Recorded,
+        ),
+    }
+    .into()
 }
 
 impl CatalogStatus {
@@ -256,11 +300,16 @@ impl CatalogStatus {
 
 fn catalog_presentation(
     refresh: CatalogRefresh,
+    local: bool,
 ) -> (ReleaseManifestV1, String, StatusTone, CatalogStatus) {
     match refresh {
         CatalogRefresh::Current(manifest) => (
             manifest,
-            "Signed release information is current.".to_owned(),
+            if local {
+                "Signed local development catalog is current.".to_owned()
+            } else {
+                "Signed release information is current.".to_owned()
+            },
             StatusTone::Success,
             CatalogStatus::Loaded,
         ),
@@ -269,9 +318,15 @@ fn catalog_presentation(
             refresh_error,
         } => (
             manifest,
-            format!(
-                "Cannot check for a newer release; showing the last verified information. {refresh_error}"
-            ),
+            if local {
+                format!(
+                    "Cannot refresh the local development catalog; showing its last verified information. {refresh_error}"
+                )
+            } else {
+                format!(
+                    "Cannot check for a newer release; showing the last verified information. {refresh_error}"
+                )
+            },
             StatusTone::Error,
             CatalogStatus::Failed,
         ),
@@ -281,7 +336,7 @@ fn catalog_presentation(
 impl AppCenter {
     fn new(
         ctx: &egui::Context,
-        firmware: FirmwareStatus,
+        firmware: FirmwareDetails,
         demo: Option<DemoMode>,
         page: AppCenterPage,
     ) -> Self {
@@ -301,9 +356,32 @@ impl AppCenter {
             None => running,
         };
         let firmware = match demo {
-            Some(DemoMode::Available) => FirmwareStatus::Reported(1),
-            Some(DemoMode::Current) => FirmwareStatus::Reported(2),
+            Some(DemoMode::Available) => FirmwareDetails {
+                version: FirmwareStatus::Reported(1),
+                ..FirmwareDetails::default()
+            },
+            Some(DemoMode::Current) => demo_firmware_details(),
             None => firmware,
+        };
+        let updates = demo.is_none().then(update_context);
+        let initial_status = if demo.is_some() {
+            "Demo preview - updater networking, files, and hardware are disabled.".to_owned()
+        } else {
+            #[cfg(debug_assertions)]
+            if updates
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(UpdateContext::local_root)
+                .is_some()
+            {
+                "Open Updates to check the signed local development catalog.".to_owned()
+            } else {
+                "Open Updates to check the signed stable release.".to_owned()
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                "Open Updates to check the signed stable release.".to_owned()
+            }
         };
         // A window that opens on Updates starts its check in `ensure_catalog`
         // on the first frame, so opening and navigating share one path.
@@ -314,11 +392,7 @@ impl AppCenter {
             release_notes,
             installed,
             firmware,
-            status: if demo.is_some() {
-                "Demo preview - updater networking, files, and hardware are disabled.".to_owned()
-            } else {
-                "Open Updates to check the signed stable release.".to_owned()
-            },
+            status: initial_status,
             activity: Activity::Idle,
             staged_application: None,
             events,
@@ -329,7 +403,9 @@ impl AppCenter {
                 || guided_replacement_supported(env!("CARGO_PKG_VERSION")),
             app_icon: load_texture(ctx, "app-center-app-icon", APP_ICON),
             demo,
+            updates,
             status_tone: StatusTone::Info,
+            status_placement: StatusPlacement::Page,
             host_commands,
             catalog_status: if demo.is_some() {
                 CatalogStatus::Loaded
@@ -343,12 +419,83 @@ impl AppCenter {
         }
     }
 
+    fn update_context(&self) -> Result<UpdateContext, String> {
+        self.updates
+            .as_ref()
+            .expect("real update operations always have an update context")
+            .clone()
+    }
+
+    #[cfg(debug_assertions)]
+    fn local_update_root(&self) -> Option<&Path> {
+        self.updates.as_ref()?.as_ref().ok()?.local_root()
+    }
+
+    fn uses_local_updates(&self) -> bool {
+        self.updates
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .is_some_and(UpdateContext::is_local)
+    }
+
+    fn update_source_name(&self) -> &'static str {
+        let local = self.uses_local_updates();
+        #[cfg(debug_assertions)]
+        if local {
+            return "local development catalog";
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = local;
+        "stable release"
+    }
+
+    fn application_current_message(&self) -> String {
+        format!(
+            "Application matches the signed {}.",
+            self.update_source_name()
+        )
+    }
+
+    fn application_newer_title(&self) -> &'static str {
+        let local = self.uses_local_updates();
+        #[cfg(debug_assertions)]
+        if local {
+            return "Newer than local catalog";
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = local;
+        "Newer than stable"
+    }
+
+    fn application_newer_message(&self) -> String {
+        format!(
+            "This application is newer than the signed {}. No downgrade is offered.",
+            self.update_source_name()
+        )
+    }
+
+    fn firmware_current_message(&self) -> String {
+        format!(
+            "The connected board matches the signed {}.",
+            self.update_source_name()
+        )
+    }
+
+    fn firmware_newer_title(&self) -> String {
+        format!(
+            "Firmware is newer than the signed {}",
+            self.update_source_name()
+        )
+    }
+
     fn check_catalog(&mut self, ctx: egui::Context) {
         let sender = self.sender.clone();
         self.cancel.store(false, Ordering::Release);
         let cancel = Arc::clone(&self.cancel);
+        let updates = self.update_context();
         let started = spawn_worker(&mut self.worker, move || {
-            let _ = sender.send(WorkerEvent::Catalog(Box::new(fetch_catalog(&cancel))));
+            let result = updates.and_then(|context| fetch_catalog(&context, &cancel));
+            let _ = sender.send(WorkerEvent::Catalog(Box::new(result)));
             ctx.request_repaint();
         });
         debug_assert!(started, "catalog worker slot must be empty");
@@ -364,16 +511,20 @@ impl AppCenter {
             ));
             "Demo: the verified application is ready for replacement.".clone_into(&mut self.status);
             self.status_tone = StatusTone::Success;
+            self.status_placement = StatusPlacement::Page;
             return;
         }
         self.activity = Activity::Busy { can_cancel: false };
         self.status_tone = StatusTone::Info;
+        self.status_placement = StatusPlacement::Page;
         self.cancel.store(false, Ordering::Release);
         "Downloading and validating the application…".clone_into(&mut self.status);
         let sender = self.sender.clone();
         let cancel = Arc::clone(&self.cancel);
+        let updates = self.update_context();
         let started = spawn_worker(&mut self.worker, move || {
-            let result = download_and_stage_application(&manifest, &cancel);
+            let result = updates
+                .and_then(|context| download_and_stage_application(&context, &manifest, &cancel));
             let _ = sender.send(WorkerEvent::Application(result));
             ctx.request_repaint();
         });
@@ -385,22 +536,27 @@ impl AppCenter {
             return;
         }
         if self.demo.is_some() {
-            self.firmware = FirmwareStatus::Reported(manifest.firmware.revision);
+            self.firmware = demo_firmware_details();
+            self.firmware.version = FirmwareStatus::Reported(manifest.firmware.revision);
             "Demo: firmware installation completed and verified.".clone_into(&mut self.status);
             self.status_tone = StatusTone::Success;
+            self.status_placement = StatusPlacement::Firmware;
             return;
         }
         self.activity = Activity::Busy { can_cancel: true };
         self.status_tone = StatusTone::Info;
+        self.status_placement = StatusPlacement::Firmware;
         self.cancel.store(false, Ordering::Release);
         "Preparing the verified firmware…".clone_into(&mut self.status);
         let sender = self.sender.clone();
         let host = self.host.clone();
         let cancel = Arc::clone(&self.cancel);
         let session_active = Arc::clone(&self.firmware_session_active);
+        let updates = self.update_context();
         let started = spawn_worker(&mut self.worker, move || {
-            let result = (|| -> Result<(), FirmwareOperationError> {
-                let path = download_firmware(&manifest, &cancel)
+            let result = (|| -> Result<FirmwareInfo, FirmwareOperationError> {
+                let context = updates.map_err(FirmwareOperationError::Preparation)?;
+                let path = download_firmware(&context, &manifest, &cancel)
                     .map_err(FirmwareOperationError::Preparation)?;
                 if cancel.load(Ordering::Acquire) {
                     return Err(FirmwareOperationError::Preparation(
@@ -450,10 +606,12 @@ impl AppCenter {
         if self.demo.is_some() {
             "Demo: the bridge would now quit safely for replacement.".clone_into(&mut self.status);
             self.status_tone = StatusTone::Success;
+            self.status_placement = StatusPlacement::Page;
             return;
         }
         self.activity = Activity::Busy { can_cancel: false };
         self.status_tone = StatusTone::Info;
+        self.status_placement = StatusPlacement::Page;
         "Waiting for the bridge to release hardware safely…".clone_into(&mut self.status);
         let sender = self.sender.clone();
         let host = self.host.clone();
@@ -468,11 +626,12 @@ impl AppCenter {
     fn drain_events(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             let terminal = !matches!(&event, WorkerEvent::FirmwareProgress(_));
+            let status_placement = event.status_placement();
             match event {
                 WorkerEvent::Catalog(result) => match *result {
                     Ok(refresh) => {
                         let (manifest, status, tone, catalog_status) =
-                            catalog_presentation(refresh);
+                            catalog_presentation(refresh, self.uses_local_updates());
                         self.status = status;
                         self.release_notes = parse_release_notes(&manifest.release_notes);
                         self.catalog = Some(manifest);
@@ -495,44 +654,30 @@ impl AppCenter {
                     self.status_tone = StatusTone::Success;
                 }
                 WorkerEvent::FirmwareProgress(progress) => {
-                    if matches!(
-                        progress,
-                        FirmwareFlashProgress::Writing
-                            | FirmwareFlashProgress::WaitingForApplication
-                            | FirmwareFlashProgress::Verifying
-                    ) {
+                    if !firmware_progress_is_cancellable(&progress) {
                         self.firmware_write_started = true;
                         self.page = AppCenterPage::Updates;
                     }
                     self.activity = Activity::Busy {
-                        can_cancel: !matches!(
-                            progress,
-                            FirmwareFlashProgress::Writing
-                                | FirmwareFlashProgress::WaitingForApplication
-                                | FirmwareFlashProgress::Verifying
-                        ),
+                        can_cancel: firmware_progress_is_cancellable(&progress),
                     };
                     progress_text(&progress).clone_into(&mut self.status);
                     self.status_tone = StatusTone::Info;
                 }
-                WorkerEvent::Firmware(Ok(())) => {
+                WorkerEvent::Firmware(Ok(firmware)) => {
                     "Firmware updated and verified. The bridge has restarted."
                         .clone_into(&mut self.status);
-                    self.firmware = self
-                        .catalog
-                        .as_ref()
-                        .map_or(FirmwareStatus::Unreported, |item| {
-                            FirmwareStatus::Reported(item.firmware.revision)
-                        });
+                    self.firmware = firmware.into();
                     self.activity = Activity::Idle;
                     self.status_tone = StatusTone::Success;
-                    self.firmware_write_started = false;
                 }
                 WorkerEvent::Firmware(Err(error)) => {
+                    if let Some(firmware) = error.verified_firmware() {
+                        self.firmware = firmware.into();
+                    }
                     self.status = error.message();
                     self.activity = Activity::Idle;
                     self.status_tone = StatusTone::Error;
-                    self.firmware_write_started = false;
                 }
                 WorkerEvent::Application(Err(error)) | WorkerEvent::Quit(Err(error)) => {
                     self.status = error;
@@ -541,6 +686,7 @@ impl AppCenter {
                 }
                 WorkerEvent::Quit(Ok(())) => self.activity = Activity::Closing,
             }
+            self.status_placement = status_placement;
             if terminal {
                 self.join_worker();
                 if self.close_when_idle {
@@ -552,7 +698,12 @@ impl AppCenter {
 
     fn join_worker(&mut self) {
         if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
+            let panicked = worker.join().is_err();
+            // Consuming the only worker is the common terminal path for
+            // firmware success, failure, and panic. Navigation must unlock in
+            // all three cases.
+            self.firmware_write_started = false;
+            if panicked {
                 "The background operation stopped unexpectedly.".clone_into(&mut self.status);
                 self.status_tone = StatusTone::Error;
                 self.activity = Activity::Idle;
@@ -611,7 +762,8 @@ impl AppCenter {
         }
         self.activity = Activity::Busy { can_cancel: false };
         self.status_tone = StatusTone::Info;
-        "Checking the signed stable release…".clone_into(&mut self.status);
+        self.status_placement = StatusPlacement::Page;
+        self.status = format!("Checking the signed {}...", self.update_source_name());
         self.check_catalog(ctx);
     }
 
@@ -635,6 +787,7 @@ impl AppCenter {
             "Demo: Finder would reveal the verified app and Applications."
                 .clone_into(&mut self.status);
             self.status_tone = StatusTone::Success;
+            self.status_placement = StatusPlacement::Page;
             return;
         }
         let Some(path) = self.staged_application.as_ref() else {
@@ -647,6 +800,7 @@ impl AppCenter {
             "Finder could not be opened; the verified app remains cached."
                 .clone_into(&mut self.status);
             self.status_tone = StatusTone::Error;
+            self.status_placement = StatusPlacement::Page;
         }
     }
 
@@ -680,7 +834,7 @@ impl AppCenter {
                         ui.add_space(7.0);
                         ui.horizontal_wrapped(|ui| {
                             hero_badge(ui, &format!("App {}", self.installed), ACCENT);
-                            hero_badge(ui, &firmware_badge(self.firmware), ACCENT);
+                            hero_badge(ui, &firmware_badge(self.firmware.version), ACCENT);
                             if let Some(mode) = self.demo {
                                 hero_badge(ui, &format!("Demo · {}", mode.label()), MUTED_TEXT);
                             }
@@ -711,29 +865,46 @@ impl AppCenter {
         }
     }
 
-    fn status_banner(&self, ui: &mut egui::Ui) {
-        let (colour, fill) = match self.status_tone {
-            StatusTone::Info => (ACCENT, ACCENT_SUBTLE),
-            StatusTone::Success => (SUCCESS, SUCCESS.gamma_multiply(0.16)),
-            StatusTone::Error => (DANGER, DANGER.gamma_multiply(0.14)),
-        };
-        egui::Frame::new()
-            .fill(fill)
-            .stroke(egui::Stroke::new(1.0, colour.gamma_multiply(0.55)))
-            .corner_radius(10)
-            .inner_margin(egui::Margin::symmetric(14, 11))
-            .show(ui, |ui| {
-                ui.set_width((ui.available_width() - 2.0).max(0.0));
-                ui.horizontal(|ui| {
-                    if self.busy() {
-                        ui.spinner();
-                    } else {
-                        ui.label(egui::RichText::new("●").size(11.0).color(colour));
-                    }
-                    ui.label(egui::RichText::new(&self.status).color(TEXT));
-                });
-            });
+    fn status_banner(&self, ui: &mut egui::Ui, placement: StatusPlacement) {
+        if self.status_placement == placement {
+            let _ = status_banner(ui, &self.status, self.status_tone, self.busy());
+        }
     }
+}
+
+fn firmware_progress_is_cancellable(progress: &FirmwareFlashProgress) -> bool {
+    !matches!(
+        progress,
+        FirmwareFlashProgress::Writing
+            | FirmwareFlashProgress::WaitingForApplication
+            | FirmwareFlashProgress::RecordingReceipt
+            | FirmwareFlashProgress::VerifyingReceipt
+    )
+}
+
+fn status_banner(ui: &mut egui::Ui, status: &str, tone: StatusTone, busy: bool) -> egui::Response {
+    let (colour, fill) = match tone {
+        StatusTone::Info => (ACCENT, ACCENT_SUBTLE),
+        StatusTone::Success => (SUCCESS, SUCCESS.gamma_multiply(0.16)),
+        StatusTone::Error => (DANGER, DANGER.gamma_multiply(0.14)),
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, colour.gamma_multiply(0.55)))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(14, 11))
+        .show(ui, |ui| {
+            ui.set_width((ui.available_width() - 2.0).max(0.0));
+            ui.horizontal(|ui| {
+                if busy {
+                    ui.spinner();
+                } else {
+                    ui.label(egui::RichText::new("●").size(11.0).color(colour));
+                }
+                ui.add(egui::Label::new(egui::RichText::new(status).color(TEXT)).wrap());
+            });
+        })
+        .response
 }
 
 impl eframe::App for AppCenter {
@@ -755,6 +926,7 @@ impl eframe::App for AppCenter {
                 self.page = AppCenterPage::Updates;
                 "Firmware verification is still in progress. Keep the board connected."
                     .clone_into(&mut self.status);
+                self.status_placement = StatusPlacement::Firmware;
             } else {
                 "Finishing the current operation before closing…".clone_into(&mut self.status);
             }
@@ -891,6 +1063,21 @@ fn demo_manifest(_mode: DemoMode) -> ReleaseManifestV1 {
 mod tests {
     use super::*;
 
+    fn verified_firmware_fixture() -> FirmwareInfo {
+        FirmwareInfo {
+            version: bridge_runtime::FirmwareVersion::Reported(2),
+            capabilities: FirmwareCapabilities::ENTER_UF2_BOOTLOADER
+                | FirmwareCapabilities::INSTALL_RECEIPT,
+            install_state: bridge_runtime::FirmwareInstallState::Recorded(
+                bridge_runtime::FirmwareInstallReceipt {
+                    installed_at: 1_786_456_920,
+                    install_id: [0x42; 16],
+                    source: bridge_runtime::FirmwareInstallSource::AppCenter,
+                },
+            ),
+        }
+    }
+
     #[test]
     fn close_waits_for_owned_work_but_not_the_final_close_command() {
         assert!(must_defer_close(
@@ -911,6 +1098,18 @@ mod tests {
             false
         ));
         assert!(!operation_available(Activity::Closing, false));
+    }
+
+    #[test]
+    fn worker_status_stays_with_the_component_that_started_it() {
+        assert_eq!(
+            WorkerEvent::FirmwareProgress(FirmwareFlashProgress::Writing).status_placement(),
+            StatusPlacement::Firmware
+        );
+        assert_eq!(
+            WorkerEvent::Application(Err("fixture".to_owned())).status_placement(),
+            StatusPlacement::Page
+        );
     }
 
     #[test]
@@ -941,9 +1140,15 @@ mod tests {
         assert!(combined.contains("runtime stopped"));
         assert!(combined.contains("Check the cable"));
 
-        let resume_only = combine_flash_and_resume(Ok(()), Err("runtime stopped".to_owned()))
-            .unwrap_err()
-            .message();
+        let verified = verified_firmware_fixture();
+        assert_eq!(
+            combine_flash_and_resume(Ok(verified), Ok(())).unwrap(),
+            verified
+        );
+        let resume_error =
+            combine_flash_and_resume(Ok(verified), Err("runtime stopped".to_owned())).unwrap_err();
+        assert_eq!(resume_error.verified_firmware(), Some(verified));
+        let resume_only = resume_error.message();
         assert!(resume_only.contains("runtime stopped"));
         assert!(!resume_only.contains("Check the cable"));
 
@@ -982,6 +1187,66 @@ mod tests {
     }
 
     #[test]
+    fn long_status_errors_wrap_without_widening_the_window() {
+        let context = egui::Context::default();
+        let mut banner = egui::Rect::NOTHING;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 480.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                banner = status_banner(
+                    ui,
+                    "A long updater failure must wrap inside the available content width instead of widening the page and clipping every card that follows it.",
+                    StatusTone::Error,
+                    false,
+                )
+                .rect;
+            },
+        );
+        output.textures_delta.clear();
+
+        assert!(
+            banner.width() <= 640.0,
+            "banner escaped the window: {banner:?}"
+        );
+        assert!(banner.height() > 40.0, "banner did not wrap: {banner:?}");
+    }
+
+    #[test]
+    fn firmware_progress_cancellation_stops_before_the_write_phase() {
+        for progress in [
+            FirmwareFlashProgress::LookingForDevice,
+            FirmwareFlashProgress::RequestingBootloader,
+            FirmwareFlashProgress::WaitingForBootloader,
+            FirmwareFlashProgress::ManualRecovery,
+        ] {
+            assert!(firmware_progress_is_cancellable(&progress));
+        }
+        for progress in [
+            FirmwareFlashProgress::Writing,
+            FirmwareFlashProgress::WaitingForApplication,
+            FirmwareFlashProgress::RecordingReceipt,
+            FirmwareFlashProgress::VerifyingReceipt,
+        ] {
+            assert!(!firmware_progress_is_cancellable(&progress));
+        }
+    }
+
+    #[test]
+    fn manual_recovery_points_to_the_physical_reset_button() {
+        let guidance = progress_text(&FirmwareFlashProgress::ManualRecovery);
+        assert!(guidance.contains("reset button"));
+        assert!(guidance.contains("USB-C"));
+        assert!(!guidance.contains("RST"));
+        assert!(!guidance.contains("GND"));
+    }
+
+    #[test]
     fn demo_release_notes_are_structured() {
         assert!(!parse_release_notes(&demo_manifest(DemoMode::Current).release_notes).is_empty());
     }
@@ -1016,15 +1281,28 @@ mod tests {
     #[test]
     fn stale_catalog_information_is_usable_but_warns_and_allows_retry() {
         let manifest = demo_manifest(DemoMode::Current);
-        let (presented, message, tone, mut status) = catalog_presentation(CatalogRefresh::Stale {
-            manifest: manifest.clone(),
-            refresh_error: "offline".to_owned(),
-        });
+        let (presented, message, tone, mut status) = catalog_presentation(
+            CatalogRefresh::Stale {
+                manifest: manifest.clone(),
+                refresh_error: "offline".to_owned(),
+            },
+            false,
+        );
         assert_eq!(presented, manifest);
         assert!(message.contains("last verified"));
         assert!(message.contains("offline"));
         assert_eq!(tone, StatusTone::Error);
         assert_eq!(status, CatalogStatus::Failed);
         assert!(status.retry_if_failed());
+
+        let (_, local_message, _, _) = catalog_presentation(
+            CatalogRefresh::Stale {
+                manifest,
+                refresh_error: "offline".to_owned(),
+            },
+            true,
+        );
+        assert!(local_message.contains("local development catalog"));
+        assert!(local_message.contains("last verified"));
     }
 }

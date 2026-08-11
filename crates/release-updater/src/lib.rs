@@ -34,20 +34,22 @@ pub use bridge_output::{
 pub use cache::{CacheError, ReleaseCache};
 pub use firmware::{
     classify_firmware_release, discover_bootloader_volumes, discover_firmware_devices,
-    flash_firmware, validate_uf2, BootloaderVolume, FirmwareDevice, FirmwareFlashError,
-    FirmwareFlashProgress, FirmwareReleaseState,
+    flash_firmware, validate_uf2, BootloaderVolume, FirmwareDevice, FirmwareDeviceKind,
+    FirmwareFlashError, FirmwareFlashProgress, FirmwareReleaseState,
 };
 pub use manifest::{
     embedded_trusted_keys, verify_signed_manifest, ApplicationRelease, ArtifactDescriptor,
     FirmwareRelease, ManifestError, ManifestSignature, ReleaseManifestV1, ReleaseSignatures,
     TrustedPublicKey,
 };
+#[cfg(debug_assertions)]
+pub use network::LocalReleaseClient;
 pub use network::{
     download_to_path, ensure_release_artifact, refresh_catalog_if_due, CatalogRefresh,
     DownloadError, LatestReleaseClient, ReleaseSource,
 };
 
-/// GitHub repository that owns the only accepted update channel.
+/// GitHub repository that owns the only accepted production update channel.
 pub const UPDATE_REPOSITORY: &str = "tkubicz/steam-controller-bridge";
 pub const MANIFEST_ASSET: &str = "steam-controller-bridge-update-manifest.json";
 pub const SIGNATURES_ASSET: &str = "steam-controller-bridge-update-signatures.json";

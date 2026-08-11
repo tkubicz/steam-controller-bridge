@@ -9,8 +9,11 @@ use gamepad_state::GamepadState;
 
 mod serial;
 pub use serial::{
-    available_serial_devices, available_serial_ports, ByteTransport, FirmwareVersion, SerialConfig,
-    SerialConnection, SerialDeviceInfo, SerialError, SerialMetrics, SerialOutput, SerialStatus,
+    available_serial_devices, available_serial_ports, new_firmware_install_receipt,
+    random_firmware_request_id, ByteTransport, FirmwareCapabilities, FirmwareInfo,
+    FirmwareInstallReceipt, FirmwareInstallSource, FirmwareInstallState,
+    FirmwareReceiptCreationError, FirmwareVersion, SerialConfig, SerialConnection,
+    SerialDeviceInfo, SerialError, SerialMetrics, SerialOutput, SerialStatus,
     MINIMUM_FIRMWARE_REVISION, XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID,
     XIAO_USB_VENDOR_ID,
 };
@@ -93,6 +96,36 @@ pub trait GamepadOutput {
     /// has no device or no live connection.
     #[must_use]
     fn firmware_version(&self) -> Option<FirmwareVersion> {
+        self.firmware_info().map(FirmwareInfo::firmware_version)
+    }
+
+    /// Complete version, capability, and installation receipt information for
+    /// the connected firmware. `None` when no identifiable device is live.
+    #[must_use]
+    fn firmware_info(&self) -> Option<FirmwareInfo> {
+        None
+    }
+
+    /// Starts receipt recording without waiting for the device response.
+    ///
+    /// # Errors
+    /// Returns [`OutputError`] when the backend cannot send the request.
+    fn request_firmware_install_receipt(
+        &mut self,
+        _request_id: u32,
+        _receipt: FirmwareInstallReceipt,
+    ) -> Result<(), OutputError> {
+        Err(OutputError::Transport(
+            "output does not support asynchronous firmware installation receipts".to_owned(),
+        ))
+    }
+
+    /// Takes a completed response for the expected receipt, if one is available.
+    fn poll_firmware_install_receipt(
+        &mut self,
+        _request_id: u32,
+        _receipt: FirmwareInstallReceipt,
+    ) -> Option<Result<FirmwareInstallReceipt, OutputError>> {
         None
     }
 }
@@ -268,8 +301,24 @@ impl<O: GamepadOutput> GamepadOutput for ChangedOnly<O> {
     fn diagnostics(&self) -> OutputDiagnostics {
         self.inner.diagnostics()
     }
-    fn firmware_version(&self) -> Option<FirmwareVersion> {
-        self.inner.firmware_version()
+    fn firmware_info(&self) -> Option<FirmwareInfo> {
+        self.inner.firmware_info()
+    }
+    fn request_firmware_install_receipt(
+        &mut self,
+        request_id: u32,
+        receipt: FirmwareInstallReceipt,
+    ) -> Result<(), OutputError> {
+        self.inner
+            .request_firmware_install_receipt(request_id, receipt)
+    }
+    fn poll_firmware_install_receipt(
+        &mut self,
+        request_id: u32,
+        receipt: FirmwareInstallReceipt,
+    ) -> Option<Result<FirmwareInstallReceipt, OutputError>> {
+        self.inner
+            .poll_firmware_install_receipt(request_id, receipt)
     }
 }
 

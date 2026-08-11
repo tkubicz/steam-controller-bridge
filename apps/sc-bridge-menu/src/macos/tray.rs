@@ -271,7 +271,7 @@ impl MenuApp {
         #[cfg(feature = "updater")]
         {
             self.update_checker.poll();
-            let available = self.update_checker.available(status.xiao.firmware);
+            let available = self.update_checker.available(status.xiao.firmware.version);
             if self.last_update_available != Some(available) {
                 self.last_update_available = Some(available);
                 if let Some(items) = &self.items {

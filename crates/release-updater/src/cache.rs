@@ -5,7 +5,11 @@ use std::time::{Duration, SystemTime};
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
+#[cfg(debug_assertions)]
+use sha2::{Digest as _, Sha256};
 
+#[cfg(debug_assertions)]
+use crate::artifact::lower_hex;
 use crate::temporary::unique_temporary_path;
 use crate::{
     verify_artifact, verify_signed_manifest, ArtifactDescriptor, ArtifactError, ManifestError,
@@ -89,6 +93,18 @@ impl ReleaseCache {
         )))
     }
 
+    #[cfg(debug_assertions)]
+    #[must_use]
+    pub fn for_local_source(root: &Path) -> Self {
+        let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
+        let identifier = lower_hex(&digest);
+        Self::new(
+            std::env::temp_dir()
+                .join("steam-controller-bridge-local-updates")
+                .join(identifier),
+        )
+    }
+
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
@@ -159,20 +175,32 @@ impl ReleaseCache {
     }
 
     #[must_use]
-    pub fn check_due(&self, interval: Duration) -> bool {
+    pub fn check_due(&self, interval: Duration, running_application: &Version) -> bool {
         let Ok(metadata) = fs::metadata(self.last_check_path()) else {
             return true;
         };
         let Ok(modified) = metadata.modified() else {
             return true;
         };
-        SystemTime::now()
+        let recent = SystemTime::now()
             .duration_since(modified)
-            .map_or(true, |age| age >= interval)
+            .is_ok_and(|age| age < interval);
+        if !recent {
+            return true;
+        }
+        fs::read_to_string(self.last_check_path()).map_or(true, |checked_application| {
+            checked_application.trim() != running_application.to_string()
+        })
     }
 
-    pub(crate) fn mark_check_success(&self) -> Result<(), CacheError> {
-        atomic_write(&self.last_check_path(), b"checked\n")?;
+    pub(crate) fn mark_check_success(
+        &self,
+        running_application: &Version,
+    ) -> Result<(), CacheError> {
+        atomic_write(
+            &self.last_check_path(),
+            format!("{running_application}\n").as_bytes(),
+        )?;
         Ok(())
     }
 }
@@ -214,10 +242,31 @@ mod tests {
         let root = temporary_directory("cache");
         let _ = fs::remove_dir_all(&root);
         let cache = ReleaseCache::new(root.clone());
-        assert!(cache.check_due(Duration::from_mins(1)));
-        cache.mark_check_success().unwrap();
-        assert!(!cache.check_due(Duration::from_mins(1)));
+        let current = Version::new(1, 5, 0);
+        let upgraded = Version::new(1, 6, 0);
+        assert!(cache.check_due(Duration::from_mins(1), &current));
+        cache.mark_check_success(&current).unwrap();
+        assert!(!cache.check_due(Duration::from_mins(1), &current));
+        assert!(cache.check_due(Duration::from_mins(1), &upgraded));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_sources_use_stable_isolated_temporary_caches() {
+        let first = temporary_directory("local-cache-first");
+        let second = temporary_directory("local-cache-second");
+        let first_cache = ReleaseCache::for_local_source(&first);
+        assert_eq!(
+            first_cache.root(),
+            ReleaseCache::for_local_source(&first).root()
+        );
+        assert_ne!(
+            first_cache.root(),
+            ReleaseCache::for_local_source(&second).root()
+        );
+        assert!(first_cache
+            .root()
+            .starts_with(std::env::temp_dir().join("steam-controller-bridge-local-updates")));
     }
 
     #[test]

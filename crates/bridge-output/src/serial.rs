@@ -1,8 +1,11 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bridge_protocol::{Frame, Message, StreamDecoder, WireGamepadState, PROTOCOL_VERSION};
+use bridge_protocol::{
+    Frame, InstallReceipt, InstallSource, Message, StreamDecoder, WireGamepadState,
+    PROTOCOL_VERSION,
+};
 use gamepad_state::GamepadState;
 
 use crate::{GamepadOutput, OutputDiagnostics, OutputError, OutputFeedback};
@@ -14,11 +17,13 @@ pub const XIAO_USB_PRODUCT: &str = "Steam Controller Bridge";
 /// Oldest firmware revision the host considers current. Hand-maintained:
 /// raise it only when the bridge depends on newer firmware behavior, so a
 /// working older board is not nagged to reflash after app-only releases.
-pub const MINIMUM_FIRMWARE_REVISION: u16 = 1;
+pub const MINIMUM_FIRMWARE_REVISION: u16 = 2;
 /// How long after Ready the firmware gets to deliver its `DeviceInfo` report
 /// before the connection is classified as pre-versioning firmware.
 const FIRMWARE_REPORT_GRACE: Duration = Duration::from_secs(2);
 const DEVICE_INFO_FORMAT: u8 = 1;
+const DEVICE_INFO_EXTENSION_SIZE: usize = 8;
+const DEVICE_INFO_RECORDED_SIZE: usize = 33;
 const SERIAL_SERVICE_MIN_INTERVAL: Duration = Duration::from_millis(10);
 const HANDSHAKE_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
@@ -107,6 +112,183 @@ pub enum FirmwareVersion {
     Unreported,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FirmwareCapabilities(u32);
+
+impl FirmwareCapabilities {
+    pub const ENTER_UF2_BOOTLOADER: Self = Self(1 << 0);
+    pub const INSTALL_RECEIPT: Self = Self(1 << 1);
+
+    #[must_use]
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn contains(self, capability: Self) -> bool {
+        self.0 & capability.0 == capability.0
+    }
+}
+
+impl std::ops::BitOr for FirmwareCapabilities {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirmwareInstallSource {
+    AppCenter,
+    FirstObserved,
+}
+
+impl From<FirmwareInstallSource> for InstallSource {
+    fn from(value: FirmwareInstallSource) -> Self {
+        match value {
+            FirmwareInstallSource::AppCenter => Self::AppCenter,
+            FirmwareInstallSource::FirstObserved => Self::FirstObserved,
+        }
+    }
+}
+
+impl From<InstallSource> for FirmwareInstallSource {
+    fn from(value: InstallSource) -> Self {
+        match value {
+            InstallSource::AppCenter => Self::AppCenter,
+            InstallSource::FirstObserved => Self::FirstObserved,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirmwareInstallReceipt {
+    pub installed_at: u64,
+    pub install_id: [u8; 16],
+    pub source: FirmwareInstallSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirmwareReceiptCreationError(String);
+
+impl std::fmt::Display for FirmwareReceiptCreationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for FirmwareReceiptCreationError {}
+
+/// Generates an installation receipt from the current UTC Unix time and OS randomness.
+///
+/// # Errors
+/// Returns an error when the system clock predates the Unix epoch, the timestamp
+/// exceeds the wire format's signed display range, or OS randomness is unavailable.
+pub fn new_firmware_install_receipt(
+    source: FirmwareInstallSource,
+) -> Result<FirmwareInstallReceipt, FirmwareReceiptCreationError> {
+    let installed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| FirmwareReceiptCreationError(error.to_string()))?
+        .as_secs();
+    if installed_at == 0 || i64::try_from(installed_at).is_err() {
+        return Err(FirmwareReceiptCreationError(
+            "system time is outside the installation receipt range".to_owned(),
+        ));
+    }
+    let mut install_id = [0_u8; 16];
+    getrandom::fill(&mut install_id)
+        .map_err(|error| FirmwareReceiptCreationError(format!("OS randomness failed: {error}")))?;
+    if install_id == [0; 16] {
+        return Err(FirmwareReceiptCreationError(
+            "OS randomness returned an empty installation ID".to_owned(),
+        ));
+    }
+    Ok(FirmwareInstallReceipt {
+        installed_at,
+        install_id,
+        source,
+    })
+}
+
+/// Generates an unpredictable request identifier for firmware control messages.
+///
+/// # Errors
+/// Returns an error when operating-system randomness is unavailable.
+pub fn random_firmware_request_id() -> Result<u32, FirmwareReceiptCreationError> {
+    let mut bytes = [0_u8; 4];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| FirmwareReceiptCreationError(format!("OS randomness failed: {error}")))?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+impl From<FirmwareInstallReceipt> for InstallReceipt {
+    fn from(value: FirmwareInstallReceipt) -> Self {
+        Self {
+            installed_at: value.installed_at,
+            install_id: value.install_id,
+            source: value.source.into(),
+        }
+    }
+}
+
+impl From<InstallReceipt> for FirmwareInstallReceipt {
+    fn from(value: InstallReceipt) -> Self {
+        Self {
+            installed_at: value.installed_at,
+            install_id: value.install_id,
+            source: value.source.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FirmwareInstallState {
+    #[default]
+    Unsupported,
+    Pending,
+    Recorded(FirmwareInstallReceipt),
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FirmwareInfo {
+    pub version: FirmwareVersion,
+    pub capabilities: FirmwareCapabilities,
+    pub install_state: FirmwareInstallState,
+}
+
+impl FirmwareInfo {
+    #[must_use]
+    pub const fn firmware_version(self) -> FirmwareVersion {
+        self.version
+    }
+}
+
+fn validate_receipt_response(
+    expected_request_id: u32,
+    expected_receipt: FirmwareInstallReceipt,
+    actual_request_id: u32,
+    actual_receipt: FirmwareInstallReceipt,
+) -> Result<FirmwareInstallReceipt, SerialError> {
+    if actual_request_id != expected_request_id {
+        return Err(SerialError::RequestMismatch {
+            expected: expected_request_id,
+            actual: actual_request_id,
+        });
+    }
+    if actual_receipt != expected_receipt {
+        return Err(SerialError::ReceiptMismatch);
+    }
+    Ok(actual_receipt)
+}
+
 impl FirmwareVersion {
     #[must_use]
     pub const fn revision(self) -> Option<u16> {
@@ -126,14 +308,58 @@ impl FirmwareVersion {
     }
 }
 
-fn parse_device_info(payload: &[u8]) -> FirmwareVersion {
+fn parse_device_info(payload: &[u8]) -> FirmwareInfo {
     match payload {
-        // Trailing bytes are future extensions and deliberately ignored.
-        [DEVICE_INFO_FORMAT, low, high, ..] => {
-            FirmwareVersion::Reported(u16::from_le_bytes([*low, *high]))
+        [DEVICE_INFO_FORMAT, low, high] => FirmwareInfo {
+            version: FirmwareVersion::Reported(u16::from_le_bytes([*low, *high])),
+            ..FirmwareInfo::default()
+        },
+        [DEVICE_INFO_FORMAT, ..] if payload.len() < DEVICE_INFO_EXTENSION_SIZE => FirmwareInfo {
+            version: FirmwareVersion::Malformed,
+            ..FirmwareInfo::default()
+        },
+        [DEVICE_INFO_FORMAT, low, high, cap0, cap1, cap2, cap3, state, ..] => {
+            let version = FirmwareVersion::Reported(u16::from_le_bytes([*low, *high]));
+            let capabilities =
+                FirmwareCapabilities::from_bits(u32::from_le_bytes([*cap0, *cap1, *cap2, *cap3]));
+            let install_state = match *state {
+                0 => FirmwareInstallState::Unsupported,
+                1 => FirmwareInstallState::Pending,
+                2 if payload.len() >= DEVICE_INFO_RECORDED_SIZE => {
+                    let installed_at =
+                        u64::from_le_bytes(payload[8..16].try_into().expect("length checked"));
+                    let install_id: [u8; 16] = payload[16..32].try_into().expect("length checked");
+                    match InstallSource::try_from(payload[32]) {
+                        Ok(source)
+                            if installed_at > 0
+                                && i64::try_from(installed_at).is_ok()
+                                && install_id != [0; 16] =>
+                        {
+                            FirmwareInstallState::Recorded(FirmwareInstallReceipt {
+                                installed_at,
+                                install_id,
+                                source: source.into(),
+                            })
+                        }
+                        Ok(_) | Err(_) => FirmwareInstallState::Invalid,
+                    }
+                }
+                2 | 3..=u8::MAX => FirmwareInstallState::Invalid,
+            };
+            FirmwareInfo {
+                version,
+                capabilities,
+                install_state,
+            }
         }
-        [DEVICE_INFO_FORMAT, ..] | [] => FirmwareVersion::Malformed,
-        [format, ..] => FirmwareVersion::UnsupportedFormat(*format),
+        [format, ..] if *format != DEVICE_INFO_FORMAT => FirmwareInfo {
+            version: FirmwareVersion::UnsupportedFormat(*format),
+            ..FirmwareInfo::default()
+        },
+        _ => FirmwareInfo {
+            version: FirmwareVersion::Malformed,
+            ..FirmwareInfo::default()
+        },
     }
 }
 
@@ -160,6 +386,11 @@ pub enum SerialError {
     VersionRejected(u8),
     PongTimeout,
     NotReady,
+    UnsupportedCapability(&'static str),
+    ControlTimeout(&'static str),
+    ControlRejected { request_id: u32, code: u16 },
+    RequestMismatch { expected: u32, actual: u32 },
+    ReceiptMismatch,
 }
 
 impl std::fmt::Display for SerialError {
@@ -176,6 +407,21 @@ impl std::fmt::Display for SerialError {
             ),
             Self::PongTimeout => write!(f, "serial pong timed out"),
             Self::NotReady => write!(f, "serial session is not ready"),
+            Self::UnsupportedCapability(capability) => {
+                write!(f, "firmware does not support {capability}")
+            }
+            Self::ControlTimeout(operation) => write!(f, "timed out while {operation}"),
+            Self::ControlRejected { request_id, code } => write!(
+                f,
+                "firmware rejected request ID {request_id} with error code {code}"
+            ),
+            Self::RequestMismatch { expected, actual } => write!(
+                f,
+                "firmware response used request ID {actual}, expected {expected}"
+            ),
+            Self::ReceiptMismatch => {
+                write!(f, "firmware acknowledged a different installation receipt")
+            }
         }
     }
 }
@@ -211,7 +457,10 @@ pub struct SerialConnection<T> {
     last_state_sent: Option<Duration>,
     pending_feedback: Option<OutputFeedback>,
     ready_at: Option<Duration>,
-    firmware: FirmwareVersion,
+    firmware: FirmwareInfo,
+    uf2_bootloader_ready: Option<u32>,
+    install_receipt_recorded: Option<(u32, FirmwareInstallReceipt)>,
+    control_error: Option<(u32, u16)>,
     metrics: SerialMetrics,
 }
 
@@ -244,7 +493,10 @@ impl<T: ByteTransport> SerialConnection<T> {
             last_state_sent: None,
             pending_feedback: None,
             ready_at: None,
-            firmware: FirmwareVersion::default(),
+            firmware: FirmwareInfo::default(),
+            uf2_bootloader_ready: None,
+            install_receipt_recorded: None,
+            control_error: None,
             metrics: SerialMetrics::default(),
         };
         connection.write_message(Message::Hello {
@@ -260,6 +512,10 @@ impl<T: ByteTransport> SerialConnection<T> {
     }
     #[must_use]
     pub const fn firmware(&self) -> FirmwareVersion {
+        self.firmware.version
+    }
+    #[must_use]
+    pub const fn firmware_info(&self) -> FirmwareInfo {
         self.firmware
     }
     #[must_use]
@@ -272,6 +528,76 @@ impl<T: ByteTransport> SerialConnection<T> {
 
     pub fn take_feedback(&mut self) -> Option<OutputFeedback> {
         self.pending_feedback.take()
+    }
+
+    /// Requests a firmware-assisted transition to the UF2 bootloader.
+    ///
+    /// # Errors
+    /// Returns an error unless negotiation is complete and the capability was reported.
+    pub fn request_uf2_bootloader(&mut self, request_id: u32) -> Result<(), SerialError> {
+        self.require_capability(
+            FirmwareCapabilities::ENTER_UF2_BOOTLOADER,
+            "automatic UF2 bootloader entry",
+        )?;
+        self.uf2_bootloader_ready = None;
+        self.control_error = None;
+        self.write_message(Message::EnterUf2Bootloader { request_id })
+    }
+
+    pub fn take_uf2_bootloader_ready(&mut self) -> Option<u32> {
+        self.uf2_bootloader_ready.take()
+    }
+
+    /// Requests that firmware commit the supplied installation receipt.
+    ///
+    /// # Errors
+    /// Returns an error unless negotiation is complete and the capability was reported.
+    pub fn record_install_receipt(
+        &mut self,
+        request_id: u32,
+        receipt: FirmwareInstallReceipt,
+    ) -> Result<(), SerialError> {
+        self.require_capability(
+            FirmwareCapabilities::INSTALL_RECEIPT,
+            "installation receipts",
+        )?;
+        self.install_receipt_recorded = None;
+        self.control_error = None;
+        self.write_message(Message::RecordInstallReceipt {
+            request_id,
+            receipt: receipt.into(),
+        })
+    }
+
+    pub fn take_install_receipt_recorded(&mut self) -> Option<(u32, FirmwareInstallReceipt)> {
+        self.install_receipt_recorded.take()
+    }
+
+    fn take_control_error(&mut self, expected: u32) -> Option<SerialError> {
+        self.control_error.take().map(|(request_id, code)| {
+            if request_id == expected {
+                SerialError::ControlRejected { request_id, code }
+            } else {
+                SerialError::RequestMismatch {
+                    expected,
+                    actual: request_id,
+                }
+            }
+        })
+    }
+
+    fn require_capability(
+        &self,
+        capability: FirmwareCapabilities,
+        name: &'static str,
+    ) -> Result<(), SerialError> {
+        if self.status != SerialStatus::Ready {
+            return Err(SerialError::NotReady);
+        }
+        if !self.firmware.capabilities.contains(capability) {
+            return Err(SerialError::UnsupportedCapability(name));
+        }
+        Ok(())
     }
 
     /// Queues a validated state, dropping the oldest at the capacity limit.
@@ -334,10 +660,10 @@ impl<T: ByteTransport> SerialConnection<T> {
             self.status = SerialStatus::Disconnected;
             return Err(SerialError::HandshakeTimeout);
         }
-        if self.firmware == FirmwareVersion::Pending && self.status == SerialStatus::Ready {
+        if self.firmware.version == FirmwareVersion::Pending && self.status == SerialStatus::Ready {
             if let Some(ready_at) = self.ready_at {
                 if now.saturating_sub(ready_at) >= FIRMWARE_REPORT_GRACE {
-                    self.firmware = FirmwareVersion::Unreported;
+                    self.firmware.version = FirmwareVersion::Unreported;
                 }
             }
         }
@@ -408,6 +734,24 @@ impl<T: ByteTransport> SerialConnection<T> {
             }
             Message::DeviceInfo(payload) => {
                 self.firmware = parse_device_info(payload);
+            }
+            Message::Uf2BootloaderReady { request_id } if self.status == SerialStatus::Ready => {
+                self.uf2_bootloader_ready = Some(*request_id);
+            }
+            Message::InstallReceiptRecorded {
+                request_id,
+                receipt,
+            } if self.status == SerialStatus::Ready => {
+                let recorded: FirmwareInstallReceipt = (*receipt).into();
+                self.install_receipt_recorded = Some((*request_id, recorded));
+            }
+            Message::Error { code, detail }
+                if self.status == SerialStatus::Ready && detail.len() == 4 =>
+            {
+                self.control_error = Some((
+                    u32::from_le_bytes(detail[..4].try_into().expect("length checked")),
+                    *code,
+                ));
             }
             Message::Rumble {
                 low_frequency,
@@ -503,6 +847,7 @@ pub struct SerialOutput {
     connected_once: bool,
     desired_state: Option<GamepadState>,
     last_poll: Option<Duration>,
+    bootloader_transition: bool,
 }
 
 impl SerialOutput {
@@ -521,6 +866,7 @@ impl SerialOutput {
             connected_once: false,
             desired_state: None,
             last_poll: None,
+            bootloader_transition: false,
         };
         output.connect()?;
         Ok(output)
@@ -534,16 +880,85 @@ impl SerialOutput {
         if self.connection.is_none() {
             self.connect()?;
         }
-        let now = self.clock.elapsed();
-        let Some(connection) = self.connection.as_mut() else {
-            return Err(SerialError::NotReady);
-        };
-        let result = connection.poll(now);
-        self.last_poll = Some(now);
-        if result.is_err() {
-            self.disconnect();
+        self.poll_existing()
+    }
+
+    /// Waits for the post-negotiation device information report.
+    ///
+    /// # Errors
+    /// Returns an I/O, protocol, or timeout error.
+    pub fn wait_for_firmware_info(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<FirmwareInfo, SerialError> {
+        self.wait_for_control_response(timeout, "waiting for firmware information", |connection| {
+            let info = connection.firmware_info();
+            (info.version != FirmwareVersion::Pending).then_some(Ok(info))
+        })
+    }
+
+    /// Requests automatic UF2 entry and waits for the correlated readiness response.
+    ///
+    /// # Errors
+    /// Returns an I/O, capability, correlation, or timeout error.
+    pub fn enter_uf2_bootloader(
+        &mut self,
+        request_id: u32,
+        timeout: Duration,
+    ) -> Result<(), SerialError> {
+        self.connection
+            .as_mut()
+            .ok_or(SerialError::NotReady)?
+            .request_uf2_bootloader(request_id)?;
+        let actual = self.wait_for_control_response(
+            timeout,
+            "waiting for the UF2 bootloader response",
+            |connection| {
+                connection
+                    .take_uf2_bootloader_ready()
+                    .map(Ok)
+                    .or_else(|| connection.take_control_error(request_id).map(Err))
+            },
+        )?;
+        if actual != request_id {
+            return Err(SerialError::RequestMismatch {
+                expected: request_id,
+                actual,
+            });
         }
-        result
+        self.bootloader_transition = true;
+        Ok(())
+    }
+
+    /// Records a receipt and waits for the correlated committed receipt response.
+    ///
+    /// # Errors
+    /// Returns an I/O, capability, receipt, correlation, or timeout error.
+    pub fn record_install_receipt_and_wait(
+        &mut self,
+        request_id: u32,
+        receipt: FirmwareInstallReceipt,
+        timeout: Duration,
+    ) -> Result<FirmwareInstallReceipt, SerialError> {
+        self.connection
+            .as_mut()
+            .ok_or(SerialError::NotReady)?
+            .record_install_receipt(request_id, receipt)?;
+        let (actual, recorded) = self.wait_for_control_response(
+            timeout,
+            "waiting for installation receipt recording",
+            |connection| {
+                connection
+                    .take_install_receipt_recorded()
+                    .map(Ok)
+                    .or_else(|| connection.take_control_error(request_id).map(Err))
+            },
+        )?;
+        let recorded = validate_receipt_response(request_id, receipt, actual, recorded)?;
+        if let Some(connection) = self.connection.as_mut() {
+            connection.firmware.install_state = FirmwareInstallState::Recorded(recorded);
+        }
+        Ok(recorded)
     }
     #[must_use]
     pub fn status(&self) -> SerialStatus {
@@ -603,6 +1018,41 @@ impl SerialOutput {
         self.connection = Some(connection);
         self.last_poll = Some(self.clock.elapsed());
         Ok(())
+    }
+
+    fn poll_existing(&mut self) -> Result<(), SerialError> {
+        let now = self.clock.elapsed();
+        let result = self
+            .connection
+            .as_mut()
+            .ok_or(SerialError::NotReady)?
+            .poll(now);
+        self.last_poll = Some(now);
+        if result.is_err() {
+            self.disconnect();
+        }
+        result
+    }
+
+    fn wait_for_control_response<T>(
+        &mut self,
+        timeout: Duration,
+        stage: &'static str,
+        mut take_response: impl FnMut(
+            &mut SerialConnection<NativeTransport>,
+        ) -> Option<Result<T, SerialError>>,
+    ) -> Result<T, SerialError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.poll_existing()?;
+            if let Some(response) = self.connection.as_mut().and_then(&mut take_response) {
+                return response;
+            }
+            if Instant::now() >= deadline {
+                return Err(SerialError::ControlTimeout(stage));
+            }
+            std::thread::sleep(HANDSHAKE_POLL_INTERVAL);
+        }
     }
 
     fn disconnect(&mut self) {
@@ -683,8 +1133,43 @@ impl GamepadOutput for SerialOutput {
             .and_then(SerialConnection::take_feedback)
     }
 
-    fn firmware_version(&self) -> Option<FirmwareVersion> {
-        self.connection.as_ref().map(SerialConnection::firmware)
+    fn firmware_info(&self) -> Option<FirmwareInfo> {
+        self.connection
+            .as_ref()
+            .map(SerialConnection::firmware_info)
+    }
+
+    fn request_firmware_install_receipt(
+        &mut self,
+        request_id: u32,
+        receipt: FirmwareInstallReceipt,
+    ) -> Result<(), OutputError> {
+        self.connection
+            .as_mut()
+            .ok_or_else(|| OutputError::Transport(SerialError::NotReady.to_string()))?
+            .record_install_receipt(request_id, receipt)
+            .map_err(|error| OutputError::Transport(error.to_string()))
+    }
+
+    fn poll_firmware_install_receipt(
+        &mut self,
+        request_id: u32,
+        receipt: FirmwareInstallReceipt,
+    ) -> Option<Result<FirmwareInstallReceipt, OutputError>> {
+        let connection = self.connection.as_mut()?;
+        if let Some((actual, recorded)) = connection.take_install_receipt_recorded() {
+            return Some(
+                validate_receipt_response(request_id, receipt, actual, recorded)
+                    .inspect(|recorded| {
+                        connection.firmware.install_state =
+                            FirmwareInstallState::Recorded(*recorded);
+                    })
+                    .map_err(|error| OutputError::Transport(error.to_string())),
+            );
+        }
+        connection
+            .take_control_error(request_id)
+            .map(|error| Err(OutputError::Transport(error.to_string())))
     }
 
     fn diagnostics(&self) -> OutputDiagnostics {
@@ -702,8 +1187,10 @@ impl GamepadOutput for SerialOutput {
 
 impl Drop for SerialOutput {
     fn drop(&mut self) {
-        if let Some(connection) = &mut self.connection {
-            let _ = connection.send_neutral_now();
+        if !self.bootloader_transition {
+            if let Some(connection) = &mut self.connection {
+                let _ = connection.send_neutral_now();
+            }
         }
     }
 }
@@ -1022,7 +1509,7 @@ mod tests {
     }
 
     #[test]
-    fn firmware_reports_parse_and_tolerate_trailing_bytes() {
+    fn old_and_extended_firmware_reports_parse_without_ambiguity() {
         let transport = MockTransport {
             reads: VecDeque::from([
                 response(Message::HelloResponse {
@@ -1042,26 +1529,231 @@ mod tests {
         assert!(!connection.firmware().update_recommended());
 
         assert_eq!(
-            parse_device_info(&[1, 7, 1, 0xaa, 0xbb]),
-            FirmwareVersion::Reported(263)
+            parse_device_info(&[1, 7, 1]),
+            FirmwareInfo {
+                version: FirmwareVersion::Reported(263),
+                capabilities: FirmwareCapabilities::default(),
+                install_state: FirmwareInstallState::Unsupported,
+            }
         );
+
+        let receipt = FirmwareInstallReceipt {
+            installed_at: 1_786_456_920,
+            install_id: [0xa5; 16],
+            source: FirmwareInstallSource::AppCenter,
+        };
+        let mut extended = vec![1, 2, 0];
+        extended.extend_from_slice(
+            &(FirmwareCapabilities::ENTER_UF2_BOOTLOADER | FirmwareCapabilities::INSTALL_RECEIPT)
+                .bits()
+                .to_le_bytes(),
+        );
+        extended.push(2);
+        extended.extend_from_slice(&receipt.installed_at.to_le_bytes());
+        extended.extend_from_slice(&receipt.install_id);
+        extended.push(InstallSource::AppCenter as u8);
+        extended.extend_from_slice(&[0xaa, 0xbb]);
+        assert_eq!(
+            parse_device_info(&extended),
+            FirmwareInfo {
+                version: FirmwareVersion::Reported(2),
+                capabilities: FirmwareCapabilities::ENTER_UF2_BOOTLOADER
+                    | FirmwareCapabilities::INSTALL_RECEIPT,
+                install_state: FirmwareInstallState::Recorded(receipt),
+            }
+        );
+    }
+
+    #[test]
+    fn generated_receipts_use_valid_time_and_operating_system_randomness() {
+        let receipt = new_firmware_install_receipt(FirmwareInstallSource::AppCenter).unwrap();
+        assert!(receipt.installed_at > 0);
+        assert!(i64::try_from(receipt.installed_at).is_ok());
+        assert_ne!(receipt.install_id, [0; 16]);
+        assert_eq!(receipt.source, FirmwareInstallSource::AppCenter);
+        random_firmware_request_id().unwrap();
     }
 
     #[test]
     fn unsupported_and_malformed_device_info_remain_distinct() {
         assert_eq!(
-            parse_device_info(&[2, 9, 9]),
+            parse_device_info(&[2, 9, 9]).version,
             FirmwareVersion::UnsupportedFormat(2)
         );
         assert_eq!(
-            parse_device_info(&[2]),
+            parse_device_info(&[2]).version,
             FirmwareVersion::UnsupportedFormat(2)
         );
-        assert_eq!(parse_device_info(&[1]), FirmwareVersion::Malformed);
-        assert_eq!(parse_device_info(&[]), FirmwareVersion::Malformed);
+        assert_eq!(parse_device_info(&[1]).version, FirmwareVersion::Malformed);
+        assert_eq!(parse_device_info(&[]).version, FirmwareVersion::Malformed);
+        for partial_extension in [vec![1, 2, 0, 1], vec![1, 2, 0, 1, 0, 0, 0]] {
+            assert_eq!(
+                parse_device_info(&partial_extension).version,
+                FirmwareVersion::Malformed
+            );
+        }
+        assert_eq!(
+            parse_device_info(&[1, 2, 0, 3, 0, 0, 0, 2]).install_state,
+            FirmwareInstallState::Invalid
+        );
+
+        let recorded_payload = |installed_at: u64, install_id: [u8; 16], source: u8| {
+            let mut payload = vec![1, 2, 0, 3, 0, 0, 0, 2];
+            payload.extend_from_slice(&installed_at.to_le_bytes());
+            payload.extend_from_slice(&install_id);
+            payload.push(source);
+            payload
+        };
+        for invalid in [
+            recorded_payload(0, [1; 16], InstallSource::AppCenter as u8),
+            recorded_payload(1, [0; 16], InstallSource::AppCenter as u8),
+            recorded_payload(i64::MAX as u64 + 1, [1; 16], InstallSource::AppCenter as u8),
+            recorded_payload(1, [1; 16], 99),
+        ] {
+            assert_eq!(
+                parse_device_info(&invalid),
+                FirmwareInfo {
+                    version: FirmwareVersion::Reported(2),
+                    capabilities: FirmwareCapabilities::ENTER_UF2_BOOTLOADER
+                        | FirmwareCapabilities::INSTALL_RECEIPT,
+                    install_state: FirmwareInstallState::Invalid,
+                }
+            );
+        }
         assert!(!FirmwareVersion::UnsupportedFormat(2).update_recommended());
         assert!(FirmwareVersion::Malformed.update_recommended());
         assert!(!FirmwareVersion::Pending.update_recommended());
+    }
+
+    #[test]
+    fn control_requests_require_capabilities_and_keep_request_correlation() {
+        let receipt = FirmwareInstallReceipt {
+            installed_at: 123,
+            install_id: [7; 16],
+            source: FirmwareInstallSource::FirstObserved,
+        };
+        let mut extended = vec![1, 2, 0];
+        extended.extend_from_slice(
+            &(FirmwareCapabilities::ENTER_UF2_BOOTLOADER | FirmwareCapabilities::INSTALL_RECEIPT)
+                .bits()
+                .to_le_bytes(),
+        );
+        extended.push(1);
+        let transport = MockTransport {
+            reads: VecDeque::from([
+                response(Message::HelloResponse {
+                    selected_version: 1,
+                }),
+                response(Message::DeviceInfo(extended)),
+                response(Message::Uf2BootloaderReady { request_id: 42 }),
+                response(Message::InstallReceiptRecorded {
+                    request_id: 43,
+                    receipt: receipt.into(),
+                }),
+            ]),
+            writes: Vec::new(),
+        };
+        let mut connection =
+            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        connection.request_uf2_bootloader(42).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        assert_eq!(connection.take_uf2_bootloader_ready(), Some(42));
+        connection.record_install_receipt(43, receipt).unwrap();
+        connection.poll(Duration::ZERO).unwrap();
+        assert_eq!(
+            connection.take_install_receipt_recorded(),
+            Some((43, receipt))
+        );
+
+        let sent = messages(&connection.into_inner().writes);
+        assert!(sent.contains(&Message::EnterUf2Bootloader { request_id: 42 }));
+        assert!(sent.contains(&Message::RecordInstallReceipt {
+            request_id: 43,
+            receipt: receipt.into(),
+        }));
+
+        let transport = MockTransport {
+            reads: VecDeque::from([
+                response(Message::HelloResponse {
+                    selected_version: 1,
+                }),
+                response(Message::DeviceInfo(vec![1, 1, 0])),
+            ]),
+            writes: Vec::new(),
+        };
+        let mut old =
+            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+        old.poll(Duration::ZERO).unwrap();
+        old.poll(Duration::ZERO).unwrap();
+        assert!(matches!(
+            old.request_uf2_bootloader(1),
+            Err(SerialError::UnsupportedCapability(_))
+        ));
+    }
+
+    #[test]
+    fn control_errors_are_correlated_before_they_are_reported() {
+        let receipt = FirmwareInstallReceipt {
+            installed_at: 123,
+            install_id: [7; 16],
+            source: FirmwareInstallSource::FirstObserved,
+        };
+        let mut extended = vec![1, 2, 0];
+        extended.extend_from_slice(&FirmwareCapabilities::INSTALL_RECEIPT.bits().to_le_bytes());
+        extended.push(1);
+        let connection_with_error = |request_id: u32| {
+            let transport = MockTransport {
+                reads: VecDeque::from([
+                    response(Message::HelloResponse {
+                        selected_version: 1,
+                    }),
+                    response(Message::DeviceInfo(extended.clone())),
+                    response(Message::Error {
+                        code: bridge_protocol::ControlErrorCode::InstallReceiptRejected as u16,
+                        detail: request_id.to_le_bytes().to_vec(),
+                    }),
+                ]),
+                writes: Vec::new(),
+            };
+            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap()
+        };
+
+        let mut matching = connection_with_error(42);
+        matching.poll(Duration::ZERO).unwrap();
+        matching.poll(Duration::ZERO).unwrap();
+        matching.record_install_receipt(42, receipt).unwrap();
+        matching.poll(Duration::ZERO).unwrap();
+        assert!(matches!(
+            matching.take_control_error(42),
+            Some(SerialError::ControlRejected {
+                request_id: 42,
+                code
+            }) if code == bridge_protocol::ControlErrorCode::InstallReceiptRejected as u16
+        ));
+
+        let mut stale = connection_with_error(41);
+        stale.poll(Duration::ZERO).unwrap();
+        stale.poll(Duration::ZERO).unwrap();
+        stale.record_install_receipt(42, receipt).unwrap();
+        stale.poll(Duration::ZERO).unwrap();
+        assert!(matches!(
+            stale.take_control_error(42),
+            Some(SerialError::RequestMismatch {
+                expected: 42,
+                actual: 41
+            })
+        ));
+
+        let different_receipt = FirmwareInstallReceipt {
+            installed_at: receipt.installed_at + 1,
+            ..receipt
+        };
+        assert!(matches!(
+            validate_receipt_response(42, receipt, 42, different_receipt),
+            Err(SerialError::ReceiptMismatch)
+        ));
     }
 
     #[test]

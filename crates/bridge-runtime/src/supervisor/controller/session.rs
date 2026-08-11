@@ -88,6 +88,26 @@ pub(crate) struct ActiveControllerSource {
 pub(crate) struct OutputSession {
     pub(crate) output: Box<dyn GamepadOutput>,
     pub(crate) xiao: Option<SerialDeviceInfo>,
+    pub(crate) first_observed_receipt: FirstObservedReceiptState,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct FirstObservedReceiptRequest {
+    pub(crate) request_id: u32,
+    pub(crate) receipt: FirmwareInstallReceipt,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum FirstObservedReceiptState {
+    Idle,
+    Waiting {
+        request: FirstObservedReceiptRequest,
+        deadline: Instant,
+    },
+    Backoff {
+        request: Option<FirstObservedReceiptRequest>,
+        retry_at: Instant,
+    },
 }
 
 /// Parks the gamepad output at neutral before desktop-input reconfiguration.

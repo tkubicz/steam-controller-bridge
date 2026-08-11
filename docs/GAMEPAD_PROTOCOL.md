@@ -28,7 +28,11 @@ The CRC is CRC-16/CCITT-FALSE with polynomial `0x1021`, initial value `0xffff`, 
 | 6 | Pong | nonce `u32` |
 | 7 | DeviceInfo | device-info payload below, at most 256 bytes |
 | 8 | Rumble | low-frequency `u16`, high-frequency `u16` |
-| 255 | Error | code `u16`, followed by optional detail bytes |
+| 9 | EnterUf2Bootloader | request ID `u32` |
+| 10 | Uf2BootloaderReady | matching request ID `u32` |
+| 11 | RecordInstallReceipt | receipt payload below |
+| 12 | InstallReceiptRecorded | matching receipt payload below |
+| 255 | Error | control error code `u16`, matching request ID `u32` |
 
 Unknown message type values are returned as opaque messages so newer messages can be ignored safely. Known messages with invalid lengths are rejected. Frames whose protocol version is not exactly 1 are rejected; version range selection happens through `Hello` before ordinary traffic.
 
@@ -43,14 +47,45 @@ it ignore it entirely, so both legacy pairings stay compatible.
 | ---: | ---: | --- |
 | 0 | 1 | Device-info format, currently `1` |
 | 1 | 2 | Firmware revision, `u16` little-endian, hand-maintained monotonic |
+| 3 | 4 | Capability flags: bit 0 automatic UF2 entry, bit 1 installation receipts |
+| 7 | 1 | Receipt state: 0 unsupported, 1 pending, 2 recorded, 3 invalid |
+| 8 | 8 | Recorded UTC Unix seconds, present when state is recorded |
+| 16 | 16 | Recorded installation ID, present when state is recorded |
+| 32 | 1 | Source: 1 App Center, 2 first observed, present when state is recorded |
 
-Receivers accept payloads longer than three bytes and ignore the trailing
-bytes, so fields can be appended without a format bump. An unknown format byte
+Exactly three bytes is the legacy revision 1 report. Lengths four through seven
+are malformed. Extended reports require at least eight bytes, or 33 bytes for a
+recorded receipt; later trailing bytes are ignored. An unknown format byte
 is classified as firmware newer than the host and is never treated as
 outdated. A current-format payload shorter than three bytes is malformed and
 prompts a reflash instead of being mistaken for a future format. Firmware that
 never sends `DeviceInfo` predates version reporting and is reported as such
 after a short host-side grace period.
+
+## Firmware update control
+
+Update commands are accepted only after Hello negotiation. Request IDs are
+little-endian `u32` values. A bootloader request forces neutral input and zero
+rumble before `Uf2BootloaderReady` is queued. The sketch drains CDC, waits 100
+ms, and calls the Adafruit UF2 entry routine. Repeating the same request ID is
+idempotent; a different ID after transition begins receives a busy error.
+
+Both receipt messages use the same 29-byte payload:
+
+| Offset | Size | Field |
+| ---: | ---: | --- |
+| 0 | 4 | Request ID `u32` |
+| 4 | 8 | UTC Unix seconds `u64` |
+| 12 | 16 | Random installation ID |
+| 28 | 1 | Source: 1 App Center, 2 first observed |
+
+Firmware acknowledges only after the receipt is committed and read back. It
+rejects replacement metadata until another UF2 flash restores blank slots.
+
+Control errors have an exact six-byte payload. The first two bytes contain the
+error code and the final four bytes contain the request ID. Current error codes
+are 1 for a busy UF2 transition, 2 for a rejected receipt, and 3 for a receipt
+readback mismatch. A host correlates the request ID before applying the error.
 
 ## Gamepad state payload
 
@@ -74,7 +109,7 @@ Button bits 0 through 15 are, in order: South, East, West, North, LeftShoulder, 
 
 ## Rumble feedback
 
-`Rumble` is the only protocol-v1 firmware-to-host feedback message. Its
+`Rumble` is the gamepad feedback message in protocol v1. Its
 four-byte payload is:
 
 | Offset | Size | Field |
