@@ -38,8 +38,8 @@ repository = "https://github.com/tkubicz/steam-controller-bridge"
 
 [workspace.dependencies]
 base64 = "0.23.0"
-ed25519-dalek = "2.2.0"
-sha2 = "0.10.9"
+ed25519-dalek = "3.0.0"
+sha2 = "0.11.0"
 semver = { version = "1.0.27", features = ["serde"] }
 clap = { version = "4.5.51", features = ["derive"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -47,7 +47,7 @@ serde_json = "1.0.150"
 hidapi = { version = "2.6.6", default-features = false, features = ["macos-shared-device"] }
 rustix = { version = "1.1.4", features = ["fs"] }
 rfd = "0.17.2"
-eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow"] }
+eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "glow"] }
 tray-icon = "0.24.2"
 tiny-skia = { version = "0.12.0", default-features = false, features = ["simd", "std"] }
 winit = "0.30.13"
