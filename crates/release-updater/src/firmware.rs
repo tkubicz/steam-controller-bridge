@@ -418,16 +418,49 @@ fn flash_with_adapter(
         adapter,
         release,
         prepared.expected_serial.as_deref(),
-        prepared.previous_firmware,
+        prepared.pre_flash_state,
         copy_result,
         &mut progress,
     )
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PreFlashState {
+    Unknown,
+    FactoryApplication,
+    Bridge(FirmwareInfo),
+}
+
+impl PreFlashState {
+    fn previous_firmware(self) -> Option<FirmwareInfo> {
+        match self {
+            Self::Bridge(info) => Some(info),
+            Self::Unknown | Self::FactoryApplication => None,
+        }
+    }
+
+    fn proves_fresh_image(self, target: u16) -> bool {
+        match self {
+            Self::FactoryApplication => true,
+            Self::Bridge(previous) => match previous.version {
+                FirmwareVersion::Reported(revision) if revision != target => true,
+                FirmwareVersion::Reported(_) => {
+                    matches!(previous.install_state, FirmwareInstallState::Recorded(_))
+                }
+                FirmwareVersion::Pending
+                | FirmwareVersion::Unreported
+                | FirmwareVersion::Malformed
+                | FirmwareVersion::UnsupportedFormat(_) => false,
+            },
+            Self::Unknown => false,
+        }
+    }
+}
+
 struct PreparedFlash {
     volume: BootloaderVolume,
     expected_serial: Option<String>,
-    previous_firmware: Option<FirmwareInfo>,
+    pre_flash_state: PreFlashState,
 }
 
 fn prepare_flash_target(
@@ -443,7 +476,7 @@ fn prepare_flash_target(
         .first()
         .and_then(|device| device.serial_number.clone());
     let mut automatic_entry_may_have_started = false;
-    let mut previous_firmware = None;
+    let mut pre_flash_state = PreFlashState::Unknown;
     let volume = if let Some(volume) = mounted {
         if devices.len() > 1
             || devices
@@ -466,9 +499,12 @@ fn prepare_flash_target(
         let info = if device.kind == FirmwareDeviceKind::BridgeApplication {
             let info = adapter.firmware_info(&device.path)?;
             validate_version_policy(info.version, release.revision)?;
-            previous_firmware = Some(info);
+            pre_flash_state = PreFlashState::Bridge(info);
             Some(info)
         } else {
+            if device.kind == FirmwareDeviceKind::FactoryApplication {
+                pre_flash_state = PreFlashState::FactoryApplication;
+            }
             None
         };
 
@@ -521,7 +557,7 @@ fn prepare_flash_target(
     Ok(PreparedFlash {
         volume,
         expected_serial,
-        previous_firmware,
+        pre_flash_state,
     })
 }
 
@@ -529,7 +565,7 @@ fn verify_reconnected_firmware(
     adapter: &mut impl FlashAdapter,
     release: &FirmwareRelease,
     expected_serial: Option<&str>,
-    previous_firmware: Option<FirmwareInfo>,
+    pre_flash_state: PreFlashState,
     copy_result: Result<(), io::Error>,
     progress: &mut impl FnMut(FirmwareFlashProgress),
 ) -> Result<FirmwareInfo, FirmwareFlashError> {
@@ -566,16 +602,15 @@ fn verify_reconnected_firmware(
                         info.install_state,
                     ));
                 }
-                if copy_error.is_some()
-                    && !provisional_copy_is_verified(previous_firmware, release.revision)
-                {
+                if copy_error.is_some() && !pre_flash_state.proves_fresh_image(release.revision) {
                     return Err(copy_error
                         .take()
                         .expect("copy error was checked as present")
                         .into());
                 }
                 let requested = adapter.new_receipt(FirmwareInstallSource::AppCenter)?;
-                if previous_firmware
+                if pre_flash_state
+                    .previous_firmware()
                     .and_then(|firmware| match firmware.install_state {
                         FirmwareInstallState::Recorded(receipt) => Some(receipt),
                         _ => None,
@@ -617,22 +652,6 @@ fn verify_reconnected_firmware(
         expected: release.revision,
         actual: last_revision,
     })
-}
-
-fn provisional_copy_is_verified(previous: Option<FirmwareInfo>, target: u16) -> bool {
-    let Some(previous) = previous else {
-        return false;
-    };
-    match previous.version {
-        FirmwareVersion::Reported(revision) if revision != target => true,
-        FirmwareVersion::Reported(_) => {
-            matches!(previous.install_state, FirmwareInstallState::Recorded(_))
-        }
-        FirmwareVersion::Pending
-        | FirmwareVersion::Unreported
-        | FirmwareVersion::Malformed
-        | FirmwareVersion::UnsupportedFormat(_) => false,
-    }
 }
 
 fn validate_version_policy(
@@ -1212,6 +1231,43 @@ mod tests {
                 |_| {},
             ),
             Err(FirmwareFlashError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn factory_install_accepts_disconnect_during_final_flush_after_verified_reconnect() {
+        let mut adapter = fake();
+        adapter.volumes.push_back(Vec::new());
+        adapter.volumes.push_back(vec![volume()]);
+        adapter.devices.push_back(vec![device(false)]);
+        adapter.devices.push_back(vec![device(true)]);
+        adapter.infos.push_back(info(
+            2,
+            FirmwareCapabilities::ENTER_UF2_BOOTLOADER | FirmwareCapabilities::INSTALL_RECEIPT,
+            FirmwareInstallState::Pending,
+        ));
+        adapter.default_version = FirmwareVersion::Reported(2);
+        adapter.default_capabilities =
+            FirmwareCapabilities::ENTER_UF2_BOOTLOADER | FirmwareCapabilities::INSTALL_RECEIPT;
+        adapter.copy_error = true;
+
+        let verified = flash_with_adapter(
+            &mut adapter,
+            Path::new("firmware.uf2"),
+            &release(2),
+            Path::new("/Volumes"),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(verified.version, FirmwareVersion::Reported(2));
+        assert!(matches!(
+            verified.install_state,
+            FirmwareInstallState::Recorded(FirmwareInstallReceipt {
+                source: FirmwareInstallSource::AppCenter,
+                ..
+            })
         ));
     }
 

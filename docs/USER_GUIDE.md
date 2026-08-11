@@ -190,25 +190,40 @@ env PATH="$ARDUINO_TOOL_PATH" arduino-cli compile \
   "$BLINK_SKETCH"
 ```
 
-The bridge firmware intentionally does not support Arduino's 1200-baud reset
-shortcut. Quickly press the tiny reset button beside the USB-C connector twice
-to enter the factory bootloader, then identify the new Seeed bootloader port:
+#### Upload Blink
+
+The firmware's TinyUSB serial interface supports Arduino's 1200-baud reset
+shortcut. This developer upload path is separate from App Center's verified UF2
+flow. Confirm that Steam Controller Bridge is fully quit, then inspect the
+current USB ports:
 
 ```bash
-arduino-cli board list
+arduino-cli board list --format json
 ```
 
-Set the port printed for `Seeed XIAO nRF52840 Sense`. Do not reuse the bridge
-application port because the bootloader port can have a different number.
+Arduino CLI can label the board `Unknown`. Use the Steam Controller Bridge port
+with vendor ID `0x045e` and product ID `0x028e`. Do not use a Valve device with
+vendor ID `0x28de`; that is the Puck. Pass the current bridge application port
+to the upload command:
 
 ```bash
-XIAO_BOOTLOADER_PORT=/dev/cu.usbmodemXXXX
+XIAO_APPLICATION_PORT=/dev/cu.usbmodemXXXX
 
 env PATH="$ARDUINO_TOOL_PATH" arduino-cli upload \
   --fqbn Seeeduino:nrf52:xiaonRF52840Sense \
-  --port "$XIAO_BOOTLOADER_PORT" \
+  --port "$XIAO_APPLICATION_PORT" \
   --input-dir temp/xiao-stock-blinky
 ```
+
+Arduino CLI opens that port at 1200 baud, waits for the serial DFU port, and
+uploads Blink. The port can change during this operation; Arduino CLI tracks the
+new port automatically.
+
+If automatic serial DFU times out, use manual recovery: quickly press the tiny
+reset button beside the USB-C connector twice, wait for the `XIAO-SENSE` volume,
+and rerun the upload command with the newly enumerated bootloader port. The
+Sense bootloader has vendor ID `0x2886` and product ID `0x0045`; a non-Sense
+bootloader uses product ID `0x0044`.
 
 For a non-Sense XIAO, use `Seeeduino:nrf52:xiaonRF52840` instead. After upload,
 `arduino-cli board list` should show a Seeed application rather than Steam
@@ -222,6 +237,10 @@ Updates and confirm that the `Local development updates` notice names
 no bridge protocol, so the firmware card shows `Firmware information
 unavailable`. Choose **Install or Recover Firmware**. When App Center enters
 the 60-second manual recovery phase, quickly press the reset button twice.
+Arduino's 1200-baud reset is not used here because it selects serial-only DFU;
+App Center verifies and copies the signed UF2 artifact and therefore needs the
+`XIAO-SENSE` UF2 drive. After this first installation, bridge firmware can enter
+UF2 mode automatically through its verified update protocol.
 
 Accept the first installation only when all of these checks pass:
 
