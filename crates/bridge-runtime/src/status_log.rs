@@ -345,8 +345,20 @@ fn core_status_changes(
     push_change(
         changes,
         "xiao_firmware",
-        &previous.xiao.firmware,
-        &current.xiao.firmware,
+        &previous.xiao.firmware.version,
+        &current.xiao.firmware.version,
+    );
+    push_change(
+        changes,
+        "xiao_firmware_capabilities",
+        &previous.xiao.firmware.capabilities.bits(),
+        &current.xiao.firmware.capabilities.bits(),
+    );
+    push_change(
+        changes,
+        "xiao_install_receipt",
+        &previous.xiao.firmware.install_state,
+        &current.xiao.firmware.install_state,
     );
     push_change(
         changes,
@@ -759,7 +771,7 @@ mod tests {
         current.source.connected = true;
         current.xiao.path = Some("/dev/cu.usbmodem1".to_owned());
         current.xiao.handshake_complete = true;
-        current.xiao.firmware = bridge_output::FirmwareVersion::Reported(3);
+        current.xiao.firmware.version = bridge_output::FirmwareVersion::Reported(3);
         current.lizard.suppressed = true;
         current.haptics.state = crate::HapticsState::Active;
         current.bindings.state = crate::DesktopBindingsState::Ready;
@@ -796,7 +808,7 @@ mod tests {
         let _ = tracker.observe(Duration::ZERO, &initial);
         let mut current = initial;
         current.revision = 1;
-        current.xiao.firmware = bridge_output::FirmwareVersion::Unreported;
+        current.xiao.firmware.version = bridge_output::FirmwareVersion::Unreported;
         let records = tracker.observe(Duration::from_secs(1), &current);
         assert_eq!(records.len(), 1);
         let text = records[0].to_string();

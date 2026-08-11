@@ -121,16 +121,28 @@ already reports the signed revision. A board reporting a newer revision is never
 downgraded.
 
 The app verifies the cached or downloaded UF2 and asks the running bridge to
-neutralize output and release hardware. When the Updates tab asks, double-tap
-RESET to mount the UF2 drive. The app validates `INFO_UF2.TXT` and the UF2
-family, writes and flushes the file, then waits for a fresh protocol handshake.
-Success is shown only after the board reports the exact signed revision. The
-bridge restarts automatically after success, cancellation, or a bounded failure
-when it was running beforehand.
+neutralize output and release hardware. Firmware revision 2 enters its UF2
+bootloader automatically. Revision 1 requires one final manual migration: when
+the recovery prompt appears, bridge the underside `RST` and `GND` pads twice.
+The app validates `INFO_UF2.TXT` and the UF2 family, writes and flushes the file,
+then waits for a fresh protocol handshake.
+
+The temporary XIAO UF2 drive disconnects automatically as soon as its
+bootloader accepts the complete image. macOS may consequently show a harmless
+**Disk Not Ejected Properly** notification. App Center does not report success
+until the board has restarted and the new firmware and installation receipt
+have both been verified.
+
+Success requires more than the revision number. The new image must report a
+blank receipt marker, accept a Mac-provided UTC installation time and random
+128-bit installation ID, acknowledge that exact receipt, and return it on a
+second read. App Center shows the time in the Mac's local timezone. A normal
+reconnect or power cycle does not change it; reinstalling the same UF2 does.
 
 You may cancel until writing begins. Once the write starts, leave the board
-connected until verification or the 30-second reconnect failure bound. The UF2
-drive prompt remains available for 60 seconds. Error text distinguishes
+connected until verification or the 30-second reconnect failure bound. The
+automatic UF2 drive wait is 15 seconds, followed by a 60-second manual recovery
+window if necessary. Error text distinguishes
 extra/wrong boards, cable or reset problems, copy failure, reconnect timeout,
 and revision mismatch. The last verified UF2 stays cached for an offline
 reinstall.
@@ -140,6 +152,50 @@ reinstall.
 The remaining build, Makefile, checksum, Arduino CLI, and manual UF2 instructions
 are retained for contributors and for recovery when the guided path cannot
 complete.
+
+### Test an unreleased firmware through App Center
+
+Prepare a local signed update directory from the current source and firmware:
+
+```bash
+tools/prepare-local-update.py
+```
+
+The command prints a launch command containing a throwaway development public
+key and the local directory. Quit every running copy of Steam Controller Bridge,
+then run that command from the repository root. Open Updates from the menu app.
+A visible `Local development updates` notice confirms that App Center is using
+the local signed catalog rather than GitHub.
+
+This works only in a debug build. It does not disable signature, manifest,
+artifact-hash, UF2, board, revision, or installation-receipt verification. The
+helper's application artifact is an intentional placeholder pinned to the
+current application version and must not be installed.
+
+To reproduce a new XIAO before testing the first installation, replace the
+bridge application with Seeed's Blink example while leaving its factory
+bootloader intact:
+
+```bash
+ARDUINO_DATA_DIR=$(arduino-cli config get directories.data)
+BLINK_SKETCH="$ARDUINO_DATA_DIR/packages/Seeeduino/hardware/nrf52/1.1.13/libraries/Bluefruit52Lib/examples/Hardware/blinky"
+
+arduino-cli compile \
+  --fqbn Seeeduino:nrf52:xiaonRF52840 \
+  --output-dir /tmp/xiao-stock-blinky \
+  "$BLINK_SKETCH"
+
+arduino-cli upload \
+  --fqbn Seeeduino:nrf52:xiaonRF52840 \
+  --port /dev/cu.usbmodemXXXX \
+  --input-dir /tmp/xiao-stock-blinky
+```
+
+App Center should recognize the resulting Seeed application identity. Because
+Blink has no bridge protocol, the first install enters the 60-second manual
+recovery phase. Bridge the board's RST and GND pads twice while that prompt is
+visible. After revision 2 is installed and its receipt is verified, repeating
+the installation must enter UF2 automatically without touching the pads.
 
 ### Install build tools
 
@@ -175,7 +231,7 @@ make -C firmware/xiao-nrf52840 test
 make -C firmware/xiao-nrf52840 artifacts
 ```
 
-The release files are:
+The local developer artifacts are:
 
 ```text
 firmware/xiao-nrf52840/build/artifacts/
@@ -187,7 +243,9 @@ Rumble requires firmware containing protocol-v1 message type 8. An older XIAO
 remains input-compatible but cannot return Xbox vibration requests to the host,
 so reflash the board after updating the project.
 
-The menu bar shows the flashed firmware under "Firmware:". A "⚠ Firmware:
+The menu bar shows the flashed firmware under "Firmware:". App Center shows
+the installation receipt and distinguishes an App Center verified install from
+the first observation after a manual developer flash. A "⚠ Firmware:
 Update recommended" line means the board runs firmware older than this app
 depends on - including any board that predates version reporting entirely.
 The bridge keeps working, but reflash the current UF2 (above, or the matching
@@ -629,7 +687,7 @@ indices and serial paths after reconnects.
 Build the current-architecture local application:
 
 ```bash
-./tools/build-macos-app.sh
+./tools/build-macos-app.py
 ```
 
 Move `dist/Steam Controller Bridge.app` to `/Applications` if desired, then
@@ -704,7 +762,7 @@ app. Permission granted to Terminal does not automatically cover the app.
 ### Opening an unnotarized build
 
 The app is ad-hoc signed, not notarized, whether it came from a release download
-or a local `./tools/build-macos-app.sh`. A downloaded copy also carries macOS's
+or a local `./tools/build-macos-app.py`. A downloaded copy also carries macOS's
 quarantine flag, so double-clicking it reports that the app is damaged or cannot
 be opened. This is Gatekeeper refusing an unknown developer, not a broken build.
 

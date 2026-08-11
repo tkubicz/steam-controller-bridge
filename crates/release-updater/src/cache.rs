@@ -5,7 +5,11 @@ use std::time::{Duration, SystemTime};
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
+#[cfg(debug_assertions)]
+use sha2::{Digest as _, Sha256};
 
+#[cfg(debug_assertions)]
+use crate::artifact::lower_hex;
 use crate::temporary::unique_temporary_path;
 use crate::{
     verify_artifact, verify_signed_manifest, ArtifactDescriptor, ArtifactError, ManifestError,
@@ -87,6 +91,18 @@ impl ReleaseCache {
         Ok(Self::new(PathBuf::from(home).join(
             "Library/Application Support/Steam Controller Bridge/Updates",
         )))
+    }
+
+    #[cfg(debug_assertions)]
+    #[must_use]
+    pub fn for_local_source(root: &Path) -> Self {
+        let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
+        let identifier = lower_hex(&digest);
+        Self::new(
+            std::env::temp_dir()
+                .join("steam-controller-bridge-local-updates")
+                .join(identifier),
+        )
     }
 
     #[must_use]
@@ -233,6 +249,24 @@ mod tests {
         assert!(!cache.check_due(Duration::from_mins(1), &current));
         assert!(cache.check_due(Duration::from_mins(1), &upgraded));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_sources_use_stable_isolated_temporary_caches() {
+        let first = temporary_directory("local-cache-first");
+        let second = temporary_directory("local-cache-second");
+        let first_cache = ReleaseCache::for_local_source(&first);
+        assert_eq!(
+            first_cache.root(),
+            ReleaseCache::for_local_source(&first).root()
+        );
+        assert_ne!(
+            first_cache.root(),
+            ReleaseCache::for_local_source(&second).root()
+        );
+        assert!(first_cache
+            .root()
+            .starts_with(std::env::temp_dir().join("steam-controller-bridge-local-updates")));
     }
 
     #[test]

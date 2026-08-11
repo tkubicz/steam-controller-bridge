@@ -180,7 +180,7 @@ Discovery never kills a process or modifies `launchd`.
 Build and ad-hoc sign the menu-only local `.app`:
 
 ```bash
-./tools/build-macos-app.sh
+./tools/build-macos-app.py
 open "dist/Steam Controller Bridge.app"
 ```
 

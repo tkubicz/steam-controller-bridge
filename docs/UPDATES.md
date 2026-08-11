@@ -41,6 +41,26 @@ and signs the manifest, includes the manifest and envelope in
 `SHA256SUMS.txt`, and uploads only after the app, firmware, workspace, dependency,
 draft-body, and signature gates pass.
 
+The public release contains the UF2 but not the developer serial-DFU zip. The
+DFU zip remains an internal developer and CI artifact produced by
+`make artifacts`.
+
+## Firmware installation
+
+Firmware revision 2 advertises automatic UF2 entry and installation receipt
+capabilities. App Center requests UF2 mode, waits up to 2 seconds for the
+correlated readiness response, then waits up to 15 seconds for the mounted
+volume. Unsupported or failed automatic entry opens a 60-second manual recovery
+window for RST/GND entry. Revision 1 therefore needs one final manual migration.
+
+After copying and syncing the signed UF2, App Center waits up to 30 seconds for
+the application device. It requires the exact target revision and a `Pending`
+receipt marker. It then supplies the current UTC Unix time, an OS-random 128-bit
+installation ID, and the `AppCenter` source. Success requires the correlated
+acknowledgement and a second read of the identical committed receipt. A normal
+runtime that first sees `Pending` after a developer flash records the same shape
+of receipt with source `FirstObserved`.
+
 ## Key rotation
 
 First ship an app embedding both the current and next public keys while signing
@@ -54,6 +74,42 @@ Source builds intentionally embed no trust anchor unless their builder sets
 `SC_BRIDGE_UPDATE_PUBLIC_KEYS`. Fixture keys belong only in tests and pull
 request validation; never place the production private seed in the repository,
 artifacts, logs, or ordinary repository secrets.
+
+## Local signed development source
+
+Debug builds can replace the fixed GitHub release source with one explicitly
+selected local directory. The development path preserves the production trust
+boundary: metadata still needs an embedded trusted Ed25519 key, the raw
+manifest signature is verified before parsing, and every copied artifact must
+match its signed name, size, and SHA-256. Local files cannot escape the selected
+directory through path components or symlinks.
+
+Prepare a firmware-only signed catalog from the current workspace:
+
+```sh
+tools/prepare-local-update.py
+```
+
+The helper builds and validates the current UF2, creates a throwaway local
+signing key under the gitignored
+`temp/steam-controller-bridge-local-update` directory, generates the signed
+manifest, and prints the exact launch command. Quit any already running menu
+app before using that command. The application entry is pinned to the workspace
+version and is an intentional placeholder, so this catalog can test firmware
+installation but cannot stage an application replacement.
+
+The printed command sets both required variables:
+
+- `SC_BRIDGE_UPDATE_PUBLIC_KEYS` embeds the throwaway public key at compile
+  time;
+- `SC_BRIDGE_LOCAL_UPDATE_DIR` selects the directory at runtime.
+
+Local catalogs refresh on every check and use an isolated cache below the
+system temporary directory. They never overwrite the production update cache.
+The Updates page displays the active local path. Code compiled without debug
+assertions does not include the local source and ignores
+`SC_BRIDGE_LOCAL_UPDATE_DIR`; production builds remain locked to the GitHub
+release repository.
 
 ## Local UI preview
 

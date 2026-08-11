@@ -115,11 +115,31 @@ fn run() -> Result<(), String> {
         }],
     )
     .map_err(|error| format!("generated manifest did not self-verify: {error}"))?;
-    fs::write(arguments.output.join(MANIFEST_ASSET), manifest_bytes)
-        .map_err(|error| error.to_string())?;
-    fs::write(arguments.output.join(SIGNATURES_ASSET), signature_bytes)
-        .map_err(|error| error.to_string())?;
-    Ok(())
+    write_public_key(
+        arguments.public_key_output.as_deref(),
+        &signatures.signatures[0].key_id,
+        &signing,
+    )?;
+    write_release_metadata(&arguments.output, &manifest_bytes, &signature_bytes)
+}
+
+fn write_release_metadata(output: &Path, manifest: &[u8], signatures: &[u8]) -> Result<(), String> {
+    fs::write(output.join(MANIFEST_ASSET), manifest).map_err(|error| error.to_string())?;
+    fs::write(output.join(SIGNATURES_ASSET), signatures).map_err(|error| error.to_string())
+}
+
+fn write_public_key(path: Option<&Path>, key_id: &str, signing: &SigningKey) -> Result<(), String> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    fs::write(
+        path,
+        format!(
+            "{key_id}={}\n",
+            BASE64.encode(signing.verifying_key().to_bytes())
+        ),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn validate_release_identity(
@@ -159,6 +179,9 @@ struct Arguments {
     output: PathBuf,
     #[arg(long)]
     key_id: String,
+    /// Optional `key-id=base64` trust-anchor file for a local development build.
+    #[arg(long)]
+    public_key_output: Option<PathBuf>,
 }
 
 fn artifact(path: &Path) -> Result<ArtifactDescriptor, String> {

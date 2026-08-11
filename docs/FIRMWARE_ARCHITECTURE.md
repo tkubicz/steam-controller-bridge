@@ -23,6 +23,10 @@ Required behavior:
 - Convert `GamepadState` and `Neutral` messages into USB HID reports.
 - Track sequence gaps for diagnostics without allowing a gap to leave stale controls active.
 - Respond to `Ping` with the same nonce in `Pong`.
+- Enter the UF2 bootloader only after negotiated, correlated control, neutral
+  input, zero rumble, CDC drain, and a 100 ms response grace period.
+- Store verified installation metadata in a dedicated 4 KiB flash page with
+  two blank slots, CRC validation, and a commit-last write that never erases.
 - Accept only the exact eight-byte Xbox 360 dual-rumble OUT command, scale its
   two 8-bit channels to `u16`, and return protocol message type 8 over CDC.
 - Refresh nonzero rumble feedback every 25 ms and prioritize a safety zero

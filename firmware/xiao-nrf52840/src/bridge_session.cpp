@@ -12,6 +12,30 @@ uint16_t read_u16(const uint8_t* data) {
          static_cast<uint16_t>(static_cast<uint16_t>(data[1]) << 8U);
 }
 
+uint32_t read_u32(const uint8_t* data) {
+  return static_cast<uint32_t>(data[0]) |
+         (static_cast<uint32_t>(data[1]) << 8U) |
+         (static_cast<uint32_t>(data[2]) << 16U) |
+         (static_cast<uint32_t>(data[3]) << 24U);
+}
+
+uint64_t read_u64(const uint8_t* data) {
+  return static_cast<uint64_t>(read_u32(data)) |
+         (static_cast<uint64_t>(read_u32(data + 4)) << 32U);
+}
+
+void write_u32(uint8_t* output, uint32_t value) {
+  for (size_t i = 0; i < 4; ++i) {
+    output[i] = static_cast<uint8_t>(value >> (8U * i));
+  }
+}
+
+void write_u64(uint8_t* output, uint64_t value) {
+  for (size_t i = 0; i < 8; ++i) {
+    output[i] = static_cast<uint8_t>(value >> (8U * i));
+  }
+}
+
 int16_t read_i16(const uint8_t* data) {
   return static_cast<int16_t>(read_u16(data));
 }
@@ -35,11 +59,18 @@ BridgeSession::BridgeSession(SessionSink& sink)
       rumble_pending_is_refresh_(false),
       deferred_rumble_pending_(false),
       rumble_refresh_armed_(false),
+      uf2_bootloader_requested_(false),
+      uf2_bootloader_ready_pending_(false),
+      uf2_bootloader_ready_(false),
+      install_receipt_requested_(false),
       consecutive_errors_(0),
       expected_sequence_(0),
       transmit_sequence_(0),
       last_data_ms_(0),
       last_rumble_tx_ms_(0),
+      uf2_bootloader_request_id_(0),
+      install_receipt_request_id_(0),
+      requested_install_receipt_{},
       pending_hid_(neutral_report()),
       deferred_active_(neutral_report()),
       last_queued_hid_(neutral_report()),
@@ -97,12 +128,16 @@ void BridgeSession::on_frame(const Frame& frame, uint32_t now_ms) {
 
   switch (static_cast<MessageType>(frame.message_type)) {
     case MessageType::GamepadState:
-      apply_gamepad(frame, now_ms);
+      if (!uf2_bootloader_requested_ && !install_receipt_requested_) {
+        apply_gamepad(frame, now_ms);
+      }
       break;
     case MessageType::Neutral:
-      last_data_ms_ = now_ms;
-      data_watchdog_armed_ = false;
-      force_neutral(false);
+      if (!uf2_bootloader_requested_ && !install_receipt_requested_) {
+        last_data_ms_ = now_ms;
+        data_watchdog_armed_ = false;
+        force_neutral(false);
+      }
       break;
     case MessageType::Ping:
       send_message(MessageType::Pong, frame.payload, 4);
@@ -111,8 +146,18 @@ void BridgeSession::on_frame(const Frame& frame, uint32_t now_ms) {
     case MessageType::HelloResponse:
     case MessageType::DeviceInfo:
     case MessageType::Rumble:
+    case MessageType::Uf2BootloaderReady:
+    case MessageType::InstallReceiptRecorded:
     case MessageType::Error:
     case MessageType::Hello:
+      break;
+    case MessageType::EnterUf2Bootloader:
+      begin_uf2_bootloader(frame);
+      break;
+    case MessageType::RecordInstallReceipt:
+      if (!uf2_bootloader_requested_) {
+        record_install_receipt(frame);
+      }
       break;
     default:
       break;
@@ -138,11 +183,17 @@ void BridgeSession::on_xinput_rumble(const RumbleFeedback& rumble,
   if (!negotiated_) {
     return;
   }
+  if (uf2_bootloader_requested_) {
+    return;
+  }
+  if (install_receipt_requested_) {
+    return;
+  }
   queue_rumble(rumble, false);
 }
 
 void BridgeSession::tick(uint32_t now_ms) {
-  if (data_watchdog_armed_ &&
+  if (!uf2_bootloader_requested_ && data_watchdog_armed_ &&
       static_cast<uint32_t>(now_ms - last_data_ms_) >= kDataWatchdogMs) {
     data_watchdog_armed_ = false;
     faulted_ = true;
@@ -152,6 +203,8 @@ void BridgeSession::tick(uint32_t now_ms) {
   }
   service_device_info();
   service_rumble(now_ms);
+  service_install_receipt();
+  service_uf2_bootloader();
 }
 
 void BridgeSession::mark_hid_report_sent() {
@@ -181,6 +234,13 @@ void BridgeSession::reset_session(bool keep_connection) {
   faulted_ = false;
   data_watchdog_armed_ = false;
   deferred_active_pending_ = false;
+  uf2_bootloader_requested_ = false;
+  uf2_bootloader_ready_pending_ = false;
+  uf2_bootloader_ready_ = false;
+  uf2_bootloader_request_id_ = 0;
+  install_receipt_requested_ = false;
+  install_receipt_request_id_ = 0;
+  requested_install_receipt_ = InstallReceiptData{};
   force_rumble_zero();
   if (!keep_connection) {
     transmit_sequence_ = 0;
@@ -252,13 +312,143 @@ void BridgeSession::service_device_info() {
   if (!negotiated_ || !device_info_pending_) {
     return;
   }
-  uint8_t payload[kDeviceInfoPayloadSize];
+  const InstallReceiptStatus receipt = sink_.install_receipt();
+  uint8_t payload[kDeviceInfoRecordedPayloadSize]{};
   payload[0] = kDeviceInfoFormat;
   payload[1] = static_cast<uint8_t>(kFirmwareRevision);
   payload[2] = static_cast<uint8_t>(kFirmwareRevision >> 8U);
-  if (send_message(MessageType::DeviceInfo, payload, sizeof(payload))) {
+  write_u32(payload + 3, kFirmwareCapabilities);
+  payload[7] = static_cast<uint8_t>(receipt.state);
+  size_t payload_length = kDeviceInfoBasePayloadSize;
+  if (receipt.state == InstallReceiptState::Recorded) {
+    write_u64(payload + 8, receipt.receipt.installed_at);
+    memcpy(payload + 16, receipt.receipt.install_id,
+           sizeof(receipt.receipt.install_id));
+    payload[32] = receipt.receipt.source;
+    payload_length = kDeviceInfoRecordedPayloadSize;
+  }
+  if (send_message(MessageType::DeviceInfo, payload,
+                   static_cast<uint16_t>(payload_length))) {
     device_info_pending_ = false;
   }
+}
+
+void BridgeSession::begin_uf2_bootloader(const Frame& frame) {
+  const uint32_t request_id = read_u32(frame.payload);
+  if (install_receipt_requested_) {
+    send_error(ControlErrorCode::Uf2TransitionBusy, request_id);
+    return;
+  }
+  if (uf2_bootloader_requested_) {
+    if (request_id == uf2_bootloader_request_id_ &&
+        uf2_bootloader_ready_) {
+      uf2_bootloader_ready_pending_ = true;
+    } else if (request_id != uf2_bootloader_request_id_) {
+      send_error(ControlErrorCode::Uf2TransitionBusy, request_id);
+    }
+    return;
+  }
+  uf2_bootloader_requested_ = true;
+  uf2_bootloader_request_id_ = request_id;
+  data_watchdog_armed_ = false;
+  force_neutral(true);
+  force_rumble_zero();
+}
+
+void BridgeSession::service_uf2_bootloader() {
+  if (!uf2_bootloader_requested_ || hid_pending_ || rumble_pending_) {
+    return;
+  }
+  if (!uf2_bootloader_ready_ || uf2_bootloader_ready_pending_) {
+    uint8_t payload[kRequestIdPayloadSize];
+    write_u32(payload, uf2_bootloader_request_id_);
+    if (send_message(MessageType::Uf2BootloaderReady, payload,
+                     sizeof(payload))) {
+      uf2_bootloader_ready_ = true;
+      uf2_bootloader_ready_pending_ = false;
+    }
+  }
+}
+
+void BridgeSession::record_install_receipt(const Frame& frame) {
+  const uint32_t request_id = read_u32(frame.payload);
+  InstallReceiptData requested{};
+  requested.installed_at = read_u64(frame.payload + 4);
+  memcpy(requested.install_id, frame.payload + 12,
+         sizeof(requested.install_id));
+  requested.source = frame.payload[28];
+  const InstallReceiptStatus status = sink_.install_receipt();
+  if (status.state == InstallReceiptState::Recorded) {
+    if (status.receipt == requested) {
+      send_install_receipt_recorded(request_id, status.receipt);
+    } else {
+      send_error(ControlErrorCode::InstallReceiptRejected, request_id);
+    }
+    return;
+  }
+  if (install_receipt_requested_) {
+    if (request_id != install_receipt_request_id_ ||
+        !(requested == requested_install_receipt_)) {
+      send_error(ControlErrorCode::InstallReceiptRejected, request_id);
+    }
+    return;
+  }
+  install_receipt_requested_ = true;
+  install_receipt_request_id_ = request_id;
+  requested_install_receipt_ = requested;
+  data_watchdog_armed_ = false;
+  force_neutral(true);
+  force_rumble_zero();
+}
+
+void BridgeSession::service_install_receipt() {
+  if (!install_receipt_requested_ || hid_pending_ || rumble_pending_) {
+    return;
+  }
+  InstallReceiptStatus status = sink_.install_receipt();
+  if (status.state == InstallReceiptState::Pending) {
+    if (!sink_.record_install_receipt(requested_install_receipt_)) {
+      if (send_error(ControlErrorCode::InstallReceiptRejected,
+                     install_receipt_request_id_)) {
+        install_receipt_requested_ = false;
+      }
+      return;
+    }
+    status = sink_.install_receipt();
+  }
+  if (status.state != InstallReceiptState::Recorded ||
+      !(status.receipt == requested_install_receipt_)) {
+    if (send_error(ControlErrorCode::InstallReceiptReadbackMismatch,
+                   install_receipt_request_id_)) {
+      install_receipt_requested_ = false;
+    }
+    return;
+  }
+  if (send_install_receipt_recorded(install_receipt_request_id_,
+                                    status.receipt)) {
+    install_receipt_requested_ = false;
+  }
+}
+
+bool BridgeSession::send_install_receipt_recorded(
+    uint32_t request_id, const InstallReceiptData& receipt) {
+  uint8_t payload[kInstallReceiptPayloadSize];
+  write_u32(payload, request_id);
+  write_u64(payload + 4, receipt.installed_at);
+  memcpy(payload + 12, receipt.install_id, sizeof(receipt.install_id));
+  payload[28] = receipt.source;
+  return send_message(MessageType::InstallReceiptRecorded, payload,
+                      sizeof(payload));
+}
+
+bool BridgeSession::send_error(ControlErrorCode error,
+                               uint32_t request_id) {
+  const uint16_t code = static_cast<uint16_t>(error);
+  uint8_t payload[6];
+  payload[0] = static_cast<uint8_t>(code);
+  payload[1] = static_cast<uint8_t>(code >> 8U);
+  write_u32(payload + 2, request_id);
+  return send_message(MessageType::Error, payload, sizeof(payload));
 }
 
 void BridgeSession::queue_rumble(const RumbleFeedback& rumble, bool safety) {

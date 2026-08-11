@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bridge_core::{BridgeConfig, BridgeMetrics};
-use bridge_output::{DumpFormat, FirmwareVersion, OutputDiagnostics, SerialConfig};
+use bridge_output::{DumpFormat, FirmwareInfo, OutputDiagnostics, SerialConfig};
 use controller_mapper::MapperConfig;
 use desktop_bindings::BindingProfile;
 use profile_picker::{PickerConfig, PickerRoster};
@@ -143,7 +143,7 @@ pub struct XiaoStatus {
     pub path: Option<String>,
     pub usb_serial: Option<String>,
     pub handshake_complete: bool,
-    pub firmware: FirmwareVersion,
+    pub firmware: FirmwareInfo,
 }
 
 /// Deliberately lossy for the same reason as [`HidDeviceInfo`]'s: this reaches

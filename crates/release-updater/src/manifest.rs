@@ -240,9 +240,7 @@ fn validate_artifact(
     artifact: &ArtifactDescriptor,
     maximum_size: u64,
 ) -> Result<(), ManifestError> {
-    if artifact.name.is_empty()
-        || artifact.name.contains('/')
-        || artifact.name.contains('\\')
+    if !valid_release_component(&artifact.name)
         || artifact.size == 0
         || artifact.size > maximum_size
         || artifact.sha256.len() != 64
@@ -254,6 +252,14 @@ fn validate_artifact(
         )));
     }
     Ok(())
+}
+
+pub(crate) fn valid_release_component(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains("..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._".contains(&byte))
 }
 
 #[cfg(test)]
@@ -370,5 +376,15 @@ mod tests {
             verify_signed_manifest(&bytes, &signatures, &[key]),
             Err(ManifestError::InvalidField(_))
         ));
+
+        for name in ["firmware..uf2", "firmware update.uf2", "firmware-ł.uf2"] {
+            let mut invalid = manifest();
+            invalid.firmware.artifact.name = name.to_owned();
+            let (bytes, signatures, key) = signed(&invalid);
+            assert!(matches!(
+                verify_signed_manifest(&bytes, &signatures, &[key]),
+                Err(ManifestError::InvalidField(_))
+            ));
+        }
     }
 }

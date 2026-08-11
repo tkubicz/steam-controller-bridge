@@ -91,8 +91,9 @@ macOS virtual-device entitlements.
 3. Connect one XIAO with a data-capable cable. In the menu app, choose
    **Check for Updates**, then **Install Firmware Update**. The App Center
    downloads, verifies, flashes, and confirms the signed firmware.
-4. When prompted, briefly bridge the underside `RST` and `GND` pads twice to
-   mount the UF2 drive. Keep the XIAO connected until verification finishes.
+4. A board already running firmware revision 2 enters UF2 mode automatically.
+   A revision 1 board needs one final manual step: when prompted, briefly bridge
+   the underside `RST` and `GND` pads twice. Future updates are automatic.
 5. Connect the controller, fully quit Steam and its helper, and start Steam
    Controller Bridge.
 
@@ -138,7 +139,7 @@ and [third-party notices](THIRD-PARTY-NOTICES.md) before distributing a build.
 | [Updates](docs/UPDATES.md)                         | Signed catalogs, application replacement, and firmware flashing   |
 | [Architecture](docs/ARCHITECTURE.md)               | Workspace boundaries and runtime design                           |
 | [Testing](docs/TESTING.md)                         | Automated, packaging, hardware, and manual acceptance gates       |
-| [Firmware guide](firmware/xiao-nrf52840/README.md) | Native tests, UF2/DFU builds, flashing, recovery, and LED states  |
+| [Firmware guide](firmware/xiao-nrf52840/README.md) | Native tests, automatic UF2 updates, receipts, recovery, and LED states |
 
 Protocol and diagnostic references live in [`docs/`](docs/), including the
 [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md),
@@ -150,7 +151,7 @@ Protocol and diagnostic references live in [`docs/`](docs/), including the
 ```bash
 cargo build --workspace
 cargo test --workspace
-./tools/build-macos-app.sh
+./tools/build-macos-app.py
 ```
 
 The packaged app is written to `dist/Steam Controller Bridge.app` and ad-hoc

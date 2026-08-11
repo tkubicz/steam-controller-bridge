@@ -458,12 +458,176 @@ impl GamepadOutput for DropOrderOutput {
     }
 }
 
+struct PendingReceiptOutput {
+    firmware: FirmwareInfo,
+    recorded: Arc<Mutex<Vec<(u32, FirmwareInstallReceipt)>>>,
+    pending_response: Option<(u32, FirmwareInstallReceipt)>,
+}
+
+impl GamepadOutput for PendingReceiptOutput {
+    fn send_state(
+        &mut self,
+        _state: &gamepad_state::GamepadState,
+    ) -> Result<(), bridge_output::OutputError> {
+        Ok(())
+    }
+
+    fn firmware_info(&self) -> Option<FirmwareInfo> {
+        Some(self.firmware)
+    }
+
+    fn request_firmware_install_receipt(
+        &mut self,
+        request_id: u32,
+        receipt: FirmwareInstallReceipt,
+    ) -> Result<(), bridge_output::OutputError> {
+        self.recorded.lock().unwrap().push((request_id, receipt));
+        self.pending_response = Some((request_id, receipt));
+        Ok(())
+    }
+
+    fn poll_firmware_install_receipt(
+        &mut self,
+        request_id: u32,
+        receipt: FirmwareInstallReceipt,
+    ) -> Option<Result<FirmwareInstallReceipt, bridge_output::OutputError>> {
+        let (actual_id, actual_receipt) = self.pending_response.take()?;
+        assert_eq!(actual_id, request_id);
+        assert_eq!(actual_receipt, receipt);
+        self.firmware.install_state = FirmwareInstallState::Recorded(actual_receipt);
+        Some(Ok(actual_receipt))
+    }
+}
+
+#[test]
+fn pending_manual_firmware_gets_one_first_observed_receipt() {
+    let status = Arc::new(Mutex::new(BridgeStatus::default()));
+    let (_, commands) = mpsc::channel();
+    let supervisor = Supervisor::new(
+        RuntimeConfig::default(),
+        Arc::clone(&status),
+        commands,
+        Box::new(|_| {}),
+        None,
+    );
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let mut output = OutputSession {
+        output: Box::new(PendingReceiptOutput {
+            firmware: FirmwareInfo {
+                version: FirmwareVersion::Reported(2),
+                capabilities: FirmwareCapabilities::ENTER_UF2_BOOTLOADER
+                    | FirmwareCapabilities::INSTALL_RECEIPT,
+                install_state: FirmwareInstallState::Pending,
+            },
+            recorded: Arc::clone(&recorded),
+            pending_response: None,
+        }),
+        xiao: None,
+        first_observed_receipt: FirstObservedReceiptState::Idle,
+    };
+
+    supervisor.refresh_xiao_firmware(&mut output);
+    supervisor.refresh_xiao_firmware(&mut output);
+
+    let receipts = recorded.lock().unwrap();
+    assert_eq!(receipts.len(), 1);
+    let (_, receipt) = receipts[0];
+    assert_eq!(receipt.source, FirmwareInstallSource::FirstObserved);
+    assert!(receipt.installed_at > 0);
+    assert_ne!(receipt.install_id, [0; 16]);
+    assert_eq!(
+        status.lock().unwrap().xiao.firmware.install_state,
+        FirmwareInstallState::Recorded(receipt)
+    );
+}
+
+struct DroppedReceiptAckOutput {
+    attempts: Arc<Mutex<Vec<(u32, FirmwareInstallReceipt)>>>,
+}
+
+impl GamepadOutput for DroppedReceiptAckOutput {
+    fn send_state(
+        &mut self,
+        _state: &gamepad_state::GamepadState,
+    ) -> Result<(), bridge_output::OutputError> {
+        Ok(())
+    }
+
+    fn firmware_info(&self) -> Option<FirmwareInfo> {
+        Some(FirmwareInfo {
+            version: FirmwareVersion::Reported(2),
+            capabilities: FirmwareCapabilities::INSTALL_RECEIPT,
+            install_state: FirmwareInstallState::Pending,
+        })
+    }
+
+    fn request_firmware_install_receipt(
+        &mut self,
+        request_id: u32,
+        receipt: FirmwareInstallReceipt,
+    ) -> Result<(), bridge_output::OutputError> {
+        self.attempts.lock().unwrap().push((request_id, receipt));
+        Ok(())
+    }
+
+    fn poll_firmware_install_receipt(
+        &mut self,
+        _request_id: u32,
+        _receipt: FirmwareInstallReceipt,
+    ) -> Option<Result<FirmwareInstallReceipt, bridge_output::OutputError>> {
+        None
+    }
+}
+
+#[test]
+fn a_lost_receipt_ack_retries_the_same_receipt_after_backoff() {
+    let status = Arc::new(Mutex::new(BridgeStatus::default()));
+    let (_, commands) = mpsc::channel();
+    let supervisor = Supervisor::new(
+        RuntimeConfig::default(),
+        status,
+        commands,
+        Box::new(|_| {}),
+        None,
+    );
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let mut output = OutputSession {
+        output: Box::new(DroppedReceiptAckOutput {
+            attempts: Arc::clone(&attempts),
+        }),
+        xiao: None,
+        first_observed_receipt: FirstObservedReceiptState::Idle,
+    };
+
+    supervisor.refresh_xiao_firmware(&mut output);
+    let FirstObservedReceiptState::Waiting { request, .. } = output.first_observed_receipt else {
+        panic!("receipt request did not start");
+    };
+    output.first_observed_receipt = FirstObservedReceiptState::Waiting {
+        request,
+        deadline: Instant::now(),
+    };
+    supervisor.refresh_xiao_firmware(&mut output);
+    let FirstObservedReceiptState::Backoff { request, .. } = output.first_observed_receipt else {
+        panic!("lost response did not enter backoff");
+    };
+    let request = request.unwrap();
+    output.first_observed_receipt = FirstObservedReceiptState::Backoff {
+        request: Some(request),
+        retry_at: Instant::now(),
+    };
+    supervisor.refresh_xiao_firmware(&mut output);
+
+    assert_eq!(*attempts.lock().unwrap(), [(request.request_id, request.receipt); 2]);
+}
+
 #[test]
 fn hardware_release_finishes_before_command_acknowledgement() {
     let order = Arc::new(Mutex::new(Vec::new()));
     let output = OutputSession {
         output: Box::new(DropOrderOutput(Arc::clone(&order))),
         xiao: None,
+        first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     let release_order = Arc::clone(&order);
     let ack_order = Arc::clone(&order);
@@ -493,6 +657,7 @@ fn a_slow_desktop_operation_is_preceded_by_neutral_on_the_wire() {
     let mut session = OutputSession {
         output: Box::new(SharedOutput(Arc::clone(&states))),
         xiao: None,
+        first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     let mut engine = BridgeEngine::new(BridgeConfig::default(), MapperConfig::default()).unwrap();
     engine.connected();

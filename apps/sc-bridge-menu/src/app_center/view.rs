@@ -1,16 +1,37 @@
+use std::fmt::Write as _;
 use std::sync::atomic::Ordering;
 
+use chrono::{DateTime, Local};
 use eframe::egui;
 use release_updater::{classify_firmware_release, FirmwareReleaseState, ReleaseManifestV1};
-use ui_theme::{ACCENT, BORDER, DANGER, MUTED_TEXT, ON_ACCENT, SUCCESS, SURFACE, TEXT};
+use ui_theme::{
+    ACCENT, ACCENT_SUBTLE, BORDER, DANGER, MUTED_TEXT, ON_ACCENT, SUCCESS, SURFACE, TEXT,
+};
 
-use super::{Activity, AppCenter, CatalogStatus, StatusTone};
-use crate::app_center_protocol::FirmwareStatus;
+use super::{Activity, AppCenter, CatalogStatus, StatusPlacement, StatusTone};
+use crate::app_center_protocol::{
+    FirmwareInstallStatus, FirmwareReceiptSource, FirmwareReceiptStatus, FirmwareStatus,
+};
 use crate::window_ui::{full_width_card, render_release_notes};
+
+const UF2_DISCONNECT_NOTICE: &str = "During installation, the temporary XIAO UF2 drive disconnects automatically. macOS may show a harmless \"Disk Not Ejected Properly\" notification even when verification succeeds.";
 
 impl AppCenter {
     pub(super) fn updates_page(&mut self, ui: &mut egui::Ui) {
-        self.status_banner(ui);
+        #[cfg(debug_assertions)]
+        if let Some(root) = self.local_update_root() {
+            status_callout(
+                ui,
+                ACCENT,
+                "Local development updates",
+                &format!(
+                    "Signed metadata and artifacts are loaded from {}. Production releases never use this source.",
+                    root.display()
+                ),
+            );
+            ui.add_space(10.0);
+        }
+        self.status_banner(ui, StatusPlacement::Page);
         if self.catalog_status == CatalogStatus::Failed && !self.busy() {
             ui.add_space(10.0);
             if secondary_button(ui, "Retry Check", true).clicked() {
@@ -25,14 +46,6 @@ impl AppCenter {
             self.firmware_card(ui, manifest);
         }
         self.catalog = catalog;
-        if matches!(self.activity, Activity::Busy { can_cancel: true }) {
-            ui.add_space(14.0);
-            if secondary_button(ui, "Cancel Before Writing", true).clicked() {
-                self.cancel.store(true, Ordering::Release);
-                "Cancelling safely…".clone_into(&mut self.status);
-                self.status_tone = StatusTone::Info;
-            }
-        }
     }
 
     fn application_card(&mut self, ui: &mut egui::Ui, manifest: &ReleaseManifestV1) {
@@ -114,15 +127,15 @@ impl AppCenter {
                         ui,
                         SUCCESS,
                         "Application is up to date",
-                        "You are running the latest signed stable release.",
+                        &self.application_current_message(),
                     );
                 }
                 std::cmp::Ordering::Greater => {
                     status_callout(
                         ui,
                         MUTED_TEXT,
-                        "Newer than stable",
-                        "This application is newer than the latest stable release. No downgrade is offered.",
+                        self.application_newer_title(),
+                        &self.application_newer_message(),
                     );
                 }
             }
@@ -136,7 +149,7 @@ impl AppCenter {
             let app_pending = installed < &manifest.application_version;
             let app_incompatible = installed < &manifest.firmware.minimum_application_version;
             let release_state =
-                classify_firmware_release(self.firmware.into(), manifest.firmware.revision);
+                classify_firmware_release(self.firmware.version.into(), manifest.firmware.revision);
             let (badge, badge_colour) = match release_state {
                 FirmwareReleaseState::Pending => ("Checking firmware", MUTED_TEXT),
                 FirmwareReleaseState::UpdateAvailable => ("Update available", ACCENT),
@@ -149,12 +162,15 @@ impl AppCenter {
                 &format!("XIAO firmware revision {}", manifest.firmware.revision),
                 &format!(
                     "Connected revision {} · XIAO nRF52840 or Sense",
-                    firmware_description(self.firmware)
+                    firmware_description(self.firmware.version)
                 ),
                 badge,
                 badge_colour,
             );
             ui.add_space(14.0);
+            self.firmware_operation_status(ui);
+            let show_reinstall =
+                !app_pending && !app_incompatible && release_state == FirmwareReleaseState::Current;
             if app_pending {
                 status_callout(
                     ui,
@@ -192,11 +208,6 @@ impl AppCenter {
                     "Firmware is up to date",
                     "The connected board reports the latest signed revision.",
                 );
-                ui.add_space(12.0);
-                if secondary_button(ui, "Reinstall Firmware", self.operation_available()).clicked()
-                {
-                    self.install_firmware(manifest.clone(), ui.ctx().clone());
-                }
             } else {
                 status_callout(
                     ui,
@@ -211,15 +222,54 @@ impl AppCenter {
                     self.install_firmware(manifest.clone(), ui.ctx().clone());
                 }
             }
-            ui.add_space(14.0);
-            ui.separator();
-            ui.add_space(6.0);
-            ui.label(
-                egui::RichText::new("The bridge pauses only while flashing. When prompted, bridge the underside RST and GND pads twice to mount the UF2 drive. Success requires the exact signed revision to reconnect.")
-                    .size(13.0)
-                    .color(MUTED_TEXT),
-            );
+            self.firmware_installation_details(ui, manifest, show_reinstall);
         });
+    }
+
+    fn firmware_installation_details(
+        &mut self,
+        ui: &mut egui::Ui,
+        manifest: &ReleaseManifestV1,
+        show_reinstall: bool,
+    ) {
+        ui.add_space(12.0);
+        firmware_receipt_callout(ui, self.firmware.install);
+        if show_reinstall {
+            ui.add_space(12.0);
+            if firmware_reinstall_action(ui, self.operation_available()).clicked() {
+                self.install_firmware(manifest.clone(), ui.ctx().clone());
+            }
+        }
+        ui.add_space(14.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(UF2_DISCONNECT_NOTICE)
+                .size(13.0)
+                .color(MUTED_TEXT),
+        );
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new("Automatic UF2 entry is the normal path on firmware revision 2 and later. RST and GND are requested only for first installation or recovery. Success requires the exact signed revision and a newly committed installation receipt.")
+                .size(13.0)
+                .color(MUTED_TEXT),
+        );
+    }
+
+    fn firmware_operation_status(&mut self, ui: &mut egui::Ui) {
+        if self.status_placement != StatusPlacement::Firmware {
+            return;
+        }
+        self.status_banner(ui, StatusPlacement::Firmware);
+        if matches!(self.activity, Activity::Busy { can_cancel: true }) {
+            ui.add_space(10.0);
+            if secondary_button(ui, "Cancel Before Writing", true).clicked() {
+                self.cancel.store(true, Ordering::Release);
+                "Cancelling safely…".clone_into(&mut self.status);
+                self.status_tone = StatusTone::Info;
+            }
+        }
+        ui.add_space(14.0);
     }
 
     fn release_notes(
@@ -246,6 +296,70 @@ impl AppCenter {
             render_release_notes(ui, &self.release_notes);
         });
     }
+}
+
+fn firmware_receipt_callout(ui: &mut egui::Ui, install: FirmwareInstallStatus) {
+    let colour = match install {
+        FirmwareInstallStatus::Unsupported => MUTED_TEXT,
+        FirmwareInstallStatus::Pending | FirmwareInstallStatus::Invalid => DANGER,
+        FirmwareInstallStatus::Recorded(_) => SUCCESS,
+    };
+    let (title, body) = firmware_receipt_copy(install);
+    status_callout(ui, colour, &title, &body);
+}
+
+fn firmware_receipt_copy(install: FirmwareInstallStatus) -> (String, String) {
+    match install {
+        FirmwareInstallStatus::Unsupported => (
+            "Installation date unavailable".to_owned(),
+            "Firmware revision 1 does not support installation receipts.".to_owned(),
+        ),
+        FirmwareInstallStatus::Pending => (
+            "Installation verification pending".to_owned(),
+            "The firmware is running, but its new installation receipt has not been recorded yet."
+                .to_owned(),
+        ),
+        FirmwareInstallStatus::Invalid => (
+            "Installation receipt is invalid".to_owned(),
+            "The receipt marker is corrupted. Reinstall firmware to restore verified installation metadata."
+                .to_owned(),
+        ),
+        FirmwareInstallStatus::Recorded(receipt) => {
+            let timestamp = format_install_time(receipt.installed_at);
+            let title = match receipt.source {
+                FirmwareReceiptSource::AppCenter => format!("Installed and verified {timestamp}"),
+                FirmwareReceiptSource::FirstObserved => {
+                    format!("First observed after flashing {timestamp}")
+                }
+            };
+            (
+                title,
+                format!("Installation ID {}", format_install_id(receipt)),
+            )
+        }
+    }
+}
+
+fn format_install_time(installed_at: u64) -> String {
+    i64::try_from(installed_at)
+        .ok()
+        .and_then(|seconds| DateTime::from_timestamp(seconds, 0))
+        .map_or_else(
+            || "at an unavailable date".to_owned(),
+            |utc| {
+                utc.with_timezone(&Local)
+                    .format("%b %-d, %Y at %H:%M")
+                    .to_string()
+            },
+        )
+}
+
+fn format_install_id(receipt: FirmwareReceiptStatus) -> String {
+    let mut id = String::with_capacity(32);
+    for byte in receipt.install_id {
+        write!(&mut id, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    id
 }
 
 fn card_header(
@@ -354,4 +468,87 @@ fn secondary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Resp
             .corner_radius(8)
             .min_size(egui::vec2(164.0, 36.0)),
     )
+}
+
+fn firmware_reinstall_action(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    let inner_width = (ui.available_width() - 28.0 - 2.0).max(0.0);
+    egui::Frame::new()
+        .fill(SURFACE)
+        .stroke(egui::Stroke::new(1.0, BORDER))
+        .corner_radius(9)
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .show(ui, |ui| {
+            ui.set_width(inner_width);
+            ui.label(
+                egui::RichText::new("Reinstall the current firmware")
+                    .strong()
+                    .color(TEXT),
+            );
+            ui.label(
+                egui::RichText::new("Use this to verify the updater or restore the current signed image. A successful reinstall creates a new installation ID and date.")
+                    .size(13.0)
+                    .color(MUTED_TEXT),
+            );
+            ui.add_space(4.0);
+            ui.add_enabled(
+                enabled,
+                egui::Button::new(
+                    egui::RichText::new("Reinstall Firmware")
+                        .strong()
+                        .color(ACCENT),
+                )
+                .fill(ACCENT_SUBTLE)
+                .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.7)))
+                .corner_radius(8)
+                .min_size(egui::vec2(180.0, 36.0)),
+            )
+        })
+        .inner
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receipt_copy_distinguishes_all_installation_states() {
+        assert_eq!(
+            firmware_receipt_copy(FirmwareInstallStatus::Unsupported).0,
+            "Installation date unavailable"
+        );
+        assert_eq!(
+            firmware_receipt_copy(FirmwareInstallStatus::Pending).0,
+            "Installation verification pending"
+        );
+        assert_eq!(
+            firmware_receipt_copy(FirmwareInstallStatus::Invalid).0,
+            "Installation receipt is invalid"
+        );
+
+        let receipt = FirmwareReceiptStatus {
+            installed_at: 1_786_456_920,
+            install_id: [0xa5; 16],
+            source: FirmwareReceiptSource::AppCenter,
+        };
+        let (app_center_title, installation_id) =
+            firmware_receipt_copy(FirmwareInstallStatus::Recorded(receipt));
+        assert!(app_center_title.starts_with("Installed and verified "));
+        assert_eq!(
+            installation_id,
+            "Installation ID a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+        );
+
+        let (first_observed_title, _) =
+            firmware_receipt_copy(FirmwareInstallStatus::Recorded(FirmwareReceiptStatus {
+                source: FirmwareReceiptSource::FirstObserved,
+                ..receipt
+            }));
+        assert!(first_observed_title.starts_with("First observed after flashing "));
+    }
+
+    #[test]
+    fn uf2_disconnect_notice_explains_the_expected_macos_warning() {
+        assert!(UF2_DISCONNECT_NOTICE.contains("Disk Not Ejected Properly"));
+        assert!(UF2_DISCONNECT_NOTICE.contains("verification succeeds"));
+    }
 }

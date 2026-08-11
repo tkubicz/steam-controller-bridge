@@ -12,6 +12,8 @@ constexpr size_t kChecksumSize = 2;
 constexpr size_t kMaxFrameSize = kHeaderSize + kMaxPayloadSize + kChecksumSize;
 constexpr size_t kGamepadPayloadSize = 18;
 constexpr size_t kRumblePayloadSize = 4;
+constexpr size_t kRequestIdPayloadSize = 4;
+constexpr size_t kInstallReceiptPayloadSize = 29;
 
 enum class MessageType : uint8_t {
   Hello = 1,
@@ -22,6 +24,10 @@ enum class MessageType : uint8_t {
   Pong = 6,
   DeviceInfo = 7,
   Rumble = 8,
+  EnterUf2Bootloader = 9,
+  Uf2BootloaderReady = 10,
+  RecordInstallReceipt = 11,
+  InstallReceiptRecorded = 12,
   Error = 255,
 };
 
@@ -33,6 +39,12 @@ enum class DecodeError : uint8_t {
   InvalidHat,
   ReservedAxisValue,
   BufferOverflow,
+};
+
+enum class ControlErrorCode : uint16_t {
+  Uf2TransitionBusy = 1,
+  InstallReceiptRejected = 2,
+  InstallReceiptReadbackMismatch = 3,
 };
 
 struct Frame {

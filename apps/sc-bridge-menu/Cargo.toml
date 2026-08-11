@@ -12,7 +12,7 @@ editor = ["dep:eframe", "dep:ui-theme", "dep:controller-art"]
 overlay = ["dep:eframe", "dep:ui-theme"]
 # About, Changelog, and Updates are tabs of one window, so the former `about`
 # feature no longer names anything that can be built on its own.
-updater = ["dep:eframe", "dep:ui-theme", "dep:release-updater", "dep:semver"]
+updater = ["dep:chrono", "dep:eframe", "dep:ui-theme", "dep:release-updater", "dep:semver"]
 
 [dependencies]
 bridge-runtime = { path = "../../crates/bridge-runtime" }
@@ -37,6 +37,7 @@ objc2.workspace = true
 objc2-app-kit.workspace = true
 release-updater = { path = "../../crates/release-updater", optional = true }
 semver = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 
 [lints]
 workspace = true

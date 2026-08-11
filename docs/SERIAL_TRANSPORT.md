@@ -40,8 +40,9 @@ firmware's 100 ms controller-data watchdog alive.
 ## Firmware revision reporting
 
 After a successful negotiation the firmware queues one `DeviceInfo` frame with
-its hand-maintained firmware revision, retried until the CDC transmit queue
-accepts it. The host gives the report a two-second grace window after the
+its hand-maintained firmware revision, capability flags, and installation
+receipt state, retried until the CDC transmit queue accepts it. A three-byte
+revision 1 report remains valid. The host gives the report a two-second grace window after the
 handshake; silence past that classifies the connection as pre-versioning
 firmware. The connection state feeds `XiaoStatus`, and the menu app shows the
 revision, adding an update recommendation when the revision is below the
@@ -49,6 +50,11 @@ host's `MINIMUM_FIRMWARE_REVISION` (bridge-output) or absent. That minimum is
 raised by hand only when the bridge depends on newer firmware behavior. Old
 firmware never reports and old hosts ignore message type 7, so mixed pairings
 remain fully input-compatible.
+
+Revision 2 accepts correlated automatic-UF2 and receipt-recording commands only
+after negotiation. The runtime records a `FirstObserved` receipt when it sees a
+blank marker after a manual flash. App Center uses `AppCenter` and requires the
+same committed receipt to be returned before reporting installation success.
 
 Refreshes maintain the firmware's watchdog lease without necessarily producing
 USB input: the firmware forwards a gamepad report only when the canonical

@@ -1,6 +1,7 @@
 #include "bridge_protocol.h"
 #include "bridge_session.h"
 #include "firmware_version.h"
+#include "install_receipt.h"
 #include "xinput_gamepad.h"
 
 #include <assert.h>
@@ -56,6 +57,8 @@ std::vector<uint8_t> gamepad_payload(uint16_t buttons = 1, int16_t x = 1234) {
 
 class CapturingSink final : public SessionSink {
  public:
+  CapturingSink() : receipt_page(scbridge::kInstallReceiptPage) {}
+
   bool queue_cdc(const uint8_t* data, size_t length) override {
     if (reject_next_write) {
       reject_next_write = false;
@@ -65,8 +68,37 @@ class CapturingSink final : public SessionSink {
     return true;
   }
 
+  scbridge::InstallReceiptStatus install_receipt() const override {
+    return scbridge::read_install_receipt(receipt_page);
+  }
+
+  bool record_install_receipt(
+      const scbridge::InstallReceiptData& receipt) override {
+    class MemoryWriter final : public scbridge::ReceiptWordWriter {
+     public:
+      explicit MemoryWriter(scbridge::InstallReceiptPage& page)
+          : page_(page) {}
+
+      bool write_word(size_t page_offset, uint32_t value) override {
+        write_offsets.push_back(page_offset);
+        memcpy(reinterpret_cast<uint8_t*>(&page_) + page_offset, &value,
+               sizeof(value));
+        return true;
+      }
+
+      scbridge::InstallReceiptPage& page_;
+      std::vector<size_t> write_offsets;
+    } writer(receipt_page);
+    const bool recorded = scbridge::write_install_receipt(
+        receipt_page, receipt, writer);
+    receipt_write_offsets = writer.write_offsets;
+    return recorded;
+  }
+
   bool reject_next_write = false;
   std::vector<std::vector<uint8_t>> writes;
+  scbridge::InstallReceiptPage receipt_page;
+  std::vector<size_t> receipt_write_offsets;
 };
 
 Frame decode_single(const std::vector<uint8_t>& bytes) {
@@ -100,6 +132,48 @@ Frame state_frame(uint16_t sequence, uint16_t buttons = 1, int16_t x = 1234) {
   const auto payload = gamepad_payload(buttons, x);
   memcpy(frame.payload, payload.data(), payload.size());
   return frame;
+}
+
+Frame control_frame(uint16_t sequence, MessageType type, uint32_t request_id) {
+  Frame frame{};
+  frame.version = 1;
+  frame.message_type = static_cast<uint8_t>(type);
+  frame.sequence = sequence;
+  frame.payload_length = scbridge::kRequestIdPayloadSize;
+  for (size_t i = 0; i < 4; ++i) {
+    frame.payload[i] = static_cast<uint8_t>(request_id >> (8U * i));
+  }
+  return frame;
+}
+
+class InterruptingWriter final : public scbridge::ReceiptWordWriter {
+ public:
+  InterruptingWriter(scbridge::InstallReceiptPage& page,
+                     size_t successful_writes)
+      : page_(page), successful_writes_(successful_writes) {}
+
+  bool write_word(size_t page_offset, uint32_t value) override {
+    offsets.push_back(page_offset);
+    if (write_count_++ == successful_writes_) {
+      return false;
+    }
+    memcpy(reinterpret_cast<uint8_t*>(&page_) + page_offset, &value,
+           sizeof(value));
+    return true;
+  }
+
+  scbridge::InstallReceiptPage& page_;
+  size_t successful_writes_;
+  size_t write_count_ = 0;
+  std::vector<size_t> offsets;
+};
+
+scbridge::InstallReceiptData example_receipt(uint8_t id = 0x42) {
+  scbridge::InstallReceiptData receipt{};
+  receipt.installed_at = 1'786'456'920;
+  memset(receipt.install_id, id, sizeof(receipt.install_id));
+  receipt.source = scbridge::kInstallSourceAppCenter;
+  return receipt;
 }
 
 void test_crc_and_neutral_vector() {
@@ -339,6 +413,162 @@ void test_decoder_rejects_header_and_payload_errors_then_recovers() {
   assert(events.errors[4] == DecodeError::ReservedAxisValue);
   assert(events.frames.size() == 1);
   assert(events.frames[0].sequence == 9);
+}
+
+void test_install_receipt_validation_recovery_and_commit_order() {
+  scbridge::InstallReceiptPage page = scbridge::kInstallReceiptPage;
+  assert(page.reserved0 == UINT32_MAX);
+  for (uint8_t byte : page.reserved) {
+    assert(byte == UINT8_MAX);
+  }
+  assert(scbridge::read_install_receipt(page).state ==
+         scbridge::InstallReceiptState::Pending);
+
+  InterruptingWriter interrupted(page, 3);
+  assert(!scbridge::write_install_receipt(page, example_receipt(),
+                                          interrupted));
+  assert(scbridge::read_install_receipt(page).state ==
+         scbridge::InstallReceiptState::Pending);
+
+  const scbridge::InstallReceiptData recovered = example_receipt(0x43);
+  InterruptingWriter complete(page, SIZE_MAX);
+  assert(scbridge::write_install_receipt(page, recovered, complete));
+  assert(!complete.offsets.empty());
+  assert(complete.offsets.back() ==
+         offsetof(scbridge::InstallReceiptPage, slots) +
+             sizeof(scbridge::InstallReceiptSlot) +
+             offsetof(scbridge::InstallReceiptSlot, commit));
+  const scbridge::InstallReceiptStatus status =
+      scbridge::read_install_receipt(page);
+  assert(status.state == scbridge::InstallReceiptState::Recorded);
+  assert(status.receipt == recovered);
+  assert(!scbridge::write_install_receipt(page, example_receipt(0x44),
+                                          complete));
+
+  scbridge::InstallReceiptPage reflashed = scbridge::kInstallReceiptPage;
+  assert(scbridge::read_install_receipt(reflashed).state ==
+         scbridge::InstallReceiptState::Pending);
+  reflashed.magic[0] ^= 1;
+  assert(scbridge::read_install_receipt(reflashed).state ==
+         scbridge::InstallReceiptState::Invalid);
+
+  scbridge::InstallReceiptPage corrupt = scbridge::kInstallReceiptPage;
+  memset(&corrupt.slots[0], 0, sizeof(corrupt.slots[0]));
+  memset(&corrupt.slots[1], 0, sizeof(corrupt.slots[1]));
+  assert(scbridge::read_install_receipt(corrupt).state ==
+         scbridge::InstallReceiptState::Invalid);
+}
+
+void test_uf2_transition_neutralizes_before_correlated_ready() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session, 0);
+  session.on_frame(state_frame(1, 7, 1000), 1);
+  session.mark_hid_report_sent();
+  session.on_xinput_rumble(RumbleFeedback{0xffff, 0xaaaa}, 1);
+
+  const Frame enter =
+      control_frame(2, MessageType::EnterUf2Bootloader, 0xaabb'ccdd);
+  session.on_frame(enter, 2);
+  assert(session.hid_report_pending());
+  assert(session.pending_hid_report().buttons == 0);
+  session.tick(2);
+  assert(!session.uf2_bootloader_ready());
+  const Frame zero_rumble = decode_single(sink.writes.back());
+  assert(zero_rumble.message_type ==
+         static_cast<uint8_t>(MessageType::Rumble));
+  assert(zero_rumble.payload[0] == 0 && zero_rumble.payload[1] == 0);
+  assert(zero_rumble.payload[2] == 0 && zero_rumble.payload[3] == 0);
+
+  session.mark_hid_report_sent();
+  session.tick(3);
+  assert(session.uf2_bootloader_ready());
+  assert(session.uf2_bootloader_request_id() == 0xaabb'ccdd);
+  const Frame ready = decode_single(sink.writes.back());
+  assert(ready.message_type ==
+         static_cast<uint8_t>(MessageType::Uf2BootloaderReady));
+  assert(ready.payload[0] == 0xdd && ready.payload[1] == 0xcc &&
+         ready.payload[2] == 0xbb && ready.payload[3] == 0xaa);
+
+  const size_t before_repeat = sink.writes.size();
+  const Frame repeated =
+      control_frame(3, MessageType::EnterUf2Bootloader, 0xaabb'ccdd);
+  session.on_frame(repeated, 4);
+  session.tick(4);
+  assert(sink.writes.size() == before_repeat + 1);
+  assert(decode_single(sink.writes.back()).message_type ==
+         static_cast<uint8_t>(MessageType::Uf2BootloaderReady));
+
+  const Frame different =
+      control_frame(4, MessageType::EnterUf2Bootloader, 99);
+  session.on_frame(different, 5);
+  assert(decode_single(sink.writes.back()).message_type ==
+         static_cast<uint8_t>(MessageType::Error));
+  session.on_frame(state_frame(5, 12, 2000), 6);
+  assert(!session.hid_report_pending());
+}
+
+void test_receipt_command_records_and_acknowledges_exact_data() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session);
+
+  session.on_frame(state_frame(1, 7, 1000), 1);
+  assert(session.hid_report_pending());
+  session.mark_hid_report_sent();
+
+  const scbridge::InstallReceiptData receipt = example_receipt();
+  Frame record{};
+  record.version = 1;
+  record.message_type =
+      static_cast<uint8_t>(MessageType::RecordInstallReceipt);
+  record.sequence = 2;
+  record.payload_length = scbridge::kInstallReceiptPayloadSize;
+  record.payload[0] = 7;
+  for (size_t i = 0; i < 8; ++i) {
+    record.payload[4 + i] =
+        static_cast<uint8_t>(receipt.installed_at >> (8U * i));
+  }
+  memcpy(record.payload + 12, receipt.install_id,
+         sizeof(receipt.install_id));
+  record.payload[28] = receipt.source;
+  session.on_frame(record, 2);
+  assert(session.hid_report_pending());
+  assert(session.pending_hid_report().buttons == 0);
+  assert(sink.install_receipt().state ==
+         scbridge::InstallReceiptState::Pending);
+  session.mark_hid_report_sent();
+  session.tick(3);
+
+  const Frame acknowledged = decode_single(sink.writes.back());
+  assert(acknowledged.message_type ==
+         static_cast<uint8_t>(MessageType::InstallReceiptRecorded));
+  assert(acknowledged.payload_length ==
+         scbridge::kInstallReceiptPayloadSize);
+  assert(memcmp(acknowledged.payload, record.payload,
+                scbridge::kInstallReceiptPayloadSize) == 0);
+  assert(sink.install_receipt().state ==
+         scbridge::InstallReceiptState::Recorded);
+  assert(!sink.receipt_write_offsets.empty());
+  assert(sink.receipt_write_offsets.back() ==
+             offsetof(scbridge::InstallReceiptPage, slots) +
+             offsetof(scbridge::InstallReceiptSlot, commit));
+
+  const std::vector<size_t> first_write_offsets =
+      sink.receipt_write_offsets;
+  record.payload[0] = 8;
+  record.sequence = 3;
+  session.on_frame(record, 4);
+  const Frame repeated = decode_single(sink.writes.back());
+  assert(repeated.message_type ==
+         static_cast<uint8_t>(MessageType::InstallReceiptRecorded));
+  assert(memcmp(repeated.payload, record.payload,
+                scbridge::kInstallReceiptPayloadSize) == 0);
+  assert(sink.receipt_write_offsets == first_write_offsets);
 }
 
 void test_session_negotiation_sequence_and_watchdog() {
@@ -683,12 +913,18 @@ void test_device_info_reported_once_after_negotiation() {
   assert(device_info_count(sink) == 1);
 
   const Frame info = last_device_info(sink);
-  assert(info.payload_length == scbridge::kDeviceInfoPayloadSize);
+  assert(info.payload_length == scbridge::kDeviceInfoBasePayloadSize);
   assert(info.payload[0] == scbridge::kDeviceInfoFormat);
   assert(info.payload[1] ==
          static_cast<uint8_t>(scbridge::kFirmwareRevision));
   assert(info.payload[2] ==
          static_cast<uint8_t>(scbridge::kFirmwareRevision >> 8U));
+  assert(info.payload[3] == 3);
+  assert(info.payload[4] == 0);
+  assert(info.payload[5] == 0);
+  assert(info.payload[6] == 0);
+  assert(info.payload[7] ==
+         static_cast<uint8_t>(scbridge::InstallReceiptState::Pending));
 
   session.tick(1);
   session.tick(50);
@@ -755,6 +991,9 @@ int main() {
   test_stream_recovery_and_splits();
   test_decoder_validation_and_unknown_messages();
   test_decoder_rejects_header_and_payload_errors_then_recovers();
+  test_install_receipt_validation_recovery_and_commit_order();
+  test_uf2_transition_neutralizes_before_correlated_ready();
+  test_receipt_command_records_and_acknowledges_exact_data();
   test_session_negotiation_sequence_and_watchdog();
   test_rumble_latest_refresh_and_safety_zero();
   test_fault_and_disconnect_neutralize();

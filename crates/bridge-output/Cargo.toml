@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 bridge-protocol = { path = "../bridge-protocol" }
 gamepad-state = { path = "../gamepad-state" }
+getrandom.workspace = true
 serialport.workspace = true
 
 [lints]

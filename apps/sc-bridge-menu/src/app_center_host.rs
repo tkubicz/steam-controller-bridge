@@ -4,10 +4,10 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use bridge_runtime::FirmwareVersion;
+use bridge_runtime::FirmwareInfo;
 
 use crate::app_center_protocol::{
-    encode, read, AppCenterCommand, AppCenterPage, FirmwareStatus, UpdateRequest, UpdateResponse,
+    encode, read, AppCenterCommand, AppCenterPage, FirmwareDetails, UpdateRequest, UpdateResponse,
 };
 use crate::cli::APP_CENTER_COMMAND;
 use crate::line_protocol::read_bounded_line;
@@ -58,7 +58,7 @@ pub struct AppCenterHost {
     generation: Option<u64>,
     next_generation: u64,
     suspension_owner: Option<u64>,
-    last_firmware: Option<FirmwareStatus>,
+    last_firmware: Option<FirmwareDetails>,
 }
 
 impl AppCenterHost {
@@ -81,16 +81,12 @@ impl AppCenterHost {
         }
     }
 
-    pub fn launch(
-        &mut self,
-        page: AppCenterPage,
-        firmware: FirmwareVersion,
-    ) -> Result<bool, String> {
+    pub fn launch(&mut self, page: AppCenterPage, firmware: FirmwareInfo) -> Result<bool, String> {
         self.reap();
         if self.suspension_owner.is_some() && self.child.is_none() {
             return Err("recovering the bridge after the previous app window exited".to_owned());
         }
-        let firmware = FirmwareStatus::from(firmware);
+        let firmware = FirmwareDetails::from(firmware);
         if self.child.is_some() {
             match self.send_command(&AppCenterCommand::Navigate { page, firmware }) {
                 Ok(()) => {
@@ -106,7 +102,7 @@ impl AppCenterHost {
         Ok(false)
     }
 
-    fn spawn(&mut self, page: AppCenterPage, firmware: FirmwareStatus) -> Result<(), String> {
+    fn spawn(&mut self, page: AppCenterPage, firmware: FirmwareDetails) -> Result<(), String> {
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let mut command = Command::new(executable);
         command
@@ -222,11 +218,11 @@ impl AppCenterHost {
         self.send_command(&AppCenterCommand::UpdateResponse(response.clone()))
     }
 
-    pub fn update_firmware(&mut self, firmware: FirmwareVersion) -> Result<(), String> {
+    pub fn update_firmware(&mut self, firmware: FirmwareInfo) -> Result<(), String> {
         if self.child.is_none() {
             return Ok(());
         }
-        let firmware = FirmwareStatus::from(firmware);
+        let firmware = FirmwareDetails::from(firmware);
         if self.last_firmware == Some(firmware) {
             return Ok(());
         }

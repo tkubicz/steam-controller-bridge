@@ -133,7 +133,7 @@ impl MenuModel {
 /// A warning here never flips the tray icon or the Problem line: the bridge
 /// still works on old firmware, so the nudge stays inside the hardware block.
 fn firmware_label(status: &BridgeStatus) -> String {
-    let firmware = status.xiao.firmware;
+    let firmware = status.xiao.firmware.version;
     match firmware {
         FirmwareVersion::Reported(revision) if firmware.update_recommended() => {
             format!("{WARNING} Firmware: rev {revision} · Update recommended")
@@ -380,7 +380,10 @@ mod tests {
                 path: Some("/dev/cu.usbmodem-example".to_owned()),
                 usb_serial: Some("redacted".to_owned()),
                 handshake_complete: true,
-                firmware: FirmwareVersion::Reported(1),
+                firmware: bridge_runtime::FirmwareInfo {
+                    version: FirmwareVersion::Reported(1),
+                    ..bridge_runtime::FirmwareInfo::default()
+                },
             },
             ..BridgeStatus::default()
         }
@@ -464,7 +467,7 @@ mod tests {
         ];
         for (firmware, expected) in cases {
             let mut status = ready_status(ControllerTransport::Bluetooth);
-            status.xiao.firmware = firmware;
+            status.xiao.firmware.version = firmware;
             let model = MenuModel::from_status(&status);
             assert_eq!(model.firmware, expected);
             assert_eq!(
@@ -482,7 +485,7 @@ mod tests {
         // Reachable once MINIMUM_FIRMWARE_REVISION exceeds 1; pinned here so
         // the label shape is already settled.
         let mut status = ready_status(ControllerTransport::Bluetooth);
-        status.xiao.firmware = FirmwareVersion::Reported(0);
+        status.xiao.firmware.version = FirmwareVersion::Reported(0);
         let model = MenuModel::from_status(&status);
         if FirmwareVersion::Reported(0).update_recommended() {
             assert_eq!(model.firmware, "⚠ Firmware: rev 0 · Update recommended");

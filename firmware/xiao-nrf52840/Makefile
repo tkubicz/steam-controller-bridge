@@ -8,6 +8,9 @@ BUILD_DIR := $(CURDIR)/build
 NATIVE_TEST := $(BUILD_DIR)/firmware-tests
 ARDUINO_DATA = $(shell $(ARDUINO_CLI) config get directories.data)
 UF2CONV = $(ARDUINO_DATA)/packages/Seeeduino/hardware/nrf52/$(CORE_VERSION)/tools/uf2conv/uf2conv.py
+GCC_BIN = $(ARDUINO_DATA)/packages/Seeeduino/tools/arm-none-eabi-gcc/9-2019q4/bin
+NM = $(GCC_BIN)/arm-none-eabi-nm
+OBJDUMP = $(GCC_BIN)/arm-none-eabi-objdump
 PORT ?=
 
 # The core's bundled adafruit-nrfutil is a frozen Click application that aborts
@@ -29,6 +32,7 @@ test:
 	mkdir -p $(BUILD_DIR)
 	$(CXX) -std=c++17 -Wall -Wextra -Werror -pedantic \
 		-Isrc src/bridge_protocol.cpp src/bridge_session.cpp \
+		src/install_receipt.cpp \
 		tests/test_firmware.cpp -o $(NATIVE_TEST)
 	$(NATIVE_TEST)
 
@@ -51,6 +55,12 @@ artifacts: build
 		$(BUILD_DIR)/xiao-nrf52840.ino.hex
 	cp $(BUILD_DIR)/xiao-nrf52840.ino.zip \
 		$(BUILD_DIR)/artifacts/steam-controller-bridge-xiao-nrf52840-dfu.zip
+	$(CURDIR)/tools/python $(CURDIR)/../../tools/check-firmware-artifact.py \
+		--elf $(BUILD_DIR)/xiao-nrf52840.ino.elf \
+		--hex $(BUILD_DIR)/xiao-nrf52840.ino.hex \
+		--uf2 $(BUILD_DIR)/artifacts/steam-controller-bridge-xiao-nrf52840.uf2 \
+		--nm $(NM) --objdump $(OBJDUMP) \
+		--version-header $(CURDIR)/src/firmware_version.h
 
 clean:
 	rm -rf $(BUILD_DIR)

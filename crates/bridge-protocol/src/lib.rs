@@ -9,6 +9,8 @@ pub const CHECKSUM_SIZE: usize = 2;
 pub const MAX_PAYLOAD_SIZE: usize = 256;
 pub const GAMEPAD_PAYLOAD_SIZE: usize = 18;
 pub const RUMBLE_PAYLOAD_SIZE: usize = 4;
+pub const REQUEST_ID_PAYLOAD_SIZE: usize = 4;
+pub const INSTALL_RECEIPT_PAYLOAD_SIZE: usize = 29;
 pub const GAMEPAD_FRAME_SIZE: usize = HEADER_SIZE + GAMEPAD_PAYLOAD_SIZE + CHECKSUM_SIZE;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +24,19 @@ pub enum MessageType {
     Pong = 6,
     DeviceInfo = 7,
     Rumble = 8,
+    EnterUf2Bootloader = 9,
+    Uf2BootloaderReady = 10,
+    RecordInstallReceipt = 11,
+    InstallReceiptRecorded = 12,
     Error = 255,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum ControlErrorCode {
+    Uf2TransitionBusy = 1,
+    InstallReceiptRejected = 2,
+    InstallReceiptReadbackMismatch = 3,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -38,10 +52,40 @@ impl TryFrom<u8> for MessageType {
             6 => Ok(Self::Pong),
             7 => Ok(Self::DeviceInfo),
             8 => Ok(Self::Rumble),
+            9 => Ok(Self::EnterUf2Bootloader),
+            10 => Ok(Self::Uf2BootloaderReady),
+            11 => Ok(Self::RecordInstallReceipt),
+            12 => Ok(Self::InstallReceiptRecorded),
             255 => Ok(Self::Error),
             _ => Err(()),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum InstallSource {
+    AppCenter = 1,
+    FirstObserved = 2,
+}
+
+impl TryFrom<u8> for InstallSource {
+    type Error = ProtocolError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::AppCenter),
+            2 => Ok(Self::FirstObserved),
+            _ => Err(ProtocolError::InvalidInstallSource(value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstallReceipt {
+    pub installed_at: u64,
+    pub install_id: [u8; 16],
+    pub source: InstallSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +109,20 @@ pub enum Message {
     Rumble {
         low_frequency: u16,
         high_frequency: u16,
+    },
+    EnterUf2Bootloader {
+        request_id: u32,
+    },
+    Uf2BootloaderReady {
+        request_id: u32,
+    },
+    RecordInstallReceipt {
+        request_id: u32,
+        receipt: InstallReceipt,
+    },
+    InstallReceiptRecorded {
+        request_id: u32,
+        receipt: InstallReceipt,
     },
     Error {
         code: u16,
@@ -217,6 +275,28 @@ fn encode_message(message: &Message) -> (u8, Vec<u8>) {
             payload.extend_from_slice(&high_frequency.to_le_bytes());
             (MessageType::Rumble as u8, payload)
         }
+        Message::EnterUf2Bootloader { request_id } => (
+            MessageType::EnterUf2Bootloader as u8,
+            request_id.to_le_bytes().to_vec(),
+        ),
+        Message::Uf2BootloaderReady { request_id } => (
+            MessageType::Uf2BootloaderReady as u8,
+            request_id.to_le_bytes().to_vec(),
+        ),
+        Message::RecordInstallReceipt {
+            request_id,
+            receipt,
+        } => (
+            MessageType::RecordInstallReceipt as u8,
+            encode_install_receipt(*request_id, *receipt),
+        ),
+        Message::InstallReceiptRecorded {
+            request_id,
+            receipt,
+        } => (
+            MessageType::InstallReceiptRecorded as u8,
+            encode_install_receipt(*request_id, *receipt),
+        ),
         Message::Error { code, detail } => {
             let mut payload = code.to_le_bytes().to_vec();
             payload.extend_from_slice(detail);
@@ -227,6 +307,15 @@ fn encode_message(message: &Message) -> (u8, Vec<u8>) {
             payload,
         } => (*message_type, payload.clone()),
     }
+}
+
+fn encode_install_receipt(request_id: u32, receipt: InstallReceipt) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(INSTALL_RECEIPT_PAYLOAD_SIZE);
+    payload.extend_from_slice(&request_id.to_le_bytes());
+    payload.extend_from_slice(&receipt.installed_at.to_le_bytes());
+    payload.extend_from_slice(&receipt.install_id);
+    payload.push(receipt.source as u8);
+    payload
 }
 
 fn encode_gamepad(state: WireGamepadState) -> Vec<u8> {
@@ -286,6 +375,32 @@ fn parse_message(message_type: u8, payload: &[u8]) -> Result<Message, ProtocolEr
                 high_frequency: u16::from_le_bytes([payload[2], payload[3]]),
             })
         }
+        Ok(MessageType::EnterUf2Bootloader) => {
+            exact_len(payload, REQUEST_ID_PAYLOAD_SIZE)?;
+            Ok(Message::EnterUf2Bootloader {
+                request_id: u32::from_le_bytes(payload.try_into().expect("length checked")),
+            })
+        }
+        Ok(MessageType::Uf2BootloaderReady) => {
+            exact_len(payload, REQUEST_ID_PAYLOAD_SIZE)?;
+            Ok(Message::Uf2BootloaderReady {
+                request_id: u32::from_le_bytes(payload.try_into().expect("length checked")),
+            })
+        }
+        Ok(MessageType::RecordInstallReceipt) => {
+            let (request_id, receipt) = parse_install_receipt(payload)?;
+            Ok(Message::RecordInstallReceipt {
+                request_id,
+                receipt,
+            })
+        }
+        Ok(MessageType::InstallReceiptRecorded) => {
+            let (request_id, receipt) = parse_install_receipt(payload)?;
+            Ok(Message::InstallReceiptRecorded {
+                request_id,
+                receipt,
+            })
+        }
         Ok(MessageType::Error) => {
             if payload.len() < 2 {
                 return Err(ProtocolError::InvalidPayloadLength {
@@ -303,6 +418,22 @@ fn parse_message(message_type: u8, payload: &[u8]) -> Result<Message, ProtocolEr
             payload: payload.to_vec(),
         }),
     }
+}
+
+fn parse_install_receipt(payload: &[u8]) -> Result<(u32, InstallReceipt), ProtocolError> {
+    exact_len(payload, INSTALL_RECEIPT_PAYLOAD_SIZE)?;
+    let request_id = u32::from_le_bytes(payload[0..4].try_into().expect("length checked"));
+    let installed_at = u64::from_le_bytes(payload[4..12].try_into().expect("length checked"));
+    let install_id = payload[12..28].try_into().expect("length checked");
+    let source = InstallSource::try_from(payload[28])?;
+    Ok((
+        request_id,
+        InstallReceipt {
+            installed_at,
+            install_id,
+            source,
+        },
+    ))
 }
 
 fn parse_gamepad(p: &[u8]) -> Result<WireGamepadState, ProtocolError> {
@@ -357,6 +488,7 @@ pub enum ProtocolError {
     ChecksumMismatch { expected: u16, actual: u16 },
     InvalidPayloadLength { expected: usize, actual: usize },
     InvalidHat(u8),
+    InvalidInstallSource(u8),
     ReservedAxisValue,
 }
 
@@ -467,6 +599,28 @@ mod tests {
                 low_frequency: 0x1234,
                 high_frequency: 0xabcd,
             },
+            Message::EnterUf2Bootloader {
+                request_id: 0x1234_5678,
+            },
+            Message::Uf2BootloaderReady {
+                request_id: 0x8765_4321,
+            },
+            Message::RecordInstallReceipt {
+                request_id: 7,
+                receipt: InstallReceipt {
+                    installed_at: 1_786_456_920,
+                    install_id: [0xa5; 16],
+                    source: InstallSource::AppCenter,
+                },
+            },
+            Message::InstallReceiptRecorded {
+                request_id: 8,
+                receipt: InstallReceipt {
+                    installed_at: 1_786_456_921,
+                    install_id: [0x5a; 16],
+                    source: InstallSource::FirstObserved,
+                },
+            },
             Message::Error {
                 code: 42,
                 detail: b"bad".to_vec(),
@@ -513,6 +667,58 @@ mod tests {
                 actual: 3
             })
         ));
+    }
+
+    #[test]
+    fn firmware_control_messages_have_exact_correlated_payloads() {
+        let receipt = InstallReceipt {
+            installed_at: 0x0102_0304_0506_0708,
+            install_id: [0x11; 16],
+            source: InstallSource::AppCenter,
+        };
+        let encoded = Frame::new(
+            1,
+            Message::RecordInstallReceipt {
+                request_id: 0xaabb_ccdd,
+                receipt,
+            },
+        )
+        .encode()
+        .unwrap();
+        assert_eq!(
+            u16::from_le_bytes([encoded[4], encoded[5]]) as usize,
+            INSTALL_RECEIPT_PAYLOAD_SIZE
+        );
+        assert_eq!(&encoded[8..12], &0xaabb_ccdd_u32.to_le_bytes());
+        assert_eq!(&encoded[12..20], &receipt.installed_at.to_le_bytes());
+        assert_eq!(&encoded[20..36], &receipt.install_id);
+        assert_eq!(encoded[36], InstallSource::AppCenter as u8);
+
+        for message_type in [
+            MessageType::EnterUf2Bootloader,
+            MessageType::Uf2BootloaderReady,
+        ] {
+            assert!(matches!(
+                parse_message(message_type as u8, &[0; 3]),
+                Err(ProtocolError::InvalidPayloadLength {
+                    expected: REQUEST_ID_PAYLOAD_SIZE,
+                    actual: 3
+                })
+            ));
+        }
+        assert!(matches!(
+            parse_message(MessageType::RecordInstallReceipt as u8, &[0; 28]),
+            Err(ProtocolError::InvalidPayloadLength {
+                expected: INSTALL_RECEIPT_PAYLOAD_SIZE,
+                actual: 28
+            })
+        ));
+        let mut invalid_source = encode_install_receipt(1, receipt);
+        invalid_source[28] = 99;
+        assert_eq!(
+            parse_message(MessageType::RecordInstallReceipt as u8, &invalid_source),
+            Err(ProtocolError::InvalidInstallSource(99))
+        );
     }
 
     #[test]

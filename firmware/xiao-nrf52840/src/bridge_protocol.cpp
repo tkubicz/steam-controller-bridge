@@ -201,6 +201,12 @@ bool StreamDecoder::validate(const Frame& frame, DecodeError* error) const {
       return true;
     case MessageType::Rumble:
       return exact_length(frame, kRumblePayloadSize, error);
+    case MessageType::EnterUf2Bootloader:
+    case MessageType::Uf2BootloaderReady:
+      return exact_length(frame, kRequestIdPayloadSize, error);
+    case MessageType::RecordInstallReceipt:
+    case MessageType::InstallReceiptRecorded:
+      return exact_length(frame, kInstallReceiptPayloadSize, error);
     case MessageType::Error:
       if (frame.payload_length >= 2U) {
         return true;

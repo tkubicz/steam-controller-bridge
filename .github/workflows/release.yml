@@ -156,7 +156,7 @@ jobs:
         run: make -C firmware/xiao-nrf52840 setup
       - name: Run native firmware tests
         run: make -C firmware/xiao-nrf52840 test
-      - name: Build UF2 and DFU artifacts
+      - name: Build and validate firmware artifacts
         run: make -C firmware/xiao-nrf52840 artifacts
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -188,7 +188,7 @@ jobs:
             *";${UPDATE_SIGNING_KEY_ID}=${SC_BRIDGE_UPDATE_PUBLIC_KEY_B64};"*) ;;
             *) echo "primary signing key is not embedded in the application" >&2; exit 1 ;;
           esac
-          ./tools/build-macos-app.sh
+          ./tools/build-macos-app.py
       - name: Archive application bundle
         run: |
           set -euo pipefail
@@ -225,7 +225,6 @@ jobs:
           set -euo pipefail
           mkdir -p release
           mv artifacts/firmware/steam-controller-bridge-xiao-nrf52840.uf2 release/
-          mv artifacts/firmware/steam-controller-bridge-xiao-nrf52840-dfu.zip release/
           mv artifacts/macos-app/steam-controller-bridge-macos.zip release/
       - name: Generate and sign unified update manifest
         env:

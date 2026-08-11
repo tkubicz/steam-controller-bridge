@@ -7,8 +7,8 @@ use super::{
     ControllerChargeState, ControllerCooldown, ControllerDiscoveryState, ControllerEnumerator,
     ControllerSelection, ControllerSourceStatus, ControllerStatus, ControllerTransport,
     DecodedReport, DesktopBindingsWorker, DesktopInputSnapshot, DeviceError, DeviceEvent,
-    DumpOutput, Duration, File, FileOutput, GamepadOutput, HapticsState, HapticsStatus,
-    HidDeviceInfo, HidSession, IdleActivityTracker, Instant, JoinHandle, LizardMode,
+    DumpOutput, Duration, File, FileOutput, FirmwareInstallReceipt, GamepadOutput, HapticsState,
+    HapticsStatus, HidDeviceInfo, HidSession, IdleActivityTracker, Instant, JoinHandle, LizardMode,
     LizardModeHeartbeat, LizardStatus, MockOutput, Mutex, Ordering, OutputFeedback,
     OutputSelection, PadFeedbackRequest, PadHapticGain, PadHapticSide, PickerConfig, PickerEvent,
     PickerEventSink, PickerInput, PickerRuntime, ProcessOutcome, RawHidReport, Receiver,
@@ -209,7 +209,7 @@ impl Supervisor {
                         self.update_status(|status| {
                             status.xiao = XiaoStatus::default();
                         });
-                    } else if let Some(session) = retained_output.as_ref() {
+                    } else if let Some(session) = retained_output.as_mut() {
                         // The firmware's DeviceInfo usually lands after
                         // discovery published XiaoStatus; keep it current
                         // while no controller is present.

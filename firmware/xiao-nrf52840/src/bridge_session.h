@@ -1,11 +1,16 @@
 #pragma once
 
 #include "bridge_protocol.h"
+#include "install_receipt.h"
 
 namespace scbridge {
 
 constexpr uint32_t kDataWatchdogMs = 100;
 constexpr uint32_t kRumbleLeaseRefreshMs = 25;
+constexpr uint32_t kEnterUf2BootloaderCapability = 1U << 0U;
+constexpr uint32_t kInstallReceiptCapability = 1U << 1U;
+constexpr uint32_t kFirmwareCapabilities =
+    kEnterUf2BootloaderCapability | kInstallReceiptCapability;
 
 struct RumbleFeedback {
   uint16_t low_frequency;
@@ -57,6 +62,8 @@ class SessionSink {
  public:
   virtual ~SessionSink() = default;
   virtual bool queue_cdc(const uint8_t* data, size_t length) = 0;
+  virtual InstallReceiptStatus install_receipt() const = 0;
+  virtual bool record_install_receipt(const InstallReceiptData& receipt) = 0;
 };
 
 class BridgeSession {
@@ -74,6 +81,10 @@ class BridgeSession {
   bool negotiated() const { return negotiated_; }
   bool faulted() const { return faulted_; }
   bool cdc_connected() const { return cdc_connected_; }
+  bool uf2_bootloader_ready() const { return uf2_bootloader_ready_; }
+  uint32_t uf2_bootloader_request_id() const {
+    return uf2_bootloader_request_id_;
+  }
   const SessionDiagnostics& diagnostics() const { return diagnostics_; }
 
   bool hid_report_pending() const { return hid_pending_; }
@@ -92,6 +103,13 @@ class BridgeSession {
   void queue_rumble(const RumbleFeedback& rumble, bool safety);
   void service_device_info();
   void service_rumble(uint32_t now_ms);
+  void service_install_receipt();
+  void service_uf2_bootloader();
+  void begin_uf2_bootloader(const Frame& frame);
+  void record_install_receipt(const Frame& frame);
+  bool send_install_receipt_recorded(uint32_t request_id,
+                                     const InstallReceiptData& receipt);
+  bool send_error(ControlErrorCode code, uint32_t request_id);
   bool send_message(MessageType type, const uint8_t* payload,
                     uint16_t payload_length);
   static CanonicalGamepadReport neutral_report();
@@ -115,11 +133,18 @@ class BridgeSession {
   bool rumble_pending_is_refresh_;
   bool deferred_rumble_pending_;
   bool rumble_refresh_armed_;
+  bool uf2_bootloader_requested_;
+  bool uf2_bootloader_ready_pending_;
+  bool uf2_bootloader_ready_;
+  bool install_receipt_requested_;
   uint8_t consecutive_errors_;
   uint16_t expected_sequence_;
   uint16_t transmit_sequence_;
   uint32_t last_data_ms_;
   uint32_t last_rumble_tx_ms_;
+  uint32_t uf2_bootloader_request_id_;
+  uint32_t install_receipt_request_id_;
+  InstallReceiptData requested_install_receipt_;
   CanonicalGamepadReport pending_hid_;
   CanonicalGamepadReport deferred_active_;
   CanonicalGamepadReport last_queued_hid_;

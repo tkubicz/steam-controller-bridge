@@ -70,7 +70,7 @@ impl Supervisor {
             status.profile_picker = picker_status(&self.config, false);
             status.automatic_shutdown = automatic_status;
         });
-        self.refresh_xiao_firmware(&output);
+        self.refresh_xiao_firmware(&mut output);
         eprintln!(
             "level=info event=bridge_running input_transport={:?} input_interface={} \
              input_product={:?} input_serial={} xiao_path={:?} lizard_mode={:?}",
@@ -394,7 +394,7 @@ impl Supervisor {
                 // Internal serial reconnects restart firmware reporting at
                 // Pending without the supervisor noticing; this re-resolves
                 // the report on the same cadence.
-                self.refresh_xiao_firmware(&output);
+                self.refresh_xiao_firmware(&mut output);
                 last_status = Instant::now();
             }
         };
