@@ -81,7 +81,7 @@ pub(super) fn progress_text(progress: &FirmwareFlashProgress) -> &'static str {
             "Waiting for the automatic XIAO UF2 drive…"
         }
         FirmwareFlashProgress::ManualRecovery => {
-            "Automatic entry is unavailable. Bridge the underside RST and GND pads twice while this recovery window is open…"
+            "Automatic entry is unavailable. Quickly press the tiny reset button beside the USB-C connector twice while this recovery window is open…"
         }
         FirmwareFlashProgress::Writing => "Writing firmware. Do not unplug the board…",
         FirmwareFlashProgress::WaitingForApplication => {

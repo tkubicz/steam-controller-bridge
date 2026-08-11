@@ -710,7 +710,7 @@ fn wait_for_volume(
         adapter.wait(Duration::from_millis(250));
     }
     Err(FirmwareFlashError::Timeout(
-        "waiting for the XIAO UF2 drive; bridge the underside RST and GND pads twice while manual recovery is waiting",
+        "waiting for the XIAO UF2 drive; quickly press the tiny reset button beside the USB-C connector twice while manual recovery is waiting",
     ))
 }
 

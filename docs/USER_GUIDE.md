@@ -123,7 +123,8 @@ downgraded.
 The app verifies the cached or downloaded UF2 and asks the running bridge to
 neutralize output and release hardware. Firmware revision 2 enters its UF2
 bootloader automatically. Revision 1 requires one final manual migration: when
-the recovery prompt appears, bridge the underside `RST` and `GND` pads twice.
+the recovery prompt appears, quickly press the tiny reset button beside the
+USB-C connector twice.
 The app validates `INFO_UF2.TXT` and the UF2 family, writes and flushes the file,
 then waits for a fresh protocol handshake.
 
@@ -193,9 +194,10 @@ arduino-cli upload \
 
 App Center should recognize the resulting Seeed application identity. Because
 Blink has no bridge protocol, the first install enters the 60-second manual
-recovery phase. Bridge the board's RST and GND pads twice while that prompt is
-visible. After revision 2 is installed and its receipt is verified, repeating
-the installation must enter UF2 automatically without touching the pads.
+recovery phase. Quickly press the tiny reset button beside the USB-C connector
+twice while that prompt is visible. After revision 2 is installed and its
+receipt is verified, repeating the installation must enter UF2 automatically
+without pressing the button.
 
 ### Install build tools
 
@@ -266,10 +268,10 @@ Flash through the serial bootloader, substituting the actual port:
 make -C firmware/xiao-nrf52840 flash PORT=/dev/cu.usbmodemXXXX
 ```
 
-If serial flashing cannot reset the XIAO, briefly bridge the underside `RST`
-and `GND` pads twice. A bootloader volume will mount in Finder; drag the
-generated `.uf2` file onto it. The board should reboot as a composite device
-named `Steam Controller Bridge` with both CDC and an Xbox-layout gamepad
+If serial flashing cannot reset the XIAO, quickly press the tiny reset button
+beside the USB-C connector twice. A bootloader volume will mount in Finder;
+drag the generated `.uf2` file onto it. The board should reboot as a composite
+device named `Steam Controller Bridge` with both CDC and an Xbox-layout gamepad
 interface.
 
 The development firmware uses Xbox 360 compatibility VID/PID `045e:028e` so
@@ -892,8 +894,8 @@ rather than continuing with duplicate keyboard/gamepad input.
 ### No XIAO serial port appears
 
 - Use a known data-capable cable and approve the USB accessory in macOS.
-- Briefly bridge the underside `RST` and `GND` pads twice, then check
-  `arduino-cli board list` again.
+- Quickly press the tiny reset button beside the USB-C connector twice, then
+  check `arduino-cli board list` again.
 - If the bootloader volume appears, reflash the UF2.
 - A slow-blue XIAO means no CDC host has opened the firmware session.
 

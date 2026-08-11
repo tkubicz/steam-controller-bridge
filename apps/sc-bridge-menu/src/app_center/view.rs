@@ -248,7 +248,7 @@ impl AppCenter {
         );
         ui.add_space(6.0);
         ui.label(
-            egui::RichText::new("Automatic UF2 entry is the normal path on firmware revision 2 and later. RST and GND are requested only for first installation or recovery. Success requires the exact signed revision and a newly committed installation receipt.")
+            egui::RichText::new("Automatic UF2 entry is normal on firmware revision 2 and later. For first installation or recovery, quickly press the tiny reset button beside the USB-C connector twice when prompted. Success requires the exact signed revision and a newly committed installation receipt.")
                 .size(13.0)
                 .color(MUTED_TEXT),
         );

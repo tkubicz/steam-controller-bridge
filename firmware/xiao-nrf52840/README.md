@@ -47,10 +47,11 @@ make flash PORT=/dev/cu.usbmodemXXXX
 App Center is the normal update path. Firmware revision 2 acknowledges a
 correlated bootloader request, drains CDC, waits 100 ms, and enters the Adafruit
 UF2 bootloader automatically. Revision 1 needs one final manual installation.
-For that migration or later recovery, briefly bridge the underside `RST` and
-`GND` pads twice. The XIAO bootloader mounts a USB drive; copy the generated UF2
-onto it, or rerun `make flash` using the bootloader's newly enumerated serial
-port. A charge-only USB-C cable will not enumerate either interface.
+For that migration or later recovery, quickly press the tiny reset button beside
+the USB-C connector twice. The XIAO bootloader mounts a USB drive; copy the
+generated UF2 onto it, or rerun `make flash` using the bootloader's newly
+enumerated serial port. A charge-only USB-C cable will not enumerate either
+interface.
 
 The application identifies itself as `Lynxware / Steam Controller Bridge`, and
 the nRF52 core derives its serial number from the MCU identifier.

@@ -92,8 +92,9 @@ macOS virtual-device entitlements.
    **Check for Updates**, then **Install Firmware Update**. The App Center
    downloads, verifies, flashes, and confirms the signed firmware.
 4. A board already running firmware revision 2 enters UF2 mode automatically.
-   A revision 1 board needs one final manual step: when prompted, briefly bridge
-   the underside `RST` and `GND` pads twice. Future updates are automatic.
+   A revision 1 board needs one final manual step: when prompted, quickly press
+   the tiny reset button beside the USB-C connector twice. Future updates are
+   automatic.
 5. Connect the controller, fully quit Steam and its helper, and start Steam
    Controller Bridge.
 

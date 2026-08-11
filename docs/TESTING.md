@@ -79,13 +79,13 @@ Run these on the exact packaged candidate; automated results are not substitutes
   stationary noise, profile changes, and permission revocation.
 - Exercise idle and fresh-Puck-dock power-off, charging behavior, wake, one-shot
   latching, and injected failure recovery.
-- Install revision 2 once through manual RST/GND recovery. Save its displayed
-  timestamp and installation ID, then reinstall revision 2 without touching
-  RST/GND. Confirm automatic UF2 entry, the same revision, and a changed
-  timestamp and installation ID. Power-cycle without flashing and confirm the
-  receipt does not change. Also verify wrong/multiple-board refusal, close/Quit
-  interlocks, and interruption before writing, during UF2 writing, and before
-  receipt commit.
+- Install revision 2 once through manual reset-button recovery. Save its
+  displayed timestamp and installation ID, then reinstall revision 2 without
+  pressing the reset button. Confirm automatic UF2 entry, the same revision,
+  and a changed timestamp and installation ID. Power-cycle without flashing
+  and confirm the receipt does not change. Also verify wrong/multiple-board
+  refusal, close/Quit interlocks, and interruption before writing, during UF2
+  writing, and before receipt commit.
 - For an unreleased candidate, run `tools/prepare-local-update.py`, launch the
   debug menu app with the printed environment, and confirm the Updates page
   names the local development source. Restore Seeed Blink before the first

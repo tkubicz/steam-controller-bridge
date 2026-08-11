@@ -28,7 +28,8 @@ and firmware updates. It opens the Updates tab, which downloads nothing beyond
 signed metadata until you choose an action. Application replacement is Finder-guided in v1;
 firmware flashing is performed by the app and does not require Arduino CLI.
 Firmware revision 2 enters the UF2 bootloader automatically. Revision 1 needs
-one final manual RST/GND entry before later installs become automatic.
+two quick presses of the tiny reset button beside the USB-C connector before
+later installs become automatic.
 
 Verify a download against the published sums before flashing:
 

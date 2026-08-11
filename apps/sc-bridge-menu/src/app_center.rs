@@ -1238,6 +1238,15 @@ mod tests {
     }
 
     #[test]
+    fn manual_recovery_points_to_the_physical_reset_button() {
+        let guidance = progress_text(&FirmwareFlashProgress::ManualRecovery);
+        assert!(guidance.contains("reset button"));
+        assert!(guidance.contains("USB-C"));
+        assert!(!guidance.contains("RST"));
+        assert!(!guidance.contains("GND"));
+    }
+
+    #[test]
     fn demo_release_notes_are_structured() {
         assert!(!parse_release_notes(&demo_manifest(DemoMode::Current).release_notes).is_empty());
     }

@@ -51,7 +51,8 @@ Firmware revision 2 advertises automatic UF2 entry and installation receipt
 capabilities. App Center requests UF2 mode, waits up to 2 seconds for the
 correlated readiness response, then waits up to 15 seconds for the mounted
 volume. Unsupported or failed automatic entry opens a 60-second manual recovery
-window for RST/GND entry. Revision 1 therefore needs one final manual migration.
+window asking for two quick presses of the tiny reset button beside the USB-C
+connector. Revision 1 therefore needs one final manual migration.
 
 After copying and syncing the signed UF2, App Center waits up to 30 seconds for
 the application device. It requires the exact target revision and a `Pending`
