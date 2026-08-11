@@ -19,6 +19,7 @@ SLOT_COUNT = 2
 UF2_MAGIC_START_0 = 0x0A324655
 UF2_MAGIC_START_1 = 0x9E5D5157
 UF2_MAGIC_END = 0x0AB16F30
+UF2_FLAG_FAMILY_ID = 0x00002000
 
 
 def fail(message: str) -> None:
@@ -26,7 +27,10 @@ def fail(message: str) -> None:
 
 
 def command_output(command: list[str]) -> str:
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit status {result.returncode}"
+        fail(f"{command[0]} failed: {detail}")
     return result.stdout
 
 
@@ -109,16 +113,16 @@ def parse_hex(path: Path) -> dict[int, int]:
     return memory
 
 
-def parse_uf2(path: Path) -> tuple[dict[int, int], int]:
+def parse_uf2(path: Path, expected_family: int) -> dict[int, int]:
     data = path.read_bytes()
     if not data or len(data) % 512 != 0:
         fail("UF2 is not a non-empty sequence of 512-byte blocks")
     memory: dict[int, int] = {}
-    magic_count = 0
     for block_index in range(len(data) // 512):
         block = data[block_index * 512 : (block_index + 1) * 512]
-        start0, start1 = struct.unpack_from("<II", block, 0)
+        start0, start1, flags = struct.unpack_from("<III", block, 0)
         target, payload_size = struct.unpack_from("<II", block, 12)
+        family = struct.unpack_from("<I", block, 28)[0]
         end = struct.unpack_from("<I", block, 508)[0]
         if (start0, start1, end) != (
             UF2_MAGIC_START_0,
@@ -126,17 +130,34 @@ def parse_uf2(path: Path) -> tuple[dict[int, int], int]:
             UF2_MAGIC_END,
         ):
             fail(f"UF2 block {block_index} has invalid magic")
+        if not flags & UF2_FLAG_FAMILY_ID or family != expected_family:
+            fail(
+                f"UF2 block {block_index} family is {family:#010x}, "
+                f"expected {expected_family:#010x}"
+            )
         if payload_size > 476:
             fail(f"UF2 block {block_index} has an oversized payload")
         payload = block[32 : 32 + payload_size]
-        magic_count += payload.count(PAGE_MAGIC)
         for index, byte in enumerate(payload):
             address = target + index
             previous = memory.get(address)
             if previous is not None and previous != byte:
                 fail(f"UF2 contains conflicting data at {address:#x}")
             memory[address] = byte
-    return memory, magic_count
+    return memory
+
+
+def count_page_magic(memory: dict[int, int]) -> int:
+    """Count markers in reassembled memory, including across UF2 blocks."""
+    return sum(
+        1
+        for address, byte in memory.items()
+        if byte == PAGE_MAGIC[0]
+        and all(
+            memory.get(address + offset) == expected
+            for offset, expected in enumerate(PAGE_MAGIC)
+        )
+    )
 
 
 def page_bytes(memory: dict[int, int], address: int, artifact: str) -> bytes:
@@ -162,35 +183,99 @@ def validate_blank_page(page: bytes, revision: int, artifact: str) -> None:
         fail(f"{artifact} contains non-blank reserved receipt space")
 
 
-def firmware_revision(header: Path) -> int:
-    match = re.search(
-        r"^constexpr\s+uint16_t\s+kFirmwareRevision\s*=\s*(\d+)\s*;",
-        header.read_text(),
-        re.MULTILINE,
+def firmware_revision_source(source: str, origin: str) -> int:
+    # Same rule as release-manifest.rs: trim each line and accept exactly one
+    # canonical declaration ending in exactly one semicolon.
+    marker = "constexpr uint16_t kFirmwareRevision = "
+    declarations = [
+        line.strip()
+        for line in source.splitlines()
+        if line.strip().startswith(marker)
+    ]
+    if len(declarations) != 1:
+        fail(
+            f"expected one kFirmwareRevision declaration in {origin}, "
+            f"found {len(declarations)}"
+        )
+    match = re.fullmatch(
+        r"constexpr uint16_t kFirmwareRevision = ([0-9]+);", declarations[0]
     )
     if match is None:
-        fail(f"cannot read kFirmwareRevision from {header}")
+        fail(f"malformed kFirmwareRevision declaration in {origin}")
     revision = int(match.group(1))
     if not 0 < revision <= 0xFFFF:
         fail(f"firmware revision {revision} is outside the uint16_t range")
     return revision
 
 
+def firmware_revision(header: Path) -> int:
+    return firmware_revision_source(header.read_text(), str(header))
+
+
+def self_test() -> None:
+    assert (
+        firmware_revision_source(
+            "constexpr uint16_t kFirmwareRevision = 2;\n", "fixture"
+        )
+        == 2
+    )
+    for invalid in (
+        "constexpr uint16_t kFirmwareRevision = 2;;\n",
+        "constexpr uint16_t kFirmwareRevision = 2; trailing\n",
+        "constexpr uint16_t kFirmwareRevision = 2;\n"
+        "constexpr uint16_t kFirmwareRevision = 3;\n",
+        "constexpr uint16_t kFirmwareRevision = 2;\n"
+        "constexpr uint16_t kFirmwareRevision = invalid;\n",
+    ):
+        try:
+            firmware_revision_source(invalid, "fixture")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid firmware revision was accepted: {invalid!r}")
+
+    crossing = {
+        0x100 + offset: byte for offset, byte in enumerate(PAGE_MAGIC)
+    }
+    assert count_page_magic(crossing) == 1
+    crossing[0x200] = PAGE_MAGIC[0]
+    assert count_page_magic(crossing) == 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--elf", type=Path, required=True)
-    parser.add_argument("--hex", dest="hex_path", type=Path, required=True)
-    parser.add_argument("--uf2", type=Path, required=True)
-    parser.add_argument("--nm", required=True)
-    parser.add_argument("--objdump", required=True)
-    parser.add_argument("--version-header", type=Path, required=True)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--elf", type=Path)
+    parser.add_argument("--hex", dest="hex_path", type=Path)
+    parser.add_argument("--uf2", type=Path)
+    parser.add_argument("--nm")
+    parser.add_argument("--objdump")
+    parser.add_argument("--family-id", type=lambda value: int(value, 0))
+    parser.add_argument("--version-header", type=Path)
     args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return 0
+
+    required = {
+        "--elf": args.elf,
+        "--hex": args.hex_path,
+        "--uf2": args.uf2,
+        "--nm": args.nm,
+        "--objdump": args.objdump,
+        "--family-id": args.family_id,
+        "--version-header": args.version_header,
+    }
+    missing = [option for option, value in required.items() if value is None]
+    if missing:
+        parser.error(f"the following arguments are required: {', '.join(missing)}")
 
     revision = firmware_revision(args.version_header)
     address, _ = receipt_symbol(args.elf, args.nm)
     validate_sections(args.elf, args.objdump, address)
     hex_page = page_bytes(parse_hex(args.hex_path), address, "Intel HEX")
-    uf2_memory, magic_count = parse_uf2(args.uf2)
+    uf2_memory = parse_uf2(args.uf2, args.family_id)
+    magic_count = count_page_magic(uf2_memory)
     uf2_page = page_bytes(uf2_memory, address, "UF2")
     validate_blank_page(hex_page, revision, "Intel HEX")
     validate_blank_page(uf2_page, revision, "UF2")

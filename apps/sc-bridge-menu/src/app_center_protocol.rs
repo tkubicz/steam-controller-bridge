@@ -12,7 +12,9 @@ use bridge_runtime::FirmwareCapabilities;
 use crate::line_protocol::read_bounded_line;
 
 pub const MAX_IPC_LINE_BYTES: usize = 4 * 1024;
-const IPC_PROTOCOL_VERSION: u32 = 1;
+// Version 2: `Navigate`/`FirmwareVersion` carry `FirmwareDetails` instead of
+// the bare `FirmwareStatus`, so a replaced-on-disk binary fails cleanly.
+const IPC_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct Envelope<T> {
@@ -234,6 +236,15 @@ mod tests {
             read::<UpdateRequest>(&mut Cursor::new(encoded)).unwrap(),
             Some(decoded) if decoded == request
         ));
+
+        let mut old_version = serde_json::to_vec(&Envelope {
+            version: IPC_PROTOCOL_VERSION - 1,
+            message: request,
+        })
+        .unwrap();
+        old_version.push(b'\n');
+        assert!(read::<UpdateRequest>(&mut Cursor::new(old_version)).is_err());
+
         let oversized = vec![b'x'; MAX_IPC_LINE_BYTES + 1];
         assert!(read::<UpdateRequest>(&mut Cursor::new(oversized)).is_err());
     }

@@ -109,6 +109,7 @@ class BridgeSession {
   void record_install_receipt(const Frame& frame);
   bool send_install_receipt_recorded(uint32_t request_id,
                                      const InstallReceiptData& receipt);
+  void send_install_receipt_error(ControlErrorCode code);
   bool send_error(ControlErrorCode code, uint32_t request_id);
   bool send_message(MessageType type, const uint8_t* payload,
                     uint16_t payload_length);

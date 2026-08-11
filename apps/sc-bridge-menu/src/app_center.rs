@@ -474,6 +474,20 @@ impl AppCenter {
         )
     }
 
+    fn firmware_current_message(&self) -> String {
+        format!(
+            "The connected board matches the signed {}.",
+            self.update_source_name()
+        )
+    }
+
+    fn firmware_newer_title(&self) -> String {
+        format!(
+            "Firmware is newer than the signed {}",
+            self.update_source_name()
+        )
+    }
+
     fn check_catalog(&mut self, ctx: egui::Context) {
         let sender = self.sender.clone();
         self.cancel.store(false, Ordering::Release);
@@ -656,7 +670,6 @@ impl AppCenter {
                     self.firmware = firmware.into();
                     self.activity = Activity::Idle;
                     self.status_tone = StatusTone::Success;
-                    self.firmware_write_started = false;
                 }
                 WorkerEvent::Firmware(Err(error)) => {
                     if let Some(firmware) = error.verified_firmware() {
@@ -665,7 +678,6 @@ impl AppCenter {
                     self.status = error.message();
                     self.activity = Activity::Idle;
                     self.status_tone = StatusTone::Error;
-                    self.firmware_write_started = false;
                 }
                 WorkerEvent::Application(Err(error)) | WorkerEvent::Quit(Err(error)) => {
                     self.status = error;
@@ -686,7 +698,12 @@ impl AppCenter {
 
     fn join_worker(&mut self) {
         if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
+            let panicked = worker.join().is_err();
+            // Consuming the only worker is the common terminal path for
+            // firmware success, failure, and panic. Navigation must unlock in
+            // all three cases.
+            self.firmware_write_started = false;
+            if panicked {
                 "The background operation stopped unexpectedly.".clone_into(&mut self.status);
                 self.status_tone = StatusTone::Error;
                 self.activity = Activity::Idle;

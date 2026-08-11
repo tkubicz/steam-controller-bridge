@@ -54,6 +54,7 @@ jobs:
           python3 tools/check-workspace-versions.py --self-test
           python3 tools/check-workspace-versions.py
           python3 tools/build-macos-app.py --self-test
+          python3 tools/check-firmware-artifact.py --self-test
           python3 tools/prepare-local-update.py --self-test
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings

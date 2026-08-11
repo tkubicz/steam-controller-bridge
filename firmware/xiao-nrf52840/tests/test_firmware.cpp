@@ -176,6 +176,27 @@ scbridge::InstallReceiptData example_receipt(uint8_t id = 0x42) {
   return receipt;
 }
 
+Frame receipt_frame(uint16_t sequence, uint32_t request_id,
+                    const scbridge::InstallReceiptData& receipt) {
+  Frame frame{};
+  frame.version = 1;
+  frame.message_type =
+      static_cast<uint8_t>(MessageType::RecordInstallReceipt);
+  frame.sequence = sequence;
+  frame.payload_length = scbridge::kInstallReceiptPayloadSize;
+  for (size_t i = 0; i < 4; ++i) {
+    frame.payload[i] = static_cast<uint8_t>(request_id >> (8U * i));
+  }
+  for (size_t i = 0; i < 8; ++i) {
+    frame.payload[4 + i] =
+        static_cast<uint8_t>(receipt.installed_at >> (8U * i));
+  }
+  memcpy(frame.payload + 12, receipt.install_id,
+         sizeof(receipt.install_id));
+  frame.payload[28] = receipt.source;
+  return frame;
+}
+
 void test_crc_and_neutral_vector() {
   const uint8_t check[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
   assert(scbridge::crc16_ccitt_false(check, sizeof(check)) == 0x29b1);
@@ -522,20 +543,7 @@ void test_receipt_command_records_and_acknowledges_exact_data() {
   session.mark_hid_report_sent();
 
   const scbridge::InstallReceiptData receipt = example_receipt();
-  Frame record{};
-  record.version = 1;
-  record.message_type =
-      static_cast<uint8_t>(MessageType::RecordInstallReceipt);
-  record.sequence = 2;
-  record.payload_length = scbridge::kInstallReceiptPayloadSize;
-  record.payload[0] = 7;
-  for (size_t i = 0; i < 8; ++i) {
-    record.payload[4 + i] =
-        static_cast<uint8_t>(receipt.installed_at >> (8U * i));
-  }
-  memcpy(record.payload + 12, receipt.install_id,
-         sizeof(receipt.install_id));
-  record.payload[28] = receipt.source;
+  Frame record = receipt_frame(2, 7, receipt);
   session.on_frame(record, 2);
   assert(session.hid_report_pending());
   assert(session.pending_hid_report().buttons == 0);
@@ -569,6 +577,57 @@ void test_receipt_command_records_and_acknowledges_exact_data() {
   assert(memcmp(repeated.payload, record.payload,
                 scbridge::kInstallReceiptPayloadSize) == 0);
   assert(sink.receipt_write_offsets == first_write_offsets);
+}
+
+void test_receipt_during_uf2_transition_is_answered_busy() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session, 0);
+
+  session.on_frame(
+      control_frame(1, MessageType::EnterUf2Bootloader, 0x0102'0304), 1);
+  const size_t before = sink.writes.size();
+  session.on_frame(receipt_frame(2, 9, example_receipt()), 2);
+  assert(sink.writes.size() == before + 1);
+  const Frame error = decode_single(sink.writes.back());
+  assert(error.message_type == static_cast<uint8_t>(MessageType::Error));
+  assert(error.payload_length == 6);
+  assert(error.payload[0] ==
+         static_cast<uint8_t>(
+             scbridge::ControlErrorCode::Uf2TransitionBusy));
+  assert(error.payload[1] == 0);
+  assert(error.payload[2] == 9 && error.payload[3] == 0 &&
+         error.payload[4] == 0 && error.payload[5] == 0);
+  assert(sink.install_receipt().state ==
+         scbridge::InstallReceiptState::Pending);
+}
+
+void test_invalid_receipt_page_is_rejected_not_mismatched() {
+  CapturingSink sink;
+  // Both slots non-blank and non-valid: the marker page is unusable.
+  memset(&sink.receipt_page.slots, 0, sizeof(sink.receipt_page.slots));
+  assert(sink.install_receipt().state ==
+         scbridge::InstallReceiptState::Invalid);
+
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session, 0);
+
+  session.on_frame(receipt_frame(1, 5, example_receipt()), 1);
+  session.mark_hid_report_sent();
+  session.tick(2);
+  const Frame error = decode_single(sink.writes.back());
+  assert(error.message_type == static_cast<uint8_t>(MessageType::Error));
+  assert(error.payload_length == 6);
+  assert(error.payload[0] ==
+         static_cast<uint8_t>(
+             scbridge::ControlErrorCode::InstallReceiptRejected));
+  assert(error.payload[1] == 0);
+  assert(error.payload[2] == 5 && error.payload[3] == 0 &&
+         error.payload[4] == 0 && error.payload[5] == 0);
 }
 
 void test_session_negotiation_sequence_and_watchdog() {
@@ -994,6 +1053,8 @@ int main() {
   test_install_receipt_validation_recovery_and_commit_order();
   test_uf2_transition_neutralizes_before_correlated_ready();
   test_receipt_command_records_and_acknowledges_exact_data();
+  test_receipt_during_uf2_transition_is_answered_busy();
+  test_invalid_receipt_page_is_rejected_not_mismatched();
   test_session_negotiation_sequence_and_watchdog();
   test_rumble_latest_refresh_and_safety_zero();
   test_fault_and_disconnect_neutralize();

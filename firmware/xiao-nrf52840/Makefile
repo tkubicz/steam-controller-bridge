@@ -3,6 +3,7 @@ CXX ?= c++
 CORE_VERSION := 1.1.13
 BOARD_URL := https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json
 FQBN := Seeeduino:nrf52:xiaonRF52840
+UF2_FAMILY_ID := 0xADA52840
 SKETCH := $(CURDIR)
 BUILD_DIR := $(CURDIR)/build
 NATIVE_TEST := $(BUILD_DIR)/firmware-tests
@@ -50,7 +51,7 @@ flash: build
 artifacts: build
 	mkdir -p $(BUILD_DIR)/artifacts
 	@test -f $(UF2CONV) || (echo "UF2 converter missing; run make setup" >&2; exit 1)
-	$(CURDIR)/tools/python $(UF2CONV) -c -f 0xADA52840 \
+	$(CURDIR)/tools/python $(UF2CONV) -c -f $(UF2_FAMILY_ID) \
 		-o $(BUILD_DIR)/artifacts/steam-controller-bridge-xiao-nrf52840.uf2 \
 		$(BUILD_DIR)/xiao-nrf52840.ino.hex
 	cp $(BUILD_DIR)/xiao-nrf52840.ino.zip \
@@ -60,6 +61,7 @@ artifacts: build
 		--hex $(BUILD_DIR)/xiao-nrf52840.ino.hex \
 		--uf2 $(BUILD_DIR)/artifacts/steam-controller-bridge-xiao-nrf52840.uf2 \
 		--nm $(NM) --objdump $(OBJDUMP) \
+		--family-id $(UF2_FAMILY_ID) \
 		--version-header $(CURDIR)/src/firmware_version.h
 
 clean:

@@ -146,5 +146,10 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (OSError, subprocess.CalledProcessError, ValueError) as error:
-        print(f"macOS application build failed: {error}", file=sys.stderr)
+        message = f"macOS application build failed: {error}"
+        # Captured stderr is otherwise lost with the CalledProcessError.
+        captured = getattr(error, "stderr", None)
+        if captured:
+            message = f"{message}\n{captured.strip()}"
+        print(message, file=sys.stderr)
         raise SystemExit(1)

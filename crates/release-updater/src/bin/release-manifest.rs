@@ -206,9 +206,14 @@ fn parse_firmware_revision_source(source: &str) -> Result<u16, String> {
     let matches = source
         .lines()
         .filter_map(|line| line.trim().strip_prefix(marker))
-        .map(|value| value.trim_end_matches(';').parse::<u16>())
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
+        .map(|value| {
+            value
+                .strip_suffix(';')
+                .ok_or("firmware revision declaration must end with one semicolon")?
+                .parse::<u16>()
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     match matches.as_slice() {
         [revision] => Ok(*revision),
         _ => Err("firmware header must define kFirmwareRevision exactly once".to_owned()),
@@ -246,5 +251,12 @@ mod tests {
             "constexpr uint16_t kFirmwareRevision = not_a_number;\n"
         )
         .is_err());
+        for invalid in [
+            "constexpr uint16_t kFirmwareRevision = 7;;\n",
+            "constexpr uint16_t kFirmwareRevision = 7; trailing\n",
+            "constexpr uint16_t kFirmwareRevision = 7;\nconstexpr uint16_t kFirmwareRevision = invalid;\n",
+        ] {
+            assert!(parse_firmware_revision_source(invalid).is_err());
+        }
     }
 }

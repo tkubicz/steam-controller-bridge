@@ -56,7 +56,8 @@ pub struct AppCenterArgs {
     #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "available")]
     pub demo: Option<DemoMode>,
 
-    /// Firmware revision reported by the parent menu process.
+    /// Firmware version, capabilities, and installation receipt state
+    /// reported by the parent menu process.
     #[arg(long, default_value_t = FirmwareDetails::default(), hide = true)]
     pub firmware: FirmwareDetails,
 }

@@ -9,9 +9,7 @@ use ui_theme::{
 };
 
 use super::{Activity, AppCenter, CatalogStatus, StatusPlacement, StatusTone};
-use crate::app_center_protocol::{
-    FirmwareInstallStatus, FirmwareReceiptSource, FirmwareReceiptStatus, FirmwareStatus,
-};
+use crate::app_center_protocol::{FirmwareInstallStatus, FirmwareReceiptSource, FirmwareStatus};
 use crate::window_ui::{full_width_card, render_release_notes};
 
 const UF2_DISCONNECT_NOTICE: &str = "During installation, the temporary XIAO UF2 drive disconnects automatically. macOS may show a harmless \"Disk Not Ejected Properly\" notification even when verification succeeds.";
@@ -198,7 +196,7 @@ impl AppCenter {
                 status_callout(
                     ui,
                     MUTED_TEXT,
-                    "Firmware is newer than stable",
+                    &self.firmware_newer_title(),
                     "Downgrading the connected board is disabled.",
                 );
             } else if release_state == FirmwareReleaseState::Current {
@@ -206,7 +204,7 @@ impl AppCenter {
                     ui,
                     SUCCESS,
                     "Firmware is up to date",
-                    "The connected board reports the latest signed revision.",
+                    &self.firmware_current_message(),
                 );
             } else {
                 status_callout(
@@ -233,7 +231,7 @@ impl AppCenter {
         show_reinstall: bool,
     ) {
         ui.add_space(12.0);
-        firmware_receipt_callout(ui, self.firmware.install);
+        firmware_receipt_callout(ui, self.firmware.version, self.firmware.install);
         if show_reinstall {
             ui.add_space(12.0);
             if firmware_reinstall_action(ui, self.operation_available()).clicked() {
@@ -298,21 +296,40 @@ impl AppCenter {
     }
 }
 
-fn firmware_receipt_callout(ui: &mut egui::Ui, install: FirmwareInstallStatus) {
+fn firmware_receipt_callout(
+    ui: &mut egui::Ui,
+    version: FirmwareStatus,
+    install: FirmwareInstallStatus,
+) {
     let colour = match install {
         FirmwareInstallStatus::Unsupported => MUTED_TEXT,
         FirmwareInstallStatus::Pending | FirmwareInstallStatus::Invalid => DANGER,
         FirmwareInstallStatus::Recorded(_) => SUCCESS,
     };
-    let (title, body) = firmware_receipt_copy(install);
+    let (title, body) = firmware_receipt_copy(version, install);
     status_callout(ui, colour, &title, &body);
 }
 
-fn firmware_receipt_copy(install: FirmwareInstallStatus) -> (String, String) {
+fn firmware_receipt_copy(
+    version: FirmwareStatus,
+    install: FirmwareInstallStatus,
+) -> (String, String) {
     match install {
+        // `Unsupported` is also the pre-handshake and no-device default, so
+        // only a reported revision justifies a claim about the firmware.
         FirmwareInstallStatus::Unsupported => (
             "Installation date unavailable".to_owned(),
-            "Firmware revision 1 does not support installation receipts.".to_owned(),
+            match version {
+                FirmwareStatus::Reported(1) => {
+                    "Firmware revision 1 does not support installation receipts.".to_owned()
+                }
+                FirmwareStatus::Reported(revision) => format!(
+                    "Firmware revision {revision} did not report installation receipt support."
+                ),
+                _ => {
+                    "The connected board has not reported installation receipt support.".to_owned()
+                }
+            },
         ),
         FirmwareInstallStatus::Pending => (
             "Installation verification pending".to_owned(),
@@ -334,7 +351,7 @@ fn firmware_receipt_copy(install: FirmwareInstallStatus) -> (String, String) {
             };
             (
                 title,
-                format!("Installation ID {}", format_install_id(receipt)),
+                format!("Installation ID {}", format_install_id(receipt.install_id)),
             )
         }
     }
@@ -354,9 +371,9 @@ fn format_install_time(installed_at: u64) -> String {
         )
 }
 
-fn format_install_id(receipt: FirmwareReceiptStatus) -> String {
+fn format_install_id(install_id: [u8; 16]) -> String {
     let mut id = String::with_capacity(32);
-    for byte in receipt.install_id {
+    for byte in install_id {
         write!(&mut id, "{byte:02x}").expect("writing to a String cannot fail");
     }
     id
@@ -509,19 +526,22 @@ fn firmware_reinstall_action(ui: &mut egui::Ui, enabled: bool) -> egui::Response
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_center_protocol::FirmwareReceiptStatus;
 
     #[test]
     fn receipt_copy_distinguishes_all_installation_states() {
+        let legacy = FirmwareStatus::Reported(1);
+        let current = FirmwareStatus::Reported(2);
         assert_eq!(
-            firmware_receipt_copy(FirmwareInstallStatus::Unsupported).0,
+            firmware_receipt_copy(legacy, FirmwareInstallStatus::Unsupported).0,
             "Installation date unavailable"
         );
         assert_eq!(
-            firmware_receipt_copy(FirmwareInstallStatus::Pending).0,
+            firmware_receipt_copy(current, FirmwareInstallStatus::Pending).0,
             "Installation verification pending"
         );
         assert_eq!(
-            firmware_receipt_copy(FirmwareInstallStatus::Invalid).0,
+            firmware_receipt_copy(current, FirmwareInstallStatus::Invalid).0,
             "Installation receipt is invalid"
         );
 
@@ -531,19 +551,46 @@ mod tests {
             source: FirmwareReceiptSource::AppCenter,
         };
         let (app_center_title, installation_id) =
-            firmware_receipt_copy(FirmwareInstallStatus::Recorded(receipt));
+            firmware_receipt_copy(current, FirmwareInstallStatus::Recorded(receipt));
         assert!(app_center_title.starts_with("Installed and verified "));
         assert_eq!(
             installation_id,
             "Installation ID a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
         );
 
-        let (first_observed_title, _) =
-            firmware_receipt_copy(FirmwareInstallStatus::Recorded(FirmwareReceiptStatus {
+        let (first_observed_title, _) = firmware_receipt_copy(
+            current,
+            FirmwareInstallStatus::Recorded(FirmwareReceiptStatus {
                 source: FirmwareReceiptSource::FirstObserved,
                 ..receipt
-            }));
+            }),
+        );
         assert!(first_observed_title.starts_with("First observed after flashing "));
+    }
+
+    #[test]
+    fn receipt_copy_does_not_invent_a_firmware_revision() {
+        let (_, reported_body) = firmware_receipt_copy(
+            FirmwareStatus::Reported(1),
+            FirmwareInstallStatus::Unsupported,
+        );
+        assert!(reported_body.contains("revision 1"));
+        let (_, newer_body) = firmware_receipt_copy(
+            FirmwareStatus::Reported(2),
+            FirmwareInstallStatus::Unsupported,
+        );
+        assert!(newer_body.contains("revision 2"));
+        assert!(!newer_body.contains("revision 1"));
+        for version in [
+            FirmwareStatus::Pending,
+            FirmwareStatus::Unreported,
+            FirmwareStatus::Malformed,
+            FirmwareStatus::UnsupportedFormat(2),
+        ] {
+            let (title, body) = firmware_receipt_copy(version, FirmwareInstallStatus::Unsupported);
+            assert_eq!(title, "Installation date unavailable");
+            assert!(!body.contains("revision 1"), "misleading copy: {body}");
+        }
     }
 
     #[test]

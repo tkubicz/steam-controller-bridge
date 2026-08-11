@@ -19,7 +19,7 @@ use release_updater::{
 };
 use semver::Version;
 
-pub const CHECK_INTERVAL: Duration = Duration::from_hours(24);
+const CHECK_INTERVAL: Duration = Duration::from_hours(24);
 #[cfg(debug_assertions)]
 const LOCAL_UPDATE_DIRECTORY_ENV: &str = "SC_BRIDGE_LOCAL_UPDATE_DIR";
 #[cfg(debug_assertions)]

@@ -294,9 +294,11 @@ class FlashReceiptWriter final : public scbridge::ReceiptWordWriter {
   bool write_word(size_t page_offset, uint32_t value) override {
     const uintptr_t page =
         reinterpret_cast<uintptr_t>(&scbridge::kInstallReceiptPage);
-    auto* destination = reinterpret_cast<uint32_t*>(page + page_offset);
-    const volatile auto* observed =
-        reinterpret_cast<volatile uint32_t*>(destination);
+    // Volatile keeps the flash store ordered against the NVMC register
+    // accesses instead of relying on the readback to pin it.
+    auto* destination =
+        reinterpret_cast<volatile uint32_t*>(page + page_offset);
+    const volatile uint32_t* observed = destination;
     if (*observed == value) {
       return true;
     }

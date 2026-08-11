@@ -155,7 +155,12 @@ void BridgeSession::on_frame(const Frame& frame, uint32_t now_ms) {
       begin_uf2_bootloader(frame);
       break;
     case MessageType::RecordInstallReceipt:
-      if (!uf2_bootloader_requested_) {
+      if (uf2_bootloader_requested_) {
+        // Mirror begin_uf2_bootloader: the host learns the transition is in
+        // progress instead of waiting for a response timeout.
+        send_error(ControlErrorCode::Uf2TransitionBusy,
+                   read_u32(frame.payload));
+      } else {
         record_install_receipt(frame);
       }
       break;
@@ -406,22 +411,23 @@ void BridgeSession::service_install_receipt() {
     return;
   }
   InstallReceiptStatus status = sink_.install_receipt();
+  if (status.state == InstallReceiptState::Invalid) {
+    // Nothing was written; an unusable marker page is a rejection, not a
+    // readback mismatch.
+    send_install_receipt_error(ControlErrorCode::InstallReceiptRejected);
+    return;
+  }
   if (status.state == InstallReceiptState::Pending) {
     if (!sink_.record_install_receipt(requested_install_receipt_)) {
-      if (send_error(ControlErrorCode::InstallReceiptRejected,
-                     install_receipt_request_id_)) {
-        install_receipt_requested_ = false;
-      }
+      send_install_receipt_error(ControlErrorCode::InstallReceiptRejected);
       return;
     }
     status = sink_.install_receipt();
   }
   if (status.state != InstallReceiptState::Recorded ||
       !(status.receipt == requested_install_receipt_)) {
-    if (send_error(ControlErrorCode::InstallReceiptReadbackMismatch,
-                   install_receipt_request_id_)) {
-      install_receipt_requested_ = false;
-    }
+    send_install_receipt_error(
+        ControlErrorCode::InstallReceiptReadbackMismatch);
     return;
   }
   if (send_install_receipt_recorded(install_receipt_request_id_,
@@ -439,6 +445,12 @@ bool BridgeSession::send_install_receipt_recorded(
   payload[28] = receipt.source;
   return send_message(MessageType::InstallReceiptRecorded, payload,
                       sizeof(payload));
+}
+
+void BridgeSession::send_install_receipt_error(ControlErrorCode error) {
+  if (send_error(error, install_receipt_request_id_)) {
+    install_receipt_requested_ = false;
+  }
 }
 
 bool BridgeSession::send_error(ControlErrorCode error,
