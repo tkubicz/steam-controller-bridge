@@ -142,8 +142,8 @@ pub(crate) const FACE_BUTTON_LAYOUT: [(Control, [f32; 2]); 4] = [
 /// The two small buttons either side of the Steam button.
 ///
 /// `OPTION_BUTTONS[0]` is on the image's left and `[1]` on its right. The
-/// source-bit names are reversed against the physical buttons — see the
-/// `Control` docs and `docs/MAPPING.md` — so this table is keyed by the
+/// source-bit names are reversed against the physical buttons - see the
+/// `Control` docs and `docs/MAPPING.md` - so this table is keyed by the
 /// physical button, not by the report bit.
 pub(crate) const OPTION_LAYOUT: [(Control, [f32; 2]); 2] = [
     (Control::View, OPTION_BUTTONS[0]),
@@ -488,7 +488,7 @@ pub fn locus_point(view: egui::Rect, control: Control, locus: [f32; 2]) -> egui:
 ///
 /// A trackpad is square, so per-axis clamping is right for it. A stick well is
 /// round, and there the direction has to be preserved while the magnitude is
-/// capped — otherwise a full diagonal lands `sqrt(2)` out and draws outside the
+/// capped - otherwise a full diagonal lands `sqrt(2)` out and draws outside the
 /// well it belongs to.
 #[must_use]
 pub fn clamp_to_unit_circle(x: f32, y: f32) -> (f32, f32) {

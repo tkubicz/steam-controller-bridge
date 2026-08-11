@@ -944,7 +944,7 @@ fn rebaseline_placement(state: &mut PadMotionState, sample: PadSample) {
 /// semantics. Escapes forward only the radial excess beyond the escaped
 /// radius (rescaled along the accumulated direction, like the stick dead
 /// zones), and the pass-through states re-anchor whenever a stop-window
-/// elapses without net radial progress — oscillating press-noise nets out to
+/// elapses without net radial progress - oscillating press-noise nets out to
 /// nothing, so it can never hold the filter open the way it defeated the
 /// previous per-crossing progress counter.
 fn filter_pad_motion(

@@ -134,7 +134,7 @@ impl DesktopBindingsWorker {
                     .push_control(&self.outputs, DesktopWorkerMessage::Shutdown(ack), true)
             {
                 // A full mailbox means the worker is not draining. With no
-                // Shutdown queued, a join could never be satisfied — detach,
+                // Shutdown queued, a join could never be satisfied - detach,
                 // exactly as the timeout path below does.
                 self.outputs.discard_feedback();
                 publish_desktop_worker_failure(&self.status, "desktop-input worker is unavailable");
@@ -221,9 +221,9 @@ pub(crate) fn run_desktop_bindings_worker(
                 }
                 // Control acknowledgements are the caller's licence to read
                 // the shared status, so each arm publishes its status effects
-                // before sending the ack. Acking first let a caller — the
+                // before sending the ack. Acking first let a caller - the
                 // supervisor's post-disconnect read, or a test using an ack as
-                // a barrier — observe the pre-command status and even write it
+                // a barrier - observe the pre-command status and even write it
                 // back over the newer one.
                 DesktopWorkerMessage::ReplaceProfile { profile, ack } => {
                     let result = runtime.replace_profile(profile.map(|profile| *profile));

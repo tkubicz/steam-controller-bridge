@@ -1,9 +1,9 @@
 //! Parent-side lifecycle for the profile-wheel overlay process.
 //!
 //! There is one overlay process per wheel and none at rest: `start` is called
-//! when a hold reaches [`profile_picker::PickerEvent::Preparing`] — halfway
+//! when a hold reaches [`profile_picker::PickerEvent::Preparing`] - halfway
 //! through, so the window and GL context are ready by the time the wheel is
-//! wanted — and `stop` kills the process on every close. A window on the
+//! wanted - and `stop` kills the process on every close. A window on the
 //! game's Space is not free to the compositor, and the wheel is up for a few
 //! seconds at a time, so it does not get to exist the rest of the time.
 
@@ -25,7 +25,7 @@ const RELAUNCH_BACKOFF: Duration = Duration::from_secs(5);
 
 /// Lines waiting for the child to read them. The wheel produces messages at
 /// human rate, so this is only reachable with a child wedged before its stdin
-/// loop — the case the writer thread exists to keep off the main thread.
+/// loop - the case the writer thread exists to keep off the main thread.
 const WRITER_QUEUE_CAPACITY: usize = 64;
 
 /// Overlay diagnostics are sparse, but the child is still a separate process

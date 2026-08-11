@@ -206,7 +206,7 @@ struct MenuApp {
     picker_roster_revision: u64,
     /// Monotonic count of roster publish attempts. A revision is spent even by
     /// a publish whose acknowledgement failed, because the runtime may still
-    /// apply it late — reusing the number would let events from that stale
+    /// apply it late - reusing the number would let events from that stale
     /// generation resolve against a newer id list.
     picker_roster_publishes: u64,
     /// The last roster publish failed; retried on the next status poll so a

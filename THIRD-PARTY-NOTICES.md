@@ -13,7 +13,7 @@ cargo deny check licenses
 cargo metadata --format-version 1 --filter-platform aarch64-apple-darwin
 ```
 
-## Embedded fonts — `sc-visualizer` and bindings editor
+## Embedded fonts - `sc-visualizer` and bindings editor
 
 `epaint_default_fonts`, reached through `eframe` → `egui` → `epaint`, embeds font
 binaries directly into the `sc-visualizer` and `sc-bridge-menu` executables. The crate as a whole is
@@ -41,13 +41,13 @@ which is the purpose of this file. The menu binary uses these fonts only in its
 opt-in desktop bindings. It is used unmodified under the MIT license. Source:
 <https://github.com/enigo-rs/enigo>
 
-## `serialport` — Mozilla Public License 2.0
+## `serialport` - Mozilla Public License 2.0
 
 `serialport` provides the host side of the USB CDC link and is linked into every
 binary in this workspace.
 
 - Source: <https://github.com/serialport/serialport-rs>
-- License: MPL-2.0 — <https://www.mozilla.org/MPL/2.0/>
+- License: MPL-2.0 - <https://www.mozilla.org/MPL/2.0/>
 
 MPL-2.0 is file-scoped copyleft. Combining it with MIT-licensed code in a larger
 work is permitted and does not change this project's license. The obligation
@@ -65,8 +65,8 @@ AGPL-3.0; this project is MIT and deliberately shares no code with it. See
 ## USB identity
 
 The firmware enumerates with the Xbox 360 compatibility VID/PID `045e:028e`,
-which belongs to Microsoft. This is a deliberate compatibility choice — Apple's
-built-in driver will not publish a generic HID gamepad to GameController — and is
+which belongs to Microsoft. This is a deliberate compatibility choice - Apple's
+built-in driver will not publish a generic HID gamepad to GameController - and is
 not a claim of ownership or affiliation. A distributable product needs an owned
 or licensed USB identity. See the README's compatibility note.
 

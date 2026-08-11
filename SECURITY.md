@@ -17,7 +17,7 @@ rather than opening a public issue. Expect an initial response within a week.
 
 Useful details: the version or commit, your macOS version, how the controller was
 connected, and the smallest reproduction you have. Diagnostics from the menu-bar
-app are safe to include — hardware serials are masked. `sc-probe capture` files
+app are safe to include - hardware serials are masked. `sc-probe capture` files
 are not: they deliberately keep the full serial so recordings stay replayable,
 and on Bluetooth that value is the controller's MAC address.
 
@@ -38,7 +38,7 @@ are the areas most worth scrutiny.
 - A way to leave the controller with desktop keyboard and pointer input
   suppressed after the bridge exits.
 - Parsing flaws in the serial protocol, the Steam Controller report decoder, or
-  the firmware frame parser — including anything reachable from malformed input
+  the firmware frame parser - including anything reachable from malformed input
   that panics, hangs, or corrupts state.
 - Leaking hardware identifiers through a path documented as masked: status
   output, logs, or **Copy Diagnostics**.
@@ -55,6 +55,6 @@ are the areas most worth scrutiny.
   Both are inherent to how macOS arbitrates HID access.
 - Full serials inside `sc-probe capture` and recording files. That is documented
   behaviour, needed for replay.
-- Advisories affecting dependencies that no shipped macOS binary links — the
+- Advisories affecting dependencies that no shipped macOS binary links - the
   Wayland stack behind `eframe`/`winit` and the GTK3 tray backend behind
   `tray-icon`. `deny.toml` scopes the audit to macOS for this reason.

@@ -92,11 +92,3 @@ Hardware command sequences and cautions are maintained in
 [USER_GUIDE.md](USER_GUIDE.md), [BRIDGE.md](BRIDGE.md), the
 [firmware README](../firmware/xiao-nrf52840/README.md), and
 [LIZARD_MOUSE_LAB.md](LIZARD_MOUSE_LAB.md).
-
-## Evidence records
-
-Historical observations belong in dated evidence records so they are not
-mistaken for current qualification. See
-[July 2026 development hardware](testing-evidence/2026-07-hardware.md). A release
-candidate needs a new record when hardware, firmware, packaging, or acceptance
-scope changes.

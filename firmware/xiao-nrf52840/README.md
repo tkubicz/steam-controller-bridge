@@ -83,7 +83,7 @@ loop stalls. The host refreshes unchanged active states every 25 ms, leaving
 margin inside the firmware's 100 ms data watchdog.
 
 The firmware tracks the last HID report successfully queued on the USB endpoint
-and suppresses any later report — forced safety neutrals included — whose
+and suppresses any later report - forced safety neutrals included - whose
 content matches it. Serial refreshes feed the 100 ms lease without generating
 USB input, and a host-side CDC teardown (for example macOS closing the port on
 system-sleep entry) produces no gamepad activity after neutral has already been
@@ -110,7 +110,7 @@ predate the message ignore it, so mixed pairings stay compatible.
 Bump `kFirmwareRevision` in the same commit as any behavior-affecting firmware
 change. Raise the host's `MINIMUM_FIRMWARE_REVISION`
 (`crates/bridge-output/src/serial.rs`) only when the bridge depends on the new
-behavior — that constant is what turns an older revision into the menu bar's
+behavior - that constant is what turns an older revision into the menu bar's
 "Update recommended" nudge.
 
 The active-low RGB LED indicates:

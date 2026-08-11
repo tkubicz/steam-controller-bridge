@@ -221,7 +221,7 @@ fn make_replay_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
 mod tests {
     use super::*;
 
-    /// Parses, validates, then maps to a runtime config — the whole path a
+    /// Parses, validates, then maps to a runtime config - the whole path a
     /// real invocation takes, so these stay end-to-end rather than testing the
     /// mapping against a hand-built `Cli`.
     fn live(values: &[&str]) -> Result<RuntimeConfig, String> {

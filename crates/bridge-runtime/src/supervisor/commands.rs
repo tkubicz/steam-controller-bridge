@@ -223,7 +223,7 @@ impl Supervisor {
                 }
                 RuntimeCommand::SetPickerConfig(config, ack) => {
                     self.config.profile_picker = config.map(PickerConfig::sanitized);
-                    // A reconfigured wheel is a closed wheel — and a cancelled
+                    // A reconfigured wheel is a closed wheel - and a cancelled
                     // hold counts too, or the overlay spawned at `Preparing`
                     // would outlive the hold it was spawned for. The picker
                     // latches whatever is still held, so the suppression it

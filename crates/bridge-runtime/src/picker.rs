@@ -25,8 +25,8 @@ impl PickerRuntime {
         }
     }
 
-    /// Replaces the configuration. Returns whether a wheel — open, or a hold
-    /// partway toward one — was cancelled, which the caller must answer by
+    /// Replaces the configuration. Returns whether a wheel - open, or a hold
+    /// partway toward one - was cancelled, which the caller must answer by
     /// dismissing the overlay.
     ///
     /// The picker itself latches whatever consumed controls are still held, so

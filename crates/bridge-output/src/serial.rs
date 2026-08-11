@@ -97,7 +97,7 @@ pub enum FirmwareVersion {
     /// The firmware's hand-maintained monotonic revision.
     Reported(u16),
     /// A device-info report arrived in a format this build does not
-    /// understand — firmware newer than the host, never a firmware-update
+    /// understand - firmware newer than the host, never a firmware-update
     /// recommendation.
     UnsupportedFormat(u8),
     /// A report used the current format but omitted required fields.

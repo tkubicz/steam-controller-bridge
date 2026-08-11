@@ -81,7 +81,7 @@ impl Picker {
     /// No event is returned, so the caller must hide the overlay itself. Unlike
     /// [`Picker::close`], reports keep arriving afterwards: consumed controls
     /// that are still physically held are latched, so the press that was aimed
-    /// at the wheel — or the hold that was arming it — cannot reach the game as
+    /// at the wheel - or the hold that was arming it - cannot reach the game as
     /// a fresh press the moment the wheel ceases to exist. The latch drains as
     /// usual on the following updates, and [`Picker::suppression`] must keep
     /// being applied for that to happen.
@@ -156,7 +156,7 @@ impl Picker {
     /// the hold starts; [`PickerEvent::TriggerTapped`] tells the host when to
     /// deliver the binding after all. Without the second, dismissing the wheel
     /// with a second Quick Access press would hand the still-held trigger back
-    /// to the bindings engine as a fresh press — firing the very binding the
+    /// to the bindings engine as a fresh press - firing the very binding the
     /// wheel exists to protect.
     #[must_use]
     pub fn mask_trigger(&self, buttons: SteamButtons) -> SteamButtons {
@@ -316,7 +316,7 @@ impl Picker {
     /// selection where it is.
     ///
     /// Either stick works, but a stick only gains control by crossing
-    /// [`PickerConfig::engage_dead_zone`] — whether from rest or by taking over
+    /// [`PickerConfig::engage_dead_zone`] - whether from rest or by taking over
     /// from the other stick. The steering stick keeps control down to
     /// [`PickerConfig::track_dead_zone`], and a thumb resting on the other
     /// stick inside that hysteresis band can never steal the wheel.

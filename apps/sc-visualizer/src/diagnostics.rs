@@ -38,11 +38,11 @@ impl Visualizer {
             diagnostic_cell(ui, "Reports processed", self.report_count);
             match &self.source {
                 Some(state) => diagnostic_cell(ui, "Sequence", state.sequence),
-                None => diagnostic_cell(ui, "Sequence", "—"),
+                None => diagnostic_cell(ui, "Sequence", "-"),
             }
             match self.raw_report_id {
                 Some(id) => diagnostic_cell(ui, "Report ID", format_args!("0x{id:02x}")),
-                None => diagnostic_cell(ui, "Report ID", "—"),
+                None => diagnostic_cell(ui, "Report ID", "-"),
             }
             diagnostic_cell(ui, "Report bytes", self.raw.len());
             diagnostic_cell(ui, "Decode failures", self.decode_failures);

@@ -22,10 +22,10 @@ Every multi-byte field is little-endian. HIDAPI returns the report ID as the fir
 
 Direct Bluetooth was observed on macOS as `28de:1303`, transport `Bluetooth`,
 usage `ff00:0001`, interface `-1`. It emits the same 46-byte `0x45` state layout
-at approximately 67–68 Hz and compatible 15-byte `0x43` battery reports. The
+at approximately 67-68 Hz and compatible 15-byte `0x43` battery reports. The
 anonymized captured state and battery packets are committed as decoder golden
 vectors. The official Puck remains `28de:1304`, transport `USB`, usage
-`ff00:0001`, interfaces 2–5, and has been observed using extended `0x42` at
+`ff00:0001`, interfaces 2-5, and has been observed using extended `0x42` at
 approximately 250 Hz.
 
 ## State report layout
@@ -125,7 +125,7 @@ decoder only observes this report; it never injects or replays its button bits.
 ## Lizard-mode suppression
 
 The exact write allowlist contains the official Proteus Puck (`28de:1304`, USB,
-vendor usage `ff00:0001`, interfaces 2–5) and direct Bluetooth (`28de:1303`,
+vendor usage `ff00:0001`, interfaces 2-5) and direct Bluetooth (`28de:1303`,
 Bluetooth, vendor usage `ff00:0001`, interface `-1`). macOS also receives the
 controller's native `0x40` mouse and `0x41` keyboard reports through sibling
 HID collections, so discarding those reports in the decoder cannot prevent

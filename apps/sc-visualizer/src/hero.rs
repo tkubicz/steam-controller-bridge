@@ -115,7 +115,7 @@ pub(crate) fn control_states(
         normalize_axis(state.right_pad_y),
     ];
     // Every touch comes from `held`, not from the mirrored struct fields. The
-    // decoder sets `left_pad_touched` from the same bit, so the two agree — but
+    // decoder sets `left_pad_touched` from the same bit, so the two agree - but
     // taking one source keeps sticks and pads consistent, and keeps working if
     // `held` is ever latched across reports to catch a sub-frame tap.
     let left_pad_touched = held.contains(SteamButton::LeftPadTouch);

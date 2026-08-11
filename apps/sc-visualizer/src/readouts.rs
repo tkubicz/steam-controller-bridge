@@ -117,7 +117,7 @@ pub(crate) fn source_state_ui(
     // Absence of a ring has to mean "no dead zone here", not "not drawn".
     ui.label(
         egui::RichText::new(format!(
-            "Inner ring: radial dead zone the mapper applies — {:.3} on the left stick, \
+            "Inner ring: radial dead zone the mapper applies - {:.3} on the left stick, \
              {:.3} on the {}. No ring means none is applied to that control. \
              Pad coordinates are touch-gated; an untouched pad maps to neutral.",
             dead_zones.left_stick,
@@ -149,8 +149,8 @@ pub(crate) fn source_state_ui(
 
 /// The Steam buttons, grouped as the controller is laid out.
 ///
-/// Report-bit order interleaves the hands — it puts `R-grip Touch` next to
-/// `L-grip Touch` — so the two hands are their own sections and get drawn as
+/// Report-bit order interleaves the hands - it puts `R-grip Touch` next to
+/// `L-grip Touch` - so the two hands are their own sections and get drawn as
 /// two columns, left on the left. `sections_cover_every_steam_button` proves
 /// nothing is lost in the regrouping.
 const STEAM_FACE: &[(SteamButton, &str)] = &[
@@ -274,7 +274,7 @@ fn imu(ui: &mut egui::Ui, state: &SteamControllerState) {
     };
     let accel = state.acceleration;
     ui.label(
-        egui::RichText::new("IMU — raw counts, scaling unverified")
+        egui::RichText::new("IMU - raw counts, scaling unverified")
             .small()
             .color(MUTED_TEXT),
     );
@@ -324,8 +324,8 @@ fn meter(ui: &mut egui::Ui, label: &str, value: i16) {
 /// Sections of the button list, so the grid reads as the controller rather
 /// than as report-bit order.
 ///
-/// Bit order interleaves the hands — it puts `R-grip Touch` next to
-/// `L-grip Touch` — which is why the left-hand and right-hand groups are drawn
+/// Bit order interleaves the hands - it puts `R-grip Touch` next to
+/// `L-grip Touch` - which is why the left-hand and right-hand groups are drawn
 /// as two columns with the left one on the left.
 struct Sections<T: 'static> {
     /// Drawn full width, above the two hands.
@@ -489,7 +489,7 @@ fn crosshair(ui: &mut egui::Ui, label: &str, reading: Crosshair, value: &str) {
         // A round control's raw magnitude can exceed 1: each axis caps at
         // 32767, so a full diagonal reaches sqrt(2). The dot has to be brought
         // back inside the well to be drawn, and that would make "past full
-        // deflection" look identical to "exactly full" — so the bound itself
+        // deflection" look identical to "exactly full" - so the bound itself
         // reports the clipping instead of hiding it. The mapper discards the
         // same excess (`magnitude.min(1.0)`), so this marks real lost range.
         let saturated = bounds == Bounds::Round && x.hypot(y) > 1.0;

@@ -276,7 +276,7 @@ impl eframe::App for ProfileOverlay {
             self.log_native_window = wheel;
             if wheel {
                 // The diagnostics below run a frame late, and only stdin
-                // traffic causes frames — so ask for one, or a wheel that is
+                // traffic causes frames - so ask for one, or a wheel that is
                 // opened and immediately committed logs nothing.
                 ui.ctx().request_repaint();
             }

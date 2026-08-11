@@ -298,8 +298,8 @@ fn replacing_the_configuration_closes_the_wheel() {
     assert_eq!(picker.config().hold, Duration::from_secs(3));
 
     // The trigger was still physically down when the configuration change
-    // closed the wheel, so it stays withheld — from the game and from the
-    // bindings engine alike — until the user lets go. Reports keep arriving
+    // closed the wheel, so it stays withheld - from the game and from the
+    // bindings engine alike - until the user lets go. Reports keep arriving
     // here, unlike a forced close, so the latch can drain normally.
     let Some(OutputSuppression::Buttons(withheld)) = picker.suppression() else {
         panic!("a still-held trigger must stay withheld across a config change");
@@ -319,7 +319,7 @@ fn replacing_the_configuration_closes_the_wheel() {
 fn a_config_change_mid_hold_swallows_the_withheld_press() {
     // Halfway through a hold the trigger has been masked from the bindings
     // engine the whole time. The configuration change abandons the hold
-    // without an event, so the press must stay swallowed until release —
+    // without an event, so the press must stay swallowed until release -
     // unmasking it here would hand the engine a fresh down edge instead.
     let mut picker = Picker::new(PickerConfig::default());
     picker.update(ms(0), &input(&[]), ROSTER);
@@ -377,7 +377,7 @@ fn dismissing_with_the_trigger_keeps_its_binding_masked_until_release() {
 fn a_resting_thumb_inside_the_hysteresis_band_cannot_steal_the_wheel() {
     // Regression: with one shared steering flag, a stick that never crossed
     // the engage dead zone could take over the moment it was pushed a hair
-    // further than the stick that did — flipping the selection to the
+    // further than the stick that did - flipping the selection to the
     // opposite side of the wheel because of a resting thumb.
     let mut picker = opened(ROSTER);
     picker.update(
