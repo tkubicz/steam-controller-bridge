@@ -21,6 +21,18 @@ fn test_view() -> egui::Rect {
     ))
 }
 
+/// Run a headless frame and explicitly discard texture uploads that a real
+/// renderer would apply. egui 0.36 treats dropping them silently as a backend
+/// integration error, including in tests.
+fn run_headless_ui(
+    ctx: &egui::Context,
+    add_contents: impl FnMut(&mut egui::Ui),
+) -> egui::FullOutput {
+    let mut output = ctx.run_ui(egui::RawInput::default(), add_contents);
+    output.textures_delta.clear();
+    output
+}
+
 /// Ray casting, used to check that no artwork escapes the silhouette.
 fn point_in_polygon(polygon: &[[f32; 2]], point: [f32; 2]) -> bool {
     let mut inside = false;
@@ -578,7 +590,7 @@ fn analog_kinds_match_the_controls_that_have_sensors() {
 fn active_differs_from_idle_for_every_control() {
     let ctx = egui::Context::default();
     let render = |state: ControlState| {
-        ctx.run_ui(egui::RawInput::default(), |ui| {
+        run_headless_ui(&ctx, |ui| {
             let view = test_view();
             let painter = ui.painter_at(egui::Rect::EVERYTHING);
             let lookup = |control: Control| {
@@ -611,7 +623,7 @@ fn active_differs_from_idle_for_every_control() {
 fn a_touched_pad_paints_differently_from_an_untouched_one() {
     let ctx = egui::Context::default();
     let render = |analog: Option<Analog>| {
-        ctx.run_ui(egui::RawInput::default(), |ui| {
+        run_headless_ui(&ctx, |ui| {
             let view = test_view();
             let painter = ui.painter_at(egui::Rect::EVERYTHING);
             let lookup = |control: Control| {
@@ -645,7 +657,7 @@ fn a_touched_pad_paints_differently_from_an_untouched_one() {
 fn a_pulled_trigger_paints_more_than_a_resting_one() {
     let ctx = egui::Context::default();
     let render = |travel: f32| {
-        ctx.run_ui(egui::RawInput::default(), |ui| {
+        run_headless_ui(&ctx, |ui| {
             let view = test_view();
             let painter = ui.painter_at(egui::Rect::EVERYTHING);
             let lookup = |control: Control| {

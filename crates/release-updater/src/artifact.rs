@@ -6,6 +6,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::ArtifactDescriptor;
 
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
 #[derive(Debug)]
 pub enum ArtifactError {
     Io(io::Error),
@@ -44,7 +46,13 @@ pub fn sha256_hex(path: &Path) -> Result<String, ArtifactError> {
         }
         digest.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    let digest = digest.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(HEX_DIGITS[usize::from(byte >> 4)] as char);
+        encoded.push(HEX_DIGITS[usize::from(byte & 0x0f)] as char);
+    }
+    Ok(encoded)
 }
 
 pub fn verify_artifact(path: &Path, descriptor: &ArtifactDescriptor) -> Result<(), ArtifactError> {
