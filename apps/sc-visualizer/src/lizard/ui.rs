@@ -279,7 +279,7 @@ impl LabUi {
                     .color(TEXT),
                 );
                 ui.label(format!(
-                    "Waiting up to {timeout_secs} seconds — approximately {remaining} seconds remaining."
+                    "Waiting up to {timeout_secs} seconds - approximately {remaining} seconds remaining."
                 ));
             } else {
                 ui.label("Auto-detecting the active controller and preparing preflight…");
@@ -297,7 +297,7 @@ impl LabUi {
         ui.separator();
         let trial = self.trials[self.trial_index].clone();
         ui.heading(format!(
-            "Trial {} of {} — {}",
+            "Trial {} of {} - {}",
             self.trial_index + 1,
             self.trials.len(),
             trial.title
@@ -464,7 +464,7 @@ impl LabUi {
             None => {
                 ui.colored_label(
                     MUTED_TEXT,
-                    "● Legacy capture — validity metadata unavailable",
+                    "● Legacy capture - validity metadata unavailable",
                 );
             }
         }
@@ -532,21 +532,21 @@ impl LabUi {
                     .analysis
                     .response_latency_us
                     .median
-                    .map_or_else(|| "—".to_owned(), |value| format!("{value} µs"))
+                    .map_or_else(|| "-".to_owned(), |value| format!("{value} µs"))
             ));
             ui.label(format!(
                 "Bridge/reference latency error: {}",
                 results
                     .comparison
                     .latency_error_us
-                    .map_or_else(|| "—".to_owned(), |value| format!("{value:+} µs"))
+                    .map_or_else(|| "-".to_owned(), |value| format!("{value:+} µs"))
             ));
             ui.label(format!(
                 "Angular error: {}",
                 results
                     .comparison
                     .angular_error_degrees
-                    .map_or_else(|| "—".to_owned(), |value| format!("{value:.2}°"))
+                    .map_or_else(|| "-".to_owned(), |value| format!("{value:.2}°"))
             ));
             if let Some(ratio) = results.analysis.raw_to_screen.host_to_raw_ratio {
                 ui.label(format!("Host/raw motion ratio: {ratio:.3}×"));
@@ -611,7 +611,7 @@ impl LabUi {
                     ui.label(
                         stage
                             .bridge_to_reference_ratio
-                            .map_or_else(|| "—".to_owned(), |ratio| format!("{ratio:.3}×")),
+                            .map_or_else(|| "-".to_owned(), |ratio| format!("{ratio:.3}×")),
                     );
                     ui.label(format!("{:.2} px", stage.rms_path_error_pixels));
                     ui.end_row();

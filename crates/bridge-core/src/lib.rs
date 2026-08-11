@@ -74,7 +74,7 @@ pub enum ProcessOutcome {
         mapped: GamepadState,
         /// The mapped state before suppression: what the user is doing with
         /// the controller. Activity tracking reads this, so operating the
-        /// profile wheel — which pins `mapped` at neutral — does not count as
+        /// profile wheel - which pins `mapped` at neutral - does not count as
         /// idle time.
         unsuppressed: GamepadState,
         sent: bool,

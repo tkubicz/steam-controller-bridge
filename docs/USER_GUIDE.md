@@ -16,7 +16,7 @@ The following paths have been verified on development hardware:
   extended `0x42` state reports at about 250 Hz;
 - direct Bluetooth enumerates as `28de:1303`, transport `Bluetooth`, usage
   `ff00:0001`, interface `-1`, and produces 46-byte `0x45` state reports at
-  approximately 67–68 Hz plus compatible `0x43` battery reports;
+  approximately 67-68 Hz plus compatible `0x43` battery reports;
 - the non-Sense XIAO flashes through its serial bootloader and exposes CDC plus
   an Xbox-layout gamepad;
 - macOS binds the gamepad to its built-in `Xbox360Gamepad` driver;
@@ -188,7 +188,7 @@ so reflash the board after updating the project.
 
 The menu bar shows the flashed firmware under "Firmware:". A "⚠ Firmware:
 Update recommended" line means the board runs firmware older than this app
-depends on — including any board that predates version reporting entirely.
+depends on - including any board that predates version reporting entirely.
 The bridge keeps working, but reflash the current UF2 (above, or the matching
 release asset) to pick up firmware-side fixes. "Firmware: Newer than this app"
 means the board was flashed from a newer release than the app and is fine. A
@@ -234,7 +234,7 @@ LED: Puck is white, wired USB-C is green, and Bluetooth is blue. See Valve's
 ### Recommended: official Puck
 
 The Puck is preferred for its approximately 250 Hz report rate and established
-reliability. Bluetooth is supported but was observed at approximately 67–68 Hz.
+reliability. Bluetooth is supported but was observed at approximately 67-68 Hz.
 
 1. Connect the official Puck to the Mac over USB-C.
 2. Start Steam and ensure no game is running.
@@ -420,7 +420,7 @@ The launcher uses Cargo's release profile so source changes are rebuilt when
 needed. Live mode automatically:
 
 - filters controller candidates to the exact Puck identity `28de:1304`, USB,
-  usage `ff00:0001`, interfaces 2–5, or the exact Bluetooth identity
+  usage `ff00:0001`, interfaces 2-5, or the exact Bluetooth identity
   `28de:1303`, Bluetooth, usage `ff00:0001`, interface `-1`;
 - observes candidates without feature writes until exactly one emits a complete
   valid `0x42` or `0x45` controller-state report;
@@ -504,8 +504,8 @@ a store with more than eight profiles.
 
 The wheel is off by default because it takes Quick Access over. Short presses
 still fire whatever Quick Access is bound to. While the wheel is open the game
-sees a fully neutral gamepad — sticks centred, every button released, triggers
-at rest — so choosing a profile does not swing the camera, and a trigger held
+sees a fully neutral gamepad - sticks centred, every button released, triggers
+at rest - so choosing a profile does not swing the camera, and a trigger held
 out of habit stops firing until the wheel closes.
 
 The wheel cannot appear over a game that captures the display exclusively.
@@ -532,8 +532,8 @@ has a configurable 25%-300% base speed, and offers momentum after release;
 speed defaults to 100% and momentum defaults on.
 Each pad's physical click can also be bound to a key chord or mouse button; the
 click fires even when that pad's pointer or scroll function is disabled. While
-a pad is pressed its motion is frozen — pressing a pad physically rolls
-the fingertip, and without the freeze that roll would jerk the pointer — so
+a pad is pressed its motion is frozen - pressing a pad physically rolls
+the fingertip, and without the freeze that roll would jerk the pointer - so
 clicks land reliably anywhere on the pad, including edges and corners. The
 stationary deadzone grows near the rim, where the raw capacitive coordinates
 are noisier, and the freeze engages on finger pressure before the switch
@@ -751,8 +751,8 @@ shasum -a 256 -c SHA256SUMS.txt
 
 ### `sc-probe` reports `not permitted`
 
-Grant Input Monitoring permission to the actual host application—Terminal,
-iTerm, or the application launching the command—then quit and reopen it.
+Grant Input Monitoring permission to the actual host application-Terminal,
+iTerm, or the application launching the command-then quit and reopen it.
 
 ### The controller is listed but no `0x42`/`0x45` reports arrive
 
@@ -821,7 +821,7 @@ failed; close other serial tools and reflash current firmware if needed.
 - In the menu app, use `Copy Diagnostics` or `Open Log Folder` and confirm
   increasing `lizard_refreshes`, zero failures, and a recent refresh age.
 - Verify the selected collection is either `28de:1304`, USB, usage
-  `ff00:0001`, interface 2–5, or `28de:1303`, Bluetooth, usage `ff00:0001`,
+  `ff00:0001`, interface 2-5, or `28de:1303`, Bluetooth, usage `ff00:0001`,
   interface -1, and is producing the active `0x42`/`0x45` stream.
 - Fully quit Steam and close other controller tools.
 - Confirm only one Steam Controller 2 is active.

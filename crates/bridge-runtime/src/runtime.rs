@@ -315,8 +315,8 @@ impl BridgeHandle {
     /// For the frontend's system-sleep hook. The port must be **closed before
     /// the machine sleeps**: serial I/O left in flight across a sleep/wake
     /// transition has panicked macOS's USB CDC driver while the XIAO
-    /// re-enumerated. The bridge stays suspended — regardless of its
-    /// start/stop setting — until [`BridgeHandle::request_resume_from_wake`].
+    /// re-enumerated. The bridge stays suspended - regardless of its
+    /// start/stop setting - until [`BridgeHandle::request_resume_from_wake`].
     ///
     /// # Errors
     /// Returns an error if the runtime thread stops or the teardown fails.

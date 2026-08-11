@@ -19,7 +19,7 @@ mod macos;
 #[cfg(target_os = "macos")]
 mod model;
 // The host side only manages the child process, so it is compiled even
-// without the `overlay` feature — a featureless build's child simply reports
+// without the `overlay` feature - a featureless build's child simply reports
 // that it cannot render and exits, the same degradation the editor gets.
 #[cfg(target_os = "macos")]
 mod overlay_host;

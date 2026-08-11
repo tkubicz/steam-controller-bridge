@@ -1059,7 +1059,7 @@ mod macos {
                 let mut attempt = 1_u32;
                 loop {
                     eprint!(
-                        "\nTrial {}/{} — {}\n{} Press Enter when ready... ",
+                        "\nTrial {}/{} - {}\n{} Press Enter when ready... ",
                         trial_index + 1,
                         trials.len(),
                         trial.title,

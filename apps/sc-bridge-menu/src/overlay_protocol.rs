@@ -3,8 +3,8 @@
 //! The overlay runs as a second process of this same binary because
 //! `eframe::run_native` owns an event loop and the menu app's is already
 //! committed to the status item. The parent writes one JSON object per line to
-//! the child's stdin; the child never writes back. Every decision — what is
-//! selected, what was chosen — is made by the runtime, so the overlay is a pure
+//! the child's stdin; the child never writes back. Every decision - what is
+//! selected, what was chosen - is made by the runtime, so the overlay is a pure
 //! display and needs no input of its own.
 
 use serde::{Deserialize, Serialize};

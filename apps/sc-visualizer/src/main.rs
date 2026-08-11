@@ -458,7 +458,7 @@ impl Visualizer {
             egui::RichText::new(format!(
                 "ID {}, {} bytes",
                 self.raw_report_id
-                    .map_or_else(|| "—".to_owned(), |id| format!("0x{id:02x}")),
+                    .map_or_else(|| "-".to_owned(), |id| format!("0x{id:02x}")),
                 self.raw.len()
             ))
             .color(MUTED_TEXT),

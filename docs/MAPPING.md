@@ -33,7 +33,7 @@ An alternate diagnostic profile can map a touched right trackpad to the generic
 right stick with `RightAxisSource::RightPad`; in that profile, releasing the pad
 centers the axis and a pad click acts as the right-stick button. This is not the
 gameplay default. In that diagnostic profile a desktop right-pad-click binding
-fires alongside the right-stick button — the same host/gamepad concurrency the
+fires alongside the right-stick button - the same host/gamepad concurrency the
 grip and Quick Access bindings already have.
 
 The physical buttons follow Xbox conventions: the left View button is Back and

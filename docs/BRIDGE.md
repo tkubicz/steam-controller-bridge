@@ -22,7 +22,7 @@ are still checked every 500 ms. State transitions are reported only when they
 change.
 
 Controller discovery considers only official `28de:1304` USB, usage
-`ff00:0001`, interface 2–5 Puck collections and the `28de:1303` Bluetooth,
+`ff00:0001`, interface 2-5 Puck collections and the `28de:1303` Bluetooth,
 usage `ff00:0001`, interface -1 collection. It opens candidates by stable HID
 identity and observes them without sending feature reports. A source becomes
 active only after a complete valid `0x42` or `0x45` state report. An idle Puck

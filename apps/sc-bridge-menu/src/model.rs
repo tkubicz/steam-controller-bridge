@@ -17,10 +17,10 @@ impl TrayState {
     #[must_use]
     pub const fn tooltip(self) -> &'static str {
         match self {
-            Self::Off => "Steam Controller Bridge — Off",
-            Self::Waiting => "Steam Controller Bridge — On, waiting",
-            Self::Ready => "Steam Controller Bridge — Controller ready",
-            Self::Error => "Steam Controller Bridge — Action required",
+            Self::Off => "Steam Controller Bridge - Off",
+            Self::Waiting => "Steam Controller Bridge - On, waiting",
+            Self::Ready => "Steam Controller Bridge - Controller ready",
+            Self::Error => "Steam Controller Bridge - Action required",
         }
     }
 }

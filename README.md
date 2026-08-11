@@ -1,426 +1,183 @@
-# Steam Controller Bridge
+<p align="center">
+  <img src="packaging/macos/AppIcon.png" alt="Steam Controller Bridge app icon" width="144" />
+</p>
 
-Use a Steam Controller 2 as a standard USB Xbox gamepad on macOS — without Steam
-running — in browsers, games, and cloud gaming services. A Seeed Studio XIAO
-nRF52840 does the translation in hardware.
+<h1 align="center">Steam Controller Bridge</h1>
 
-> **Requirements:** macOS 13 or later, a **Steam Controller 2 (2026)**, and a
-> non-Sense XIAO nRF52840. The original 2015 Steam Controller and its receiver
-> use a different protocol and are not supported.
+<p align="center"><strong>Your Steam Controller 2, everywhere macOS expects an Xbox gamepad.</strong></p>
 
-For hardware requirements, firmware flashing, Steam Controller 2 pairing,
-macOS permissions, daily startup, verification, and troubleshooting, start with
-the [user guide](docs/USER_GUIDE.md).
+<p align="center">
+  <a href="https://github.com/tkubicz/steam-controller-bridge/releases/latest"><img src="https://img.shields.io/github/v/release/tkubicz/steam-controller-bridge?style=flat-square&amp;color=53cedb" alt="Latest release" /></a>
+  <a href="https://github.com/tkubicz/steam-controller-bridge/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/tkubicz/steam-controller-bridge/ci.yml?branch=main&amp;style=flat-square&amp;label=build" alt="Build status" /></a>
+  <img src="https://img.shields.io/badge/macOS-13%2B-20252d?style=flat-square" alt="macOS 13 or later" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-53cedb?style=flat-square" alt="MIT license" /></a>
+</p>
 
-## Download
+Steam Controller Bridge turns a **Steam Controller 2** into a standard
+Xbox-layout USB gamepad for macOS. It works in browsers, native games, and cloud
+gaming services - with no Steam client, kernel extension, or restricted virtual
+HID entitlement in the path.
 
-Grab the latest [release](https://github.com/tkubicz/steam-controller-bridge/releases):
+The controller connects through its official Puck or directly over Bluetooth.
+A tiny non-Sense XIAO nRF52840 handles the gamepad-facing USB connection, while
+the native menu app keeps setup, profiles, diagnostics, and updates close at
+hand.
 
-| File | What it is |
-| --- | --- |
-| `steam-controller-bridge-xiao-nrf52840.uf2` | Firmware. Double-tap RESET on the XIAO and copy this onto the drive that mounts. |
-| `steam-controller-bridge-macos.zip` | The menu-bar application. |
-| `steam-controller-bridge-xiao-nrf52840-dfu.zip` | Firmware for serial DFU flashing, if you prefer `make flash`. |
-| `steam-controller-bridge-update-manifest.json` | Signed application and firmware release metadata used by the in-app updater. |
-| `steam-controller-bridge-update-signatures.json` | Ed25519 signatures for the exact manifest bytes. |
+> [!IMPORTANT]
+> This project supports the **Steam Controller 2 (2026)**. The original 2015
+> Steam Controller and its receiver use a different protocol and are not
+> supported.
 
-After installing the menu app, use **Check for Updates…** for normal application
-and firmware updates. It opens the Updates tab, which downloads nothing beyond
-signed metadata until you choose an action. Application replacement is Finder-guided in v1;
-firmware flashing is performed by the app and does not require Arduino CLI.
+## See it in action
 
-Verify a download against the published sums before flashing:
+<table>
+  <tr>
+    <td width="28%" valign="top">
+      <img src="docs/images/menu-app.png" alt="Steam Controller Bridge menu showing bridge and hardware status" width="100%" />
+      <br />
+      <strong>Live at a glance</strong><br />
+      <sub>Start or stop the bridge, check hardware, switch profiles, and open updates from the menu bar.</sub>
+    </td>
+    <td width="72%" valign="top">
+      <img src="docs/images/profile-editor.png" alt="Steam Controller Bridge profile and binding editor" width="100%" />
+      <br />
+      <strong>Make the extra controls yours</strong><br />
+      <sub>Bind L4/L5/R4/R5, Quick Access, and pad clicks; configure right-pad pointer and left-pad scrolling per profile.</sub>
+    </td>
+  </tr>
+</table>
 
-```bash
-shasum -a 256 -c SHA256SUMS.txt
-```
+<p align="center">
+  <img src="docs/images/sc-visualizer.png" alt="Steam Controller Visualizer showing live analog input and mapped controls" width="100%" />
+  <br />
+  <strong>See every signal</strong><br />
+  <sub>The visualizer exposes live controller geometry, decoded input, mapped output, diagnostics, recording, and the Lizard Mouse Lab.</sub>
+</p>
 
-The application is ad-hoc signed rather than notarized, so macOS blocks it on
-first launch. Right-click the app and choose **Open** once; see
-[opening an unnotarized build](docs/USER_GUIDE.md#opening-an-unnotarized-build).
+## Why it exists
 
-Building from source instead is fully supported — see [build and test](#build-and-test).
-Source builds do not trust production updates unless the builder deliberately
-embeds the release public keys.
+- **Play where macOS already understands gamepads.** The XIAO presents the
+  familiar Xbox 360-compatible layout used by Safari, games, and streaming
+  clients.
+- **Keep the controller experience.** Every standard control, both triggers,
+  both sticks, the D-pad, and end-to-end dual rumble are carried through, while
+  live battery state stays visible in the app.
+- **Leave Steam out of the input path.** Automatic discovery, reconnects,
+  neutralization, and lizard-mode suppression are owned by the bridge.
+- **Use the controls games leave behind.** Extra paddles, Quick Access, and pad
+  clicks can drive opt-in keyboard and mouse bindings without changing gamepad
+  output.
+- **Stay in control.** The native menu app reports what is connected, explains
+  problems, records diagnostics, manages profiles, and verifies signed update
+  metadata.
 
-GitHub releases are the only distribution channel today. A Homebrew cask and an
-App Store build are intended later. Nothing here is published to crates.io: every
-workspace crate sets `publish = false`, and the library crates exist to structure
-this application rather than to be depended on externally.
+## What you need
 
-## Why it identifies as an Xbox 360 controller
+- macOS 13 or later
+- a Steam Controller 2
+- the official Puck **or** a direct Bluetooth connection to the Mac
+- a non-Sense XIAO nRF52840 connected by USB
 
-The firmware enumerates with the Xbox 360 compatibility VID/PID `045e:028e`.
-This is deliberate: Apple's built-in driver will not publish a generic HID
-gamepad to GameController, so a standards-based HID personality enumerates at the
-USB layer but stays invisible to Safari, games, and streaming clients. Borrowing
-the identity is what makes the device work at all on macOS.
+The XIAO is the small hardware bridge that makes the controller visible through
+Apple's normal game-controller stack. It also keeps the output independent of
+macOS virtual-device entitlements.
 
-It is not a claim of ownership or affiliation, and a distributable product would
-need an owned or licensed USB identity plus a re-qualified macOS recognition
-path. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+## Get started
 
-## Status
+1. Download the macOS app from the
+   [latest release](https://github.com/tkubicz/steam-controller-bridge/releases/latest).
+2. Unzip `steam-controller-bridge-macos.zip`, move the app to Applications, then
+   right-click it and choose **Open** on the first launch.
+3. Connect one XIAO with a data-capable cable. In the menu app, choose
+   **Check for Updates**, then **Install Firmware Update**. The App Center
+   downloads, verifies, flashes, and confirms the signed firmware.
+4. If automatic bootloader entry fails, double-tap RESET while the App Center is
+   waiting. Keep the XIAO connected until verification finishes.
+5. Connect the controller, fully quit Steam and its helper, and start Steam
+   Controller Bridge.
 
-Working end to end on macOS. Both the official Puck and direct Bluetooth input
-paths feed the host bridge and XIAO nRF52840 CDC-to-gamepad firmware. The
-following are verified on hardware:
+The [user guide](docs/USER_GUIDE.md) walks through hardware, pairing,
+permissions, verification, recovery, and troubleshooting step by step.
+Manual UF2 copying remains available as a recovery path when guided flashing
+cannot complete.
 
-- the browser Gamepad API in Safari, reporting `mapping: standard`;
-- Boosteroid and GeForce NOW, both driven as a standard Xbox-layout gamepad;
-- every physical control: buttons, both sticks, both triggers, and the D-pad;
-- end-to-end dual rumble, from a client vibration request through to the
-  correct strong and weak Steam Controller 2 actuators;
-- lizard-mode suppression, with no stray Space keypresses or pointer motion
-  while running and normal desktop behavior restored after exit;
-- zero-argument discovery of the uniquely active Puck or Bluetooth collection
-  and the metadata/Hello-verified XIAO port, including live battery reporting;
-- direct Bluetooth `28de:1303` input using 46-byte `0x45` state reports at
-  approximately 67–68 Hz and compatible `0x43` battery reports;
-- more than an hour of continuous gameplay without degradation.
+## More than a bridge
 
-Bluetooth reconnect/sleep-wake stress and in-game control/rumble confirmation
-remain hardware acceptance gates. Distributing this to end users additionally
-requires the USB identity and code-signing work described under
-[known limitations](#known-limitations).
+- Native menu-bar status and controls
+- Official Puck and direct Bluetooth input
+- Xbox-layout USB gamepad output
+- Dual-actuator rumble and pad feedback
+- Per-profile keyboard, mouse, pointer, and scrolling bindings
+- In-game radial profile switcher
+- Automatic idle and Puck-dock shutdown options
+- Signed application and firmware update metadata
+- Live visualizer, JSONL recording, deterministic replay, and HID diagnostics
+- Guided Lizard Mouse comparison lab
 
-```text
-Simulator -> GamepadState -> protocol frame or JSONL recording -> output/replay
-```
+## Project status
 
-The bridge sends framed states over USB CDC to firmware that exposes a physical
-Xbox-layout USB gamepad. This avoids depending on Apple's restricted
-virtual-HID entitlements.
+The complete path is live-tested on macOS with both official Puck and direct
+Bluetooth input. Safari's Gamepad API, Boosteroid, GeForce NOW, every physical
+control, dual rumble, automatic discovery, and extended gameplay sessions have
+all been exercised on hardware.
 
-## Build and test
+This is still an enthusiast project rather than a polished retail installer.
+The app is ad-hoc signed and not notarized, and the firmware currently uses an
+Xbox 360 compatibility USB identity so macOS publishes it through
+GameController. Read the [known limitations](docs/TECHNICAL_GUIDE.md#known-limitations)
+and [third-party notices](THIRD-PARTY-NOTICES.md) before distributing a build.
+
+## Documentation
+
+| Guide                                              | Use it for                                                        |
+| -------------------------------------------------- | ----------------------------------------------------------------- |
+| [User guide](docs/USER_GUIDE.md)                   | Setup, permissions, normal use, verification, and troubleshooting |
+| [Technical guide](docs/TECHNICAL_GUIDE.md)         | Detailed commands, diagnostics, tools, and current limitations    |
+| [Desktop bindings](docs/DESKTOP_BINDINGS.md)       | Profiles, actions, pad behavior, and persistence                  |
+| [Profile wheel](docs/PROFILE_OVERLAY.md)           | Controller-driven switching over fullscreen and windowed games    |
+| [Updates](docs/UPDATES.md)                         | Signed catalogs, application replacement, and firmware flashing   |
+| [Architecture](docs/ARCHITECTURE.md)               | Workspace boundaries and runtime design                           |
+| [Testing](docs/TESTING.md)                         | Automated, packaging, hardware, and manual acceptance gates       |
+| [Firmware guide](firmware/xiao-nrf52840/README.md) | Native tests, UF2/DFU builds, flashing, recovery, and LED states  |
+
+Protocol and diagnostic references live in [`docs/`](docs/), including the
+[Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md),
+[serial transport](docs/SERIAL_TRANSPORT.md), [gamepad protocol](docs/GAMEPAD_PROTOCOL.md),
+[mapping](docs/MAPPING.md), and [recording format](docs/RECORDING_FORMAT.md).
+
+## Build from source
 
 ```bash
 cargo build --workspace
 cargo test --workspace
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-```
-
-No physical hardware is required. The recording crate uses the established `serde`, `serde_json`, and `base64` crates; the timing, protocol, output, and simulator paths otherwise use the standard library.
-
-## Contributing and releases
-
-Pull requests use Conventional Commit titles and squash merging. Release Please
-turns those merged titles into the workspace version, `CHANGELOG.md`, the
-version tag, and the matching GitHub Release notes. Maintainers review and merge
-the generated release pull request; they do not maintain a second set of notes
-or create version tags manually. See [CONTRIBUTING.md](CONTRIBUTING.md) for title
-formats, multi-entry changes, and the stable-release procedure.
-
-## Daily use
-
-After flashing the XIAO, connecting the Steam Controller 2 through its official
-Puck or macOS Bluetooth, granting Input Monitoring permission, and fully
-stopping Steam and its IPC helper, start the complete bridge from the
-repository root:
-
-```bash
-./sc-bridge
-```
-
-No HID index or serial path is normally needed. The bridge waits if either
-endpoint is absent, identifies the one supported Puck or Bluetooth collection
-producing complete `0x42`/`0x45` controller states, verifies the XIAO with a
-protocol-v1 Hello handshake, and resumes after either endpoint is reconnected.
-It refuses to guess when more than one active controller source or valid XIAO
-is present.
-
-Use `./sc-bridge --index N` or `./sc-bridge --port /dev/cu.usbmodem…` only to
-resolve an ambiguity or diagnose a specific endpoint. See the
-[user guide](docs/USER_GUIDE.md) for the one-time setup.
-
-The live bridge defaults to powering an inactive controller off after 15
-minutes of meaningful neutral input. Continuous state reports, IMU noise,
-rumble, and XIAO refresh traffic do not postpone it. Configure the timeout with:
-
-```bash
-./sc-bridge --idle-shutdown never
-./sc-bridge --idle-shutdown 5
-```
-
-An independent opt-in can turn the controller off as soon as a fresh Puck
-`Charging`/`Charged` report confirms it was placed on the official Puck:
-
-```bash
-./sc-bridge --puck-dock-action power-off
-```
-
-That action fires once per placement. Waking the controller while it remains on
-the Puck does not immediately turn it off again; remove it long enough to emit a
-fresh `Discharging` report before the next placement can trigger another
-shutdown. The option defaults to `leave`.
-
-Extra L4/L5/R4/R5 and Quick Access controls can also drive opt-in desktop
-bindings without changing the XIAO firmware or serial protocol. Profiles can
-independently enable the right pad as a relative pointer and the left pad as
-accelerated smooth two-axis scrolling with configurable speed and optional
-release momentum; both pads are off by default and offer configurable movement
-and physical-click feedback. The menu app
-requests Input Monitoring directly when macOS has not decided yet. Only after
-that grant is detected does it request Post Event and Accessibility access, so
-the TCC requests remain ordered even when no controller is attached.
-Open `Profiles -> Edit Profiles…` to save a profile. Settings shortcuts remain
-available for a previously denied request. CLI use is deliberately paired:
-
-```bash
-./sc-bridge --bindings "$HOME/Library/Application Support/Steam Controller Bridge/bindings.json" --profile Default
-```
-
-Replay rejects these options so a recording can never inject keyboard or mouse
-input. See [desktop bindings](docs/DESKTOP_BINDINGS.md).
-
-## Simulator
-
-Generate one automated cycle as readable state changes:
-
-```bash
-cargo run -p gamepad-simulator -- automated --interval-ms 0 --output dump
-```
-
-Write binary protocol frames for later firmware inspection:
-
-```bash
-cargo run -p gamepad-simulator -- automated --output file --file gamepad.frames
-```
-
-Use the line-oriented keyboard simulator:
-
-```bash
-cargo run -p gamepad-simulator -- keyboard --output json
-```
-
-Enter `w/a/s/d`, `up/left/down/right`, `q/e`, `i/j/k/l`, `space`, `1` through `9`, `r`, or `exit`, followed by Enter. Each line produces one state, which keeps the tool dependency-free and portable; raw-terminal input can be added in a later UI phase.
-
-## Recording and replay
-
-Record an automated session, then replay it without waiting for recorded timing:
-
-```bash
-cargo run -p gamepad-simulator -- automated --interval-ms 0 \
-  --output recording --file session.jsonl
-cargo run -p sc-replay -- session.jsonl --deterministic --output dump
-```
-
-`sc-replay` also supports `--speed`, `--seek-us`, `--step`, `--loop`, and all currently implemented output backends, including negotiated serial output.
-
-## HID probing on macOS
-
-Enumeration never assumes a Steam Controller VID/PID. Start by inspecting the HID collections macOS currently exposes:
-
-```bash
-cargo run -p sc-probe -- list
-cargo run -p sc-probe -- inspect --index 0
-```
-
-Indices use a stable path-sorted snapshot. Connecting or removing hardware can still change the snapshot, so run `list` again immediately before selecting a collection.
-
-Monitor or capture the explicitly selected collection:
-
-```bash
-cargo run -p sc-probe -- monitor --index 0 --raw
-cargo run -p sc-probe -- capture --index 0 --output reports.jsonl \
-  --duration-secs 30 --decoded
-```
-
-Supported controller collections are opened with macOS shared HID access
-because the tested Puck rejects `kIOHIDOptionsTypeSeizeDevice` with `not
-permitted`. Project tools take a per-input ownership lock, preventing two
-bridge/probe/visualizer processes from sharing one source. Steam and other
-non-project consumers do not honor that lock and must be stopped separately.
-After identifying either the active `28de:1304` USB `ff00:0001` interface 2–5
-slot or `28de:1303` Bluetooth `ff00:0001` interface -1 collection, test the safe
-SDL-compatible lizard-mode heartbeat:
-
-```bash
-cargo run -p sc-probe -- suppress-lizard --index 0 --duration-secs 15
-```
-
-While the command runs, controller buttons and touchpads should no longer
-produce native keyboard/mouse input. The controller watchdog restores desktop
-mode after the command exits.
-
-Independently of the XIAO, test the two SC2 actuators directly:
-
-```bash
-cargo run -p sc-probe -- rumble --index 0 --low 32768 --high 0
-cargo run -p sc-probe -- rumble --index 0 --low 0 --high 32768
-```
-
-The diagnostic suppresses lizard mode, refreshes rumble every 40 ms, and always
-attempts a zero write before it exits.
-
-The narrowly allowlisted power-off diagnostic changes controller state
-immediately:
-
-```bash
-cargo run -p sc-probe -- power-off --index 0
-```
-
-It accepts only an exact supported Puck or Bluetooth controller collection,
-sends the fixed `01 9f 04 6f 66 66 21 …` command, and never exposes arbitrary
-feature writes. Press Steam to wake the controller again.
-
-The session reports disconnects and automatically attempts to reopen the same collection identity every 500 ms. Capture files include connection metadata, transport, source collection identity, report ID, base64 bytes, and the available dropped-report count. `--decoded` additionally records typed Steam Controller 2 state reports.
-
-macOS may reject protected keyboard/gamepad collections with an IOKit `not permitted` error until the terminal or Codex host has Input Monitoring permission. Listing and metadata inspection do not require opening the collection.
-
-## Lizard mouse comparison lab
-
-`sc-visualizer` includes a full-window Lizard Mouse Lab. Open the visualizer and
-use the mode switch at the top of the dashboard to start a guided capture or
-open an existing JSONL recording. Entering the lab finishes an ordinary
-visualizer recording, neutralizes and disables mock/serial output, and joins
-the ordinary HID worker before the measurement worker takes controller
-ownership. Leaving the lab restarts ordinary discovery with a clean decoder and
-mapper baseline.
-
-The same capture, analysis, comparison, and safe replay tools are available as
-nested headless commands:
-
-```bash
-cargo run -p sc-visualizer -- lizard capture --output lizard.jsonl --guided
-cargo run -p sc-visualizer -- lizard analyze lizard.jsonl --output analysis.json
-cargo run -p sc-visualizer -- lizard compare lizard.jsonl --output comparison.json
-cargo run -p sc-visualizer -- lizard replay lizard.jsonl --source reference --output dump
-```
-
-Capture auto-detects the unique active controller using the same shared
-discovery as the bridge and visualizer; `--index N` remains an explicit
-multi-controller/debug override. Capture is macOS-only and needs Input
-Monitoring because it installs a passive HID-entry event tap. It uses an
-8,192-event bounded queue and a timestamp reorder window; overflow, disconnect,
-and tap disable explicitly invalidate the file.
-Do not use another mouse or trackpad during measured intervals. Analysis,
-comparison, the GUI results view, and textual replay are portable and also
-accept older visualizer JSONL files.
-Desktop replay must be explicitly requested with `--output desktop`; it injects
-pointer motion only and never replays lizard keyboard or mouse-button actions.
-See [the lab guide](docs/LIZARD_MOUSE_LAB.md).
-
-## Visualizer
-
-The visualizer finds a supported controller on its own, so it usually needs no
-arguments. It keeps looking while none is present, so you can start it first and
-plug the controller in afterwards:
-
-```bash
-cargo run -p sc-visualizer
-```
-
-To pin it to one collection from `sc-probe list` instead of discovering one:
-
-```bash
-cargo run -p sc-visualizer -- --index 0
-```
-
-The visualizer shows raw, decoded, and mapped state; reports connection/rate and
-error diagnostics; edits the mapping filters; and records raw, decoded, mapped,
-lifecycle, and marker events to JSONL. It supports mock and negotiated serial
-output.
-
-See [the wire protocol](docs/GAMEPAD_PROTOCOL.md), [serial transport](docs/SERIAL_TRANSPORT.md), [Steam Controller protocol](docs/STEAM_CONTROLLER_PROTOCOL.md), [mapping](docs/MAPPING.md), [desktop bindings](docs/DESKTOP_BINDINGS.md), [lizard mouse lab](docs/LIZARD_MOUSE_LAB.md), [recording format](docs/RECORDING_FORMAT.md), [updater operations](docs/UPDATES.md), [architecture](docs/ARCHITECTURE.md), [testing](docs/TESTING.md), and [firmware architecture](docs/FIRMWARE_ARCHITECTURE.md).
-
-Firmware setup, native tests, UF2/DFU builds, flashing, recovery, LED states,
-and hardware validation are documented in
-[`firmware/xiao-nrf52840/README.md`](firmware/xiao-nrf52840/README.md).
-
-## Integrated bridge
-
-```bash
-./sc-bridge
-./sc-bridge --index 43 --port /dev/cu.usbmodem11201
-./sc-bridge --input replay --file session.jsonl \
-  --deterministic --output mock
-```
-
-Live mode defaults to automatic active-source and XIAO discovery plus serial
-output. It uses bounded latest-state input, timeout and decode-failure
-neutralization, reconnect recovery, Ctrl-C shutdown, and structured status. It
-claims the selected Puck or Bluetooth collection from other project tools and
-refreshes the narrow lizard-off setting every three seconds. Steam must still
-be fully quit. A failed suppression write neutralizes the XIAO and stops the
-bridge. See [the bridge guide](docs/BRIDGE.md).
-
-## macOS menu-bar app
-
-Build an ad-hoc-signed, dockless local application:
-
-```bash
 ./tools/build-macos-app.sh
-open "dist/Steam Controller Bridge.app"
 ```
 
-The menu app embeds the same runtime, starts it automatically, and presents
-short, grouped bridge, readiness, hardware, battery, haptics, bindings, and problem
-lines. `Idle Shutdown` offers Never/5/10/15/30-minute choices, and `Turn Off
-When Placed on Puck` controls the independent immediate-dock action. Both are
-applied live and saved under `~/Library/Application Support/Steam Controller
-Bridge/`. The menu-bar icon distinguishes Off, On but waiting, Controller ready,
-and Action required states. The dynamic `Profiles` submenu selects profiles and
-launches the editor; permission shortcuts live in the separate `Permissions`
-submenu. `Profile Wheel` enables
-an in-game radial switcher: hold Quick Access, point either stick at a profile,
-press A to apply or B to cancel. It floats over native-fullscreen and
-borderless-windowed games, is off by default because it takes Quick Access over,
-and is documented in [docs/PROFILE_OVERLAY.md](docs/PROFILE_OVERLAY.md).
-Friendly problem summaries stay bounded; use
-`Copy Full Error`, `Copy Diagnostics`, or the rotated log folder for the
-complete technical detail. Start/Stop, Input Monitoring settings, and Quit are
-also available. `About` and `Check for Updates…` open the corresponding tab in
-one foreground Steam Controller Bridge window. Its hero reports the installed
-application and connected firmware revisions alongside the project summary,
-collapsible changelog, and signed update workflow. Logs write
-concise `status_change` records immediately, full `status_snapshot` records at
-startup and every five minutes, and an immediate full snapshot when an error or
-failure appears. Release metadata is Ed25519-signed and application bundles are
-ad-hoc code-signed. Developer ID signing, notarization, a DMG, and Launch at
-Login remain future work.
+The packaged app is written to `dist/Steam Controller Bridge.app` and ad-hoc
+signed locally. The [technical guide](docs/TECHNICAL_GUIDE.md#build-and-test)
+and [testing guide](docs/TESTING.md) cover the full validation matrix.
 
-## Known limitations
+## Acknowledgements
 
-- Steam Controller 2 Puck input is live-tested with extended `0x42` reports;
-  Bluetooth is live-tested with primary `0x45` and battery `0x43` reports.
-  Direct USB-C input remains unsupported.
-- Only the exact official Proteus Puck `28de:1304` active slots and the direct
-  Bluetooth `28de:1303` vendor collection are permitted to receive the
-  SDL-compatible lizard-off feature report and exact standard dual-rumble
-  output, the finite SDL Triton pad tick, plus the fixed `0x9f` power-off
-  command. Arbitrary controller
-  initialization, settings, mappings, custom
-  haptics, and feature/output writes remain intentionally unavailable.
-- Automatic-shutdown protocol, scheduling, and recovery are covered by native
-  tests, but real Puck/Bluetooth power-off, charge-state transitions, and
-  stay-asleep behavior remain an explicit hardware acceptance gate. Use the
-  documented `sc-probe power-off --index N` procedure before relying on it.
-- The profile wheel cannot appear over a game that captures the display
-  exclusively; such a game draws above every window level. Native-fullscreen and
-  borderless-windowed games, including those under Game Porting Toolkit or
-  Whisky, are supported. The wheel also does not suppress the Quick Access hold
-  itself, so the game sees `Extra3` held for the hold duration before it opens.
-- Steam coexistence, multiple simultaneous SC2 controllers, and running another
-  HID consumer against the selected slot are unsupported.
-- Automatic discovery deliberately reports an ambiguity instead of choosing
-  when multiple Puck/Bluetooth sources produce controller states or multiple
-  XIAOs complete the firmware handshake. Use an explicit override after
-  identifying the intended endpoint.
-- macOS access is intentionally shared at the native HID layer. The project
-  lock excludes other project tools only; Steam's persistent
-  `com.valvesoftware.steam.ipctool` LaunchAgent must be booted out before play.
-- Standard Xbox button and axis mapping remains fixed. Desktop bindings cover
-  L4/L5/R4/R5/Quick Access and the two pad clicks plus fixed right-pad pointer
-  and left-pad scroll roles; pressure actions, gestures, trigger clicks, and
-  stick clicks are not configurable in this milestone. macOS has native function-key
-  identities only through F20, and Enigo does not expose macOS
-  play/previous/next media events, so those portable entries degrade bindings
-  with an explicit error instead of emitting a different key.
-- The macOS application is ad-hoc signed rather than notarized, and there is no
-  DMG or Launch at Login.
-- The output uses the Xbox 360 compatibility USB identity described
-  [above](#why-it-identifies-as-an-xbox-360-controller).
-- Automatic lizard restoration timing and lizard-suppression failure timing
-  have not been formally qualified.
-- The keyboard simulator is line-oriented, not a production input UI.
+Steam Controller Bridge probably would not exist without the work shared by
+[OpenPuck](https://github.com/safijari/openpuck) and
+[SDL](https://github.com/libsdl-org/SDL).
+
+OpenPuck made essential Steam Controller 2 protocol research available and
+provided an invaluable architectural reference for the hardware bridge. SDL's
+Steam Controller 2/Triton driver documented the safe controller commands and
+behavior that informed input handling, lizard-mode control, battery reporting,
+rumble, and haptics. Thank you to both projects and everyone who contributed to
+them.
+
+## Contributing
+
+Pull requests are welcome. The repository uses Conventional Commit PR titles,
+squash merging, and Release Please. See [CONTRIBUTING.md](CONTRIBUTING.md) before
+opening a change.
+
+## License
+
+MIT. Steam, Steam Controller, Xbox, macOS, and the named streaming services are
+trademarks of their respective owners. This project is not affiliated with or
+endorsed by Valve, Microsoft, Apple, or those services.

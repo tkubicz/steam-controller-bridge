@@ -26,7 +26,7 @@ impl MenuApp {
     /// Applies a change to the wheel's configuration, everywhere it is needed.
     ///
     /// Returns whether the runtime accepted it. Nothing is persisted on a
-    /// refusal — the caller reverts its settings change, so the menu never
+    /// refusal - the caller reverts its settings change, so the menu never
     /// claims a wheel the running bridge does not have.
     pub(super) fn apply_picker_settings(&mut self) -> bool {
         let accepted = match self

@@ -79,7 +79,7 @@ impl Drop for PowerMonitor {
                 // `CFRunLoopStop` only stops a loop that is already running. A
                 // drop can land in the instant between the startup barrier and
                 // the monitor thread entering its run loop, where a single stop
-                // would be lost and the join below would wait forever — so keep
+                // would be lost and the join below would wait forever - so keep
                 // stopping until the thread has actually exited.
                 while !thread.is_finished() {
                     run_loop.0.stop();

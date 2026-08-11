@@ -217,7 +217,7 @@ pub enum Analog {
     /// capacitive ring says so; a trackpad's coordinates are stale unless a
     /// finger is down, so its position disappears while its touch is false.
     Position {
-        /// Where the contact is inside the control's own area — x right, y up,
+        /// Where the contact is inside the control's own area - x right, y up,
         /// each `-1.0..=1.0`. `None` when no position is meaningful now.
         offset: Option<[f32; 2]>,
         /// Capacitive contact. Drives the outline halo, not the dot.

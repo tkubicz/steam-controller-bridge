@@ -53,7 +53,7 @@ remain fully input-compatible.
 Refreshes maintain the firmware's watchdog lease without necessarily producing
 USB input: the firmware forwards a gamepad report only when the canonical
 report differs from the last one successfully queued on the USB endpoint. This
-applies to forced safety neutrals too — a disconnect or Hello after a neutral
+applies to forced safety neutrals too - a disconnect or Hello after a neutral
 has already been queued is silent on the USB side, which keeps CDC teardown
 during macOS sleep entry from registering as user activity. Endpoint acceptance
 does not prove that the host polled the report; USB remount invalidates the

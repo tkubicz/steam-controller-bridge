@@ -315,7 +315,7 @@ impl AppCenter {
             installed,
             firmware,
             status: if demo.is_some() {
-                "Demo preview — updater networking, files, and hardware are disabled.".to_owned()
+                "Demo preview - updater networking, files, and hardware are disabled.".to_owned()
             } else {
                 "Open Updates to check the signed stable release.".to_owned()
             },

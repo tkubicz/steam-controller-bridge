@@ -83,7 +83,7 @@ pub(super) fn paint_wedge(
     };
     let fill = if selected { ACCENT } else { SURFACE_RAISED };
     if sectors <= 1 {
-        // A lone entry — the short last page of a roster like 9-of-8 — owns
+        // A lone entry - the short last page of a roster like 9-of-8 - owns
         // the whole wheel. Its "wedge" swept nearly a full turn, which is not
         // convex and mistessellates; a disc is the same shape drawn honestly.
         painter.circle_filled(center, radius, fill);

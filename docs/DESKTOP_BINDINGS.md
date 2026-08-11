@@ -34,7 +34,7 @@ When the profile wheel is enabled, it takes Quick Access over for the length of
 a hold. A Quick Access binding still fires on a short press: the press edge is
 withheld while the hold is being timed, and replayed as a tap if the button
 comes up before the wheel opens. Once the wheel is open the binding is not
-delivered at all — including for the press that closes it: a second Quick
+delivered at all - including for the press that closes it: a second Quick
 Access press cancels the wheel and stays masked until released, so cancelling
 can never fire the binding. Nothing changes for L4, L5, R4, R5, or the pads, and nothing
 changes at all while the wheel is disabled. At launch, the menu app queries Input Monitoring directly
@@ -58,7 +58,7 @@ on each physical click even when the pointer or scroll function is disabled;
 it can be disabled or set to Low (-36 dB), Medium (-30 dB), or High (-24 dB)
 independently for each side. Right-pad pointer motion uses the captured lizard
 mode's larger anchored stationary envelope: 2,560 counts at pad center, growing
-to 3,584 at the rim, and re-parks after a 100 ms window without 384–768 counts
+to 3,584 at the rim, and re-parks after a 100 ms window without 384-768 counts
 of position-aware net progress. Left-pad scrolling retains its more responsive 192-count center
 envelope, growing to 2,048 counts at the edge, and its 150 ms stop window. A
 resting finger's bounded wander around its anchor emits nothing; intentional
