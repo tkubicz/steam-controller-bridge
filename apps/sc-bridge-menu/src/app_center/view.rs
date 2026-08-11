@@ -189,9 +189,20 @@ impl AppCenter {
                 status_callout(
                     ui,
                     MUTED_TEXT,
-                    "Waiting for firmware information",
-                    "Reconnect the board if its firmware revision does not appear shortly.",
+                    "Firmware information unavailable",
+                    "A factory XIAO does not report bridge firmware. Install the signed firmware, or wait and reconnect if a bridge-enabled board is still starting.",
                 );
+                ui.add_space(12.0);
+                if primary_button(
+                    ui,
+                    firmware_install_action_label(release_state)
+                        .expect("pending firmware has an install action"),
+                    self.operation_available(),
+                )
+                .clicked()
+                {
+                    self.install_firmware(manifest.clone(), ui.ctx().clone());
+                }
             } else if release_state == FirmwareReleaseState::Newer {
                 status_callout(
                     ui,
@@ -214,8 +225,13 @@ impl AppCenter {
                     "The board and firmware are verified before anything is written.",
                 );
                 ui.add_space(12.0);
-                if primary_button(ui, "Install Firmware Update", self.operation_available())
-                    .clicked()
+                if primary_button(
+                    ui,
+                    firmware_install_action_label(release_state)
+                        .expect("available firmware has an install action"),
+                    self.operation_available(),
+                )
+                .clicked()
                 {
                     self.install_firmware(manifest.clone(), ui.ctx().clone());
                 }
@@ -435,6 +451,14 @@ fn firmware_description(status: FirmwareStatus) -> String {
     }
 }
 
+fn firmware_install_action_label(release_state: FirmwareReleaseState) -> Option<&'static str> {
+    match release_state {
+        FirmwareReleaseState::Pending => Some("Install or Recover Firmware"),
+        FirmwareReleaseState::UpdateAvailable => Some("Install Firmware Update"),
+        FirmwareReleaseState::Current | FirmwareReleaseState::Newer => None,
+    }
+}
+
 pub(super) fn firmware_badge(status: FirmwareStatus) -> String {
     match status {
         FirmwareStatus::Reported(revision) => format!("Firmware rev {revision}"),
@@ -597,5 +621,25 @@ mod tests {
     fn uf2_disconnect_notice_explains_the_expected_macos_warning() {
         assert!(UF2_DISCONNECT_NOTICE.contains("Disk Not Ejected Properly"));
         assert!(UF2_DISCONNECT_NOTICE.contains("verification succeeds"));
+    }
+
+    #[test]
+    fn unknown_firmware_still_offers_the_factory_install_path() {
+        assert_eq!(
+            firmware_install_action_label(FirmwareReleaseState::Pending),
+            Some("Install or Recover Firmware")
+        );
+        assert_eq!(
+            firmware_install_action_label(FirmwareReleaseState::UpdateAvailable),
+            Some("Install Firmware Update")
+        );
+        assert_eq!(
+            firmware_install_action_label(FirmwareReleaseState::Current),
+            None
+        );
+        assert_eq!(
+            firmware_install_action_label(FirmwareReleaseState::Newer),
+            None
+        );
     }
 }

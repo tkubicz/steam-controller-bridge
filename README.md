@@ -89,11 +89,10 @@ macOS virtual-device entitlements.
 2. Unzip `steam-controller-bridge-macos.zip`, move the app to Applications, then
    right-click it and choose **Open** on the first launch.
 3. Connect one XIAO with a data-capable cable. In the menu app, choose
-   **Check for Updates**, then **Install Firmware Update**. The App Center
-   downloads, verifies, flashes, and confirms the signed firmware.
-4. A board already running firmware revision 2 enters UF2 mode automatically.
-   A revision 1 board needs one final manual step: when prompted, quickly press
-   the tiny reset button beside the USB-C connector twice. Future updates are
+   **Check for Updates**, then **Install or Recover Firmware**.
+4. When App Center asks for the XIAO bootloader, quickly press the tiny reset
+   button beside the USB-C connector twice. App Center downloads, verifies,
+   installs, and confirms the signed firmware. Later firmware updates are
    automatic.
 5. Connect the controller, fully quit Steam and its helper, and start Steam
    Controller Bridge.

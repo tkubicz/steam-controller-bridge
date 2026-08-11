@@ -156,48 +156,87 @@ complete.
 
 ### Test an unreleased firmware through App Center
 
-Prepare a local signed update directory from the current source and firmware:
+This procedure replaces the installed bridge application on the XIAO with
+Seeed's Blink example, then exercises the same first-install path as a new
+factory board. It does not replace the factory UF2 bootloader.
+
+First prepare the local signed update directory while the current bridge is
+still available:
 
 ```bash
 tools/prepare-local-update.py
 ```
 
-The command prints a launch command containing a throwaway development public
-key and the local directory. Quit every running copy of Steam Controller Bridge,
-then run that command from the repository root. Open Updates from the menu app.
-A visible `Local development updates` notice confirms that App Center is using
-the local signed catalog rather than GitHub.
+Save the launch command printed at the end, but do not run it yet. The helper
+builds firmware revision 2 from the current source and stores the catalog below
+`temp/steam-controller-bridge-local-update`.
 
 This works only in a debug build. It does not disable signature, manifest,
 artifact-hash, UF2, board, revision, or installation-receipt verification. The
 helper's application artifact is an intentional placeholder pinned to the
 current application version and must not be installed.
 
-To reproduce a new XIAO before testing the first installation, replace the
-bridge application with Seeed's Blink example while leaving its factory
-bootloader intact:
+Quit every running copy of Steam Controller Bridge. Compile Blink for the XIAO
+nRF52840 Sense used by this project:
 
 ```bash
 ARDUINO_DATA_DIR=$(arduino-cli config get directories.data)
 BLINK_SKETCH="$ARDUINO_DATA_DIR/packages/Seeeduino/hardware/nrf52/1.1.13/libraries/Bluefruit52Lib/examples/Hardware/blinky"
+ARDUINO_TOOL_PATH="$PWD/firmware/xiao-nrf52840/tools:$PATH"
 
-arduino-cli compile \
-  --fqbn Seeeduino:nrf52:xiaonRF52840 \
-  --output-dir /tmp/xiao-stock-blinky \
+env PATH="$ARDUINO_TOOL_PATH" arduino-cli compile \
+  --fqbn Seeeduino:nrf52:xiaonRF52840Sense \
+  --output-dir temp/xiao-stock-blinky \
   "$BLINK_SKETCH"
-
-arduino-cli upload \
-  --fqbn Seeeduino:nrf52:xiaonRF52840 \
-  --port /dev/cu.usbmodemXXXX \
-  --input-dir /tmp/xiao-stock-blinky
 ```
 
-App Center should recognize the resulting Seeed application identity. Because
-Blink has no bridge protocol, the first install enters the 60-second manual
-recovery phase. Quickly press the tiny reset button beside the USB-C connector
-twice while that prompt is visible. After revision 2 is installed and its
-receipt is verified, repeating the installation must enter UF2 automatically
-without pressing the button.
+The bridge firmware intentionally does not support Arduino's 1200-baud reset
+shortcut. Quickly press the tiny reset button beside the USB-C connector twice
+to enter the factory bootloader, then identify the new Seeed bootloader port:
+
+```bash
+arduino-cli board list
+```
+
+Set the port printed for `Seeed XIAO nRF52840 Sense`. Do not reuse the bridge
+application port because the bootloader port can have a different number.
+
+```bash
+XIAO_BOOTLOADER_PORT=/dev/cu.usbmodemXXXX
+
+env PATH="$ARDUINO_TOOL_PATH" arduino-cli upload \
+  --fqbn Seeeduino:nrf52:xiaonRF52840Sense \
+  --port "$XIAO_BOOTLOADER_PORT" \
+  --input-dir temp/xiao-stock-blinky
+```
+
+For a non-Sense XIAO, use `Seeeduino:nrf52:xiaonRF52840` instead. After upload,
+`arduino-cli board list` should show a Seeed application rather than Steam
+Controller Bridge. A Sense application normally reports USB ID `2886:8045`.
+The `ARDUINO_TOOL_PATH` prefix supplies the `python` compatibility shim required
+by Seeed's Arduino core on current macOS installations.
+
+Run the saved local-source launch command from the repository root. Open
+Updates and confirm that the `Local development updates` notice names
+`temp/steam-controller-bridge-local-update`. The factory Blink application has
+no bridge protocol, so the firmware card shows `Firmware information
+unavailable`. Choose **Install or Recover Firmware**. When App Center enters
+the 60-second manual recovery phase, quickly press the reset button twice.
+
+Accept the first installation only when all of these checks pass:
+
+1. The temporary `XIAO-SENSE` UF2 drive appears and revision 2 is written.
+2. The board reconnects as Steam Controller Bridge without manual unplugging.
+3. App Center reports firmware revision 2 and an `AppCenter` installation
+   receipt with a date and installation ID.
+4. **Reinstall Firmware** completes without pressing the reset button.
+5. The reinstall keeps revision 2 but produces a different date and
+   installation ID.
+6. Unplugging and reconnecting the board does not change the second receipt.
+
+macOS can show `Disk Not Ejected Properly` when the UF2 bootloader disconnects
+itself after a successful write. This notification is expected if App Center
+subsequently reconnects to the board and verifies the new receipt.
 
 ### Install build tools
 
