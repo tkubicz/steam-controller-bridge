@@ -9,26 +9,17 @@ import sys
 from release_metadata import ROOT, VISIBLE_SECTIONS, is_internal_scope
 
 
-def newest_release(markdown: str) -> tuple[str, list[str]]:
-    release: str | None = None
-    lines: list[str] = []
-    for line in markdown.splitlines():
-        if line.startswith("## ["):
-            if release is not None:
-                break
-            release = line.split("]", 1)[0][4:]
-        elif release is not None:
-            lines.append(line)
-    return release or "unversioned", lines
-
-
 def invalid_entries(markdown: str) -> list[str]:
-    release, lines = newest_release(markdown)
+    release = "unversioned"
     seen: set[str] = set()
     section = ""
     invalid: list[str] = []
-    for line in lines:
-        if line.startswith("### "):
+    for line in markdown.splitlines():
+        if line.startswith("## ["):
+            release = line.split("]", 1)[0][4:]
+            seen.clear()
+            section = ""
+        elif line.startswith("### "):
             section = line[4:]
         elif line.startswith("* "):
             description = line[2:].split(" ([", 1)[0].strip()
@@ -57,6 +48,9 @@ def self_test() -> None:
     ) == ["2.0.0: internal scope 'build/macos' appears under Bug Fixes"]
     assert invalid_entries(
         "## [2.0.0]\n* clean ([abc])\n## [1.0.0]\n* old ([abc])\n* old ([def])"
+    ) == ["1.0.0: duplicate entry: old"]
+    assert invalid_entries(
+        "## [2.0.0]\n* same ([abc])\n## [1.0.0]\n* same ([def])"
     ) == []
 
 
