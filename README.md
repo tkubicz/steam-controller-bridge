@@ -19,7 +19,7 @@ gaming services - with no Steam client, kernel extension, or restricted virtual
 HID entitlement in the path.
 
 The controller connects through its official Puck or directly over Bluetooth.
-A tiny non-Sense XIAO nRF52840 handles the gamepad-facing USB connection, while
+A tiny XIAO nRF52840 or XIAO nRF52840 Sense handles the gamepad-facing USB connection, while
 the native menu app keeps setup, profiles, diagnostics, and updates close at
 hand.
 
@@ -76,7 +76,7 @@ hand.
 - macOS 13 or later
 - a Steam Controller 2
 - the official Puck **or** a direct Bluetooth connection to the Mac
-- a non-Sense XIAO nRF52840 connected by USB
+- a XIAO nRF52840 or XIAO nRF52840 Sense connected by USB
 
 The XIAO is the small hardware bridge that makes the controller visible through
 Apple's normal game-controller stack. It also keeps the output independent of
@@ -91,8 +91,8 @@ macOS virtual-device entitlements.
 3. Connect one XIAO with a data-capable cable. In the menu app, choose
    **Check for Updates**, then **Install Firmware Update**. The App Center
    downloads, verifies, flashes, and confirms the signed firmware.
-4. If automatic bootloader entry fails, double-tap RESET while the App Center is
-   waiting. Keep the XIAO connected until verification finishes.
+4. When prompted, briefly bridge the underside `RST` and `GND` pads twice to
+   mount the UF2 drive. Keep the XIAO connected until verification finishes.
 5. Connect the controller, fully quit Steam and its helper, and start Steam
    Controller Bridge.
 

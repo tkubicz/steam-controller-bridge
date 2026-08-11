@@ -712,28 +712,33 @@ impl AppCenter {
     }
 
     fn status_banner(&self, ui: &mut egui::Ui) {
-        let (colour, fill) = match self.status_tone {
-            StatusTone::Info => (ACCENT, ACCENT_SUBTLE),
-            StatusTone::Success => (SUCCESS, SUCCESS.gamma_multiply(0.16)),
-            StatusTone::Error => (DANGER, DANGER.gamma_multiply(0.14)),
-        };
-        egui::Frame::new()
-            .fill(fill)
-            .stroke(egui::Stroke::new(1.0, colour.gamma_multiply(0.55)))
-            .corner_radius(10)
-            .inner_margin(egui::Margin::symmetric(14, 11))
-            .show(ui, |ui| {
-                ui.set_width((ui.available_width() - 2.0).max(0.0));
-                ui.horizontal(|ui| {
-                    if self.busy() {
-                        ui.spinner();
-                    } else {
-                        ui.label(egui::RichText::new("●").size(11.0).color(colour));
-                    }
-                    ui.label(egui::RichText::new(&self.status).color(TEXT));
-                });
-            });
+        let _ = status_banner(ui, &self.status, self.status_tone, self.busy());
     }
+}
+
+fn status_banner(ui: &mut egui::Ui, status: &str, tone: StatusTone, busy: bool) -> egui::Response {
+    let (colour, fill) = match tone {
+        StatusTone::Info => (ACCENT, ACCENT_SUBTLE),
+        StatusTone::Success => (SUCCESS, SUCCESS.gamma_multiply(0.16)),
+        StatusTone::Error => (DANGER, DANGER.gamma_multiply(0.14)),
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, colour.gamma_multiply(0.55)))
+        .corner_radius(10)
+        .inner_margin(egui::Margin::symmetric(14, 11))
+        .show(ui, |ui| {
+            ui.set_width((ui.available_width() - 2.0).max(0.0));
+            ui.horizontal(|ui| {
+                if busy {
+                    ui.spinner();
+                } else {
+                    ui.label(egui::RichText::new("●").size(11.0).color(colour));
+                }
+                ui.add(egui::Label::new(egui::RichText::new(status).color(TEXT)).wrap());
+            });
+        })
+        .response
 }
 
 impl eframe::App for AppCenter {
@@ -979,6 +984,37 @@ mod tests {
         let message = error.message();
         assert!(message.contains("stopped unexpectedly"));
         assert!(message.contains("runtime stopped"));
+    }
+
+    #[test]
+    fn long_status_errors_wrap_without_widening_the_window() {
+        let context = egui::Context::default();
+        let mut banner = egui::Rect::NOTHING;
+        let mut output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 480.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                banner = status_banner(
+                    ui,
+                    "A long updater failure must wrap inside the available content width instead of widening the page and clipping every card that follows it.",
+                    StatusTone::Error,
+                    false,
+                )
+                .rect;
+            },
+        );
+        output.textures_delta.clear();
+
+        assert!(
+            banner.width() <= 640.0,
+            "banner escaped the window: {banner:?}"
+        );
+        assert!(banner.height() > 40.0, "banner did not wrap: {banner:?}");
     }
 
     #[test]

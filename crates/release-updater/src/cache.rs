@@ -159,20 +159,32 @@ impl ReleaseCache {
     }
 
     #[must_use]
-    pub fn check_due(&self, interval: Duration) -> bool {
+    pub fn check_due(&self, interval: Duration, running_application: &Version) -> bool {
         let Ok(metadata) = fs::metadata(self.last_check_path()) else {
             return true;
         };
         let Ok(modified) = metadata.modified() else {
             return true;
         };
-        SystemTime::now()
+        let recent = SystemTime::now()
             .duration_since(modified)
-            .map_or(true, |age| age >= interval)
+            .is_ok_and(|age| age < interval);
+        if !recent {
+            return true;
+        }
+        fs::read_to_string(self.last_check_path()).map_or(true, |checked_application| {
+            checked_application.trim() != running_application.to_string()
+        })
     }
 
-    pub(crate) fn mark_check_success(&self) -> Result<(), CacheError> {
-        atomic_write(&self.last_check_path(), b"checked\n")?;
+    pub(crate) fn mark_check_success(
+        &self,
+        running_application: &Version,
+    ) -> Result<(), CacheError> {
+        atomic_write(
+            &self.last_check_path(),
+            format!("{running_application}\n").as_bytes(),
+        )?;
         Ok(())
     }
 }
@@ -214,9 +226,12 @@ mod tests {
         let root = temporary_directory("cache");
         let _ = fs::remove_dir_all(&root);
         let cache = ReleaseCache::new(root.clone());
-        assert!(cache.check_due(Duration::from_mins(1)));
-        cache.mark_check_success().unwrap();
-        assert!(!cache.check_due(Duration::from_mins(1)));
+        let current = Version::new(1, 5, 0);
+        let upgraded = Version::new(1, 6, 0);
+        assert!(cache.check_due(Duration::from_mins(1), &current));
+        cache.mark_check_success(&current).unwrap();
+        assert!(!cache.check_due(Duration::from_mins(1), &current));
+        assert!(cache.check_due(Duration::from_mins(1), &upgraded));
         let _ = fs::remove_dir_all(root);
     }
 

@@ -7,7 +7,7 @@ use release_updater::{
     CatalogRefresh, FirmwareFlashProgress, LatestReleaseClient, ReleaseCache, ReleaseManifestV1,
 };
 
-use crate::update_check::{update_context, CHECK_INTERVAL};
+use crate::update_check::{running_version, update_context, CHECK_INTERVAL};
 
 fn cache() -> Result<ReleaseCache, String> {
     ReleaseCache::for_current_user().map_err(|error| error.to_string())
@@ -20,6 +20,7 @@ pub(super) fn fetch_catalog(cancellation: &Arc<AtomicBool>) -> Result<CatalogRef
         &cache,
         &keys,
         CHECK_INTERVAL,
+        &running_version(),
     )
 }
 
@@ -72,9 +73,8 @@ pub(super) fn download_firmware(
 pub(super) fn progress_text(progress: &FirmwareFlashProgress) -> &'static str {
     match progress {
         FirmwareFlashProgress::LookingForDevice => "Looking for one compatible XIAO…",
-        FirmwareFlashProgress::EnteringBootloader => "Entering the UF2 bootloader…",
         FirmwareFlashProgress::WaitingForBootloader => {
-            "Waiting for bootloader. Double-tap RESET if needed…"
+            "Bridge the underside RST and GND pads twice now. Waiting for the XIAO UF2 drive…"
         }
         FirmwareFlashProgress::Writing => "Writing firmware. Do not unplug the board…",
         FirmwareFlashProgress::WaitingForApplication => {

@@ -17,7 +17,7 @@ The following paths have been verified on development hardware:
 - direct Bluetooth enumerates as `28de:1303`, transport `Bluetooth`, usage
   `ff00:0001`, interface `-1`, and produces 46-byte `0x45` state reports at
   approximately 67-68 Hz plus compatible `0x43` battery reports;
-- the non-Sense XIAO flashes through its serial bootloader and exposes CDC plus
+- the XIAO nRF52840 or XIAO nRF52840 Sense flashes through its UF2 bootloader and exposes CDC plus
   an Xbox-layout gamepad;
 - macOS binds the gamepad to its built-in `Xbox360Gamepad` driver;
 - Safari's Gamepad API sees a connected controller with `mapping: standard`;
@@ -55,7 +55,7 @@ rumble, tones, or scripted haptics.
 - A Steam Controller 2 (2026).
 - Either its official Steam Controller Puck or a Mac with Bluetooth available.
   The Puck is recommended when minimum latency or maximum reliability matters.
-- One non-Sense Seeed Studio XIAO nRF52840.
+- One Seeed Studio XIAO nRF52840 or XIAO nRF52840 Sense.
 - A USB-C data cable for the XIAO and, in Puck mode, another data connection for
   the Puck. Charge-only cables will not work.
 
@@ -115,24 +115,25 @@ re-evaluates compatibility.
 
 ### Install or update XIAO firmware
 
-Connect exactly one non-Sense Seeed XIAO nRF52840 with a data-capable cable, then
+Connect exactly one Seeed XIAO nRF52840 or XIAO nRF52840 Sense with a data-capable cable, then
 choose **Install Firmware Update**, or **Reinstall Firmware** when the board
 already reports the signed revision. A board reporting a newer revision is never
 downgraded.
 
-The app verifies the cached or downloaded UF2, asks the running bridge
-to neutralize output and release hardware, tries automatic 1200-baud bootloader
-entry, validates `INFO_UF2.TXT` and the UF2 family, writes and flushes the file,
-then waits for a fresh protocol handshake. Success is shown only after the board
-reports the exact signed revision. The bridge restarts automatically after
-success, cancellation, or a bounded failure when it was running beforehand.
+The app verifies the cached or downloaded UF2 and asks the running bridge to
+neutralize output and release hardware. When the Updates tab asks, double-tap
+RESET to mount the UF2 drive. The app validates `INFO_UF2.TXT` and the UF2
+family, writes and flushes the file, then waits for a fresh protocol handshake.
+Success is shown only after the board reports the exact signed revision. The
+bridge restarts automatically after success, cancellation, or a bounded failure
+when it was running beforehand.
 
-If automatic entry does not work, double-tap RESET while the Updates tab says
-it is waiting for the bootloader. You may cancel until writing begins. Once the
-write starts, leave the board connected until verification or the 30-second
-failure bound. Error text distinguishes extra/wrong boards, cable or reset
-problems, copy failure, reconnect timeout, and revision mismatch. The last
-verified UF2 stays cached for an offline reinstall.
+You may cancel until writing begins. Once the write starts, leave the board
+connected until verification or the 30-second reconnect failure bound. The UF2
+drive prompt remains available for 60 seconds. Error text distinguishes
+extra/wrong boards, cable or reset problems, copy failure, reconnect timeout,
+and revision mismatch. The last verified UF2 stays cached for an offline
+reinstall.
 
 ## Development and recovery workflow
 
@@ -207,10 +208,11 @@ Flash through the serial bootloader, substituting the actual port:
 make -C firmware/xiao-nrf52840 flash PORT=/dev/cu.usbmodemXXXX
 ```
 
-If serial flashing cannot reset the XIAO, double-tap RESET. A bootloader volume
-will mount in Finder; drag the generated `.uf2` file onto it. The board should
-reboot as a composite device named `Steam Controller Bridge` with both CDC and
-an Xbox-layout gamepad interface.
+If serial flashing cannot reset the XIAO, briefly bridge the underside `RST`
+and `GND` pads twice. A bootloader volume will mount in Finder; drag the
+generated `.uf2` file onto it. The board should reboot as a composite device
+named `Steam Controller Bridge` with both CDC and an Xbox-layout gamepad
+interface.
 
 The development firmware uses Xbox 360 compatibility VID/PID `045e:028e` so
 macOS's built-in driver publishes the device to GameController, Safari, and
@@ -832,7 +834,8 @@ rather than continuing with duplicate keyboard/gamepad input.
 ### No XIAO serial port appears
 
 - Use a known data-capable cable and approve the USB accessory in macOS.
-- Double-tap RESET and check `arduino-cli board list` again.
+- Briefly bridge the underside `RST` and `GND` pads twice, then check
+  `arduino-cli board list` again.
 - If the bootloader volume appears, reflash the UF2.
 - A slow-blue XIAO means no CDC host has opened the firmware session.
 

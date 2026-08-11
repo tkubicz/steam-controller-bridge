@@ -49,12 +49,13 @@ impl UpdateChecker {
             .as_ref()
             .filter(|manifest| checker.running_version >= manifest.application_version)
             .map(|manifest| manifest.application.artifact.clone());
-        if !cache.check_due(CHECK_INTERVAL) {
+        if !cache.check_due(CHECK_INTERVAL, &checker.running_version) {
             if let Some(artifact) = obsolete_application {
                 thread::spawn(move || remove_obsolete_application_cache(&cache, &artifact));
             }
             return checker;
         }
+        let running_version = checker.running_version.clone();
         let (sender, result) = mpsc::sync_channel(1);
         thread::spawn(move || {
             if let Some(artifact) = obsolete_application {
@@ -65,6 +66,7 @@ impl UpdateChecker {
                 &cache,
                 &keys,
                 CHECK_INTERVAL,
+                &running_version,
             ));
         });
         checker.result = Some(result);

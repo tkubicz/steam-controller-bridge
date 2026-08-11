@@ -15,8 +15,10 @@ use crate::UF2_FAMILY_ID;
 use crate::{verify_artifact, FirmwareRelease, FIRMWARE_BOARD_ID};
 
 const SEEED_VENDOR_ID: u16 = 0x2886;
-const XIAO_APPLICATION_PRODUCT_ID: u16 = 0x8044;
-const XIAO_BOOTLOADER_PRODUCT_ID: u16 = 0x0044;
+const XIAO_APPLICATION_PRODUCT_IDS: [u16; 2] = [0x8044, 0x8045];
+const XIAO_BOOTLOADER_PRODUCT_IDS: [u16; 2] = [0x0044, 0x0045];
+const XIAO_SENSE_BOARD_ID: &str = "Seeed_XIAO_nRF52840_Sense";
+const BOOTLOADER_WAIT_TIMEOUT: Duration = Duration::from_mins(1);
 const UF2_BLOCK_SIZE: usize = 512;
 const UF2_MAGIC_START_0: u32 = 0x0A32_4655;
 const UF2_MAGIC_START_1: u32 = 0x9E5D_5157;
@@ -39,7 +41,6 @@ pub struct BootloaderVolume {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FirmwareFlashProgress {
     LookingForDevice,
-    EnteringBootloader,
     WaitingForBootloader,
     Writing,
     WaitingForApplication,
@@ -151,7 +152,8 @@ fn is_factory_xiao(device: &SerialDeviceInfo) -> bool {
     callout
         && device.vendor_id == Some(SEEED_VENDOR_ID)
         && device.product_id.is_some_and(|product_id| {
-            [XIAO_APPLICATION_PRODUCT_ID, XIAO_BOOTLOADER_PRODUCT_ID].contains(&product_id)
+            XIAO_APPLICATION_PRODUCT_IDS.contains(&product_id)
+                || XIAO_BOOTLOADER_PRODUCT_IDS.contains(&product_id)
         })
 }
 
@@ -242,7 +244,6 @@ trait FlashAdapter {
     fn devices(&mut self) -> Result<Vec<FirmwareDevice>, FirmwareFlashError>;
     fn volumes(&mut self, root: &Path) -> Result<Vec<BootloaderVolume>, FirmwareFlashError>;
     fn firmware_version(&mut self, path: &str) -> Result<FirmwareVersion, FirmwareFlashError>;
-    fn touch_1200(&mut self, path: &str) -> Result<(), FirmwareFlashError>;
     fn copy_and_flush(&mut self, source: &Path, destination: &Path) -> Result<(), io::Error>;
     fn elapsed(&self) -> Duration;
     fn wait(&mut self, duration: Duration);
@@ -263,10 +264,6 @@ impl FlashAdapter for NativeFlashAdapter {
 
     fn firmware_version(&mut self, path: &str) -> Result<FirmwareVersion, FirmwareFlashError> {
         read_firmware_version(path)
-    }
-
-    fn touch_1200(&mut self, path: &str) -> Result<(), FirmwareFlashError> {
-        touch_1200(path)
     }
 
     fn copy_and_flush(&mut self, source: &Path, destination: &Path) -> Result<(), io::Error> {
@@ -321,16 +318,11 @@ fn flash_with_adapter(
             if device.bridge_firmware {
                 validate_version_policy(adapter.firmware_version(&device.path)?, release.revision)?;
             }
-            progress(FirmwareFlashProgress::EnteringBootloader);
-            // A refused or disappearing port is also how a successful touch
-            // can present. Continue into the documented double-RESET recovery
-            // window instead of failing before the user can intervene.
-            let _ = adapter.touch_1200(&device.path);
         }
         progress(FirmwareFlashProgress::WaitingForBootloader);
-        wait_for_volume(adapter, volumes_root, cancelled, Duration::from_secs(30))?
+        wait_for_volume(adapter, volumes_root, cancelled, BOOTLOADER_WAIT_TIMEOUT)?
     };
-    if volume.board_id != FIRMWARE_BOARD_ID {
+    if !supported_board_id(&volume.board_id) {
         return Err(FirmwareFlashError::WrongBoard(volume.board_id));
     }
     if cancelled.load(Ordering::Acquire) {
@@ -420,10 +412,14 @@ fn select_supported_volume(
     let Some(volume) = volumes.into_iter().next() else {
         return Ok(None);
     };
-    if volume.board_id != FIRMWARE_BOARD_ID {
+    if !supported_board_id(&volume.board_id) {
         return Err(FirmwareFlashError::WrongBoard(volume.board_id));
     }
     Ok(Some(volume))
+}
+
+fn supported_board_id(board_id: &str) -> bool {
+    matches!(board_id, FIRMWARE_BOARD_ID | XIAO_SENSE_BOARD_ID)
 }
 
 fn wait_for_volume(
@@ -443,20 +439,8 @@ fn wait_for_volume(
         adapter.wait(Duration::from_millis(250));
     }
     Err(FirmwareFlashError::Timeout(
-        "waiting for the XIAO bootloader; double-tap RESET",
+        "waiting for the XIAO UF2 drive; bridge the underside RST and GND pads twice while installation is waiting",
     ))
-}
-
-fn touch_1200(path: &str) -> Result<(), FirmwareFlashError> {
-    let mut port = serialport::new(path, 1_200)
-        .timeout(Duration::from_millis(250))
-        .open()
-        .map_err(|error| FirmwareFlashError::Io(io::Error::other(error.to_string())))?;
-    port.write_data_terminal_ready(true)
-        .map_err(|error| FirmwareFlashError::Io(io::Error::other(error.to_string())))?;
-    port.write_data_terminal_ready(false)
-        .map_err(|error| FirmwareFlashError::Io(io::Error::other(error.to_string())))?;
-    Ok(())
 }
 
 fn copy_and_flush(source: &Path, destination: &Path) -> io::Result<()> {
@@ -531,7 +515,6 @@ mod tests {
         versions: VecDeque<FirmwareVersion>,
         default_version: FirmwareVersion,
         copy_error: bool,
-        touches: usize,
     }
 
     impl FlashAdapter for FakeAdapter {
@@ -551,11 +534,6 @@ mod tests {
 
         fn firmware_version(&mut self, _path: &str) -> Result<FirmwareVersion, FirmwareFlashError> {
             Ok(self.versions.pop_front().unwrap_or(self.default_version))
-        }
-
-        fn touch_1200(&mut self, _path: &str) -> Result<(), FirmwareFlashError> {
-            self.touches += 1;
-            Ok(())
         }
 
         fn copy_and_flush(&mut self, _source: &Path, _destination: &Path) -> Result<(), io::Error> {
@@ -585,12 +563,11 @@ mod tests {
             versions: VecDeque::new(),
             default_version: FirmwareVersion::Pending,
             copy_error: false,
-            touches: 0,
         }
     }
 
     #[test]
-    fn fake_adapter_covers_manual_entry_and_exact_revision_success() {
+    fn guided_entry_and_exact_revision_succeed_without_serial_only_reset() {
         let mut adapter = fake();
         adapter.devices.push_back(vec![device(false)]);
         adapter.devices.push_back(vec![device(true)]);
@@ -608,7 +585,6 @@ mod tests {
             |state| progress.push(state),
         )
         .unwrap();
-        assert_eq!(adapter.touches, 1);
         assert!(progress.contains(&FirmwareFlashProgress::WaitingForBootloader));
         assert!(progress.contains(&FirmwareFlashProgress::Verifying));
     }
@@ -683,7 +659,6 @@ mod tests {
             ),
             Err(FirmwareFlashError::Cancelled)
         ));
-        assert_eq!(adapter.touches, 0);
     }
 
     #[test]
@@ -725,16 +700,28 @@ mod tests {
     }
 
     #[test]
+    fn standard_and_sense_bootloader_boards_are_supported() {
+        for board_id in [FIRMWARE_BOARD_ID, XIAO_SENSE_BOARD_ID] {
+            assert!(select_supported_volume(vec![BootloaderVolume {
+                root: PathBuf::from("/Volumes/XIAO"),
+                board_id: board_id.to_owned(),
+            }])
+            .unwrap()
+            .is_some());
+        }
+    }
+
+    #[test]
     fn wrong_and_multiple_bootloader_boards_are_rejected() {
         let root = std::env::temp_dir().join(format!(
             "release-updater-board-selection-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("sense")).unwrap();
+        fs::create_dir_all(root.join("wrong")).unwrap();
         fs::write(
-            root.join("sense/INFO_UF2.TXT"),
-            "Board-ID: Seeed_XIAO_nRF52840_Sense\n",
+            root.join("wrong/INFO_UF2.TXT"),
+            "Board-ID: incompatible_board\n",
         )
         .unwrap();
         assert!(matches!(
@@ -752,6 +739,20 @@ mod tests {
             Err(FirmwareFlashError::Discovery(_))
         ));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn factory_xiao_detection_accepts_standard_and_sense_usb_ids() {
+        for product_id in [0x8044, 0x0044, 0x8045, 0x0045] {
+            assert!(is_factory_xiao(&SerialDeviceInfo {
+                path: "/dev/cu.fixture".to_owned(),
+                vendor_id: Some(SEEED_VENDOR_ID),
+                product_id: Some(product_id),
+                serial_number: None,
+                manufacturer: Some("Seeed".to_owned()),
+                product: None,
+            }));
+        }
     }
 
     #[test]

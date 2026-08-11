@@ -148,7 +148,7 @@ impl AppCenter {
                 "FIRMWARE",
                 &format!("XIAO firmware revision {}", manifest.firmware.revision),
                 &format!(
-                    "Connected revision {} · non-Sense XIAO nRF52840",
+                    "Connected revision {} · XIAO nRF52840 or Sense",
                     firmware_description(self.firmware)
                 ),
                 badge,
@@ -215,7 +215,7 @@ impl AppCenter {
             ui.separator();
             ui.add_space(6.0);
             ui.label(
-                egui::RichText::new("The bridge pauses only while flashing. If automatic bootloader entry fails, double-tap RESET. Success requires the exact signed revision to reconnect.")
+                egui::RichText::new("The bridge pauses only while flashing. When prompted, bridge the underside RST and GND pads twice to mount the UF2 drive. Success requires the exact signed revision to reconnect.")
                     .size(13.0)
                     .color(MUTED_TEXT),
             );

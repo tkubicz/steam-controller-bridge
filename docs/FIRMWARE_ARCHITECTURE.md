@@ -1,6 +1,6 @@
 # XIAO nRF52840 Firmware Architecture
 
-Firmware is implemented in `firmware/xiao-nrf52840` for the non-Sense board.
+Firmware is implemented in `firmware/xiao-nrf52840` for the XIAO nRF52840 and XIAO nRF52840 Sense.
 Its native protocol/session tests run without hardware. Serial flashing,
 CDC/gamepad enumeration, macOS Xbox-driver binding, Safari Gamepad API
 visibility, a 30-second unchanged-state refresh, full control-by-control

@@ -5,7 +5,7 @@ running - in browsers, games, and cloud gaming services. A Seeed Studio XIAO
 nRF52840 does the translation in hardware.
 
 > **Requirements:** macOS 13 or later, a **Steam Controller 2 (2026)**, and a
-> non-Sense XIAO nRF52840. The original 2015 Steam Controller and its receiver
+> XIAO nRF52840 or XIAO nRF52840 Sense. The original 2015 Steam Controller and its receiver
 > use a different protocol and are not supported.
 
 For hardware requirements, firmware flashing, Steam Controller 2 pairing,
@@ -18,7 +18,7 @@ Grab the latest [release](https://github.com/tkubicz/steam-controller-bridge/rel
 
 | File | What it is |
 | --- | --- |
-| `steam-controller-bridge-xiao-nrf52840.uf2` | Firmware. Double-tap RESET on the XIAO and copy this onto the drive that mounts. |
+| `steam-controller-bridge-xiao-nrf52840.uf2` | Firmware. Bridge the underside `RST` and `GND` pads twice, then copy this onto the drive that mounts. |
 | `steam-controller-bridge-macos.zip` | The menu-bar application. |
 | `steam-controller-bridge-xiao-nrf52840-dfu.zip` | Firmware for serial DFU flashing, if you prefer `make flash`. |
 | `steam-controller-bridge-update-manifest.json` | Signed application and firmware release metadata used by the in-app updater. |

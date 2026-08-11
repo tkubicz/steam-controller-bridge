@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use semver::Version;
+
 use crate::temporary::unique_temporary_path;
 use crate::{
     ArtifactDescriptor, ReleaseCache, ReleaseManifestV1, TrustedPublicKey, MANIFEST_ASSET,
@@ -160,8 +162,9 @@ pub fn refresh_catalog_if_due(
     cache: &ReleaseCache,
     trusted_keys: &[TrustedPublicKey],
     interval: std::time::Duration,
+    running_application: &Version,
 ) -> Result<CatalogRefresh, String> {
-    if !cache.check_due(interval) {
+    if !cache.check_due(interval, running_application) {
         return cache
             .load_manifest(trusted_keys)
             .map(CatalogRefresh::Current)
@@ -177,7 +180,7 @@ pub fn refresh_catalog_if_due(
         .map_err(|error| error.to_string())?;
     rustix::fs::flock(&refresh_lock, rustix::fs::FlockOperation::LockExclusive)
         .map_err(|error| error.to_string())?;
-    if !cache.check_due(interval) {
+    if !cache.check_due(interval, running_application) {
         return cache
             .load_manifest(trusted_keys)
             .map(CatalogRefresh::Current)
@@ -198,7 +201,7 @@ pub fn refresh_catalog_if_due(
         Ok(manifest) => {
             // The marker is only a network-throttling optimization. Verified
             // metadata remains usable if writing the marker itself fails.
-            let _ = cache.mark_check_success();
+            let _ = cache.mark_check_success(running_application);
             Ok(CatalogRefresh::Current(manifest))
         }
         Err(refresh_error) => cache
@@ -464,17 +467,19 @@ mod tests {
             &source,
             &cache,
             std::slice::from_ref(&key),
-            Duration::from_hours(24)
+            Duration::from_hours(24),
+            &Version::new(1, 5, 0),
         )
         .is_err());
-        assert!(cache.check_due(Duration::from_hours(24)));
+        assert!(cache.check_due(Duration::from_hours(24), &Version::new(1, 5, 0)));
         assert_eq!(
             refreshed_manifest(
                 &refresh_catalog_if_due(
                     &source,
                     &cache,
                     std::slice::from_ref(&key),
-                    Duration::from_hours(24)
+                    Duration::from_hours(24),
+                    &Version::new(1, 5, 0),
                 )
                 .unwrap()
             )
@@ -482,7 +487,64 @@ mod tests {
             semver::Version::new(1, 5, 0)
         );
         assert_eq!(source.calls(), 2);
-        assert!(!cache.check_due(Duration::from_hours(24)));
+        assert!(!cache.check_due(Duration::from_hours(24), &Version::new(1, 5, 0)));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn application_upgrade_bypasses_the_previous_versions_throttle() {
+        let root = temporary_directory("network-application-upgrade");
+        let cache = ReleaseCache::new(root.clone());
+        let (old_manifest, old_signatures, key) = signed_metadata("1.5.0", 5);
+        let (current_manifest, current_signatures, _) = signed_metadata("1.6.0", 6);
+        let source = MetadataSource::new([
+            MetadataReply::Metadata(old_manifest, old_signatures),
+            MetadataReply::Metadata(current_manifest, current_signatures),
+        ]);
+
+        let old_application = Version::new(1, 5, 0);
+        let current_application = Version::new(1, 6, 0);
+        let first = refresh_catalog_if_due(
+            &source,
+            &cache,
+            std::slice::from_ref(&key),
+            Duration::from_hours(24),
+            &old_application,
+        )
+        .unwrap();
+        assert_eq!(
+            refreshed_manifest(&first).application_version,
+            old_application
+        );
+
+        let cached = refresh_catalog_if_due(
+            &source,
+            &cache,
+            std::slice::from_ref(&key),
+            Duration::from_hours(24),
+            &Version::new(1, 5, 0),
+        )
+        .unwrap();
+        assert_eq!(
+            refreshed_manifest(&cached).application_version,
+            old_application
+        );
+        assert_eq!(source.calls(), 1);
+
+        let refreshed = refresh_catalog_if_due(
+            &source,
+            &cache,
+            &[key],
+            Duration::from_hours(24),
+            &current_application,
+        )
+        .unwrap();
+        assert_eq!(
+            refreshed_manifest(&refreshed).application_version,
+            current_application
+        );
+        assert_eq!(source.calls(), 2);
+        assert!(!cache.check_due(Duration::from_hours(24), &current_application));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -496,9 +558,22 @@ mod tests {
             MetadataReply::Metadata(b"{}".to_vec(), b"{}".to_vec()),
         ]);
 
-        refresh_catalog_if_due(&source, &cache, std::slice::from_ref(&key), Duration::ZERO)
-            .unwrap();
-        let fallback = refresh_catalog_if_due(&source, &cache, &[key], Duration::ZERO).unwrap();
+        refresh_catalog_if_due(
+            &source,
+            &cache,
+            std::slice::from_ref(&key),
+            Duration::ZERO,
+            &Version::new(1, 5, 0),
+        )
+        .unwrap();
+        let fallback = refresh_catalog_if_due(
+            &source,
+            &cache,
+            &[key],
+            Duration::ZERO,
+            &Version::new(1, 5, 0),
+        )
+        .unwrap();
         let CatalogRefresh::Stale {
             manifest,
             refresh_error,
@@ -532,8 +607,14 @@ mod tests {
             let key = key.clone();
             workers.push(std::thread::spawn(move || {
                 start.wait();
-                refresh_catalog_if_due(source.as_ref(), &cache, &[key], Duration::from_hours(24))
-                    .unwrap()
+                refresh_catalog_if_due(
+                    source.as_ref(),
+                    &cache,
+                    &[key],
+                    Duration::from_hours(24),
+                    &Version::new(1, 5, 0),
+                )
+                .unwrap()
             }));
         }
         for worker in workers {
