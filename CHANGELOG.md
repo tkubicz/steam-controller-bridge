@@ -5,6 +5,19 @@ Published history may be corrected directly when this file and the matching
 GitHub Release are updated together. Versions follow [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.5.0...v1.6.0) (2026-08-11)
+
+
+### Features
+
+* **updater:** add one App Center for application and XIAO firmware updates ([9fa5e63](https://github.com/tkubicz/steam-controller-bridge/commit/9fa5e63a77619d108220d99749bdd2562dfa73c0))
+
+
+### Bug Fixes
+
+* **runtime:** preserve bridge run intent across firmware updates ([9fa5e63](https://github.com/tkubicz/steam-controller-bridge/commit/9fa5e63a77619d108220d99749bdd2562dfa73c0))
+* **updater:** keep retries, downloads, and firmware flashing lifecycle-safe ([9fa5e63](https://github.com/tkubicz/steam-controller-bridge/commit/9fa5e63a77619d108220d99749bdd2562dfa73c0))
+
 ## [1.5.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.4.0...v1.5.0) (2026-08-10)
 
 
