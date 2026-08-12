@@ -31,13 +31,13 @@ impl Supervisor {
             let _ = engine.shutdown(&mut *output.output);
             worker.shutdown()?;
             return Err(format!(
-                "XIAO service failed before input activation: {error}"
+                "bridge-device service failed before input activation: {error}"
             ));
         }
         while output.output.take_feedback().is_some() {
             // Feedback received before the input worker exists is not a valid
             // post-reconnect lease. A continuing effect will be refreshed by
-            // the XIAO within 25 ms.
+            // the bridge device within 25 ms.
         }
         let mut last_controller_state = Instant::now();
         let mut controller_state_seen = initial_controller_seen;
@@ -70,15 +70,15 @@ impl Supervisor {
             status.profile_picker = picker_status(&self.config, false);
             status.automatic_shutdown = automatic_status;
         });
-        self.refresh_xiao_firmware(&mut output);
+        self.refresh_output_firmware(&mut output);
         eprintln!(
             "level=info event=bridge_running input_transport={:?} input_interface={} \
-             input_product={:?} input_serial={} xiao_path={:?} lizard_mode={:?}",
+             input_product={:?} input_serial={} output_endpoint={:?} lizard_mode={:?}",
             worker.device_info().controller_transport(),
             worker.device_info().interface_number,
             worker.device_info().product,
             masked_serial(worker.device_info().serial_number.as_deref()),
-            output.xiao.as_ref().map(|info| info.path.as_str()),
+            output.device.as_ref().map(|info| info.path.as_str()),
             self.config.lizard_mode
         );
         record_device_event(
@@ -247,7 +247,7 @@ impl Supervisor {
                     Ok(ReportEffect::None) => {}
                     Err(error) if is_output_error(&error) => {
                         break 'active ActiveExit::OutputLost(format!(
-                            "XIAO output failed; waiting for reconnect: {error}"
+                            "bridge-device output failed; waiting for reconnect: {error}"
                         ));
                     }
                     Err(error) => {
@@ -278,7 +278,7 @@ impl Supervisor {
             };
             if let Err(error) = service_result {
                 break ActiveExit::OutputLost(format!(
-                    "XIAO service failed; waiting for reconnect: {error}"
+                    "bridge-device service failed; waiting for reconnect: {error}"
                 ));
             }
             iteration_timer.enter("output_feedback");
@@ -309,9 +309,9 @@ impl Supervisor {
                 .or_else(|| dock_retry_due.then_some(ShutdownTrigger::PuckDock))
                 .or_else(|| idle_shutdown_due.then_some(ShutdownTrigger::IdleTimeout));
             if let Some(trigger) = automatic_trigger {
-                if output.xiao.is_none() {
+                if output.device.is_none() {
                     eprintln!(
-                        "level=warn event=automatic_shutdown_skipped trigger={trigger:?} reason=xiao_not_ready"
+                        "level=warn event=automatic_shutdown_skipped trigger={trigger:?} reason=output_not_ready"
                     );
                 } else if trigger != ShutdownTrigger::IdleTimeout || idle_activity.is_neutral() {
                     self.automatic_shutdown.begin(trigger);
@@ -357,7 +357,7 @@ impl Supervisor {
                         },
                         Err(error) => {
                             break ActiveExit::OutputLost(format!(
-                                "cannot neutralize XIAO before automatic controller shutdown: {error}"
+                                "cannot neutralize bridge device before automatic controller shutdown: {error}"
                             ));
                         }
                     }
@@ -394,7 +394,7 @@ impl Supervisor {
                 // Internal serial reconnects restart firmware reporting at
                 // Pending without the supervisor noticing; this re-resolves
                 // the report on the same cadence.
-                self.refresh_xiao_firmware(&mut output);
+                self.refresh_output_firmware(&mut output);
                 last_status = Instant::now();
             }
         };
@@ -420,9 +420,9 @@ impl Supervisor {
         self.clear_controller_status();
         let recording_result =
             record_device_event(&mut recording, started, KIND_DEVICE_DISCONNECTED, None);
-        let neutral_result = neutral_result
-            .map(|_| ())
-            .map_err(|error| format!("cannot neutralize XIAO before HID release: {error}"));
+        let neutral_result = neutral_result.map(|_| ()).map_err(|error| {
+            format!("cannot neutralize bridge device before HID release: {error}")
+        });
         let required_cleanup =
             worker_result
                 .and(recording_result)

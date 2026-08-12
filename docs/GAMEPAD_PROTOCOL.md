@@ -38,10 +38,10 @@ Unknown message type values are returned as opaque messages so newer messages ca
 
 ## Device info payload
 
-Firmware sends one `DeviceInfo` frame to the host after every successful Hello
-negotiation, retried until the CDC transmit queue accepts it. `DeviceInfo` is
-the one deliberately length-agnostic message: hosts and firmware that predate
-it ignore it entirely, so both legacy pairings stay compatible.
+Firmware may send one `DeviceInfo` frame to the host after every successful
+Hello negotiation, retried until the transport accepts it. `DeviceInfo` is
+deliberately extensible: firmware that predates it remains bridge-compatible,
+and hosts must ignore trailing fields that they do not understand.
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
@@ -55,16 +55,37 @@ it ignore it entirely, so both legacy pairings stay compatible.
 
 Exactly three bytes is the legacy revision 1 report. Lengths four through seven
 are malformed. Extended reports require at least eight bytes, or 33 bytes for a
-recorded receipt; later trailing bytes are ignored. An unknown format byte
-is classified as firmware newer than the host and is never treated as
-outdated. A current-format payload shorter than three bytes is malformed and
-prompts a reflash instead of being mistaken for a future format. Firmware that
-never sends `DeviceInfo` predates version reporting and is reported as such
-after a short host-side grace period.
+recorded receipt. Zero or more TLVs follow that base body:
+
+| Field | Size | Meaning |
+| --- | ---: | --- |
+| Tag | 1 | Extension type |
+| Length | 1 | Value length in bytes |
+| Value | Length | Tag-specific value |
+
+Tag `1` is the firmware target ID. Its value is 1-64 lowercase ASCII bytes
+using `a-z`, `0-9`, dot, and hyphen, with an alphanumeric first and last byte.
+It identifies an implementation for updater-catalog matching; it is not a
+hardware-model claim or update authority. The project XIAO firmware reports
+`seeed-xiao-nrf52840`.
+
+Unknown complete TLVs are ignored. A duplicate target tag, invalid target
+value, truncated TLV header, or truncated value makes target identity malformed
+and disables update association. It does not invalidate a separately valid
+revision or the bridge session. No target TLV means legacy/unreported identity.
+Old format-1 hosts tolerate the appended bytes by continuing to parse only the
+base or receipt body.
+
+An unknown format byte is classified as firmware newer than the host and is
+never treated as outdated. A current-format payload shorter than three bytes is
+malformed instead of being mistaken for a future format. Firmware that never
+sends `DeviceInfo` predates version reporting and is reported as such after a
+short host-side grace period.
 
 ## Firmware update control
 
-Update commands are accepted only after Hello negotiation. Request IDs are
+Update commands are optional protocol capabilities and are accepted only after
+Hello negotiation. Request IDs are
 little-endian `u32` values. A bootloader request forces neutral input and zero
 rumble before `Uf2BootloaderReady` is queued. The sketch drains CDC, waits 100
 ms, and calls the Adafruit UF2 entry routine. Repeating the same request ID is
@@ -81,6 +102,11 @@ Both receipt messages use the same 29-byte payload:
 
 Firmware acknowledges only after the receipt is committed and read back. It
 rejects replacement metadata until another UF2 flash restores blank slots.
+
+A host must associate automatic update control with a matching, locally known
+firmware target before issuing these commands. Targetless, malformed, or
+different-target implementations remain valid bridge devices but receive no
+automatic bootloader request or target-specific revision policy.
 
 Control errors have an exact six-byte payload. The first two bytes contain the
 error code and the final four bytes contain the request ID. Current error codes

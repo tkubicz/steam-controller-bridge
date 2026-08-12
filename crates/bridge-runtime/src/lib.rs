@@ -16,9 +16,9 @@ mod supervisor;
 pub use api::{
     AutomaticShutdownPhase, AutomaticShutdownStatus, BridgeStatus, ControllerChargeState,
     ControllerSelection, ControllerSourceStatus, ControllerStatus, DesktopBindingsState,
-    DesktopBindingsStatus, HapticsState, HapticsStatus, LizardMode, LizardStatus, OutputSelection,
-    ProfilePickerStatus, PuckDockAction, RuntimeConfig, RuntimeError, RuntimeState,
-    SerialSelection, ShutdownTrigger, XiaoStatus,
+    DesktopBindingsStatus, HapticsState, HapticsStatus, LizardMode, LizardStatus, OutputBackend,
+    OutputSelection, OutputStatus, ProfilePickerStatus, PuckDockAction, RuntimeConfig,
+    RuntimeError, RuntimeState, SerialSelection, ShutdownTrigger,
 };
 pub(crate) use automatic_shutdown::{
     automatic_shutdown_phase, binding_status_for_profile, validate_idle_shutdown_timeout,
@@ -39,7 +39,8 @@ pub use runtime::{
 // bridge-output directly.
 pub use bridge_output::{
     new_firmware_install_receipt, FirmwareCapabilities, FirmwareInfo, FirmwareInstallReceipt,
-    FirmwareInstallSource, FirmwareInstallState, FirmwareVersion, MINIMUM_FIRMWARE_REVISION,
+    FirmwareInstallSource, FirmwareInstallState, FirmwareTarget, FirmwareTargetId,
+    FirmwareTargetIdError, FirmwareVersion,
 };
 pub(crate) use supervisor::Supervisor;
 #[cfg(test)]
@@ -117,7 +118,7 @@ const DISCOVERY_INTERVAL: Duration = Duration::from_millis(500);
 #[cfg(target_os = "macos")]
 const SLEEP_TEARDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(25);
 /// How long after a system wake before hardware discovery may reopen ports.
-/// The XIAO's CDC interface re-enumerates for a couple of seconds after a
+/// A bridge device's CDC interface can re-enumerate for a couple of seconds after a
 /// wake, and touching it mid-setup is the window the sleep suspension exists
 /// to stay out of.
 const WAKE_SETTLE_DELAY: Duration = Duration::from_secs(2);

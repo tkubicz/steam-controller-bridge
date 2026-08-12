@@ -1,6 +1,10 @@
 # XIAO nRF52840 Firmware Architecture
 
 Firmware is implemented in `firmware/xiao-nrf52840` for the XIAO nRF52840 and XIAO nRF52840 Sense.
+It is the project's first supported implementation of the public bridge-device
+contract, not a board requirement imposed by the host runtime. Its updater
+target ID is `seeed-xiao-nrf52840`; other compatible implementations may use
+the protocol without claiming that target or becoming installable by App Center.
 Its native protocol/session tests run without hardware. Serial flashing,
 CDC/gamepad enumeration, macOS Xbox-driver binding, Safari Gamepad API
 visibility, a 30-second unchanged-state refresh, full control-by-control
@@ -23,6 +27,8 @@ Required behavior:
 - Convert `GamepadState` and `Neutral` messages into USB HID reports.
 - Track sequence gaps for diagnostics without allowing a gap to leave stale controls active.
 - Respond to `Ping` with the same nonce in `Pong`.
+- Append a valid target-ID TLV to DeviceInfo format 1 after the base or recorded
+  receipt body.
 - Enter the UF2 bootloader only after negotiated, correlated control, neutral
   input, zero rumble, CDC drain, and a 100 ms response grace period.
 - Store verified installation metadata in a dedicated 4 KiB flash page with

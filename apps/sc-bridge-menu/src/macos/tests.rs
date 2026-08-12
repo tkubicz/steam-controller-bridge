@@ -2,6 +2,7 @@ use super::icons::{template_icon_rgba, ICON_HEIGHT, ICON_RENDER_SCALE, ICON_WIDT
 use super::logging::diagnostics_text;
 use super::support::{default_overlay_hold_ms, SETTINGS_VERSION};
 use super::system::privacy_pane_url;
+use super::tray::{hardware_status_rows, HardwareStatusRow};
 use super::*;
 
 #[test]
@@ -15,6 +16,52 @@ fn app_center_menu_actions_follow_build_capability() {
         app_center_available().then_some(AppCenterPage::Updates)
     );
     assert_eq!(app_center_page_for_menu("not-an-app-center-item"), None);
+}
+
+#[test]
+fn firmware_update_menu_labels_preserve_the_visible_ampersand() {
+    let item = MenuItem::new(MANAGE_UPDATES_LABEL, true, None);
+    assert_eq!(item.text(), "Manage Firmware & Updates");
+    item.set_text(UPDATE_AVAILABLE_LABEL);
+    assert_eq!(item.text(), "Manage Firmware & Updates — Update Available");
+}
+
+#[test]
+fn optional_hardware_rows_have_the_requested_pipeline_order() {
+    let hidden = HardwareRowVisibility {
+        section: false,
+        firmware: true,
+        controller_details: true,
+    };
+    assert!(hardware_status_rows(hidden).is_empty());
+
+    assert_eq!(
+        hardware_status_rows(HardwareRowVisibility {
+            section: true,
+            firmware: false,
+            controller_details: false,
+        }),
+        [
+            HardwareStatusRow::Input,
+            HardwareStatusRow::Output,
+            HardwareStatusRow::Controller,
+        ]
+    );
+    assert_eq!(
+        hardware_status_rows(HardwareRowVisibility {
+            section: true,
+            firmware: true,
+            controller_details: true,
+        }),
+        [
+            HardwareStatusRow::Input,
+            HardwareStatusRow::Output,
+            HardwareStatusRow::Firmware,
+            HardwareStatusRow::Controller,
+            HardwareStatusRow::Battery,
+            HardwareStatusRow::Haptics,
+        ]
+    );
 }
 
 #[test]
@@ -321,7 +368,7 @@ fn picker_commits_only_resolve_against_the_roster_the_wheel_used() {
 fn diagnostics_include_hardware_and_safety_state() {
     let text = diagnostics_text(&BridgeStatus::default());
     assert!(text.contains("source:"));
-    assert!(text.contains("xiao:"));
+    assert!(text.contains("output:"));
     assert!(text.contains("lizard:"));
     assert!(text.contains("haptics:"));
     assert!(text.contains("automatic_shutdown:"));
@@ -476,20 +523,21 @@ fn diagnostics_never_expose_a_whole_device_serial() {
             connected: true,
             active: true,
         },
-        xiao: bridge_runtime::XiaoStatus {
-            path: Some("/dev/cu.usbmodem11201".to_owned()),
-            usb_serial: Some("5E6EF905E5468F85".to_owned()),
-            handshake_complete: true,
-            firmware: bridge_runtime::FirmwareInfo {
+        output: bridge_runtime::OutputStatus {
+            backend: bridge_runtime::OutputBackend::SerialBridge,
+            endpoint: Some("/dev/cu.usbmodem11201".to_owned()),
+            stable_id: Some("5E6EF905E5468F85".to_owned()),
+            ready: true,
+            firmware: Some(bridge_runtime::FirmwareInfo {
                 version: bridge_runtime::FirmwareVersion::Reported(1),
                 ..bridge_runtime::FirmwareInfo::default()
-            },
+            }),
         },
         ..BridgeStatus::default()
     });
     assert!(!text.contains("a1b2c3d4e5f6"));
     assert!(text.contains("****e5f6"));
-    // The XIAO's MCU serial is a stable hardware identifier too.
+    // A bridge device's MCU serial is a stable hardware identifier too.
     assert!(!text.contains("5E6EF905E5468F85"));
     assert!(text.contains("****8F85"));
     // Transport, product, and port still have to be diagnosable.

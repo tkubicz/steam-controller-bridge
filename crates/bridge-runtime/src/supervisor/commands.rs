@@ -6,7 +6,7 @@ use super::*;
 
 use bridge_output::{
     new_firmware_install_receipt, random_firmware_request_id, FirmwareInfo, FirmwareInstallReceipt,
-    FirmwareInstallSource, FirmwareInstallState, MINIMUM_FIRMWARE_REVISION,
+    FirmwareInstallSource, FirmwareInstallState,
 };
 
 const FIRST_OBSERVED_RECEIPT_RETRY: Duration = Duration::from_secs(5);
@@ -316,18 +316,18 @@ impl Supervisor {
         self.update_status(|status| {
             status.source = ControllerSourceStatus::default();
             status.controller = ControllerStatus::default();
-            status.xiao = XiaoStatus::default();
+            status.output = OutputStatus::configured(&self.config.output);
             status.battery_percent = None;
             status.battery_charge_state = None;
             status.lizard = LizardStatus::default();
         });
     }
 
-    /// Copies the output's current firmware report into `XiaoStatus`, logging
+    /// Copies the output's current firmware report into `OutputStatus`, logging
     /// each transition once. Skips backends without a live device connection,
     /// so a torn-down serial session keeps the last known value until the
     /// existing output-lost reset clears it.
-    pub(crate) fn refresh_xiao_firmware(&self, output: &mut OutputSession) {
+    pub(crate) fn refresh_output_firmware(&self, output: &mut OutputSession) {
         let Some(mut reported) = output.output.firmware_info() else {
             return;
         };
@@ -340,17 +340,10 @@ impl Supervisor {
     }
 
     fn publish_firmware(&self, reported: FirmwareInfo) {
-        if !self.update_status(|status| status.xiao.firmware = reported) {
+        if !self.update_status(|status| status.output.firmware = Some(reported)) {
             return;
         }
-        if reported.version.update_recommended() {
-            eprintln!(
-                "level=warn event=xiao_firmware_outdated firmware={reported:?} \
-                 minimum={MINIMUM_FIRMWARE_REVISION}"
-            );
-        } else {
-            eprintln!("level=info event=xiao_firmware firmware={reported:?}");
-        }
+        eprintln!("level=info event=output_firmware firmware={reported:?}");
     }
 
     pub(super) fn update_status(&self, update: impl FnOnce(&mut BridgeStatus)) -> bool {
@@ -364,7 +357,7 @@ impl Supervisor {
             || status.detail != previous.detail
             || status.source != previous.source
             || status.controller != previous.controller
-            || status.xiao != previous.xiao
+            || status.output != previous.output
             || status.battery_percent != previous.battery_percent
             || status.battery_charge_state != previous.battery_charge_state
             || status.lizard != previous.lizard
@@ -396,21 +389,21 @@ fn service_first_observed_receipt(
             Some(Ok(recorded)) => {
                 output.first_observed_receipt = FirstObservedReceiptState::Idle;
                 reported.install_state = FirmwareInstallState::Recorded(recorded);
-                eprintln!("level=info event=xiao_install_receipt_recorded source=first_observed");
+                eprintln!("level=info event=output_install_receipt_recorded source=first_observed");
             }
             Some(Err(error)) => {
                 output.first_observed_receipt = FirstObservedReceiptState::Backoff {
                     request: Some(request),
                     retry_at: now + FIRST_OBSERVED_RECEIPT_RETRY,
                 };
-                eprintln!("level=warn event=xiao_install_receipt_failed error={error:?}");
+                eprintln!("level=warn event=output_install_receipt_failed error={error:?}");
             }
             None if now >= deadline => {
                 output.first_observed_receipt = FirstObservedReceiptState::Backoff {
                     request: Some(request),
                     retry_at: now + FIRST_OBSERVED_RECEIPT_RETRY,
                 };
-                eprintln!("level=warn event=xiao_install_receipt_failed error=response_timeout");
+                eprintln!("level=warn event=output_install_receipt_failed error=response_timeout");
             }
             None => {}
         }
@@ -461,7 +454,7 @@ fn start_first_observed_receipt(output: &mut OutputSession, now: Instant) {
                     request: Some(request),
                     retry_at: now + FIRST_OBSERVED_RECEIPT_RETRY,
                 };
-                eprintln!("level=warn event=xiao_install_receipt_failed error={error:?}");
+                eprintln!("level=warn event=output_install_receipt_failed error={error:?}");
             }
         },
         Err(error) => {
@@ -469,7 +462,7 @@ fn start_first_observed_receipt(output: &mut OutputSession, now: Instant) {
                 request: None,
                 retry_at: now + FIRST_OBSERVED_RECEIPT_RETRY,
             };
-            eprintln!("level=warn event=xiao_install_receipt_failed error={error:?}");
+            eprintln!("level=warn event=output_install_receipt_failed error={error:?}");
         }
     }
 }

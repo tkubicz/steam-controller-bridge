@@ -972,7 +972,8 @@ void test_device_info_reported_once_after_negotiation() {
   assert(device_info_count(sink) == 1);
 
   const Frame info = last_device_info(sink);
-  assert(info.payload_length == scbridge::kDeviceInfoBasePayloadSize);
+  assert(info.payload_length == scbridge::kDeviceInfoBasePayloadSize +
+                                    scbridge::kFirmwareTargetExtensionSize);
   assert(info.payload[0] == scbridge::kDeviceInfoFormat);
   assert(info.payload[1] ==
          static_cast<uint8_t>(scbridge::kFirmwareRevision));
@@ -984,6 +985,10 @@ void test_device_info_reported_once_after_negotiation() {
   assert(info.payload[6] == 0);
   assert(info.payload[7] ==
          static_cast<uint8_t>(scbridge::InstallReceiptState::Pending));
+  assert(info.payload[8] == scbridge::kFirmwareTargetTlv);
+  assert(info.payload[9] == scbridge::kFirmwareTargetIdSize);
+  assert(memcmp(info.payload + 10, scbridge::kFirmwareTargetId,
+                scbridge::kFirmwareTargetIdSize) == 0);
 
   session.tick(1);
   session.tick(50);
@@ -1002,6 +1007,30 @@ void test_device_info_retries_when_sink_rejects() {
   assert(device_info_count(sink) == 0);
   session.tick(1);
   assert(device_info_count(sink) == 1);
+}
+
+void test_device_info_appends_target_after_a_recorded_receipt() {
+  CapturingSink sink;
+  const scbridge::InstallReceiptData receipt = example_receipt();
+  assert(sink.record_install_receipt(receipt));
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session);
+  session.tick(0);
+
+  const Frame info = last_device_info(sink);
+  assert(info.payload_length == scbridge::kDeviceInfoRecordedPayloadSize +
+                                    scbridge::kFirmwareTargetExtensionSize);
+  assert(info.payload[7] ==
+         static_cast<uint8_t>(scbridge::InstallReceiptState::Recorded));
+  assert(info.payload[scbridge::kDeviceInfoRecordedPayloadSize] ==
+         scbridge::kFirmwareTargetTlv);
+  assert(info.payload[scbridge::kDeviceInfoRecordedPayloadSize + 1U] ==
+         scbridge::kFirmwareTargetIdSize);
+  assert(memcmp(info.payload + scbridge::kDeviceInfoRecordedPayloadSize + 2U,
+                scbridge::kFirmwareTargetId,
+                scbridge::kFirmwareTargetIdSize) == 0);
 }
 
 void test_device_info_not_sent_before_negotiation() {
@@ -1066,6 +1095,7 @@ int main() {
   test_deferred_state_matching_the_neutral_is_not_resent();
   test_rejected_sends_do_not_advance_the_queue_cache();
   test_device_info_reported_once_after_negotiation();
+  test_device_info_appends_target_after_a_recorded_receipt();
   test_device_info_retries_when_sink_rejects();
   test_device_info_not_sent_before_negotiation();
   test_device_info_resent_after_re_hello();

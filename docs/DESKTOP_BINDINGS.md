@@ -8,7 +8,7 @@ independently of whether that pad function is enabled. While a pad is held
 clicked its motion is frozen (see below), so the click action lands without
 disturbing the pointer or scroll position. Stick clicks remain ordinary
 Xbox controls; trigger clicks, pressure actions, and gestures are not mapped.
-The feature is host-side and requires no protocol-v1 or XIAO firmware change.
+The feature is host-side and requires no protocol-v1 or bridge-device firmware change.
 
 ## Menu app
 
@@ -23,7 +23,7 @@ releases every old held output and ignores physical controls already held until
 they are released. The gamepad output is parked at neutral for the length of the
 switch. Profile reconfiguration and macOS input-sink lifecycle work run on a
 dedicated bounded worker, so a slow window-server operation cannot stall the
-thread feeding the XIAO; the neutral report remains the safety boundary while
+thread feeding gamepad output; the neutral report remains the safety boundary while
 that ordered work completes. Once authorized, the sink is retained across
 profile switches, including an unbound profile, and is dropped only after a
 backend failure or during worker shutdown. See

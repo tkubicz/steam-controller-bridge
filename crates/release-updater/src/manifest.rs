@@ -6,10 +6,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    APPLICATION_BUNDLE_ID, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID,
-    XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
-};
+use crate::{firmware_target, APPLICATION_BUNDLE_ID};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -203,9 +200,14 @@ fn validate_manifest(manifest: &ReleaseManifestV1) -> Result<(), ManifestError> 
             "application identity/version mismatch".to_owned(),
         ));
     }
-    if manifest.firmware.target != FIRMWARE_TARGET_ID
-        || manifest.firmware.board_id != FIRMWARE_BOARD_ID
-        || manifest.firmware.uf2_family_id != UF2_FAMILY_ID
+    let Some(target) = firmware_target(&manifest.firmware.target) else {
+        return Err(ManifestError::InvalidField(
+            "unsupported firmware target".to_owned(),
+        ));
+    };
+    if manifest.firmware.revision < target.minimum_compatible_revision
+        || manifest.firmware.board_id != target.manifest_board_id
+        || manifest.firmware.uf2_family_id != target.uf2_family_id
     {
         return Err(ManifestError::InvalidField(
             "unsupported firmware target".to_owned(),
@@ -217,10 +219,10 @@ fn validate_manifest(manifest: &ReleaseManifestV1) -> Result<(), ManifestError> 
         ));
     }
     if manifest.firmware.minimum_application_version > manifest.application_version
-        || manifest.firmware.usb_vendor_id != XIAO_USB_VENDOR_ID
-        || manifest.firmware.usb_product_id != XIAO_USB_PRODUCT_ID
-        || manifest.firmware.usb_manufacturer != XIAO_USB_MANUFACTURER
-        || manifest.firmware.usb_product != XIAO_USB_PRODUCT
+        || manifest.firmware.usb_vendor_id != target.application_usb.vendor_id
+        || manifest.firmware.usb_product_id != target.application_usb.product_id
+        || manifest.firmware.usb_manufacturer != target.application_manufacturer
+        || manifest.firmware.usb_product != target.application_product
     {
         return Err(ManifestError::InvalidField(
             "incompatible firmware/application or USB identity".to_owned(),
@@ -265,6 +267,10 @@ pub(crate) fn valid_release_component(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID, XIAO_USB_MANUFACTURER,
+        XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
+    };
     use ed25519_dalek::{Signer as _, SigningKey};
 
     fn manifest() -> ReleaseManifestV1 {
@@ -361,6 +367,24 @@ mod tests {
 
     #[test]
     fn rejects_target_and_path_confusion() {
+        let mutations: [fn(&mut ReleaseManifestV1); 2] = [
+            |manifest: &mut ReleaseManifestV1| {
+                manifest.firmware.target = "community-nrf52840".to_owned();
+            },
+            |manifest: &mut ReleaseManifestV1| {
+                manifest.firmware.revision = 1;
+            },
+        ];
+        for mutate in mutations {
+            let mut invalid = manifest();
+            mutate(&mut invalid);
+            let (bytes, signatures, key) = signed(&invalid);
+            assert!(matches!(
+                verify_signed_manifest(&bytes, &signatures, &[key]),
+                Err(ManifestError::InvalidField(_))
+            ));
+        }
+
         let mut invalid = manifest();
         invalid.firmware.board_id = "Seeed_XIAO_nRF52840_Sense".to_owned();
         let (bytes, signatures, key) = signed(&invalid);

@@ -1,8 +1,8 @@
 use super::{
     automatic_shutdown_phase, binding_status_for_profile, mpsc, thread, Arc,
     AutomaticShutdownStatus, BindingProfile, BridgeStatus, Duration, JoinHandle, Mutex,
-    PickerConfig, PickerEvent, PickerRoster, ProfilePickerStatus, PuckDockAction, RuntimeConfig,
-    RuntimeError, RuntimeState, Supervisor, COMMAND_TIMEOUT,
+    OutputStatus, PickerConfig, PickerEvent, PickerRoster, ProfilePickerStatus, PuckDockAction,
+    RuntimeConfig, RuntimeError, RuntimeState, Supervisor, COMMAND_TIMEOUT,
 };
 #[cfg(target_os = "macos")]
 use super::{bounded_error, OutputSelection, PowerEvent, PowerMonitor, SLEEP_TEARDOWN_ACK_TIMEOUT};
@@ -62,6 +62,7 @@ impl BridgeRuntime {
             },
             bindings: binding_status_for_profile(config.binding_profile.as_ref()),
             profile_picker: picker_status(&config, false),
+            output: OutputStatus::configured(&config.output),
             ..BridgeStatus::default()
         }));
         let worker_status = Arc::clone(&status);
@@ -314,7 +315,7 @@ impl BridgeHandle {
     ///
     /// For the frontend's system-sleep hook. The port must be **closed before
     /// the machine sleeps**: serial I/O left in flight across a sleep/wake
-    /// transition has panicked macOS's USB CDC driver while the XIAO
+    /// transition has panicked macOS's USB CDC driver while the bridge device
     /// re-enumerated. The bridge stays suspended - regardless of its
     /// start/stop setting - until [`BridgeHandle::request_resume_from_wake`].
     ///
@@ -361,7 +362,7 @@ impl BridgeHandle {
     /// Lets the bridge look for its hardware again after a system wake.
     ///
     /// Discovery waits `WAKE_SETTLE_DELAY` first, so the USB stack has
-    /// time to finish re-enumerating the XIAO before anything reopens it. A
+    /// time to finish re-enumerating the bridge device before anything reopens it. A
     /// bridge the user had stopped stays stopped.
     ///
     /// # Errors

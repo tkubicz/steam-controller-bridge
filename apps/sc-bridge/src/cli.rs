@@ -12,10 +12,10 @@ use std::time::Duration;
 use bridge_runtime::MAX_IDLE_SHUTDOWN_TIMEOUT;
 use clap::{Parser, ValueEnum};
 
-/// Bridges a Steam Controller 2 to a XIAO over serial, or replays a recording.
+/// Bridges a Steam Controller 2 to a protocol-compatible output device, or replays a recording.
 ///
 /// With no arguments, waits for one active Steam Controller 2 input source
-/// (Puck or Bluetooth) and the XIAO, then starts the serial bridge and recovers
+/// (Puck or Bluetooth) and the output device, then starts the serial bridge and recovers
 /// after reconnects.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "sc-bridge", version, about, long_about = None)]
@@ -33,7 +33,7 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "N")]
     pub(crate) index: Option<usize>,
 
-    /// Automatic XIAO discovery, or a fixed CDC port path.
+    /// Automatic bridge-device discovery, or a fixed CDC port path.
     #[arg(long, value_name = "auto|PATH")]
     pub(crate) port: Option<String>,
 
@@ -194,7 +194,7 @@ impl Cli {
             && (self.idle_shutdown.is_some() || self.puck_dock_action.is_some())
         {
             return Err(
-                "automatic controller shutdown requires live serial output to a ready XIAO"
+                "automatic controller shutdown requires live serial output to a ready bridge device"
                     .to_owned(),
             );
         }
@@ -238,7 +238,7 @@ impl Cli {
         })
     }
 
-    /// Replay has no XIAO discovery, so `auto` is not a port here.
+    /// Replay has no bridge-device discovery, so `auto` is not a port here.
     pub(crate) fn replay_port(&self) -> Option<&str> {
         self.port.as_deref().filter(|value| *value != "auto")
     }
@@ -371,7 +371,7 @@ mod tests {
         assert!(reject(&["--input", "replay"]).contains("requires --file PATH"));
         let message = reject(&["--input", "replay", "--file", "x", "--output", "serial"]);
         assert!(message.contains("explicit --port PATH"), "{message}");
-        // `auto` is XIAO discovery, which replay does not do.
+        // `auto` is bridge-device discovery, which replay does not do.
         let message = reject(&[
             "--input", "replay", "--file", "x", "--output", "serial", "--port", "auto",
         ]);

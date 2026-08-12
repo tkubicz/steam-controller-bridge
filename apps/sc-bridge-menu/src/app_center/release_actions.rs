@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use release_updater::{
     ensure_release_artifact, installed_macos_version, refresh_catalog_if_due, stage_application,
-    CatalogRefresh, FirmwareFlashProgress, ReleaseManifestV1,
+    CatalogRefresh, FirmwareFlashProgress, FirmwareTargetDescriptor, ReleaseManifestV1,
 };
 
 use crate::update_check::{running_version, UpdateContext};
@@ -71,27 +71,36 @@ pub(super) fn download_firmware(
     )
 }
 
-pub(super) fn progress_text(progress: &FirmwareFlashProgress) -> &'static str {
+pub(super) fn progress_text(
+    progress: &FirmwareFlashProgress,
+    target: Option<&FirmwareTargetDescriptor>,
+) -> String {
+    let target_name = target.map_or("supported firmware target", |target| target.display_name);
     match progress {
-        FirmwareFlashProgress::LookingForDevice => "Looking for one compatible XIAO…",
+        FirmwareFlashProgress::LookingForDevice => {
+            format!("Looking for one compatible {target_name} device…")
+        }
         FirmwareFlashProgress::RequestingBootloader => {
-            "Requesting automatic UF2 bootloader mode…"
+            "Requesting automatic UF2 bootloader mode…".to_owned()
         }
         FirmwareFlashProgress::WaitingForBootloader => {
-            "Waiting for the automatic XIAO UF2 drive…"
+            format!("Waiting for the automatic {target_name} UF2 drive…")
         }
-        FirmwareFlashProgress::ManualRecovery => {
-            "Automatic entry is unavailable. Quickly press the tiny reset button beside the USB-C connector twice while this recovery window is open…"
+        FirmwareFlashProgress::ManualRecovery => target.map_or_else(
+            || "Automatic entry is unavailable. Follow the supported target's manual bootloader recovery instructions while this recovery window is open…".to_owned(),
+            |target| format!("Automatic entry is unavailable. {}…", target.manual_recovery),
+        ),
+        FirmwareFlashProgress::Writing => {
+            "Writing firmware. Do not unplug the board…".to_owned()
         }
-        FirmwareFlashProgress::Writing => "Writing firmware. Do not unplug the board…",
         FirmwareFlashProgress::WaitingForApplication => {
-            "Waiting for the flashed device to reconnect…"
+            "Waiting for the flashed device to reconnect…".to_owned()
         }
         FirmwareFlashProgress::RecordingReceipt => {
-            "Firmware started. Recording the verified installation receipt…"
+            "Firmware started. Recording the verified installation receipt…".to_owned()
         }
         FirmwareFlashProgress::VerifyingReceipt => {
-            "Reading the committed installation receipt back from the board…"
+            "Reading the committed installation receipt back from the board…".to_owned()
         }
     }
 }

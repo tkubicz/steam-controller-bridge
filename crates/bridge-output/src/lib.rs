@@ -12,10 +12,9 @@ pub use serial::{
     available_serial_devices, available_serial_ports, new_firmware_install_receipt,
     random_firmware_request_id, ByteTransport, FirmwareCapabilities, FirmwareInfo,
     FirmwareInstallReceipt, FirmwareInstallSource, FirmwareInstallState,
-    FirmwareReceiptCreationError, FirmwareVersion, SerialConfig, SerialConnection,
-    SerialDeviceInfo, SerialError, SerialMetrics, SerialOutput, SerialStatus,
-    MINIMUM_FIRMWARE_REVISION, XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID,
-    XIAO_USB_VENDOR_ID,
+    FirmwareReceiptCreationError, FirmwareTarget, FirmwareTargetId, FirmwareTargetIdError,
+    FirmwareVersion, SerialConfig, SerialConnection, SerialDeviceInfo, SerialError, SerialMetrics,
+    SerialOutput, SerialStatus, BRIDGE_DEVICE_USB_PRODUCT, MAX_FIRMWARE_TARGET_ID_LEN,
 };
 
 #[derive(Debug)]

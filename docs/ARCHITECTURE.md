@@ -13,13 +13,17 @@ Steam Controller HID -> decode -> SteamControllerState
 simulator/replay ------------> GamepadState  macOS  finite pad tick
                                    |
                                    v
-                         framed serial protocol
+                           GamepadOutput
                                    |
-                                   v
-                          XIAO Xbox gamepad USB
+                   +---------------+---------------+
+                   |               |               |
+             serial bridge      dump/file         mock
+                   |
+                   v
+              gamepad-facing HID
 
-game/browser -> Xbox rumble OUT -> XIAO -> CDC feedback -> bridge runtime
-                                                        -> SC2 actuators
+game/browser -> gamepad feedback -> bridge device -> protocol feedback
+                                                 -> bridge runtime -> SC2 actuators
 ```
 
 ## Ownership
@@ -39,7 +43,7 @@ game/browser -> Xbox rumble OUT -> XIAO -> CDC feedback -> bridge runtime
 | `bridge-core` | Hardware-independent decode/map/output lifecycle. |
 | `bridge-runtime` | Live hardware ownership, discovery, safety cleanup, power policy, and status. |
 | `macos-power-monitor` | Typed macOS sleep/wake notifications and acknowledgement ownership. |
-| `release-updater` | Signed metadata, rollback policy, bounded downloads, staging, and firmware flashing. |
+| `release-updater` | Signed metadata, rollback policy, bounded downloads, staging, firmware-target catalog, and target-specific installation. |
 | `controller-art`, `ui-theme` | Shared visual primitives without controller or profile policy. |
 | CLI and GUI applications | Argument parsing, presentation, user actions, and composition of the crates above. |
 
@@ -83,6 +87,11 @@ recovery.
   completes.
 - Release metadata is verified before parsing, cached atomically, and checked
   for rollback. Artifacts require the signed size and SHA-256 before use.
+- A reported firmware target is only an implementation identity. Automatic
+  recommendations, bootloader control, and successful reconnect verification
+  require an exact match to a target in the signed updater path. Targetless,
+  malformed, and different-target devices continue bridging without automatic
+  update association.
 
 ## Platform boundary
 
@@ -92,7 +101,15 @@ pretending live access exists. All project-authored crates forbid unsafe code
 except `macos-power-monitor`, whose documented IOKit/Core Foundation ownership
 is isolated behind a safe typed API.
 
-The XIAO firmware provides CDC transport plus the Xbox-compatible USB gamepad.
-Its framing contract is documented in [GAMEPAD_PROTOCOL.md](GAMEPAD_PROTOCOL.md);
-firmware scheduling and watchdog ownership are documented in
-[FIRMWARE_ARCHITECTURE.md](FIRMWARE_ARCHITECTURE.md).
+The core host depends on the public bridge-device contract, not a board model.
+Zero-configuration serial discovery uses the exact USB product marker
+`Steam Controller Bridge`, followed by a required protocol-v1 Hello handshake;
+an explicit port bypasses only the marker. The contract is documented in
+[SERIAL_TRANSPORT.md](SERIAL_TRANSPORT.md) and
+[GAMEPAD_PROTOCOL.md](GAMEPAD_PROTOCOL.md).
+
+Seeed Studio XIAO nRF52840/Sense is the first project-supported firmware target
+and the sole current entry in the updater catalog. Its CDC-to-Xbox reference
+implementation, scheduling, and watchdog ownership remain documented in
+[FIRMWARE_ARCHITECTURE.md](FIRMWARE_ARCHITECTURE.md). Another compatible serial
+implementation can bridge without becoming an installable project target.

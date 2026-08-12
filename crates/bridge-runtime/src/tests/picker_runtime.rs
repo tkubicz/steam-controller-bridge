@@ -518,16 +518,17 @@ fn pending_manual_firmware_gets_one_first_observed_receipt() {
                 capabilities: FirmwareCapabilities::ENTER_UF2_BOOTLOADER
                     | FirmwareCapabilities::INSTALL_RECEIPT,
                 install_state: FirmwareInstallState::Pending,
+                ..FirmwareInfo::default()
             },
             recorded: Arc::clone(&recorded),
             pending_response: None,
         }),
-        xiao: None,
+        device: None,
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
 
-    supervisor.refresh_xiao_firmware(&mut output);
-    supervisor.refresh_xiao_firmware(&mut output);
+    supervisor.refresh_output_firmware(&mut output);
+    supervisor.refresh_output_firmware(&mut output);
 
     let receipts = recorded.lock().unwrap();
     assert_eq!(receipts.len(), 1);
@@ -536,7 +537,13 @@ fn pending_manual_firmware_gets_one_first_observed_receipt() {
     assert!(receipt.installed_at > 0);
     assert_ne!(receipt.install_id, [0; 16]);
     assert_eq!(
-        status.lock().unwrap().xiao.firmware.install_state,
+        status
+            .lock()
+            .unwrap()
+            .output
+            .firmware
+            .unwrap()
+            .install_state,
         FirmwareInstallState::Recorded(receipt)
     );
 }
@@ -558,6 +565,7 @@ impl GamepadOutput for DroppedReceiptAckOutput {
             version: FirmwareVersion::Reported(2),
             capabilities: FirmwareCapabilities::INSTALL_RECEIPT,
             install_state: FirmwareInstallState::Pending,
+            ..FirmwareInfo::default()
         })
     }
 
@@ -595,11 +603,11 @@ fn a_lost_receipt_ack_retries_the_same_receipt_after_backoff() {
         output: Box::new(DroppedReceiptAckOutput {
             attempts: Arc::clone(&attempts),
         }),
-        xiao: None,
+        device: None,
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
 
-    supervisor.refresh_xiao_firmware(&mut output);
+    supervisor.refresh_output_firmware(&mut output);
     let FirstObservedReceiptState::Waiting { request, .. } = output.first_observed_receipt else {
         panic!("receipt request did not start");
     };
@@ -607,7 +615,7 @@ fn a_lost_receipt_ack_retries_the_same_receipt_after_backoff() {
         request,
         deadline: Instant::now(),
     };
-    supervisor.refresh_xiao_firmware(&mut output);
+    supervisor.refresh_output_firmware(&mut output);
     let FirstObservedReceiptState::Backoff { request, .. } = output.first_observed_receipt else {
         panic!("lost response did not enter backoff");
     };
@@ -616,7 +624,7 @@ fn a_lost_receipt_ack_retries_the_same_receipt_after_backoff() {
         request: Some(request),
         retry_at: Instant::now(),
     };
-    supervisor.refresh_xiao_firmware(&mut output);
+    supervisor.refresh_output_firmware(&mut output);
 
     assert_eq!(*attempts.lock().unwrap(), [(request.request_id, request.receipt); 2]);
 }
@@ -626,7 +634,7 @@ fn hardware_release_finishes_before_command_acknowledgement() {
     let order = Arc::new(Mutex::new(Vec::new()));
     let output = OutputSession {
         output: Box::new(DropOrderOutput(Arc::clone(&order))),
-        xiao: None,
+        device: None,
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     let release_order = Arc::clone(&order);
@@ -656,7 +664,7 @@ fn a_slow_desktop_operation_is_preceded_by_neutral_on_the_wire() {
     let states = Arc::new(Mutex::new(Vec::new()));
     let mut session = OutputSession {
         output: Box::new(SharedOutput(Arc::clone(&states))),
-        xiao: None,
+        device: None,
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     let mut engine = BridgeEngine::new(BridgeConfig::default(), MapperConfig::default()).unwrap();

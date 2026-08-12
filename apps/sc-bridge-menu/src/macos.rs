@@ -37,7 +37,7 @@ use crate::app_center_host::AppCenterHost;
 use crate::app_center_protocol::{
     AppCenterPage, UpdateOperation, UpdateRequest, UpdateResponse, UpdateResult,
 };
-use crate::model::{MenuModel, RunAction, TrayState};
+use crate::model::{HardwareRowVisibility, MenuModel, RunAction, TrayState};
 use crate::overlay_host::OverlayHost;
 #[cfg(feature = "updater")]
 use crate::update_check::UpdateChecker;
@@ -78,11 +78,16 @@ const ACCESSIBILITY_ID: &str = "accessibility";
 const ENABLE_BINDINGS_ID: &str = "enable-bindings";
 const EDIT_BINDINGS_ID: &str = "edit-bindings";
 const PROFILES_MENU_LABEL: &str = "Profiles";
-const EDIT_PROFILES_LABEL: &str = "Edit Profiles…";
+const EDIT_PROFILES_LABEL: &str = "Edit Profiles";
 const BINDING_PROFILE_PREFIX: &str = "binding-profile:";
 const LOGS_ID: &str = "open-logs";
 const ABOUT_ID: &str = "about";
 const UPDATES_ID: &str = "updates";
+// `muda` treats a single ampersand as a mnemonic marker on every platform.
+// Doubling it preserves one visible ampersand in the native macOS menu.
+const MANAGE_UPDATES_LABEL: &str = "Manage Firmware && Updates";
+#[cfg(any(feature = "updater", test))]
+const UPDATE_AVAILABLE_LABEL: &str = "Manage Firmware && Updates — Update Available";
 
 const fn app_center_available() -> bool {
     cfg!(feature = "updater")
@@ -133,10 +138,12 @@ struct MenuItems {
     status: MenuItem,
     input: MenuItem,
     controller: MenuItem,
-    xiao: MenuItem,
+    output: MenuItem,
     firmware: MenuItem,
     battery: MenuItem,
     haptics: MenuItem,
+    hardware_separator: PredefinedMenuItem,
+    hardware_visibility: HardwareItemVisibility,
     current_profile: MenuItem,
     automatic_shutdown: MenuItem,
     problem: MenuItem,
@@ -155,6 +162,32 @@ struct MenuItems {
     overlay_submenu: Submenu,
     overlay_enabled: CheckMenuItem,
     overlay_hold: Vec<(u64, CheckMenuItem)>,
+}
+
+#[derive(Clone, Copy)]
+struct HardwareItemVisibility {
+    section: bool,
+    optional: OptionalHardwareItemVisibility,
+}
+
+#[derive(Clone, Copy)]
+struct OptionalHardwareItemVisibility {
+    firmware: bool,
+    battery: bool,
+    haptics: bool,
+}
+
+impl From<HardwareRowVisibility> for HardwareItemVisibility {
+    fn from(rows: HardwareRowVisibility) -> Self {
+        Self {
+            section: rows.section,
+            optional: OptionalHardwareItemVisibility {
+                firmware: rows.section && rows.firmware,
+                battery: rows.section && rows.controller_details,
+                haptics: rows.section && rows.controller_details,
+            },
+        }
+    }
 }
 
 fn binding_profile_menu_items(

@@ -18,7 +18,7 @@ pub enum ControllerSelection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SerialSelection {
-    AutoXiao,
+    AutoBridgeDevice,
     Port(String),
 }
 
@@ -68,6 +68,26 @@ pub enum OutputSelection {
     Mock,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputBackend {
+    #[default]
+    SerialBridge,
+    Dump,
+    File,
+    Mock,
+}
+
+impl From<&OutputSelection> for OutputBackend {
+    fn from(selection: &OutputSelection) -> Self {
+        match selection {
+            OutputSelection::Serial => Self::SerialBridge,
+            OutputSelection::Dump(_) => Self::Dump,
+            OutputSelection::File(_) => Self::File,
+            OutputSelection::Mock => Self::Mock,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub controller: ControllerSelection,
@@ -96,7 +116,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             controller: ControllerSelection::AutoActive,
-            serial: SerialSelection::AutoXiao,
+            serial: SerialSelection::AutoBridgeDevice,
             output: OutputSelection::Serial,
             lizard_mode: LizardMode::Suppress,
             bridge: BridgeConfig::default(),
@@ -138,23 +158,61 @@ pub struct ControllerStatus {
     pub last_state_age: Option<Duration>,
 }
 
-#[derive(Clone, PartialEq, Eq, Default)]
-pub struct XiaoStatus {
-    pub path: Option<String>,
-    pub usb_serial: Option<String>,
-    pub handshake_complete: bool,
-    pub firmware: FirmwareInfo,
+#[derive(Clone, PartialEq, Eq)]
+pub struct OutputStatus {
+    pub backend: OutputBackend,
+    pub endpoint: Option<String>,
+    pub stable_id: Option<String>,
+    pub ready: bool,
+    pub firmware: Option<FirmwareInfo>,
+}
+
+impl Default for OutputStatus {
+    fn default() -> Self {
+        Self {
+            backend: OutputBackend::SerialBridge,
+            endpoint: None,
+            stable_id: None,
+            ready: false,
+            firmware: None,
+        }
+    }
+}
+
+impl OutputStatus {
+    #[must_use]
+    pub fn configured(selection: &OutputSelection) -> Self {
+        let endpoint = match selection {
+            OutputSelection::Dump(_) => Some("stdout".to_owned()),
+            OutputSelection::File(path) => Some(path.display().to_string()),
+            OutputSelection::Serial | OutputSelection::Mock => None,
+        };
+        Self {
+            backend: OutputBackend::from(selection),
+            endpoint,
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn ready_nonserial(selection: &OutputSelection) -> Self {
+        Self {
+            ready: true,
+            ..Self::configured(selection)
+        }
+    }
 }
 
 /// Deliberately lossy for the same reason as [`HidDeviceInfo`]'s: this reaches
-/// Copy Diagnostics through `{:?}`, and `usb_serial` is a stable hardware
+/// Copy Diagnostics through `{:?}`, and `stable_id` can be a stable hardware
 /// identifier. Read the field directly when the real value is needed.
-impl std::fmt::Debug for XiaoStatus {
+impl std::fmt::Debug for OutputStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("XiaoStatus")
-            .field("path", &self.path)
-            .field("usb_serial", &masked_serial(self.usb_serial.as_deref()))
-            .field("handshake_complete", &self.handshake_complete)
+        f.debug_struct("OutputStatus")
+            .field("backend", &self.backend)
+            .field("endpoint", &self.endpoint)
+            .field("stable_id", &masked_serial(self.stable_id.as_deref()))
+            .field("ready", &self.ready)
             .field("firmware", &self.firmware)
             .finish()
     }
@@ -277,7 +335,7 @@ pub struct BridgeStatus {
     pub detail: String,
     pub source: ControllerSourceStatus,
     pub controller: ControllerStatus,
-    pub xiao: XiaoStatus,
+    pub output: OutputStatus,
     pub battery_percent: Option<u8>,
     pub battery_charge_state: Option<ControllerChargeState>,
     pub lizard: LizardStatus,
@@ -298,7 +356,7 @@ impl Default for BridgeStatus {
             detail: "Bridge stopped".to_owned(),
             source: ControllerSourceStatus::default(),
             controller: ControllerStatus::default(),
-            xiao: XiaoStatus::default(),
+            output: OutputStatus::default(),
             battery_percent: None,
             battery_charge_state: None,
             lizard: LizardStatus::default(),

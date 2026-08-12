@@ -75,7 +75,7 @@ fn live_config(cli: &Cli) -> Result<RuntimeConfig, String> {
         .index
         .map_or(ControllerSelection::AutoActive, ControllerSelection::Index);
     let serial = match cli.port.as_deref() {
-        None | Some("auto") => SerialSelection::AutoXiao,
+        None | Some("auto") => SerialSelection::AutoBridgeDevice,
         Some(path) => SerialSelection::Port(path.to_owned()),
     };
     let output = live_output(cli)?;
@@ -242,7 +242,7 @@ mod tests {
     fn zero_arguments_select_zero_configuration_live_bridge() {
         let config = live(&[]).unwrap();
         assert_eq!(config.controller, ControllerSelection::AutoActive);
-        assert_eq!(config.serial, SerialSelection::AutoXiao);
+        assert_eq!(config.serial, SerialSelection::AutoBridgeDevice);
         assert_eq!(config.output, OutputSelection::Serial);
         assert_eq!(config.idle_shutdown_timeout, Some(Duration::from_mins(15)));
         assert_eq!(config.puck_dock_action, PuckDockAction::LeaveOn);
@@ -262,7 +262,7 @@ mod tests {
     fn explicit_auto_forms_match_defaults() {
         let config = live(&["--controller", "auto", "--port", "auto"]).unwrap();
         assert_eq!(config.controller, ControllerSelection::AutoActive);
-        assert_eq!(config.serial, SerialSelection::AutoXiao);
+        assert_eq!(config.serial, SerialSelection::AutoBridgeDevice);
     }
 
     #[test]

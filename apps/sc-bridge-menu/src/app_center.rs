@@ -6,13 +6,13 @@ use std::thread;
 
 use bridge_runtime::{
     new_firmware_install_receipt, FirmwareCapabilities, FirmwareInfo, FirmwareInstallSource,
-    FirmwareInstallState, FirmwareVersion,
+    FirmwareInstallState, FirmwareTarget, FirmwareTargetId, FirmwareVersion,
 };
 use eframe::egui;
 use release_updater::{
-    flash_firmware, guided_replacement_supported, ApplicationRelease, ArtifactDescriptor,
-    CatalogRefresh, FirmwareFlashError, FirmwareFlashProgress, FirmwareRelease, ReleaseManifestV1,
-    APPLICATION_BUNDLE_ID, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID,
+    firmware_target, flash_firmware, guided_replacement_supported, ApplicationRelease,
+    ArtifactDescriptor, CatalogRefresh, FirmwareFlashError, FirmwareFlashProgress, FirmwareRelease,
+    ReleaseManifestV1, APPLICATION_BUNDLE_ID, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID,
     XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
 };
 use semver::Version;
@@ -21,7 +21,8 @@ use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
 use crate::about_pages::AboutContent;
 use crate::app_center_protocol::{
-    AppCenterCommand, AppCenterPage, FirmwareDetails, FirmwareStatus, UpdateOperation,
+    AppCenterCommand, AppCenterPage, FirmwareDetails, FirmwareStatus, FirmwareTargetStatus,
+    UpdateOperation,
 };
 use crate::cli::{AppCenterArgs, DemoMode};
 use crate::macos::{open_path, reveal_path};
@@ -103,7 +104,7 @@ enum FirmwareOperationError {
     Preparation(String),
     Flash(FirmwareFlashError),
     Resume {
-        firmware: FirmwareInfo,
+        firmware: Box<FirmwareInfo>,
         error: String,
     },
     FlashAndResume {
@@ -117,7 +118,7 @@ enum FirmwareOperationError {
 impl FirmwareOperationError {
     fn verified_firmware(&self) -> Option<FirmwareInfo> {
         match self {
-            Self::Resume { firmware, .. } => Some(*firmware),
+            Self::Resume { firmware, .. } => Some(**firmware),
             _ => None,
         }
     }
@@ -165,7 +166,10 @@ fn combine_flash_and_resume(
     match (flash, resume) {
         (Ok(firmware), Ok(())) => Ok(firmware),
         (Err(error), Ok(())) => Err(FirmwareOperationError::Flash(error)),
-        (Ok(firmware), Err(error)) => Err(FirmwareOperationError::Resume { firmware, error }),
+        (Ok(firmware), Err(error)) => Err(FirmwareOperationError::Resume {
+            firmware: Box::new(firmware),
+            error,
+        }),
         (Err(flash), Err(resume)) => Err(FirmwareOperationError::FlashAndResume { flash, resume }),
     }
 }
@@ -269,7 +273,8 @@ enum CatalogStatus {
 
 fn demo_firmware_details() -> FirmwareDetails {
     FirmwareInfo {
-        version: FirmwareVersion::Reported(2),
+        target: FirmwareTarget::Reported(FirmwareTargetId::new(FIRMWARE_TARGET_ID).unwrap()),
+        version: FirmwareVersion::Reported(3),
         capabilities: FirmwareCapabilities::ENTER_UF2_BOOTLOADER
             | FirmwareCapabilities::INSTALL_RECEIPT,
         install_state: new_firmware_install_receipt(FirmwareInstallSource::AppCenter).map_or(
@@ -357,6 +362,7 @@ impl AppCenter {
         };
         let firmware = match demo {
             Some(DemoMode::Available) => FirmwareDetails {
+                target: FirmwareTargetStatus::Reported(FIRMWARE_TARGET_ID.to_owned()),
                 version: FirmwareStatus::Reported(1),
                 ..FirmwareDetails::default()
             },
@@ -661,7 +667,12 @@ impl AppCenter {
                     self.activity = Activity::Busy {
                         can_cancel: firmware_progress_is_cancellable(&progress),
                     };
-                    progress_text(&progress).clone_into(&mut self.status);
+                    self.status = progress_text(
+                        &progress,
+                        self.catalog
+                            .as_ref()
+                            .and_then(|manifest| firmware_target(&manifest.firmware.target)),
+                    );
                     self.status_tone = StatusTone::Info;
                 }
                 WorkerEvent::Firmware(Ok(firmware)) => {
@@ -834,7 +845,7 @@ impl AppCenter {
                         ui.add_space(7.0);
                         ui.horizontal_wrapped(|ui| {
                             hero_badge(ui, &format!("App {}", self.installed), ACCENT);
-                            hero_badge(ui, &firmware_badge(self.firmware.version), ACCENT);
+                            hero_badge(ui, &firmware_badge(&self.firmware), ACCENT);
                             if let Some(mode) = self.demo {
                                 hero_badge(ui, &format!("Demo · {}", mode.label()), MUTED_TEXT);
                             }
@@ -1040,7 +1051,7 @@ fn demo_manifest(_mode: DemoMode) -> ReleaseManifestV1 {
         },
         firmware: FirmwareRelease {
             target: FIRMWARE_TARGET_ID.to_owned(),
-            revision: 2,
+            revision: 3,
             minimum_application_version: application_version,
             protocol_version: 1,
             device_info_format: 1,
@@ -1065,6 +1076,9 @@ mod tests {
 
     fn verified_firmware_fixture() -> FirmwareInfo {
         FirmwareInfo {
+            target: bridge_runtime::FirmwareTarget::Reported(
+                bridge_runtime::FirmwareTargetId::new(FIRMWARE_TARGET_ID).unwrap(),
+            ),
             version: bridge_runtime::FirmwareVersion::Reported(2),
             capabilities: FirmwareCapabilities::ENTER_UF2_BOOTLOADER
                 | FirmwareCapabilities::INSTALL_RECEIPT,
@@ -1239,7 +1253,10 @@ mod tests {
 
     #[test]
     fn manual_recovery_points_to_the_physical_reset_button() {
-        let guidance = progress_text(&FirmwareFlashProgress::ManualRecovery);
+        let guidance = progress_text(
+            &FirmwareFlashProgress::ManualRecovery,
+            firmware_target(FIRMWARE_TARGET_ID),
+        );
         assert!(guidance.contains("reset button"));
         assert!(guidance.contains("USB-C"));
         assert!(!guidance.contains("RST"));
@@ -1253,15 +1270,22 @@ mod tests {
 
     #[test]
     fn hero_firmware_badges_are_explicit() {
+        let supported = demo_firmware_details();
+        assert_eq!(firmware_badge(&supported), "Firmware rev 3");
+        let mut unsupported_format = supported.clone();
+        unsupported_format.version = FirmwareStatus::UnsupportedFormat(2);
+        assert_eq!(firmware_badge(&unsupported_format), "Firmware newer");
+        let mut pending = supported;
+        pending.version = FirmwareStatus::Pending;
+        assert_eq!(firmware_badge(&pending), "Checking firmware");
         assert_eq!(
-            firmware_badge(FirmwareStatus::Reported(3)),
-            "Firmware rev 3"
+            firmware_badge(&FirmwareDetails {
+                target: FirmwareTargetStatus::Reported("another-device".to_owned()),
+                version: FirmwareStatus::Reported(3),
+                ..FirmwareDetails::default()
+            }),
+            "Firmware unidentified"
         );
-        assert_eq!(
-            firmware_badge(FirmwareStatus::UnsupportedFormat(2)),
-            "Firmware newer"
-        );
-        assert_eq!(firmware_badge(FirmwareStatus::Pending), "Checking firmware");
     }
 
     #[test]

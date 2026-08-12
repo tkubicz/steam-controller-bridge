@@ -19,9 +19,11 @@ gaming services - with no Steam client, kernel extension, or restricted virtual
 HID entitlement in the path.
 
 The controller connects through its official Puck or directly over Bluetooth.
-A tiny XIAO nRF52840 or XIAO nRF52840 Sense handles the gamepad-facing USB connection, while
-the native menu app keeps setup, profiles, diagnostics, and updates close at
-hand.
+A small protocol-compatible bridge device handles the gamepad-facing USB
+connection, while the native menu app keeps setup, profiles, diagnostics, and
+updates close at hand. Seeed Studio XIAO nRF52840/Sense is the first
+project-supported firmware target; the serial protocol is public so other
+devices can implement the bridge contract without inheriting XIAO identity.
 
 > [!IMPORTANT]
 > This project supports the **Steam Controller 2 (2026)**. The original 2015
@@ -56,7 +58,7 @@ hand.
 
 ## Why it exists
 
-- **Play where macOS already understands gamepads.** The XIAO presents the
+- **Play where macOS already understands gamepads.** The supported bridge presents the
   familiar Xbox 360-compatible layout used by Safari, games, and streaming
   clients.
 - **Keep the controller experience.** Every standard control, both triggers,
@@ -76,11 +78,15 @@ hand.
 - macOS 13 or later
 - a Steam Controller 2
 - the official Puck **or** a direct Bluetooth connection to the Mac
-- a XIAO nRF52840 or XIAO nRF52840 Sense connected by USB
+- a protocol-compatible serial bridge device connected by USB; today the
+  project supplies firmware for XIAO nRF52840 and XIAO nRF52840 Sense
 
-The XIAO is the small hardware bridge that makes the controller visible through
-Apple's normal game-controller stack. It also keeps the output independent of
-macOS virtual-device entitlements.
+The bridge device makes the controller visible through Apple's normal
+game-controller stack and keeps the current output independent of macOS
+virtual-device entitlements. Zero-configuration implementations use the exact
+USB product marker `Steam Controller Bridge` and complete the protocol-v1 Hello
+handshake; implementations without the marker can be selected with an explicit
+serial port.
 
 ## Get started
 
@@ -88,8 +94,9 @@ macOS virtual-device entitlements.
    [latest release](https://github.com/tkubicz/steam-controller-bridge/releases/latest).
 2. Unzip `steam-controller-bridge-macos.zip`, move the app to Applications, then
    right-click it and choose **Open** on the first launch.
-3. Connect one XIAO with a data-capable cable. In the menu app, choose
-   **Check for Updates**, then **Install or Recover Firmware**.
+3. For the project-supported setup, connect one XIAO with a data-capable cable.
+   In the menu app, choose **Check for Updates**, then
+   **Install or Recover XIAO Firmware**.
 4. When App Center asks for the XIAO bootloader, quickly press the tiny reset
    button beside the USB-C connector twice. App Center downloads, verifies,
    installs, and confirms the signed firmware. Later firmware updates are
