@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-core"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "bridge-output",
  "controller-mapper",
@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-output"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "bridge-protocol",
  "gamepad-state",
@@ -317,14 +317,14 @@ dependencies = [
 
 [[package]]
 name = "bridge-protocol"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "gamepad-state",
 ]
 
 [[package]]
 name = "bridge-runtime"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "bridge-core",
  "bridge-output",
@@ -628,7 +628,7 @@ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
 name = "controller-art"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "eframe",
  "ui-theme",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "controller-mapper"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "gamepad-state",
  "steam-controller-protocol",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-bindings"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "enigo",
  "objc2-core-graphics",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "gamepad-simulator"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "bridge-output",
  "clap",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "gamepad-state"
-version = "1.7.0"
+version = "1.8.0"
 
 [[package]]
 name = "gdk"
@@ -2327,7 +2327,7 @@ dependencies = [
 
 [[package]]
 name = "macos-power-monitor"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
@@ -3120,7 +3120,7 @@ dependencies = [
 
 [[package]]
 name = "profile-picker"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "controller-mapper",
  "gamepad-state",
@@ -3277,7 +3277,7 @@ dependencies = [
 
 [[package]]
 name = "recording"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "base64 0.23.1",
  "bridge-output",
@@ -3327,7 +3327,7 @@ dependencies = [
 
 [[package]]
 name = "release-updater"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "base64 0.23.1",
  "bridge-output",
@@ -3566,7 +3566,7 @@ dependencies = [
 
 [[package]]
 name = "sc-bridge"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "bridge-core",
  "bridge-output",
@@ -3579,7 +3579,7 @@ dependencies = [
 
 [[package]]
 name = "sc-bridge-menu"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "bridge-runtime",
  "chrono",
@@ -3604,7 +3604,7 @@ dependencies = [
 
 [[package]]
 name = "sc-probe"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "clap",
  "ctrlc",
@@ -3616,7 +3616,7 @@ dependencies = [
 
 [[package]]
 name = "sc-replay"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "bridge-output",
  "clap",
@@ -3625,7 +3625,7 @@ dependencies = [
 
 [[package]]
 name = "sc-visualizer"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "bridge-output",
  "clap",
@@ -3962,7 +3962,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "steam-controller-device"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "hidapi",
  "rustix 1.1.4",
@@ -3971,7 +3971,7 @@ dependencies = [
 
 [[package]]
 name = "steam-controller-discovery"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "steam-controller-device",
  "steam-controller-protocol",
@@ -3979,7 +3979,7 @@ dependencies = [
 
 [[package]]
 name = "steam-controller-protocol"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "serde",
 ]
@@ -4462,7 +4462,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "ui-theme"
-version = "1.7.0"
+version = "1.8.0"
 dependencies = [
  "eframe",
 ]
