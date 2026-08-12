@@ -7,10 +7,10 @@ use base64::Engine as _;
 use clap::Parser;
 use ed25519_dalek::{Signer as _, SigningKey};
 use release_updater::{
-    firmware_target, sha256_hex, validate_uf2, verify_signed_manifest, ApplicationRelease,
-    ArtifactDescriptor, ArtifactError, FirmwareFlashError, FirmwareTargetCatalogError,
-    ManifestError, ManifestSignature, ReleaseManifestV1, ReleaseSignatures, TrustedPublicKey,
-    APPLICATION_BUNDLE_ID, MANIFEST_ASSET, SIGNATURES_ASSET,
+    firmware_target, firmware_targets, sha256_hex, validate_uf2, verify_signed_manifest,
+    ApplicationRelease, ArtifactDescriptor, ArtifactError, FirmwareFlashError,
+    FirmwareTargetCatalogError, ManifestError, ManifestSignature, ReleaseManifestV1,
+    ReleaseSignatures, TrustedPublicKey, APPLICATION_BUNDLE_ID, MANIFEST_ASSET, SIGNATURES_ASSET,
 };
 use semver::Version;
 use thiserror::Error;
@@ -56,7 +56,10 @@ fn run() -> Result<(), ManifestGenerationError> {
         &arguments.key_id,
     )?;
     let firmware_revision = parse_firmware_revision(&arguments.firmware_header)?;
-    let target = firmware_target(&arguments.firmware_target)?.ok_or_else(|| {
+    // Resolved through the catalog first so a release build fails with the
+    // parse error rather than a misleading "unsupported target".
+    firmware_targets()?;
+    let target = firmware_target(&arguments.firmware_target).ok_or_else(|| {
         ManifestGenerationError::UnsupportedTarget(arguments.firmware_target.clone())
     })?;
     validate_uf2(&arguments.firmware, target.uf2_family_id)?;

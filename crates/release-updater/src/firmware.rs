@@ -13,8 +13,7 @@ use bridge_output::{
 
 use crate::{
     firmware_matches_target, firmware_target, verify_artifact, ArtifactError,
-    FirmwareInstallerStrategy, FirmwareRelease, FirmwareTargetCatalogError,
-    FirmwareTargetDescriptor,
+    FirmwareInstallerStrategy, FirmwareRelease, FirmwareTargetDescriptor,
 };
 const AUTOMATIC_BOOTLOADER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTOMATIC_BOOTLOADER_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -96,8 +95,6 @@ pub enum FirmwareFlashError {
     WrongBoard(String),
     #[error("unsupported firmware target: {0}")]
     UnsupportedTarget(String),
-    #[error(transparent)]
-    TargetCatalog(#[from] FirmwareTargetCatalogError),
     #[error("invalid UF2 firmware: {0}")]
     InvalidUf2(String),
     #[error("firmware update cancelled")]
@@ -234,7 +231,7 @@ pub fn flash_firmware(
     cancelled: &AtomicBool,
     progress: impl FnMut(FirmwareFlashProgress),
 ) -> Result<FirmwareInfo, FirmwareFlashError> {
-    let target = firmware_target(&release.target)?
+    let target = firmware_target(&release.target)
         .ok_or_else(|| FirmwareFlashError::UnsupportedTarget(release.target.clone()))?;
     verify_artifact(artifact_path, &release.artifact)?;
     match target.installer {
@@ -378,7 +375,7 @@ fn flash_with_adapter(
     cancelled: &AtomicBool,
     mut progress: impl FnMut(FirmwareFlashProgress),
 ) -> Result<FirmwareInfo, FirmwareFlashError> {
-    let target = firmware_target(&release.target)?
+    let target = firmware_target(&release.target)
         .ok_or_else(|| FirmwareFlashError::UnsupportedTarget(release.target.clone()))?;
     progress(FirmwareFlashProgress::LookingForDevice);
     if cancelled.load(Ordering::Acquire) {

@@ -129,8 +129,12 @@ impl LatestReleaseClient {
         Ok(Self { client })
     }
 
+    /// Drives one download on a private current-thread runtime. The IO driver
+    /// is mandatory: `reqwest` opens its own sockets, and a runtime without it
+    /// panics instead of connecting.
     fn run<T>(future: impl Future<Output = Result<T, DownloadError>>) -> Result<T, DownloadError> {
         tokio::runtime::Builder::new_current_thread()
+            .enable_io()
             .enable_time()
             .build()
             .map_err(DownloadError::Runtime)?
@@ -583,6 +587,30 @@ mod tests {
         ));
     }
 
+    /// A runtime built without the IO driver panics the moment `reqwest` opens
+    /// a socket, which no HTTPS-rejection test can reach. Connecting to a
+    /// closed loopback port needs no network but does need that driver, so a
+    /// transport error here proves the production path can reach the wire.
+    #[test]
+    fn production_downloads_run_on_a_runtime_with_io_enabled() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let root = tempfile::tempdir().unwrap();
+        let error = download_to_path(
+            &format!("https://127.0.0.1:{port}/update"),
+            &root.path().join("asset"),
+            1,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, DownloadError::Http(_)),
+            "expected a transport error, got {error:?}"
+        );
+    }
+
+    /// `LocalReleaseClient` only exists in development builds.
+    #[cfg(debug_assertions)]
     #[test]
     fn local_source_bounds_and_cancels_atomic_copies() {
         let root = tempfile::tempdir().unwrap();

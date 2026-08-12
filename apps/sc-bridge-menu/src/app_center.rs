@@ -397,6 +397,13 @@ const fn demo_receipt(source: FirmwareReceiptSource) -> FirmwareReceiptStatus {
     }
 }
 
+/// The target every demo fixture is built against. Demo mode never touches
+/// hardware, so any usable catalog entry serves; an unusable catalog leaves the
+/// preview with nothing to describe.
+fn demo_target() -> Option<&'static FirmwareTargetDescriptor> {
+    firmware_targets().ok()?.first()
+}
+
 fn demo_setup(mode: DemoMode, target: &FirmwareTargetDescriptor, running: &Version) -> DemoSetup {
     let scenario = DemoScenario::for_mode(mode);
     let fixture_manifest = demo_manifest(target);
@@ -623,6 +630,9 @@ fn initial_update_status(updates: Option<&Result<UpdateContext, String>>) -> Str
     {
         return "Open Updates to check the signed local development catalog.".to_owned();
     }
+    // A release build has no local development channel to distinguish.
+    #[cfg(not(debug_assertions))]
+    let _ = updates;
     "Open Updates to check the signed stable release.".to_owned()
 }
 
@@ -638,27 +648,23 @@ impl AppCenter {
         let running = running_version();
         let updates = demo.is_none().then(update_context);
         let setup = match demo {
-            Some(mode) => firmware_targets()
-                .ok()
-                .and_then(|targets| targets.first())
-                .map_or_else(
-                    || DemoSetup {
-                        catalog: None,
-                        release_notes: Vec::new(),
-                        installed: running.clone(),
-                        firmware,
-                        status:
-                            "Demo unavailable - the embedded firmware target catalog is invalid."
-                                .to_owned(),
-                        status_tone: StatusTone::Error,
-                        catalog_status: CatalogStatus::Failed,
-                        staged_application: None,
-                        activity: Activity::Idle,
-                        status_placement: StatusPlacement::Page,
-                        firmware_write_started: false,
-                    },
-                    |target| demo_setup(mode, target, &running),
-                ),
+            Some(mode) => demo_target().map_or_else(
+                || DemoSetup {
+                    catalog: None,
+                    release_notes: Vec::new(),
+                    installed: running.clone(),
+                    firmware,
+                    status: "Demo unavailable - the embedded firmware target catalog is invalid."
+                        .to_owned(),
+                    status_tone: StatusTone::Error,
+                    catalog_status: CatalogStatus::Failed,
+                    staged_application: None,
+                    activity: Activity::Idle,
+                    status_placement: StatusPlacement::Page,
+                    firmware_write_started: false,
+                },
+                |target| demo_setup(mode, target, &running),
+            ),
             None => DemoSetup {
                 catalog: None,
                 release_notes: Vec::new(),
@@ -823,11 +829,7 @@ impl AppCenter {
             return;
         }
         if self.demo.is_some() {
-            self.firmware = firmware_targets()
-                .ok()
-                .and_then(|targets| targets.first())
-                .map(demo_firmware_details)
-                .unwrap_or_default();
+            self.firmware = demo_target().map(demo_firmware_details).unwrap_or_default();
             self.firmware.version = FirmwareStatus::Reported(manifest.firmware.revision);
             "Demo: firmware installation completed and verified.".clone_into(&mut self.status);
             self.status_tone = StatusTone::Success;
@@ -967,9 +969,9 @@ impl AppCenter {
                     };
                     self.status = progress_text(
                         &progress,
-                        self.catalog.as_ref().and_then(|manifest| {
-                            firmware_target(&manifest.firmware.target).ok().flatten()
-                        }),
+                        self.catalog
+                            .as_ref()
+                            .and_then(|manifest| firmware_target(&manifest.firmware.target)),
                     );
                     self.status_tone = StatusTone::Info;
                 }
@@ -1105,10 +1107,7 @@ impl AppCenter {
             return;
         }
         if self.demo.is_some() {
-            self.catalog = firmware_targets()
-                .ok()
-                .and_then(|targets| targets.first())
-                .map(demo_manifest);
+            self.catalog = demo_target().map(demo_manifest);
             self.release_notes = self.catalog.as_ref().map_or_else(Vec::new, |manifest| {
                 parse_release_notes(&manifest.release_notes)
             });

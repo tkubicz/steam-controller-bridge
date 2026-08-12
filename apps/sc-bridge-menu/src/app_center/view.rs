@@ -172,8 +172,6 @@ impl AppCenter {
                 None => ("Unidentified firmware", MUTED_TEXT),
             };
             let target_name = firmware_target(&manifest.firmware.target)
-                .ok()
-                .flatten()
                 .map_or(manifest.firmware.target.as_str(), |target| {
                     target.display_name.as_str()
                 });
@@ -321,20 +319,17 @@ impl AppCenter {
         manifest: &ReleaseManifestV1,
         action: FirmwareAction,
     ) {
-        if action == FirmwareAction::None || !self.operation_available() {
+        if !self.operation_available() {
             return;
         }
+        let (label, enabled) = match action {
+            FirmwareAction::None => return,
+            FirmwareAction::Disabled(label) => (label, false),
+            FirmwareAction::Install(label) => (label, true),
+        };
         ui.add_space(12.0);
-        match action {
-            FirmwareAction::None => {}
-            FirmwareAction::Disabled(label) => {
-                let _ = update_action_button(ui, label, false);
-            }
-            FirmwareAction::Install(label) => {
-                if update_action_button(ui, label, true).clicked() {
-                    self.install_firmware(manifest.clone(), ui.ctx().clone());
-                }
-            }
+        if update_action_button(ui, label, enabled).clicked() {
+            self.install_firmware(manifest.clone(), ui.ctx().clone());
         }
     }
 
@@ -346,14 +341,14 @@ impl AppCenter {
     ) {
         ui.add_space(12.0);
         if show_reinstall {
-            if firmware_reinstall_action(ui, self.operation_available()).clicked() {
+            if firmware_reinstall_action(ui).clicked() {
                 self.install_firmware(manifest.clone(), ui.ctx().clone());
             }
             ui.add_space(12.0);
         }
         ui.separator();
         ui.add_space(6.0);
-        let target = firmware_target(&manifest.firmware.target).ok().flatten();
+        let target = firmware_target(&manifest.firmware.target);
         let target_name = target.map_or("the selected firmware target", |target| {
             target.display_name.as_str()
         });
@@ -600,12 +595,9 @@ pub(super) fn firmware_badge(firmware: &FirmwareDetails) -> String {
     // Pending and newer-format reports carry no parseable identity, so the
     // version state must win before the target check declares them
     // unidentified.
-    let target_is_supported = firmware.target_id().is_some_and(|identifier| {
-        firmware_target(identifier.as_str())
-            .ok()
-            .flatten()
-            .is_some()
-    });
+    let target_is_supported = firmware
+        .target_id()
+        .is_some_and(|identifier| firmware_target(identifier.as_str()).is_some());
     match firmware.version {
         FirmwareStatus::Pending => "Checking firmware".to_owned(),
         FirmwareStatus::UnsupportedFormat(_) => "Firmware newer".to_owned(),
@@ -663,7 +655,9 @@ fn show_update_action_button(ui: &mut egui::Ui, button: ActionButton<'_>) -> egu
     .inner
 }
 
-fn firmware_reinstall_action(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+/// The whole card is hidden while an operation is running, so its button is
+/// only ever built in an actionable state.
+fn firmware_reinstall_action(ui: &mut egui::Ui) -> egui::Response {
     let inner_width = (ui.available_width() - 28.0 - 2.0).max(0.0);
     egui::Frame::new()
         .fill(SURFACE)
@@ -683,7 +677,7 @@ fn firmware_reinstall_action(ui: &mut egui::Ui, enabled: bool) -> egui::Response
                     .color(MUTED_TEXT),
             );
             ui.add_space(4.0);
-            update_action_button(ui, "Reinstall Firmware", enabled)
+            update_action_button(ui, "Reinstall Firmware", true)
         })
         .inner
 }

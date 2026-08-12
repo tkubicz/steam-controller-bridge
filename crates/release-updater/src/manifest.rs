@@ -7,7 +7,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{firmware_target, FirmwareTargetCatalogError, APPLICATION_BUNDLE_ID};
+use crate::{firmware_target, APPLICATION_BUNDLE_ID};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,8 +114,6 @@ pub enum ManifestError {
     InvalidJson(String),
     #[error("invalid release manifest field: {0}")]
     InvalidField(String),
-    #[error(transparent)]
-    TargetCatalog(#[from] FirmwareTargetCatalogError),
 }
 
 /// Verifies at least one signature over the exact manifest bytes before JSON
@@ -188,7 +186,7 @@ fn validate_manifest(manifest: &ReleaseManifestV1) -> Result<(), ManifestError> 
             "application identity/version mismatch".to_owned(),
         ));
     }
-    let Some(target) = firmware_target(&manifest.firmware.target)? else {
+    let Some(target) = firmware_target(&manifest.firmware.target) else {
         return Err(ManifestError::InvalidField(
             "unsupported firmware target".to_owned(),
         ));

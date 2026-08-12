@@ -242,7 +242,7 @@ fn firmware_update_available(
     release: &FirmwareRelease,
     firmware: Option<FirmwareInfo>,
 ) -> bool {
-    let target = firmware_target(&release.target).ok().flatten();
+    let target = firmware_target(&release.target);
     let Some((firmware, target)) = firmware.zip(target) else {
         return false;
     };

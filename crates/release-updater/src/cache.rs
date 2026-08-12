@@ -202,6 +202,8 @@ mod tests {
         assert!(cache.check_due(Duration::from_mins(1), &upgraded));
     }
 
+    /// Local update sources only exist in development builds.
+    #[cfg(debug_assertions)]
     #[test]
     fn local_sources_use_stable_isolated_temporary_caches() {
         let first = temporary_directory("local-cache-first");

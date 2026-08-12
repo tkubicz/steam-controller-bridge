@@ -152,12 +152,15 @@ pub fn firmware_targets() -> Result<&'static [FirmwareTargetDescriptor], Firmwar
     }
 }
 
-pub fn firmware_target(
-    identifier: &str,
-) -> Result<Option<&'static FirmwareTargetDescriptor>, FirmwareTargetCatalogError> {
-    Ok(firmware_targets()?
+/// Resolves one usable target. A catalog that failed to parse exposes no
+/// targets at all, so callers that only need the descriptor treat both cases
+/// alike; [`firmware_targets`] reports why the catalog is unusable.
+#[must_use]
+pub fn firmware_target(identifier: &str) -> Option<&'static FirmwareTargetDescriptor> {
+    firmware_targets()
+        .ok()?
         .iter()
-        .find(|target| target.id.as_str() == identifier))
+        .find(|target| target.id.as_str() == identifier)
 }
 
 #[must_use]
@@ -427,11 +430,11 @@ mod tests {
 
     #[test]
     fn embedded_catalog_resolves_supported_target() {
-        let target = firmware_target(TARGET_ID).unwrap().unwrap();
+        let target = firmware_target(TARGET_ID).unwrap();
         assert_eq!(target.compact_display_name, "XIAO nRF52840");
         assert!(target.display_name.contains(&target.compact_display_name));
         assert_eq!(target.application_product, BRIDGE_DEVICE_USB_PRODUCT);
-        assert!(firmware_target("example-custom-board").unwrap().is_none());
+        assert!(firmware_target("example-custom-board").is_none());
         let firmware = FirmwareInfo {
             target: FirmwareTarget::Reported(FirmwareTargetId::new(TARGET_ID).unwrap()),
             version: FirmwareVersion::Reported(3),
