@@ -79,8 +79,8 @@ Run these on the exact packaged candidate; automated results are not substitutes
   stationary noise, profile changes, and permission revocation.
 - Exercise idle and fresh-Puck-dock power-off, charging behavior, wake, one-shot
   latching, and injected failure recovery.
-- Install revision 2 once through manual reset-button recovery. Save its
-  displayed timestamp and installation ID, then reinstall revision 2 without
+- Install revision 3 once through manual reset-button recovery. Save its
+  displayed timestamp and installation ID, then reinstall revision 3 without
   pressing the reset button. Confirm automatic UF2 entry, the same revision,
   and a changed timestamp and installation ID. Power-cycle without flashing
   and confirm the receipt does not change. Also verify wrong/multiple-board
@@ -90,8 +90,15 @@ Run these on the exact packaged candidate; automated results are not substitutes
   debug menu app with the printed environment, and confirm the Updates page
   names the local development source. Restore Seeed Blink before the first
   installation so factory VID/PID detection, the manual recovery window, the
-  revision-2 receipt, and the following automatic reinstall are exercised in
+  revision-3 receipt, and the following automatic reinstall are exercised in
   one sequence. Confirm a non-debug build ignores the local-source variable.
+- Flash legacy targetless revision 2 and confirm it bridges normally without an
+  automatic update prompt or bootloader command; the explicit XIAO recovery
+  action must release serial and require manual UF2 entry.
+- Validate automatic discovery with an implementation using the exact
+  `Steam Controller Bridge` product marker but different VID, PID, and
+  manufacturer metadata. Validate `--port` with a Hello-compatible
+  implementation that does not publish the marker.
 - Sleep and wake with the XIAO attached; confirm hardware closes before sleep,
   CDC re-enumerates, a previously running bridge resumes, and a user-stopped
   bridge stays stopped.

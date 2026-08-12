@@ -3,16 +3,19 @@ use std::sync::atomic::Ordering;
 
 use chrono::{DateTime, Local};
 use eframe::egui;
-use release_updater::{classify_firmware_release, FirmwareReleaseState, ReleaseManifestV1};
+use release_updater::{
+    classify_firmware_release, firmware_target, FirmwareReleaseState, ReleaseManifestV1,
+};
 use ui_theme::{
     ACCENT, ACCENT_SUBTLE, BORDER, DANGER, MUTED_TEXT, ON_ACCENT, SUCCESS, SURFACE, TEXT,
 };
 
 use super::{Activity, AppCenter, CatalogStatus, StatusPlacement, StatusTone};
-use crate::app_center_protocol::{FirmwareInstallStatus, FirmwareReceiptSource, FirmwareStatus};
+use crate::app_center_protocol::{
+    FirmwareDetails, FirmwareInstallStatus, FirmwareReceiptSource, FirmwareStatus,
+    FirmwareTargetStatus,
+};
 use crate::window_ui::{full_width_card, render_release_notes};
-
-const UF2_DISCONNECT_NOTICE: &str = "During installation, the temporary XIAO UF2 drive disconnects automatically. macOS may show a harmless \"Disk Not Ejected Properly\" notification even when verification succeeds.";
 
 impl AppCenter {
     pub(super) fn updates_page(&mut self, ui: &mut egui::Ui) {
@@ -146,46 +149,90 @@ impl AppCenter {
             let installed = &self.installed;
             let app_pending = installed < &manifest.application_version;
             let app_incompatible = installed < &manifest.firmware.minimum_application_version;
-            let release_state =
-                classify_firmware_release(self.firmware.version.into(), manifest.firmware.revision);
+            let target_matches = firmware_target_matches(&self.firmware, &manifest.firmware.target);
+            let release_state = firmware_release_state(
+                &self.firmware,
+                &manifest.firmware.target,
+                manifest.firmware.revision,
+            );
             let (badge, badge_colour) = match release_state {
-                FirmwareReleaseState::Pending => ("Checking firmware", MUTED_TEXT),
-                FirmwareReleaseState::UpdateAvailable => ("Update available", ACCENT),
-                FirmwareReleaseState::Current => ("Up to date", SUCCESS),
-                FirmwareReleaseState::Newer => ("Newer firmware", MUTED_TEXT),
+                Some(FirmwareReleaseState::Pending) => ("Checking firmware", MUTED_TEXT),
+                Some(FirmwareReleaseState::UpdateAvailable) => ("Update available", ACCENT),
+                Some(FirmwareReleaseState::Current) => ("Up to date", SUCCESS),
+                Some(FirmwareReleaseState::Newer) => ("Newer firmware", MUTED_TEXT),
+                None => ("Unidentified firmware", MUTED_TEXT),
+            };
+            let target_name = firmware_target(&manifest.firmware.target)
+                .map_or(manifest.firmware.target.as_str(), |target| {
+                    target.display_name
+                });
+            let target_association = match &self.firmware.target {
+                FirmwareTargetStatus::Reported(_) if target_matches => "target verified",
+                FirmwareTargetStatus::Reported(_) => "different firmware target",
+                FirmwareTargetStatus::Unreported => "target not reported",
+                FirmwareTargetStatus::Malformed => "target report invalid",
             };
             card_header(
                 ui,
                 "FIRMWARE",
-                &format!("XIAO firmware revision {}", manifest.firmware.revision),
                 &format!(
-                    "Connected revision {} · XIAO nRF52840 or Sense",
-                    firmware_description(self.firmware.version)
+                    "{target_name} firmware revision {}",
+                    manifest.firmware.revision
+                ),
+                &format!(
+                    "Connected revision {} · {target_association}",
+                    firmware_description(self.firmware.version),
                 ),
                 badge,
                 badge_colour,
             );
             ui.add_space(14.0);
             self.firmware_operation_status(ui);
-            let show_reinstall =
-                !app_pending && !app_incompatible && release_state == FirmwareReleaseState::Current;
-            if app_pending {
-                status_callout(
-                    ui,
-                    ACCENT,
-                    "Application update required first",
-                    "Replace and relaunch the application before installing this firmware.",
-                );
-                ui.add_space(12.0);
-                let _ = primary_button(ui, "Update Application First", false);
-            } else if app_incompatible {
-                status_callout(
-                    ui,
-                    DANGER,
-                    "Newer application required",
-                    "The installed application cannot communicate with this firmware revision.",
-                );
-            } else if release_state == FirmwareReleaseState::Pending {
+            let show_reinstall = !app_pending
+                && !app_incompatible
+                && release_state == Some(FirmwareReleaseState::Current);
+            self.firmware_release_action(
+                ui,
+                manifest,
+                release_state,
+                app_pending,
+                app_incompatible,
+            );
+            self.firmware_installation_details(ui, manifest, target_matches, show_reinstall);
+        });
+    }
+
+    fn firmware_release_action(
+        &mut self,
+        ui: &mut egui::Ui,
+        manifest: &ReleaseManifestV1,
+        release_state: Option<FirmwareReleaseState>,
+        app_pending: bool,
+        app_incompatible: bool,
+    ) {
+        if app_pending {
+            status_callout(
+                ui,
+                ACCENT,
+                "Application update required first",
+                "Replace and relaunch the application before installing this firmware.",
+            );
+            ui.add_space(12.0);
+            let _ = primary_button(ui, "Update Application First", false);
+            return;
+        }
+        if app_incompatible {
+            status_callout(
+                ui,
+                DANGER,
+                "Newer application required",
+                "The installed application cannot communicate with this firmware revision.",
+            );
+            return;
+        }
+        match release_state {
+            None => self.unidentified_firmware_action(ui, manifest),
+            Some(FirmwareReleaseState::Pending) => {
                 status_callout(
                     ui,
                     MUTED_TEXT,
@@ -195,40 +242,7 @@ impl AppCenter {
                 ui.add_space(12.0);
                 if primary_button(
                     ui,
-                    firmware_install_action_label(release_state)
-                        .expect("pending firmware has an install action"),
-                    self.operation_available(),
-                )
-                .clicked()
-                {
-                    self.install_firmware(manifest.clone(), ui.ctx().clone());
-                }
-            } else if release_state == FirmwareReleaseState::Newer {
-                status_callout(
-                    ui,
-                    MUTED_TEXT,
-                    &self.firmware_newer_title(),
-                    "Downgrading the connected board is disabled.",
-                );
-            } else if release_state == FirmwareReleaseState::Current {
-                status_callout(
-                    ui,
-                    SUCCESS,
-                    "Firmware is up to date",
-                    &self.firmware_current_message(),
-                );
-            } else {
-                status_callout(
-                    ui,
-                    ACCENT,
-                    &format!("Revision {} is ready", manifest.firmware.revision),
-                    "The board and firmware are verified before anything is written.",
-                );
-                ui.add_space(12.0);
-                if primary_button(
-                    ui,
-                    firmware_install_action_label(release_state)
-                        .expect("available firmware has an install action"),
+                    "Install or Recover XIAO Firmware",
                     self.operation_available(),
                 )
                 .clicked()
@@ -236,18 +250,85 @@ impl AppCenter {
                     self.install_firmware(manifest.clone(), ui.ctx().clone());
                 }
             }
-            self.firmware_installation_details(ui, manifest, show_reinstall);
-        });
+            Some(FirmwareReleaseState::Newer) => {
+                status_callout(
+                    ui,
+                    MUTED_TEXT,
+                    &self.firmware_newer_title(),
+                    "Downgrading the connected board is disabled.",
+                );
+            }
+            Some(FirmwareReleaseState::Current) => {
+                status_callout(
+                    ui,
+                    SUCCESS,
+                    "Firmware is up to date",
+                    &self.firmware_current_message(),
+                );
+            }
+            Some(FirmwareReleaseState::UpdateAvailable) => {
+                status_callout(
+                    ui,
+                    ACCENT,
+                    &format!("Revision {} is ready", manifest.firmware.revision),
+                    "The board and firmware are verified before anything is written.",
+                );
+                ui.add_space(12.0);
+                if primary_button(ui, "Install Firmware Update", self.operation_available())
+                    .clicked()
+                {
+                    self.install_firmware(manifest.clone(), ui.ctx().clone());
+                }
+            }
+        }
+    }
+
+    fn unidentified_firmware_action(&mut self, ui: &mut egui::Ui, manifest: &ReleaseManifestV1) {
+        let (title, identity) = match &self.firmware.target {
+            FirmwareTargetStatus::Unreported => (
+                "Firmware target unidentified",
+                "This bridge device did not report a firmware target.",
+            ),
+            FirmwareTargetStatus::Malformed => (
+                "Firmware target invalid",
+                "This bridge device reported a malformed or duplicate firmware target.",
+            ),
+            FirmwareTargetStatus::Reported(_) => (
+                "Different firmware target",
+                "This bridge device reports a target that is not this XIAO release target.",
+            ),
+        };
+        status_callout(
+            ui,
+            MUTED_TEXT,
+            title,
+            &format!(
+                "{identity} Normal bridging remains available, but automatic recommendations and bootloader commands are disabled."
+            ),
+        );
+        ui.add_space(12.0);
+        if primary_button(
+            ui,
+            "Install or Recover XIAO Firmware",
+            self.operation_available(),
+        )
+        .clicked()
+        {
+            self.install_firmware(manifest.clone(), ui.ctx().clone());
+        }
     }
 
     fn firmware_installation_details(
         &mut self,
         ui: &mut egui::Ui,
         manifest: &ReleaseManifestV1,
+        target_matches: bool,
         show_reinstall: bool,
     ) {
         ui.add_space(12.0);
-        firmware_receipt_callout(ui, self.firmware.version, self.firmware.install);
+        if target_matches {
+            firmware_receipt_callout(ui, self.firmware.version, self.firmware.install);
+        }
         if show_reinstall {
             ui.add_space(12.0);
             if firmware_reinstall_action(ui, self.operation_available()).clicked() {
@@ -257,14 +338,28 @@ impl AppCenter {
         ui.add_space(14.0);
         ui.separator();
         ui.add_space(6.0);
+        let target = firmware_target(&manifest.firmware.target);
+        let target_name =
+            target.map_or("the selected firmware target", |target| target.display_name);
         ui.label(
-            egui::RichText::new(UF2_DISCONNECT_NOTICE)
+            egui::RichText::new(format!(
+                "During installation, the temporary {target_name} UF2 drive disconnects automatically. macOS may show a harmless \"Disk Not Ejected Properly\" notification even when verification succeeds."
+            ))
                 .size(13.0)
                 .color(MUTED_TEXT),
         );
         ui.add_space(6.0);
+        let automatic_entry = target.map_or_else(
+            || "Automatic UF2 entry requires matching target identity and an advertised bootloader capability.".to_owned(),
+            |target| format!(
+                "Automatic UF2 entry is used only when the connected firmware reports the matching {} target and advertises bootloader capability.",
+                target.display_name
+            ),
+        );
         ui.label(
-            egui::RichText::new("Automatic UF2 entry is normal on firmware revision 2 and later. For first installation or recovery, quickly press the tiny reset button beside the USB-C connector twice when prompted. Success requires the exact signed revision and a newly committed installation receipt.")
+            egui::RichText::new(format!(
+                "{automatic_entry} For first installation or recovery, quickly press the tiny reset button beside the USB-C connector twice when prompted. Success requires the exact signed revision and a newly committed installation receipt."
+            ))
                 .size(13.0)
                 .color(MUTED_TEXT),
         );
@@ -451,21 +546,41 @@ fn firmware_description(status: FirmwareStatus) -> String {
     }
 }
 
-fn firmware_install_action_label(release_state: FirmwareReleaseState) -> Option<&'static str> {
-    match release_state {
-        FirmwareReleaseState::Pending => Some("Install or Recover Firmware"),
-        FirmwareReleaseState::UpdateAvailable => Some("Install Firmware Update"),
-        FirmwareReleaseState::Current | FirmwareReleaseState::Newer => None,
-    }
+fn firmware_target_matches(firmware: &FirmwareDetails, release_target: &str) -> bool {
+    firmware
+        .target_id()
+        .is_some_and(|target| target.as_str() == release_target)
 }
 
-pub(super) fn firmware_badge(status: FirmwareStatus) -> String {
-    match status {
-        FirmwareStatus::Reported(revision) => format!("Firmware rev {revision}"),
-        FirmwareStatus::UnsupportedFormat(_) => "Firmware newer".to_owned(),
+/// `None` marks firmware whose reported identity is outside this release's
+/// target. A pending report is not an identity verdict yet - a factory board
+/// or a still-starting bridge keeps its dedicated checking guidance instead of
+/// reading as a foreign target.
+fn firmware_release_state(
+    firmware: &FirmwareDetails,
+    release_target: &str,
+    release_revision: u16,
+) -> Option<FirmwareReleaseState> {
+    (firmware.version == FirmwareStatus::Pending
+        || firmware_target_matches(firmware, release_target))
+    .then(|| classify_firmware_release(firmware.version.into(), release_revision))
+}
+
+pub(super) fn firmware_badge(firmware: &FirmwareDetails) -> String {
+    // Pending and newer-format reports carry no parseable identity, so the
+    // version state must win before the target check declares them
+    // unidentified.
+    let target_is_supported = firmware
+        .target_id()
+        .is_some_and(|identifier| firmware_target(identifier.as_str()).is_some());
+    match firmware.version {
         FirmwareStatus::Pending => "Checking firmware".to_owned(),
-        FirmwareStatus::Malformed | FirmwareStatus::Unreported => {
-            "Firmware update needed".to_owned()
+        FirmwareStatus::UnsupportedFormat(_) => "Firmware newer".to_owned(),
+        FirmwareStatus::Reported(revision) if target_is_supported => {
+            format!("Firmware rev {revision}")
+        }
+        FirmwareStatus::Reported(_) | FirmwareStatus::Malformed | FirmwareStatus::Unreported => {
+            "Firmware unidentified".to_owned()
         }
     }
 }
@@ -618,28 +733,46 @@ mod tests {
     }
 
     #[test]
-    fn uf2_disconnect_notice_explains_the_expected_macos_warning() {
-        assert!(UF2_DISCONNECT_NOTICE.contains("Disk Not Ejected Properly"));
-        assert!(UF2_DISCONNECT_NOTICE.contains("verification succeeds"));
+    fn release_state_requires_the_exact_target_except_while_the_report_is_pending() {
+        let target = release_updater::FIRMWARE_TARGET_ID;
+        let pending = FirmwareDetails::default();
+        assert_eq!(
+            firmware_release_state(&pending, target, 3),
+            Some(FirmwareReleaseState::Pending)
+        );
+
+        let matching = FirmwareDetails {
+            target: FirmwareTargetStatus::Reported(target.to_owned()),
+            version: FirmwareStatus::Reported(2),
+            ..FirmwareDetails::default()
+        };
+        assert_eq!(
+            firmware_release_state(&matching, target, 3),
+            Some(FirmwareReleaseState::UpdateAvailable)
+        );
+
+        let targetless = FirmwareDetails {
+            version: FirmwareStatus::Reported(2),
+            ..FirmwareDetails::default()
+        };
+        assert_eq!(firmware_release_state(&targetless, target, 3), None);
+
+        let different = FirmwareDetails {
+            target: FirmwareTargetStatus::Reported("community-nrf52840".to_owned()),
+            version: FirmwareStatus::Reported(2),
+            ..FirmwareDetails::default()
+        };
+        assert_eq!(firmware_release_state(&different, target, 3), None);
     }
 
     #[test]
-    fn unknown_firmware_still_offers_the_factory_install_path() {
-        assert_eq!(
-            firmware_install_action_label(FirmwareReleaseState::Pending),
-            Some("Install or Recover Firmware")
+    fn uf2_disconnect_notice_explains_the_expected_macos_warning() {
+        let target = firmware_target(release_updater::FIRMWARE_TARGET_ID).unwrap();
+        let notice = format!(
+            "During installation, the temporary {} UF2 drive disconnects automatically. macOS may show a harmless \"Disk Not Ejected Properly\" notification even when verification succeeds.",
+            target.display_name
         );
-        assert_eq!(
-            firmware_install_action_label(FirmwareReleaseState::UpdateAvailable),
-            Some("Install Firmware Update")
-        );
-        assert_eq!(
-            firmware_install_action_label(FirmwareReleaseState::Current),
-            None
-        );
-        assert_eq!(
-            firmware_install_action_label(FirmwareReleaseState::Newer),
-            None
-        );
+        assert!(notice.contains("Disk Not Ejected Properly"));
+        assert!(notice.contains("verification succeeds"));
     }
 }

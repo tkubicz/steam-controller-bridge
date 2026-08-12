@@ -87,7 +87,7 @@ pub(crate) struct ActiveControllerSource {
 
 pub(crate) struct OutputSession {
     pub(crate) output: Box<dyn GamepadOutput>,
-    pub(crate) xiao: Option<SerialDeviceInfo>,
+    pub(crate) device: Option<SerialDeviceInfo>,
     pub(crate) first_observed_receipt: FirstObservedReceiptState,
 }
 
@@ -115,7 +115,7 @@ pub(crate) enum FirstObservedReceiptState {
 /// Constructing the desktop-input sink is synchronous, and Enigo's macOS
 /// destructor can deliberately sleep after sustained event traffic. Those
 /// operations now run on the dedicated desktop-input worker, so they cannot
-/// block the supervisor's XIAO deadline. Retaining this neutral transition also
+/// block the supervisor's output-device deadline. Retaining this neutral transition also
 /// makes reconfiguration safe if worker ownership changes again later.
 ///
 /// The next controller report restores the real state, and `reset` keeps the
@@ -138,7 +138,7 @@ pub(crate) fn service_waiting_output(output: Option<&mut OutputSession>) -> bool
             true
         }
         Err(error) => {
-            eprintln!("level=warn event=xiao_lost phase=waiting error={error:?} action=rediscover");
+            eprintln!("level=warn event=output_device_lost phase=waiting error={error:?} action=rediscover");
             false
         }
     })
@@ -183,7 +183,7 @@ pub(crate) fn make_nonserial_output(
     selection: &OutputSelection,
 ) -> Result<Box<dyn GamepadOutput>, String> {
     match selection {
-        OutputSelection::Serial => Err("serial output requires XIAO discovery".to_owned()),
+        OutputSelection::Serial => Err("serial output requires bridge-device discovery".to_owned()),
         OutputSelection::Dump(format) => Ok(Box::new(DumpOutput::new(io::stdout(), *format))),
         OutputSelection::File(path) => FileOutput::create(path)
             .map(|output| Box::new(output) as Box<dyn GamepadOutput>)
@@ -192,7 +192,23 @@ pub(crate) fn make_nonserial_output(
     }
 }
 
-pub(crate) fn choose_xiao_index<T>(
+pub(crate) fn output_candidates(
+    devices: Vec<SerialDeviceInfo>,
+    selection: &SerialSelection,
+) -> Vec<SerialDeviceInfo> {
+    match selection {
+        SerialSelection::AutoBridgeDevice => devices
+            .into_iter()
+            .filter(SerialDeviceInfo::is_bridge_device)
+            .collect(),
+        SerialSelection::Port(path) => devices
+            .into_iter()
+            .filter(|device| device.path == *path)
+            .collect(),
+    }
+}
+
+pub(crate) fn choose_output_index<T>(
     valid: &[(SerialDeviceInfo, T)],
     preferred_serial: Option<&str>,
 ) -> Result<usize, String> {
@@ -210,10 +226,10 @@ pub(crate) fn choose_xiao_index<T>(
             return Ok(preferred_matches[0]);
         }
     }
-    Err(xiao_ambiguity_message(valid))
+    Err(output_ambiguity_message(valid))
 }
 
-pub(crate) fn xiao_ambiguity_message<T>(valid: &[(SerialDeviceInfo, T)]) -> String {
+pub(crate) fn output_ambiguity_message<T>(valid: &[(SerialDeviceInfo, T)]) -> String {
     let ports = valid
         .iter()
         .map(|(info, _)| {
@@ -225,7 +241,7 @@ pub(crate) fn xiao_ambiguity_message<T>(valid: &[(SerialDeviceInfo, T)]) -> Stri
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!("multiple valid XIAO bridges found: {ports}; restart with --port PATH")
+    format!("multiple valid bridge devices found: {ports}; restart with --port PATH")
 }
 
 pub(crate) fn controller_source_description(

@@ -11,11 +11,11 @@ impl Supervisor {
                 Discovery::Error,
                 |output| {
                     self.update_status(|status| {
-                        status.xiao = XiaoStatus::default();
+                        status.output = OutputStatus::ready_nonserial(&self.config.output);
                     });
                     Discovery::Ready(OutputSession {
                         output,
-                        xiao: None,
+                        device: None,
                         first_observed_receipt: FirstObservedReceiptState::Idle,
                     })
                 },
@@ -31,22 +31,15 @@ impl Supervisor {
                 };
             }
         };
-        let candidates: Vec<_> = match &self.config.serial {
-            SerialSelection::AutoXiao => devices
-                .into_iter()
-                .filter(SerialDeviceInfo::is_xiao_bridge)
-                .collect(),
-            SerialSelection::Port(path) => devices
-                .into_iter()
-                .filter(|device| &device.path == path)
-                .collect(),
-        };
+        let candidates = output_candidates(devices, &self.config.serial);
         if candidates.is_empty() {
             let detail = match &self.config.serial {
-                SerialSelection::AutoXiao => {
-                    "Waiting for XIAO Steam Controller Bridge CDC port".to_owned()
+                SerialSelection::AutoBridgeDevice => {
+                    "Waiting for a Steam Controller Bridge protocol device".to_owned()
                 }
-                SerialSelection::Port(path) => format!("Waiting for XIAO serial port {path}"),
+                SerialSelection::Port(path) => {
+                    format!("Waiting for bridge-device serial port {path}")
+                }
             };
             return Discovery::Wait {
                 detail,
@@ -68,39 +61,41 @@ impl Supervisor {
         }
         if valid.is_empty() {
             return Discovery::Wait {
-                detail: "Waiting for a XIAO that completes the protocol-v1 Hello handshake"
-                    .to_owned(),
+                detail:
+                    "Waiting for a bridge device that completes the protocol-v1 Hello handshake"
+                        .to_owned(),
                 error: (!failures.is_empty()).then(|| failures.join("; ")),
             };
         }
 
-        let selected_index = match choose_xiao_index(&valid, self.preferred_xiao_serial.as_deref())
-        {
-            Ok(index) => index,
-            Err(message) => return Discovery::Error(message),
-        };
+        let selected_index =
+            match choose_output_index(&valid, self.preferred_output_serial.as_deref()) {
+                Ok(index) => index,
+                Err(message) => return Discovery::Error(message),
+            };
         let (info, output) = valid.swap_remove(selected_index);
-        self.preferred_xiao_serial.clone_from(&info.serial_number);
+        self.preferred_output_serial.clone_from(&info.serial_number);
         // DeviceInfo can land in the same read burst as the HelloResponse
         // during the blocking handshake, so read it rather than assume
         // Pending.
         let firmware = output.firmware_info().unwrap_or_default();
         self.update_status(|status| {
-            status.xiao = XiaoStatus {
-                path: Some(info.path.clone()),
-                usb_serial: info.serial_number.clone(),
-                handshake_complete: true,
-                firmware,
+            status.output = OutputStatus {
+                backend: OutputBackend::SerialBridge,
+                endpoint: Some(info.path.clone()),
+                stable_id: info.serial_number.clone(),
+                ready: true,
+                firmware: Some(firmware),
             };
         });
         eprintln!(
-            "level=info event=xiao_ready path={:?} usb_serial={} protocol=1",
+            "level=info event=output_device_ready endpoint={:?} stable_id={} protocol=1",
             info.path,
             masked_serial(info.serial_number.as_deref())
         );
         Discovery::Ready(OutputSession {
             output: Box::new(output),
-            xiao: Some(info),
+            device: Some(info),
             first_observed_receipt: FirstObservedReceiptState::Idle,
         })
     }

@@ -318,7 +318,7 @@ void BridgeSession::service_device_info() {
     return;
   }
   const InstallReceiptStatus receipt = sink_.install_receipt();
-  uint8_t payload[kDeviceInfoRecordedPayloadSize]{};
+  uint8_t payload[kDeviceInfoMaximumPayloadSize]{};
   payload[0] = kDeviceInfoFormat;
   payload[1] = static_cast<uint8_t>(kFirmwareRevision);
   payload[2] = static_cast<uint8_t>(kFirmwareRevision >> 8U);
@@ -332,6 +332,10 @@ void BridgeSession::service_device_info() {
     payload[32] = receipt.receipt.source;
     payload_length = kDeviceInfoRecordedPayloadSize;
   }
+  payload[payload_length++] = kFirmwareTargetTlv;
+  payload[payload_length++] = static_cast<uint8_t>(kFirmwareTargetIdSize);
+  memcpy(payload + payload_length, kFirmwareTargetId, kFirmwareTargetIdSize);
+  payload_length += kFirmwareTargetIdSize;
   if (send_message(MessageType::DeviceInfo, payload,
                    static_cast<uint16_t>(payload_length))) {
     device_info_pending_ = false;

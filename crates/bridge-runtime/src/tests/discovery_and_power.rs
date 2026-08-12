@@ -381,14 +381,39 @@ fn ambiguity_descriptions_retain_global_indices_and_transports() {
 }
 
 #[test]
-fn remembered_xiao_serial_survives_a_changed_port_path() {
+fn remembered_output_serial_survives_a_changed_port_path() {
     let valid = vec![
         (serial_info("/dev/cu.usbmodem-new", "remembered"), ()),
         (serial_info("/dev/cu.usbmodem-other", "other"), ()),
     ];
-    assert!(choose_xiao_index(&valid, None).is_err());
-    assert_eq!(choose_xiao_index(&valid, Some("remembered")), Ok(0));
-    assert_eq!(choose_xiao_index(&valid, Some("other")), Ok(1));
+    assert!(choose_output_index(&valid, None).is_err());
+    assert_eq!(choose_output_index(&valid, Some("remembered")), Ok(0));
+    assert_eq!(choose_output_index(&valid, Some("other")), Ok(1));
+}
+
+#[test]
+fn automatic_output_requires_the_marker_but_an_explicit_port_bypasses_it() {
+    let marked = serial_info("/dev/cu.marked", "marked");
+    let mut explicit_only = serial_info("/dev/cu.explicit", "explicit");
+    explicit_only.product = Some("Custom development firmware".to_owned());
+    explicit_only.vendor_id = Some(0xbeef);
+    explicit_only.product_id = Some(0x1234);
+    explicit_only.manufacturer = Some("Community implementation".to_owned());
+
+    assert_eq!(
+        output_candidates(
+            vec![explicit_only.clone(), marked.clone()],
+            &SerialSelection::AutoBridgeDevice,
+        ),
+        vec![marked]
+    );
+    assert_eq!(
+        output_candidates(
+            vec![explicit_only.clone()],
+            &SerialSelection::Port(explicit_only.path.clone()),
+        ),
+        vec![explicit_only]
+    );
 }
 
 #[test]

@@ -88,21 +88,24 @@ impl AppCenterHost {
         }
         let firmware = FirmwareDetails::from(firmware);
         if self.child.is_some() {
-            match self.send_command(&AppCenterCommand::Navigate { page, firmware }) {
+            match self.send_command(&AppCenterCommand::Navigate {
+                page,
+                firmware: firmware.clone(),
+            }) {
                 Ok(()) => {
-                    self.last_firmware = Some(firmware);
+                    self.last_firmware = Some(firmware.clone());
                     return Ok(true);
                 }
                 Err(error) if self.suspension_owner.is_some() => return Err(error),
                 Err(_) => {}
             }
         }
-        self.spawn(page, firmware)?;
+        self.spawn(page, &firmware)?;
         self.last_firmware = Some(firmware);
         Ok(false)
     }
 
-    fn spawn(&mut self, page: AppCenterPage, firmware: FirmwareDetails) -> Result<(), String> {
+    fn spawn(&mut self, page: AppCenterPage, firmware: &FirmwareDetails) -> Result<(), String> {
         let executable = std::env::current_exe().map_err(|error| error.to_string())?;
         let mut command = Command::new(executable);
         command
@@ -223,10 +226,12 @@ impl AppCenterHost {
             return Ok(());
         }
         let firmware = FirmwareDetails::from(firmware);
-        if self.last_firmware == Some(firmware) {
+        if self.last_firmware.as_ref() == Some(&firmware) {
             return Ok(());
         }
-        self.send_command(&AppCenterCommand::FirmwareVersion { firmware })?;
+        self.send_command(&AppCenterCommand::FirmwareVersion {
+            firmware: firmware.clone(),
+        })?;
         self.last_firmware = Some(firmware);
         Ok(())
     }

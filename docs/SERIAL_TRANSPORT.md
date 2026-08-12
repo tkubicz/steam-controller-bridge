@@ -1,99 +1,114 @@
-# Serial Transport
+# Serial Bridge-Device Contract
 
-The host sends the existing versioned bridge frames over a byte-stream serial
-port. No serial-specific framing is added. The default native settings are
-115200 baud and a 1 ms read timeout; callers can select another baud rate.
+The host's live gamepad output is a protocol-compatible bridge device reached
+over a byte-stream serial port. The protocol is public and board-neutral: an
+independent implementation does not need Seeed USB identifiers, a Lynxware
+manufacturer string, or XIAO hardware. Protocol v1 and its framing remain
+unchanged.
 
-Zero-configuration live mode enumerates `SerialPortInfo`, keeps only macOS
-callout ports with exact XIAO metadata (`Lynxware / Steam Controller Bridge`,
-`045e:028e`), and then performs the Hello exchange below before selection. It
-never chooses a port merely because its filename contains `usbmodem`, which
-prevents confusing the Puck's own CDC interface with the XIAO.
+## Discovery and opt-in identity
 
-## Session lifecycle
+On macOS, zero-configuration discovery considers only callout ports
+(`/dev/cu.*`) whose USB product string is exactly `Steam Controller Bridge`.
+The product string is the implementation's explicit opt-in marker. VID, PID,
+manufacturer, serial-port filename, and board model are not discovery
+requirements.
 
-1. The host opens the configured port and sends `Hello { min: 1, max: 1 }`.
-2. Firmware must answer `HelloResponse { selected: 1 }` within one second.
-3. Only after negotiation does the host flush queued gamepad states.
-4. The host sends a `Ping` after one second of health-check time and expects the
-   matching `Pong` within two seconds. Firmware-originated pings receive an
+Every candidate must still open successfully and complete the protocol-v1
+Hello exchange. A marker is not proof of protocol compatibility. With
+`--port PATH`, the user selects an endpoint explicitly; this bypasses the USB
+product marker but never bypasses Hello negotiation or protocol validation.
+
+The runtime remembers the stable USB serial identity of the selected bridge
+device and prefers it after macOS assigns a different callout path. If multiple
+candidates complete Hello and no remembered identity selects exactly one, the
+runtime reports an ambiguity and requires `--port PATH`.
+
+Implementers who cannot or do not want to publish the discovery marker can
+therefore remain fully usable through the explicit-port path.
+
+## Session lifecycle and safety
+
+1. The host opens the endpoint at 115200 baud by default and sends
+   `Hello { min: 1, max: 1 }`.
+2. The device answers `HelloResponse { selected: 1 }` within the handshake
+   deadline. Ordinary traffic is not valid before this exchange.
+3. When ready, the host flushes only its newest queued gamepad snapshot.
+4. A one-second host health interval sends `Ping`; the matching `Pong` must
+   arrive before the two-second timeout. Device-originated pings receive an
    immediate pong.
-5. I/O, handshake, or health failure marks the connection unavailable. Native
-   output retries by reopening the configured port and repeating negotiation.
-6. Normal shutdown sends the dedicated `Neutral` frame when the connection is
-   still writable.
-7. While a non-neutral state remains current, the serial backend retransmits the
-   complete state every 25 ms. All application wait loops service output at
-   least every 25 ms. `Neutral` clears the cached active state immediately.
+5. While a non-neutral state is current, the host retransmits the complete
+   state every 25 ms. These refreshes feed a device-side safety watchdog.
+6. Stop, disconnect handling, decode failure, sleep, and orderly shutdown send
+   or attempt `Neutral` before releasing hardware.
+7. I/O, handshake, or health failure makes the output unavailable and starts
+   rediscovery. A device must independently neutralize on expired data,
+   disconnected CDC, USB teardown, malformed input, and internal faults.
 
-Sequence numbers cover every host-originated frame, including hello, state,
-neutral, ping, and pong, and wrap as `u16`. Firmware owns an independent
-wrapping transmit sequence for Hello responses, Pong, and rumble feedback.
-Incoming bytes use the shared
-recovering `StreamDecoder`; checksum and framing errors are counted without
-creating a second parser.
+Ping traffic proves that the bidirectional session is responsive but must not
+renew the controller-data watchdog. Rumble is also a bounded lease with an
+explicit zero; see [GAMEPAD_PROTOCOL.md](GAMEPAD_PROTOCOL.md).
 
-The refresh interval is independent of the one-second Ping health check. Pings
-prove the bidirectional session is responsive but deliberately do not keep the
-firmware's 100 ms controller-data watchdog alive.
+Sequence numbers cover every frame in each direction and wrap as `u16`. The
+host and device own independent transmit sequences. Incoming bytes use the
+recovering stream decoder, so corruption is counted and scanning resumes at
+the next valid frame.
 
-## Firmware revision reporting
+## DeviceInfo and firmware identity
 
-After a successful negotiation the firmware queues one `DeviceInfo` frame with
-its hand-maintained firmware revision, capability flags, and installation
-receipt state, retried until the CDC transmit queue accepts it. A three-byte
-revision 1 report remains valid. The host gives the report a two-second grace window after the
-handshake; silence past that classifies the connection as pre-versioning
-firmware. The connection state feeds `XiaoStatus`, and the menu app shows the
-revision, adding an update recommendation when the revision is below the
-host's `MINIMUM_FIRMWARE_REVISION` (bridge-output) or absent. That minimum is
-raised by hand only when the bridge depends on newer firmware behavior. Old
-firmware never reports and old hosts ignore message type 7, so mixed pairings
-remain fully input-compatible.
+After Hello, an implementation may report DeviceInfo format 1. Firmware
+revision and capability flags describe the running implementation, not the
+physical board. The optional target-ID TLV associates that implementation with
+a project updater target.
 
-Revision 2 accepts correlated automatic-UF2 and receipt-recording commands only
-after negotiation. The runtime records a `FirstObserved` receipt when it sees a
-blank marker after a manual flash. App Center uses `AppCenter` and requires the
-same committed receipt to be returned before reporting installation success.
+Target IDs are 1-64 byte lowercase ASCII identifiers containing letters,
+digits, dots, and hyphens, with an alphanumeric first and last byte. The current
+project target is `seeed-xiao-nrf52840`. Target identity is not hardware
+detection and grants no update authority by itself: the signed release manifest
+must name a target that the app's firmware-target catalog recognizes.
 
-Refreshes maintain the firmware's watchdog lease without necessarily producing
-USB input: the firmware forwards a gamepad report only when the canonical
-report differs from the last one successfully queued on the USB endpoint. This
-applies to forced safety neutrals too - a disconnect or Hello after a neutral
-has already been queued is silent on the USB side, which keeps CDC teardown
-during macOS sleep entry from registering as user activity. Endpoint acceptance
-does not prove that the host polled the report; USB remount invalidates the
-cache and unconditionally queues a fresh neutral baseline.
+Legacy firmware that reports no target, a malformed target, a duplicate target,
+or a different valid target continues normal bridging. The host presents its
+firmware neutrally and disables all target-specific revision recommendations,
+automatic bootloader requests, and automatic update association.
 
-## Reverse rumble lease
+Unknown DeviceInfo TLVs are ignored. Invalid or truncated target information
+fails closed for updater association without invalidating the negotiated serial
+session or a separately valid firmware revision. The byte layout is specified
+in [GAMEPAD_PROTOCOL.md](GAMEPAD_PROTOCOL.md).
 
-Updated firmware returns `Rumble { low_frequency, high_frequency }` frames
-after validating an exact Xbox 360 output report. The serial backend retains
-only the newest feedback command, so rapid effects cannot create an unbounded
-queue. The runtime applies changes to the selected Puck or Bluetooth controller
-immediately and treats every nonzero frame as a 100 ms lease. Firmware
-refreshes nonzero values every 25 ms; the runtime refreshes the selected SC2
-actuator report every 40 ms. If feedback frames stop, the runtime sends zero
-and stops refreshing. Ping and controller input do not renew this lease.
+## Optional capabilities
 
-Old firmware remains input-compatible but never produces rumble feedback. Old
-hosts ignore message type 8 through the protocol's unknown-message rule.
+Protocol implementations may omit updater capabilities and still provide
+gamepad output. Current DeviceInfo capability bits are:
 
-The live runtime remembers the selected XIAO's MCU-derived USB serial number.
-After reconnect it prefers that identity even when macOS assigns a different
-`/dev/cu.usbmodem…` path. On an initial run, two Hello-valid XIAOs are an
-ambiguity and require `--port PATH`.
+| Bit | Capability | Required behavior |
+| ---: | --- | --- |
+| 0 | Enter UF2 bootloader | Accept the correlated command only after Hello, neutralize gamepad and rumble first, acknowledge readiness, then enter the bootloader. |
+| 1 | Installation receipts | Commit, read back, and acknowledge the exact correlated receipt; reject unsafe replacement. |
 
-## Queue behavior
+The host invokes these capabilities automatically only when the reported target
+matches a signed catalog target. A user may explicitly start the labeled XIAO
+install/recovery workflow for unidentified firmware, but the app releases the
+serial session and requires manual bootloader entry. It then verifies the XIAO
+board ID and UF2 family before writing, and the returned target ID, revision,
+and receipt before reporting success.
 
-The transport-independent session has a bounded state queue with capacity 8 by
-default. When the connection becomes ready, it sends only the newest pending
-snapshot and discards every older state; when full, it also drops the oldest
-state first. This prevents stale controller motion from replaying after a
-handshake or temporary output stall. Lifecycle and protocol-control messages
-are not stored in that queue.
+## Output backends and status
 
-## Commands
+Runtime status describes a generic gamepad output with a backend kind,
+readiness, optional endpoint and stable ID, and optional firmware report.
+Serial bridge devices, diagnostic dump, file, and mock backends are distinct.
+This status shape leaves room for another backend such as virtual HID without
+making firmware or XIAO concepts part of the runtime core.
+
+## Validation without custom hardware
+
+The transport-independent session is covered with an in-memory `ByteTransport`
+that exercises negotiation, trailing DeviceInfo data, malformed target TLVs,
+queue bounds, watchdog refresh cadence, ping/pong, rumble, and corruption
+recovery. The existing simulator and replay tools exercise the same output
+interface:
 
 ```bash
 cargo run -p gamepad-simulator -- automated --output serial \
@@ -103,7 +118,7 @@ cargo run -p sc-replay -- session.jsonl --output serial \
   --port /dev/cu.usbmodemXXXX --baud 115200
 ```
 
-The visualizer exposes the same path and baud controls when `Serial` is selected
-as its output backend. Raw transmit/receive frame logging is opt-in. Native
-firmware interoperability has been exercised on a flashed XIAO; the host state
-machine remains covered independently with an in-memory `ByteTransport`.
+The visualizer exposes the same explicit endpoint and baud controls. The
+project's first supported implementation is the reference XIAO nRF52840/Sense
+firmware in `firmware/xiao-nrf52840`; implementing firmware for another board
+does not require changing this host contract.

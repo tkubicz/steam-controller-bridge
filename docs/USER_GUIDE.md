@@ -121,10 +121,12 @@ already reports the signed revision. A board reporting a newer revision is never
 downgraded.
 
 The app verifies the cached or downloaded UF2 and asks the running bridge to
-neutralize output and release hardware. Firmware revision 2 enters its UF2
-bootloader automatically. Revision 1 requires one final manual migration: when
-the recovery prompt appears, quickly press the tiny reset button beside the
-USB-C connector twice.
+neutralize output and release hardware. Current revision 3 reports the XIAO
+firmware target and can enter its UF2 bootloader automatically. Targetless
+revision 2 and other unidentified firmware receive no automatic update prompt
+or bootloader command; choose **Install or Recover XIAO Firmware** explicitly,
+then quickly press the tiny reset button beside the USB-C connector twice when
+manual recovery appears.
 The app validates `INFO_UF2.TXT` and the UF2 family, writes and flushes the file,
 then waits for a fresh protocol handshake.
 
@@ -168,7 +170,7 @@ tools/prepare-local-update.py
 ```
 
 Save the launch command printed at the end, but do not run it yet. The helper
-builds firmware revision 2 from the current source and stores the catalog below
+builds firmware revision 3 from the current source and stores the catalog below
 `temp/steam-controller-bridge-local-update`.
 
 This works only in a debug build. It does not disable signature, manifest,
@@ -235,7 +237,7 @@ Run the saved local-source launch command from the repository root. Open
 Updates and confirm that the `Local development updates` notice names
 `temp/steam-controller-bridge-local-update`. The factory Blink application has
 no bridge protocol, so the firmware card shows `Firmware information
-unavailable`. Choose **Install or Recover Firmware**. When App Center enters
+unavailable`. Choose **Install or Recover XIAO Firmware**. When App Center enters
 the 60-second manual recovery phase, quickly press the reset button twice.
 Arduino's 1200-baud reset is not used here because it selects serial-only DFU;
 App Center verifies and copies the signed UF2 artifact and therefore needs the
@@ -244,12 +246,12 @@ UF2 mode automatically through its verified update protocol.
 
 Accept the first installation only when all of these checks pass:
 
-1. The temporary `XIAO-SENSE` UF2 drive appears and revision 2 is written.
+1. The temporary `XIAO-SENSE` UF2 drive appears and revision 3 is written.
 2. The board reconnects as Steam Controller Bridge without manual unplugging.
-3. App Center reports firmware revision 2 and an `AppCenter` installation
+3. App Center reports firmware revision 3 and an `AppCenter` installation
    receipt with a date and installation ID.
 4. **Reinstall Firmware** completes without pressing the reset button.
-5. The reinstall keeps revision 2 but produces a different date and
+5. The reinstall keeps revision 3 but produces a different date and
    installation ID.
 6. Unplugging and reconnecting the board does not change the second receipt.
 
@@ -544,10 +546,10 @@ needed. Live mode automatically:
   `28de:1303`, Bluetooth, usage `ff00:0001`, interface `-1`;
 - observes candidates without feature writes until exactly one emits a complete
   valid `0x42` or `0x45` controller-state report;
-- filters macOS callout ports by the XIAO's `Lynxware / Steam Controller
-  Bridge`, `045e:028e` USB metadata, rejecting the Puck's own CDC port;
-- completes the protocol-v1 Hello handshake before selecting the XIAO;
-- remembers the XIAO MCU serial number across a changed `/dev/cu.usbmodem…`
+- filters macOS callout ports by the exact USB product marker
+  `Steam Controller Bridge`, regardless of VID, PID, or manufacturer;
+- completes the protocol-v1 Hello handshake before selecting a bridge device;
+- remembers its stable USB serial number across a changed `/dev/cu.usbmodem…`
   path; and
 - waits and rescans every 500 ms when hardware is absent. Once supported
   collections are already open, report queues are still checked every 500 ms
@@ -556,8 +558,9 @@ needed. Live mode automatically:
 If more than one supported source produces controller states, the bridge
 refuses the ambiguity, lists transport/product/serial/index, and asks for
 `--index N`. An idle connected Puck does not conflict with an active Bluetooth
-controller. If more than one XIAO completes Hello, use `--port PATH`. Explicit
-forms are:
+controller. If more than one bridge device completes Hello, use `--port PATH`.
+An explicit port bypasses the USB product marker but still requires Hello.
+Explicit forms are:
 
 ```bash
 ./sc-bridge --controller auto --port auto
@@ -575,16 +578,16 @@ open on controller sleep and battery has not yet been measured. Until that
 hardware observation is complete, stop the bridge for prolonged periods when
 idle battery life matters.
 
-Keep the terminal and XIAO connected while playing. Press `Ctrl-C` for orderly
+Keep the terminal and bridge device connected while playing. Press `Ctrl-C` for orderly
 shutdown; the bridge sends a final neutral state before releasing the selected
 controller input. The controller's desktop lizard mode returns automatically
-after its watchdog expires. The XIAO also neutralizes if CDC disconnects or
+after its watchdog expires. A compatible bridge device also neutralizes if CDC disconnects or
 active-state refreshes stop for 100 ms.
 
 Normal logs progress through `Discovering`, `Waiting`, `Starting`, and
-`Running`. Running status must show the selected XIAO path, a connected
+`Running`. Running status must show a ready serial gamepad output, a connected
 controller, `lizard_suppressed=true`, and haptics `Idle` until an effect is
-requested. `Active` means a fresh XIAO rumble lease is being refreshed;
+requested. `Active` means a fresh gamepad-feedback lease is being refreshed;
 `Degraded` means actuator writes failed while controller input remains usable.
 The diagnostic option
 `--lizard-mode leave` retains the old native keyboard/mouse behavior and is not
@@ -916,13 +919,13 @@ launchctl print user/$(id -u)/com.valvesoftware.steam.ipctool
 If it is present, use the `launchctl bootout` command above. Then run
 `sc-probe list` again because indices may have changed.
 
-### Automatic discovery reports multiple active sources or XIAOs
+### Automatic discovery reports multiple active sources or bridge devices
 
 The bridge intentionally does not prefer Puck or Bluetooth and does not pick
 the first device. Quit the bridge, run `target/release/sc-probe list`, identify
 the intended active `ff00:0001` collection from the listed transport, product,
-serial, and index, then restart with `./sc-bridge --index N`. For XIAO
-ambiguity, disconnect the unused board or restart with
+serial, and index, then restart with `./sc-bridge --index N`. For gamepad-output
+ambiguity, disconnect the unused device or restart with
 `./sc-bridge --port /dev/cu.usbmodem…`.
 
 ### The bridge stays in `Waiting`
@@ -931,8 +934,9 @@ Read the status detail. `Waiting for a Steam Controller 2 Puck or Bluetooth
 connection` means no exact supported collection is enumerated. `waiting for
 valid controller state` means collections opened but no complete state stream
 was observed; wake the controller and verify its solid white Puck LED or solid
-blue Bluetooth LED. `Waiting for XIAO ... CDC` means no exact XIAO metadata
-match. A Hello-handshake message means the port exists but firmware negotiation
+blue Bluetooth LED. `Waiting for a Steam Controller Bridge protocol device`
+means no callout port has the exact USB product marker. A Hello-handshake
+message means a candidate port exists but protocol negotiation
 failed; close other serial tools and reflash current firmware if needed.
 
 ### `A` still types Space or a touchpad moves the pointer
@@ -946,7 +950,7 @@ failed; close other serial tools and reflash current firmware if needed.
 - Fully quit Steam and close other controller tools.
 - Confirm only one Steam Controller 2 is active.
 
-If a refresh fails, the bridge intentionally neutralizes the XIAO and exits
+If a refresh fails, the bridge intentionally neutralizes gamepad output and exits
 rather than continuing with duplicate keyboard/gamepad input.
 
 ### No XIAO serial port appears

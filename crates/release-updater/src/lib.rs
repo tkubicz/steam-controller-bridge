@@ -1,4 +1,4 @@
-//! Signed release discovery and XIAO firmware installation primitives.
+//! Signed release discovery and catalog-driven firmware installation primitives.
 //!
 //! The menu application owns presentation and bridge lifecycle. This crate
 //! owns the security boundary: a release is not trusted until its raw manifest
@@ -17,6 +17,7 @@ mod cache;
 mod firmware;
 mod manifest;
 mod network;
+mod targets;
 mod temporary;
 #[cfg(test)]
 mod test_support;
@@ -26,11 +27,6 @@ pub use application::{
     guided_replacement_supported, installed_macos_version, stage_application, StagedApplication,
 };
 pub use artifact::{sha256_hex, verify_artifact, ArtifactError};
-/// The post-flash USB identity a signed manifest must match, re-exported from
-/// the crate that also selects the live bridge by it.
-pub use bridge_output::{
-    XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
-};
 pub use cache::{CacheError, ReleaseCache};
 pub use firmware::{
     classify_firmware_release, discover_bootloader_volumes, discover_firmware_devices,
@@ -48,12 +44,15 @@ pub use network::{
     download_to_path, ensure_release_artifact, refresh_catalog_if_due, CatalogRefresh,
     DownloadError, LatestReleaseClient, ReleaseSource,
 };
+pub use targets::{
+    firmware_matches_target, firmware_target, FirmwareInstallerStrategy, FirmwareTargetDescriptor,
+    UsbIdentity, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID,
+    XIAO_MINIMUM_COMPATIBLE_REVISION, XIAO_NRF52840_TARGET, XIAO_SENSE_BOARD_ID,
+    XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
+};
 
 /// GitHub repository that owns the only accepted production update channel.
 pub const UPDATE_REPOSITORY: &str = "tkubicz/steam-controller-bridge";
 pub const MANIFEST_ASSET: &str = "steam-controller-bridge-update-manifest.json";
 pub const SIGNATURES_ASSET: &str = "steam-controller-bridge-update-signatures.json";
 pub const APPLICATION_BUNDLE_ID: &str = "com.lynxware.steam-controller-bridge";
-pub const FIRMWARE_TARGET_ID: &str = "seeed-xiao-nrf52840";
-pub const FIRMWARE_BOARD_ID: &str = "Seeed_XIAO_nRF52840";
-pub const UF2_FAMILY_ID: u32 = 0xADA5_2840;

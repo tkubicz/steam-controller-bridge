@@ -1,12 +1,14 @@
 # Steam Controller Bridge - Technical Guide
 
 Use a Steam Controller 2 as a standard USB Xbox gamepad on macOS - without Steam
-running - in browsers, games, and cloud gaming services. A Seeed Studio XIAO
-nRF52840 does the translation in hardware.
+running - in browsers, games, and cloud gaming services. A protocol-compatible
+bridge device does the gamepad translation; the project currently provides and
+updates firmware for Seeed Studio XIAO nRF52840/Sense.
 
 > **Requirements:** macOS 13 or later, a **Steam Controller 2 (2026)**, and a
-> XIAO nRF52840 or XIAO nRF52840 Sense. The original 2015 Steam Controller and its receiver
-> use a different protocol and are not supported.
+> protocol-compatible serial bridge device; the project supplies firmware for
+> the XIAO nRF52840 and XIAO nRF52840 Sense. The original 2015 Steam Controller
+> and its receiver use a different protocol and are not supported.
 
 For hardware requirements, firmware flashing, Steam Controller 2 pairing,
 macOS permissions, daily startup, verification, and troubleshooting, start with
@@ -27,9 +29,10 @@ After installing the menu app, use **Check for Updates…** for normal applicati
 and firmware updates. It opens the Updates tab, which downloads nothing beyond
 signed metadata until you choose an action. Application replacement is Finder-guided in v1;
 firmware flashing is performed by the app and does not require Arduino CLI.
-Firmware revision 2 enters the UF2 bootloader automatically. Revision 1 needs
-two quick presses of the tiny reset button beside the USB-C connector before
-later installs become automatic.
+Firmware revision 3 reports the XIAO updater target and enters the UF2
+bootloader automatically. Targetless revision 2 and factory firmware require
+the explicitly labeled XIAO recovery action plus two quick presses of the tiny
+reset button beside the USB-C connector.
 
 Verify a download against the published sums before flashing:
 
@@ -344,12 +347,12 @@ and hardware validation are documented in
   --deterministic --output mock
 ```
 
-Live mode defaults to automatic active-source and XIAO discovery plus serial
+Live mode defaults to automatic active-source and bridge-device discovery plus serial
 output. It uses bounded latest-state input, timeout and decode-failure
 neutralization, reconnect recovery, Ctrl-C shutdown, and structured status. It
 claims the selected Puck or Bluetooth collection from other project tools and
 refreshes the narrow lizard-off setting every three seconds. Steam must still
-be fully quit. A failed suppression write neutralizes the XIAO and stops the
+be fully quit. A failed suppression write neutralizes gamepad output and stops the
 bridge. See [the bridge guide](BRIDGE.md).
 
 ## macOS menu-bar app
@@ -412,7 +415,7 @@ Login remain future work.
   HID consumer against the selected slot are unsupported.
 - Automatic discovery deliberately reports an ambiguity instead of choosing
   when multiple Puck/Bluetooth sources produce controller states or multiple
-  XIAOs complete the firmware handshake. Use an explicit override after
+  bridge devices complete the firmware handshake. Use an explicit override after
   identifying the intended endpoint.
 - macOS access is intentionally shared at the native HID layer. The project
   lock excludes other project tools only; Steam's persistent

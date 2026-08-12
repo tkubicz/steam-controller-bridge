@@ -1,6 +1,6 @@
 use bridge_runtime::{
-    AutomaticShutdownPhase, BridgeStatus, DesktopBindingsState, FirmwareVersion, PuckDockAction,
-    RuntimeState,
+    AutomaticShutdownPhase, BridgeStatus, DesktopBindingsState, FirmwareTarget, FirmwareVersion,
+    OutputBackend, PuckDockAction, RuntimeState,
 };
 
 const MAX_PROBLEM_CHARS: usize = 48;
@@ -48,16 +48,24 @@ impl RunAction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HardwareRowVisibility {
+    pub section: bool,
+    pub firmware: bool,
+    pub controller_details: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuModel {
     pub bridge: String,
     pub status: String,
     pub input: String,
     pub controller: String,
-    pub xiao: String,
+    pub output: String,
     pub firmware: String,
     pub battery: String,
     pub haptics: String,
+    pub hardware_rows: HardwareRowVisibility,
     pub current_profile: String,
     pub automatic_shutdown: String,
     pub problem: String,
@@ -76,34 +84,31 @@ impl MenuModel {
     pub fn from_status(status: &BridgeStatus) -> Self {
         let tray_state = tray_state(status);
         let starts = matches!(status.state, RuntimeState::Stopped | RuntimeState::Error);
+        let controller_present = status.controller.connected && status.source.active;
         Self {
             bridge: bridge_label(status.state),
             status: status_label(status, tray_state),
             input: input_label(status),
             controller: format!(
                 "Controller: {}",
-                if status.controller.connected && status.source.active {
+                if controller_present {
                     "Connected"
                 } else {
                     "Not connected"
                 }
             ),
-            xiao: format!(
-                "XIAO: {}",
-                if status.xiao.handshake_complete {
-                    "Ready"
-                } else if status.xiao.path.is_some() {
-                    "Connecting"
-                } else {
-                    "Not detected"
-                }
-            ),
+            output: output_label(status),
             firmware: firmware_label(status),
             battery: status.battery_percent.map_or_else(
                 || "Battery: Unknown".to_owned(),
                 |percent| format!("Battery: {percent}%"),
             ),
             haptics: format!("Haptics: {:?}", status.haptics.state),
+            hardware_rows: HardwareRowVisibility {
+                section: !starts,
+                firmware: status.output.firmware.is_some(),
+                controller_details: controller_present,
+            },
             current_profile: current_profile_label(status),
             automatic_shutdown: automatic_shutdown_label(status),
             problem: status.last_error.as_deref().map_or_else(
@@ -130,20 +135,58 @@ impl MenuModel {
     }
 }
 
-/// A warning here never flips the tray icon or the Problem line: the bridge
-/// still works on old firmware, so the nudge stays inside the hardware block.
 fn firmware_label(status: &BridgeStatus) -> String {
-    let firmware = status.xiao.firmware.version;
-    match firmware {
-        FirmwareVersion::Reported(revision) if firmware.update_recommended() => {
-            format!("{WARNING} Firmware: rev {revision} · Update recommended")
-        }
-        FirmwareVersion::Reported(revision) => format!("Firmware: rev {revision}"),
-        FirmwareVersion::Unreported => format!("{WARNING} Firmware: Update recommended"),
+    let Some(firmware) = status.output.firmware else {
+        return "Firmware: Not available".to_owned();
+    };
+    match firmware.version {
+        FirmwareVersion::Reported(revision) => match firmware.target {
+            FirmwareTarget::Reported(_) => format!("Firmware: rev {revision}"),
+            FirmwareTarget::Unreported => format!("Firmware: rev {revision} · Unidentified"),
+            FirmwareTarget::Malformed => {
+                format!("{WARNING} Firmware: rev {revision} · Invalid target ID")
+            }
+        },
+        FirmwareVersion::Unreported => "Firmware: Not reported".to_owned(),
         FirmwareVersion::UnsupportedFormat(_) => "Firmware: Newer than this app".to_owned(),
-        FirmwareVersion::Malformed => format!("{WARNING} Firmware: Reflash recommended"),
-        FirmwareVersion::Pending => "Firmware: Unknown".to_owned(),
+        FirmwareVersion::Malformed => format!("{WARNING} Firmware: Information invalid"),
+        FirmwareVersion::Pending => "Firmware: Checking…".to_owned(),
     }
+}
+
+fn output_label(status: &BridgeStatus) -> String {
+    let output = match status.output.backend {
+        OutputBackend::SerialBridge if status.output.ready => serial_output_name(status),
+        OutputBackend::SerialBridge if status.output.endpoint.is_some() => "Connecting",
+        OutputBackend::SerialBridge => "Not Detected",
+        OutputBackend::Dump => "Diagnostic Dump",
+        OutputBackend::File => "File",
+        OutputBackend::Mock => "Mock",
+    };
+    format!("Output: {output}")
+}
+
+#[cfg(feature = "updater")]
+fn serial_output_name(status: &BridgeStatus) -> &'static str {
+    if let Some(name) = status
+        .output
+        .firmware
+        .and_then(|firmware| match firmware.target {
+            FirmwareTarget::Reported(identifier) => {
+                release_updater::firmware_target(identifier.as_str())
+                    .map(|target| target.compact_display_name)
+            }
+            FirmwareTarget::Unreported | FirmwareTarget::Malformed => None,
+        })
+    {
+        return name;
+    }
+    "Bridge Device"
+}
+
+#[cfg(not(feature = "updater"))]
+fn serial_output_name(_status: &BridgeStatus) -> &'static str {
+    "Bridge Device"
 }
 
 fn current_profile_label(status: &BridgeStatus) -> String {
@@ -213,7 +256,7 @@ fn tray_state(status: &BridgeStatus) -> TrayState {
     if status.state == RuntimeState::Running
         && status.source.active
         && status.controller.connected
-        && status.xiao.handshake_complete
+        && status.output.ready
     {
         return TrayState::Ready;
     }
@@ -241,9 +284,10 @@ fn status_label(status: &BridgeStatus, tray_state: TrayState) -> String {
         RuntimeState::Starting => "Starting…",
         RuntimeState::Discovering => "Looking for hardware",
         RuntimeState::Running if tray_state == TrayState::Ready => "Ready",
-        RuntimeState::Running if !status.xiao.handshake_complete => "Waiting for XIAO",
         RuntimeState::Waiting if status.last_error.is_some() => "Action required",
-        RuntimeState::Waiting if status.detail.contains("XIAO") => "Waiting for XIAO",
+        RuntimeState::Running | RuntimeState::Waiting if !status.output.ready => {
+            "Waiting for bridge device"
+        }
         RuntimeState::Running | RuntimeState::Waiting => "Waiting for controller",
     };
     format!("Status: {value}")
@@ -251,17 +295,8 @@ fn status_label(status: &BridgeStatus, tray_state: TrayState) -> String {
 
 fn input_label(status: &BridgeStatus) -> String {
     status.source.transport.map_or_else(
-        || "Input: Not detected".to_owned(),
-        |transport| {
-            format!(
-                "Input: {transport} · {}",
-                if status.source.active {
-                    "Active"
-                } else {
-                    "Waiting"
-                }
-            )
-        },
+        || "Input: Not Detected".to_owned(),
+        |transport| format!("Input: {transport}"),
     )
 }
 
@@ -277,13 +312,13 @@ fn friendly_error(error: &str) -> String {
         return "Controller is already in use".to_owned();
     }
     if lower.contains("device or resource busy") {
-        return "XIAO serial port is busy".to_owned();
+        return "Bridge-device serial port is busy".to_owned();
     }
     if lower.contains("multiple active steam controller") {
         return "Multiple active controllers found".to_owned();
     }
-    if lower.contains("multiple valid xiao") || lower.contains("multiple xiao bridges") {
-        return "Multiple XIAO bridges found".to_owned();
+    if lower.contains("multiple valid bridge devices") {
+        return "Multiple bridge devices found".to_owned();
     }
     if lower.contains("lizard-mode") {
         return "Controller safety setup failed".to_owned();
@@ -292,7 +327,7 @@ fn friendly_error(error: &str) -> String {
         return "Controller could not be powered off".to_owned();
     }
     if lower.contains("hello handshake") || lower.contains("hello-handshake") {
-        return "XIAO firmware handshake failed".to_owned();
+        return "Bridge-device handshake failed".to_owned();
     }
 
     let first_clause = error
@@ -318,7 +353,7 @@ fn truncate_chars(value: &str, maximum: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bridge_runtime::{ControllerSourceStatus, XiaoStatus};
+    use bridge_runtime::{ControllerSourceStatus, OutputStatus};
     use steam_controller_device::{ControllerTransport, HidDeviceInfo};
 
     fn source_status(
@@ -376,14 +411,18 @@ mod tests {
                 connected: true,
                 last_state_age: Some(std::time::Duration::ZERO),
             },
-            xiao: XiaoStatus {
-                path: Some("/dev/cu.usbmodem-example".to_owned()),
-                usb_serial: Some("redacted".to_owned()),
-                handshake_complete: true,
-                firmware: bridge_runtime::FirmwareInfo {
+            output: OutputStatus {
+                backend: OutputBackend::SerialBridge,
+                endpoint: Some("/dev/cu.usbmodem-example".to_owned()),
+                stable_id: Some("redacted".to_owned()),
+                ready: true,
+                firmware: Some(bridge_runtime::FirmwareInfo {
                     version: FirmwareVersion::Reported(1),
+                    target: FirmwareTarget::Reported(
+                        bridge_runtime::FirmwareTargetId::new("seeed-xiao-nrf52840").unwrap(),
+                    ),
                     ..bridge_runtime::FirmwareInfo::default()
-                },
+                }),
             },
             ..BridgeStatus::default()
         }
@@ -394,6 +433,10 @@ mod tests {
         let stopped = MenuModel::from_status(&BridgeStatus::default());
         assert_eq!(stopped.bridge, "Bridge: Off");
         assert_eq!(stopped.status, "Status: Not running");
+        assert_eq!(stopped.output, "Output: Not Detected");
+        assert!(!stopped.hardware_rows.section);
+        assert!(!stopped.hardware_rows.firmware);
+        assert!(!stopped.hardware_rows.controller_details);
         assert_eq!(stopped.tray_state, TrayState::Off);
         assert_eq!(stopped.run_action, RunAction::Start);
         assert_eq!(stopped.run_action.label(), "Start Bridge");
@@ -408,6 +451,13 @@ mod tests {
         let running = MenuModel::from_status(&status);
         assert_eq!(running.bridge, "Bridge: On");
         assert_eq!(running.status, "Status: Ready");
+        #[cfg(feature = "updater")]
+        assert_eq!(running.output, "Output: XIAO nRF52840");
+        #[cfg(not(feature = "updater"))]
+        assert_eq!(running.output, "Output: Bridge Device");
+        assert!(running.hardware_rows.section);
+        assert!(running.hardware_rows.firmware);
+        assert!(running.hardware_rows.controller_details);
         assert_eq!(running.tray_state, TrayState::Ready);
         assert_eq!(running.run_action, RunAction::Stop);
         assert_eq!(running.run_action.label(), "Stop Bridge");
@@ -444,17 +494,13 @@ mod tests {
     }
 
     #[test]
-    fn firmware_lines_warn_only_below_the_minimum_and_never_change_the_icon() {
-        let minimum = bridge_runtime::MINIMUM_FIRMWARE_REVISION;
+    fn firmware_lines_report_identity_without_applying_target_update_policy() {
         let cases = [
-            (FirmwareVersion::Pending, "Firmware: Unknown".to_owned()),
-            (
-                FirmwareVersion::Reported(minimum),
-                format!("Firmware: rev {minimum}"),
-            ),
+            (FirmwareVersion::Pending, "Firmware: Checking…".to_owned()),
+            (FirmwareVersion::Reported(2), "Firmware: rev 2".to_owned()),
             (
                 FirmwareVersion::Unreported,
-                "⚠ Firmware: Update recommended".to_owned(),
+                "Firmware: Not reported".to_owned(),
             ),
             (
                 FirmwareVersion::UnsupportedFormat(2),
@@ -462,34 +508,56 @@ mod tests {
             ),
             (
                 FirmwareVersion::Malformed,
-                "⚠ Firmware: Reflash recommended".to_owned(),
+                "⚠ Firmware: Information invalid".to_owned(),
             ),
         ];
         for (firmware, expected) in cases {
             let mut status = ready_status(ControllerTransport::Bluetooth);
-            status.xiao.firmware.version = firmware;
+            status.output.firmware.as_mut().unwrap().version = firmware;
             let model = MenuModel::from_status(&status);
             assert_eq!(model.firmware, expected);
-            assert_eq!(
-                model.firmware.starts_with(WARNING),
-                firmware.update_recommended()
-            );
-            // Old firmware still works: the nudge must not read as an error.
             assert!(!model.has_error);
             assert_eq!(model.tray_state, TrayState::Ready);
         }
     }
 
     #[test]
-    fn an_outdated_reported_revision_names_the_revision_it_warns_about() {
-        // Reachable once MINIMUM_FIRMWARE_REVISION exceeds 1; pinned here so
-        // the label shape is already settled.
+    fn targetless_firmware_is_unidentified_without_an_update_prompt() {
         let mut status = ready_status(ControllerTransport::Bluetooth);
-        status.xiao.firmware.version = FirmwareVersion::Reported(0);
+        let firmware = status.output.firmware.as_mut().unwrap();
+        firmware.version = FirmwareVersion::Reported(2);
+        firmware.target = FirmwareTarget::Unreported;
         let model = MenuModel::from_status(&status);
-        if FirmwareVersion::Reported(0).update_recommended() {
-            assert_eq!(model.firmware, "⚠ Firmware: rev 0 · Update recommended");
-        }
+        assert_eq!(model.firmware, "Firmware: rev 2 · Unidentified");
+        assert_eq!(model.output, "Output: Bridge Device");
+        assert!(model.hardware_rows.firmware);
+        assert!(!model.firmware.contains("Update"));
+    }
+
+    #[test]
+    fn output_line_uses_plain_identity_or_discovery_copy_without_a_status_suffix() {
+        let mut status = ready_status(ControllerTransport::Bluetooth);
+        status.output.ready = false;
+        assert_eq!(MenuModel::from_status(&status).output, "Output: Connecting");
+
+        status.output.endpoint = None;
+        assert_eq!(
+            MenuModel::from_status(&status).output,
+            "Output: Not Detected"
+        );
+
+        status.output.backend = OutputBackend::Dump;
+        status.output.ready = true;
+        assert_eq!(
+            MenuModel::from_status(&status).output,
+            "Output: Diagnostic Dump"
+        );
+
+        status.output.firmware = None;
+        status.controller.connected = false;
+        let unavailable = MenuModel::from_status(&status);
+        assert!(!unavailable.hardware_rows.firmware);
+        assert!(!unavailable.hardware_rows.controller_details);
     }
 
     #[test]
@@ -557,11 +625,11 @@ mod tests {
     #[test]
     fn controller_transport_lines_are_short_and_do_not_expose_identity_details() {
         let bluetooth = MenuModel::from_status(&ready_status(ControllerTransport::Bluetooth));
-        assert_eq!(bluetooth.input, "Input: Bluetooth · Active");
+        assert_eq!(bluetooth.input, "Input: Bluetooth");
         assert_eq!(bluetooth.controller, "Controller: Connected");
 
         let puck = MenuModel::from_status(&ready_status(ControllerTransport::Puck));
-        assert_eq!(puck.input, "Input: Puck · Active");
+        assert_eq!(puck.input, "Input: Puck");
         assert!(!puck.input.contains("serial"));
         assert!(!puck.input.contains("interface"));
     }
@@ -640,9 +708,9 @@ mod tests {
     #[test]
     fn running_without_a_complete_path_is_visibly_waiting() {
         let mut status = ready_status(ControllerTransport::Bluetooth);
-        status.xiao.handshake_complete = false;
+        status.output.ready = false;
         let model = MenuModel::from_status(&status);
         assert_eq!(model.tray_state, TrayState::Waiting);
-        assert_eq!(model.status, "Status: Waiting for XIAO");
+        assert_eq!(model.status, "Status: Waiting for bridge device");
     }
 }

@@ -94,7 +94,7 @@ non-neutral, so the watchdog stays armed - leaving only a 4× margin. Anything
 that stalls the host thread past 100 ms then faults the device, which flashes
 red until traffic resumes. Nothing is logged, because no write ever failed.
 
-The same hazard applies to any slow work on the thread that feeds the XIAO.
+The same hazard applies to any slow work on the thread that feeds gamepad output.
 macOS input-sink construction and destruction are window-server operations
 whose duration this side does not control, so `bridge-runtime` owns them on a
 dedicated worker. `neutralize_before_desktop_work` still parks the device at
@@ -104,7 +104,8 @@ ordinary and unbound profile switches; backend failure and shutdown are the
 places that destroy it.
 
 If you ever add work to the supervisor loop that can block, park the output
-first. The symptom of getting this wrong is a red-flashing XIAO and a clean log.
+first. On the reference XIAO firmware, the symptom of getting this wrong is a
+red-flashing device and a clean log.
 
 ## Layout
 
@@ -124,7 +125,7 @@ further wins, so resting a thumb on the other one cannot fight it.
 HID report
   |
   v
-bridge-core: decode, map, send to XIAO
+bridge-core: decode, map, send to gamepad output
   ^                    |
   |                    v
 suppression   profile-picker: hold timing, angle to sector, commit

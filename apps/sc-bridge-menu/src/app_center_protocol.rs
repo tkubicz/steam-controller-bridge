@@ -4,7 +4,10 @@ use clap::ValueEnum;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use bridge_runtime::{FirmwareInfo, FirmwareInstallSource, FirmwareInstallState, FirmwareVersion};
+use bridge_runtime::{
+    FirmwareInfo, FirmwareInstallSource, FirmwareInstallState, FirmwareTarget, FirmwareTargetId,
+    FirmwareVersion,
+};
 
 #[cfg(test)]
 use bridge_runtime::FirmwareCapabilities;
@@ -12,9 +15,9 @@ use bridge_runtime::FirmwareCapabilities;
 use crate::line_protocol::read_bounded_line;
 
 pub const MAX_IPC_LINE_BYTES: usize = 4 * 1024;
-// Version 2: `Navigate`/`FirmwareVersion` carry `FirmwareDetails` instead of
-// the bare `FirmwareStatus`, so a replaced-on-disk binary fails cleanly.
-const IPC_PROTOCOL_VERSION: u32 = 2;
+// Version 3: firmware details carry the target identity used for fail-closed
+// update association, so a replaced-on-disk binary fails cleanly.
+const IPC_PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct Envelope<T> {
@@ -57,6 +60,40 @@ pub enum FirmwareStatus {
     Unreported,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state", content = "value")]
+pub enum FirmwareTargetStatus {
+    #[default]
+    Unreported,
+    Reported(String),
+    Malformed,
+}
+
+impl<'de> Deserialize<'de> for FirmwareTargetStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", tag = "state", content = "value")]
+        enum EncodedTargetStatus {
+            Unreported,
+            Reported(String),
+            Malformed,
+        }
+
+        Ok(match EncodedTargetStatus::deserialize(deserializer)? {
+            EncodedTargetStatus::Unreported => Self::Unreported,
+            EncodedTargetStatus::Reported(identifier)
+                if FirmwareTargetId::new(&identifier).is_ok() =>
+            {
+                Self::Reported(identifier)
+            }
+            EncodedTargetStatus::Reported(_) | EncodedTargetStatus::Malformed => Self::Malformed,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FirmwareReceiptSource {
@@ -81,8 +118,9 @@ pub enum FirmwareInstallStatus {
     Invalid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct FirmwareDetails {
+    pub target: FirmwareTargetStatus,
     pub version: FirmwareStatus,
     pub capabilities: u32,
     pub install: FirmwareInstallStatus,
@@ -91,6 +129,13 @@ pub struct FirmwareDetails {
 impl From<FirmwareInfo> for FirmwareDetails {
     fn from(value: FirmwareInfo) -> Self {
         Self {
+            target: match value.target {
+                FirmwareTarget::Unreported => FirmwareTargetStatus::Unreported,
+                FirmwareTarget::Reported(identifier) => {
+                    FirmwareTargetStatus::Reported(identifier.to_string())
+                }
+                FirmwareTarget::Malformed => FirmwareTargetStatus::Malformed,
+            },
             version: value.version.into(),
             capabilities: value.capabilities.bits(),
             install: match value.install_state {
@@ -110,6 +155,16 @@ impl From<FirmwareInfo> for FirmwareDetails {
                     })
                 }
             },
+        }
+    }
+}
+
+#[cfg(any(feature = "updater", test))]
+impl FirmwareDetails {
+    pub fn target_id(&self) -> Option<FirmwareTargetId> {
+        match &self.target {
+            FirmwareTargetStatus::Reported(identifier) => FirmwareTargetId::new(identifier).ok(),
+            FirmwareTargetStatus::Unreported | FirmwareTargetStatus::Malformed => None,
         }
     }
 }
@@ -267,7 +322,7 @@ mod tests {
         };
         let encoded = encode(AppCenterCommand::Navigate {
             page: AppCenterPage::Updates,
-            firmware,
+            firmware: firmware.clone(),
         })
         .unwrap();
         assert_eq!(
@@ -299,6 +354,7 @@ mod tests {
         for details in [
             FirmwareDetails::default(),
             FirmwareDetails {
+                target: FirmwareTargetStatus::Reported("seeed-xiao-nrf52840".to_owned()),
                 version: FirmwareStatus::Reported(7),
                 capabilities: (FirmwareCapabilities::ENTER_UF2_BOOTLOADER
                     | FirmwareCapabilities::INSTALL_RECEIPT)
@@ -306,6 +362,7 @@ mod tests {
                 install: FirmwareInstallStatus::Pending,
             },
             FirmwareDetails {
+                target: FirmwareTargetStatus::Malformed,
                 version: FirmwareStatus::Reported(2),
                 capabilities: (FirmwareCapabilities::ENTER_UF2_BOOTLOADER
                     | FirmwareCapabilities::INSTALL_RECEIPT)
@@ -319,5 +376,13 @@ mod tests {
         ] {
             assert_eq!(details.to_string().parse(), Ok(details));
         }
+    }
+
+    #[test]
+    fn malformed_reported_target_is_normalized_during_ipc_decode() {
+        let encoded = r#"{"target":{"state":"reported","value":"NOT VALID"},"version":{"state":"reported","value":3},"capabilities":0,"install":{"state":"unsupported"}}"#;
+        let details: FirmwareDetails = encoded.parse().unwrap();
+        assert_eq!(details.target, FirmwareTargetStatus::Malformed);
+        assert_eq!(details.target_id(), None);
     }
 }

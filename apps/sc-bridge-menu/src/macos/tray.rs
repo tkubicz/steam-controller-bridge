@@ -4,6 +4,31 @@
 )]
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HardwareStatusRow {
+    Input,
+    Output,
+    Firmware,
+    Controller,
+    Battery,
+    Haptics,
+}
+
+pub(super) fn hardware_status_rows(visibility: HardwareRowVisibility) -> Vec<HardwareStatusRow> {
+    if !visibility.section {
+        return Vec::new();
+    }
+    let mut rows = vec![HardwareStatusRow::Input, HardwareStatusRow::Output];
+    if visibility.firmware {
+        rows.push(HardwareStatusRow::Firmware);
+    }
+    rows.push(HardwareStatusRow::Controller);
+    if visibility.controller_details {
+        rows.extend([HardwareStatusRow::Battery, HardwareStatusRow::Haptics]);
+    }
+    rows
+}
+
 impl MenuApp {
     #[allow(clippy::too_many_lines)] // Native menu construction keeps item ownership and order together.
     pub(super) fn create_tray(&mut self) -> Result<(), String> {
@@ -11,8 +36,8 @@ impl MenuApp {
         let status = MenuItem::new("Status: Looking for hardware", false, None);
         let input = MenuItem::new("Input: Discovering", false, None);
         let controller = MenuItem::new("Controller: Not connected", false, None);
-        let xiao = MenuItem::new("XIAO: Discovering", false, None);
-        let firmware = MenuItem::new("Firmware: Unknown", false, None);
+        let output = MenuItem::new("Output: Discovering", false, None);
+        let firmware = MenuItem::new("Firmware: Not available", false, None);
         let battery = MenuItem::new("Battery: Unknown", false, None);
         let haptics = MenuItem::new("Haptics: Idle", false, None);
         let current_profile = MenuItem::new("Current Profile: None · Disabled", false, None);
@@ -30,7 +55,7 @@ impl MenuApp {
         let logs = MenuItem::with_id(LOGS_ID, "Open Log Folder", true, None);
         let updates = MenuItem::with_id(
             UPDATES_ID,
-            "Check for Updates…",
+            MANAGE_UPDATES_LABEL,
             app_center_available(),
             None,
         );
@@ -189,21 +214,25 @@ impl MenuApp {
         .map_err(|error| error.to_string())?;
         let separators: [PredefinedMenuItem; 6] =
             std::array::from_fn(|_| PredefinedMenuItem::separator());
-        let copy_error_visible = self.runtime.status().last_error.is_some();
-        let mut root_items: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![
-            &bridge,
-            &status,
-            &run_toggle,
-            &separators[0],
-            &controller,
-            &input,
-            &xiao,
-            &firmware,
-            &battery,
-            &haptics,
-            &separators[1],
-            &problem,
-        ];
+        let initial_status = self.runtime.status();
+        let copy_error_visible = initial_status.last_error.is_some();
+        let hardware_rows = MenuModel::from_status(&initial_status).hardware_rows;
+        let mut root_items: Vec<&dyn tray_icon::menu::IsMenuItem> =
+            vec![&bridge, &status, &run_toggle, &separators[0]];
+        for row in hardware_status_rows(hardware_rows) {
+            root_items.push(match row {
+                HardwareStatusRow::Input => &input,
+                HardwareStatusRow::Output => &output,
+                HardwareStatusRow::Firmware => &firmware,
+                HardwareStatusRow::Controller => &controller,
+                HardwareStatusRow::Battery => &battery,
+                HardwareStatusRow::Haptics => &haptics,
+            });
+        }
+        if hardware_rows.section {
+            root_items.push(&separators[1]);
+        }
+        root_items.push(&problem);
         if copy_error_visible {
             root_items.push(&copy_error);
         }
@@ -237,10 +266,12 @@ impl MenuApp {
             status,
             input,
             controller,
-            xiao,
+            output,
             firmware,
             battery,
             haptics,
+            hardware_separator: separators[1].clone(),
+            hardware_visibility: hardware_rows.into(),
             current_profile,
             automatic_shutdown,
             problem,
@@ -265,20 +296,23 @@ impl MenuApp {
     pub(super) fn refresh_status(&mut self) {
         let status = self.runtime.status();
         let recovery_problem = self.app_center_recovery.problem().map(str::to_owned);
-        if let Err(error) = self.app_center_host.update_firmware(status.xiao.firmware) {
+        if let Err(error) = self
+            .app_center_host
+            .update_firmware(status.output.firmware.unwrap_or_default())
+        {
             eprintln!("cannot update app window firmware status: {error}");
         }
         #[cfg(feature = "updater")]
         {
             self.update_checker.poll();
-            let available = self.update_checker.available(status.xiao.firmware.version);
+            let available = self.update_checker.available(status.output.firmware);
             if self.last_update_available != Some(available) {
                 self.last_update_available = Some(available);
                 if let Some(items) = &self.items {
                     items.updates.set_text(if available {
-                        "Updates Available…"
+                        UPDATE_AVAILABLE_LABEL
                     } else {
-                        "Check for Updates…"
+                        MANAGE_UPDATES_LABEL
                     });
                 }
             }
@@ -304,7 +338,7 @@ impl MenuApp {
                 items.status.set_text(&model.status);
                 items.input.set_text(&model.input);
                 items.controller.set_text(&model.controller);
-                items.xiao.set_text(&model.xiao);
+                items.output.set_text(&model.output);
                 items.firmware.set_text(&model.firmware);
                 items.battery.set_text(&model.battery);
                 items.haptics.set_text(&model.haptics);
@@ -313,6 +347,9 @@ impl MenuApp {
                 items.problem.set_text(&model.problem);
                 items.run_toggle.set_text(model.run_action.label());
                 items.run_toggle.set_enabled(model.run_enabled);
+                if let Err(error) = items.sync_status_visibility(&model) {
+                    eprintln!("cannot update hardware status visibility: {error}");
+                }
                 if items.copy_error_visible != model.has_error {
                     let result: Result<(), String> = if model.has_error {
                         let problem_position = items
@@ -357,7 +394,7 @@ impl MenuApp {
     }
 
     pub(super) fn show_app_center(&mut self, page: AppCenterPage) {
-        let firmware = self.runtime.status().xiao.firmware;
+        let firmware = self.runtime.status().output.firmware.unwrap_or_default();
         match self.app_center_host.launch(page, firmware) {
             Ok(reused) => {
                 if reused
@@ -637,4 +674,124 @@ impl MenuApp {
             false
         }
     }
+}
+
+impl MenuItems {
+    fn sync_status_visibility(&mut self, model: &MenuModel) -> Result<(), String> {
+        if model.hardware_rows.section != self.hardware_visibility.section {
+            return self.sync_hardware_section(model.hardware_rows);
+        }
+        if !model.hardware_rows.section {
+            return Ok(());
+        }
+        sync_menu_item_visibility(
+            &self.menu,
+            &self.output,
+            &self.firmware,
+            model.hardware_rows.firmware,
+            &mut self.hardware_visibility.optional.firmware,
+        )?;
+        if model.hardware_rows.controller_details {
+            sync_menu_item_visibility(
+                &self.menu,
+                &self.controller,
+                &self.battery,
+                true,
+                &mut self.hardware_visibility.optional.battery,
+            )?;
+            sync_menu_item_visibility(
+                &self.menu,
+                &self.battery,
+                &self.haptics,
+                true,
+                &mut self.hardware_visibility.optional.haptics,
+            )?;
+        } else {
+            sync_menu_item_visibility(
+                &self.menu,
+                &self.battery,
+                &self.haptics,
+                false,
+                &mut self.hardware_visibility.optional.haptics,
+            )?;
+            sync_menu_item_visibility(
+                &self.menu,
+                &self.controller,
+                &self.battery,
+                false,
+                &mut self.hardware_visibility.optional.battery,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn sync_hardware_section(&mut self, rows: HardwareRowVisibility) -> Result<(), String> {
+        let target: HardwareItemVisibility = rows.into();
+        if target.section {
+            let position = self
+                .menu
+                .items()
+                .iter()
+                .position(|candidate| candidate.id() == self.problem.id())
+                .ok_or_else(|| "Problem menu item is missing".to_owned())?;
+            let items = self.hardware_items(target);
+            self.menu
+                .insert_items(&items, position)
+                .map_err(|error| error.to_string())?;
+        } else {
+            let items = self.hardware_items(self.hardware_visibility);
+            for item in items.into_iter().rev() {
+                self.menu.remove(item).map_err(|error| error.to_string())?;
+            }
+        }
+        self.hardware_visibility = target;
+        Ok(())
+    }
+
+    fn hardware_items(
+        &self,
+        visibility: HardwareItemVisibility,
+    ) -> Vec<&dyn tray_icon::menu::IsMenuItem> {
+        if !visibility.section {
+            return Vec::new();
+        }
+        let mut items: Vec<&dyn tray_icon::menu::IsMenuItem> = vec![&self.input, &self.output];
+        if visibility.optional.firmware {
+            items.push(&self.firmware);
+        }
+        items.push(&self.controller);
+        if visibility.optional.battery {
+            items.push(&self.battery);
+        }
+        if visibility.optional.haptics {
+            items.push(&self.haptics);
+        }
+        items.push(&self.hardware_separator);
+        items
+    }
+}
+
+fn sync_menu_item_visibility(
+    menu: &Menu,
+    anchor: &MenuItem,
+    item: &MenuItem,
+    visible: bool,
+    currently_visible: &mut bool,
+) -> Result<(), String> {
+    if visible == *currently_visible {
+        return Ok(());
+    }
+    if visible {
+        let position = menu
+            .items()
+            .iter()
+            .position(|candidate| candidate.id() == anchor.id())
+            .ok_or_else(|| format!("anchor for {} is missing", item.text()))?;
+        menu.insert(item, position + 1)
+            .map_err(|error| error.to_string())?;
+    } else {
+        menu.remove(item).map_err(|error| error.to_string())?;
+    }
+    *currently_visible = visible;
+    Ok(())
 }

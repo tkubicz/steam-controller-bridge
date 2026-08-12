@@ -324,42 +324,7 @@ fn core_status_changes(
         &previous.controller.connected,
         &current.controller.connected,
     );
-    push_change(
-        changes,
-        "xiao_path",
-        &previous.xiao.path,
-        &current.xiao.path,
-    );
-    push_masked_serial_change(
-        changes,
-        "xiao_serial",
-        previous.xiao.usb_serial.as_deref(),
-        current.xiao.usb_serial.as_deref(),
-    );
-    push_change(
-        changes,
-        "xiao_handshake",
-        &previous.xiao.handshake_complete,
-        &current.xiao.handshake_complete,
-    );
-    push_change(
-        changes,
-        "xiao_firmware",
-        &previous.xiao.firmware.version,
-        &current.xiao.firmware.version,
-    );
-    push_change(
-        changes,
-        "xiao_firmware_capabilities",
-        &previous.xiao.firmware.capabilities.bits(),
-        &current.xiao.firmware.capabilities.bits(),
-    );
-    push_change(
-        changes,
-        "xiao_install_receipt",
-        &previous.xiao.firmware.install_state,
-        &current.xiao.firmware.install_state,
-    );
+    output_status_changes(changes, previous, current);
     push_change(
         changes,
         "battery",
@@ -371,6 +336,73 @@ fn core_status_changes(
         "charge_state",
         &previous.battery_charge_state,
         &current.battery_charge_state,
+    );
+}
+
+fn output_status_changes(
+    changes: &mut Vec<StatusLogChange>,
+    previous: &BridgeStatus,
+    current: &BridgeStatus,
+) {
+    push_change(
+        changes,
+        "output_backend",
+        &previous.output.backend,
+        &current.output.backend,
+    );
+    push_change(
+        changes,
+        "output_endpoint",
+        &previous.output.endpoint,
+        &current.output.endpoint,
+    );
+    push_masked_serial_change(
+        changes,
+        "output_stable_id",
+        previous.output.stable_id.as_deref(),
+        current.output.stable_id.as_deref(),
+    );
+    push_change(
+        changes,
+        "output_ready",
+        &previous.output.ready,
+        &current.output.ready,
+    );
+    push_change(
+        changes,
+        "output_firmware_target",
+        &previous.output.firmware.map(|firmware| firmware.target),
+        &current.output.firmware.map(|firmware| firmware.target),
+    );
+    push_change(
+        changes,
+        "output_firmware",
+        &previous.output.firmware.map(|firmware| firmware.version),
+        &current.output.firmware.map(|firmware| firmware.version),
+    );
+    push_change(
+        changes,
+        "output_firmware_capabilities",
+        &previous
+            .output
+            .firmware
+            .map(|firmware| firmware.capabilities.bits()),
+        &current
+            .output
+            .firmware
+            .map(|firmware| firmware.capabilities.bits()),
+    );
+    push_change(
+        changes,
+        "output_install_receipt",
+        &previous
+            .output
+            .firmware
+            .map(|firmware| firmware.install_state),
+        &current
+            .output
+            .firmware
+            .map(|firmware| firmware.install_state),
     );
 }
 
@@ -593,7 +625,7 @@ fn tracked_status_changed(previous: &BridgeStatus, current: &BridgeStatus) -> bo
         || previous.detail != current.detail
         || previous.source != current.source
         || previous.controller.connected != current.controller.connected
-        || previous.xiao != current.xiao
+        || previous.output != current.output
         || previous.battery_percent != current.battery_percent
         || previous.battery_charge_state != current.battery_charge_state
         || previous.lizard.suppressed != current.lizard.suppressed
@@ -669,7 +701,7 @@ mod tests {
             "status=BridgeStatus",
             "source:",
             "controller:",
-            "xiao:",
+            "output:",
             "lizard:",
             "haptics:",
             "bindings:",
@@ -769,9 +801,12 @@ mod tests {
         let mut current = initial;
         current.revision = 1;
         current.source.connected = true;
-        current.xiao.path = Some("/dev/cu.usbmodem1".to_owned());
-        current.xiao.handshake_complete = true;
-        current.xiao.firmware.version = bridge_output::FirmwareVersion::Reported(3);
+        current.output.endpoint = Some("/dev/cu.usbmodem1".to_owned());
+        current.output.ready = true;
+        current.output.firmware = Some(bridge_output::FirmwareInfo {
+            version: bridge_output::FirmwareVersion::Reported(3),
+            ..bridge_output::FirmwareInfo::default()
+        });
         current.lizard.suppressed = true;
         current.haptics.state = crate::HapticsState::Active;
         current.bindings.state = crate::DesktopBindingsState::Ready;
@@ -786,8 +821,8 @@ mod tests {
         let text = records[0].to_string();
         for field in [
             "source_connected=",
-            "xiao_path=",
-            "xiao_firmware=Pending->Reported(3)",
+            "output_endpoint=",
+            "output_firmware=None->Some(Reported(3))",
             "lizard_suppressed=",
             "haptics_state=",
             "bindings_state=",
@@ -808,11 +843,17 @@ mod tests {
         let _ = tracker.observe(Duration::ZERO, &initial);
         let mut current = initial;
         current.revision = 1;
-        current.xiao.firmware.version = bridge_output::FirmwareVersion::Unreported;
+        current.output.firmware = Some(bridge_output::FirmwareInfo {
+            version: bridge_output::FirmwareVersion::Unreported,
+            ..bridge_output::FirmwareInfo::default()
+        });
         let records = tracker.observe(Duration::from_secs(1), &current);
         assert_eq!(records.len(), 1);
         let text = records[0].to_string();
-        assert!(text.contains("xiao_firmware=Pending->Unreported"), "{text}");
+        assert!(
+            text.contains("output_firmware=None->Some(Unreported)"),
+            "{text}"
+        );
         assert!(!matches!(
             records[0].kind(),
             StatusLogRecordKind::Snapshot(StatusSnapshotReason::Error)
@@ -847,10 +888,10 @@ mod tests {
 
     #[test]
     fn snapshots_and_source_changes_mask_serial_numbers() {
-        let xiao_secret = "5E6EF905E5468F85";
+        let output_secret = "5E6EF905E5468F85";
         let controller_secret = "a1:b2:c3:d4:e5:f6";
         let mut status = BridgeStatus::default();
-        status.xiao.usb_serial = Some(xiao_secret.to_owned());
+        status.output.stable_id = Some(output_secret.to_owned());
         status.source.identity = Some(steam_controller_device::HidDeviceInfo {
             id: "bluetooth-controller".to_owned(),
             path: "bluetooth-controller".to_owned(),
@@ -867,31 +908,31 @@ mod tests {
         let mut tracker = StatusLogTracker::default();
         let records = tracker.observe(Duration::ZERO, &status);
         let text = records[0].to_string();
-        assert!(!text.contains(xiao_secret));
+        assert!(!text.contains(output_secret));
         assert!(!text.contains(controller_secret));
         assert!(text.contains("****8F85"));
         assert!(text.contains("****5:f6"));
 
         let previous = status.clone();
         status.revision = 1;
-        status.xiao.handshake_complete = true;
+        status.output.ready = true;
         status.source.connected = true;
         let records = tracker.observe(Duration::from_secs(1), &status);
         assert_eq!(records.len(), 1);
         let text = records[0].to_string();
-        assert!(!text.contains(xiao_secret));
+        assert!(!text.contains(output_secret));
         assert!(!text.contains(controller_secret));
-        assert!(!text.contains("usb_serial"));
+        assert!(!text.contains("stable_id"));
         assert!(!text.contains("serial_number"));
-        assert_ne!(previous.xiao, status.xiao);
+        assert_ne!(previous.output, status.output);
 
         status.revision = 2;
-        status.xiao.usb_serial = Some("1122334455667788".to_owned());
+        status.output.stable_id = Some("1122334455667788".to_owned());
         status.source.identity.as_mut().unwrap().serial_number =
             Some("11:22:33:44:55:66".to_owned());
         let records = tracker.observe(Duration::from_secs(2), &status);
         let text = records[0].to_string();
-        assert!(!text.contains(xiao_secret));
+        assert!(!text.contains(output_secret));
         assert!(!text.contains(controller_secret));
         assert!(!text.contains("1122334455667788"));
         assert!(!text.contains("11:22:33:44:55:66"));

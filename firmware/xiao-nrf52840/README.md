@@ -44,9 +44,11 @@ arduino-cli board list
 make flash PORT=/dev/cu.usbmodemXXXX
 ```
 
-App Center is the normal update path. Firmware revision 2 acknowledges a
+App Center is the normal update path. Firmware revision 3 reports updater
+target `seeed-xiao-nrf52840` and acknowledges a
 correlated bootloader request, drains CDC, waits 100 ms, and enters the Adafruit
-UF2 bootloader automatically. Revision 1 needs one final manual installation.
+UF2 bootloader automatically. Targetless revision 2, factory firmware, and
+unidentified application firmware require the explicit XIAO recovery action.
 For that migration or later recovery, quickly press the tiny reset button beside
 the USB-C connector twice. The XIAO bootloader mounts a USB drive; copy the
 generated UF2 onto it, or rerun `make flash` using the bootloader's newly
@@ -113,7 +115,8 @@ watchdog and does not compete with a pending neutral input report.
 `src/firmware_version.h` holds `kFirmwareRevision`, a hand-maintained
 monotonic counter independent of release numbering. After every successful
 Hello negotiation the firmware queues one protocol `DeviceInfo` frame carrying
-the revision, capability flags, and installation receipt state. A revision 1
+the revision, capability flags, installation receipt state, and the XIAO target
+ID TLV. A revision 1
 three-byte report remains valid, so mixed pairings stay compatible.
 
 Revision 2 includes a dedicated 4 KiB flash page with two initially blank
@@ -125,10 +128,9 @@ actual ELF, Intel HEX, and UF2 to prove page alignment, isolation, blank slots,
 and exactly one marker.
 
 Bump `kFirmwareRevision` in the same commit as any behavior-affecting firmware
-change. Raise the host's `MINIMUM_FIRMWARE_REVISION`
-(`crates/bridge-output/src/serial.rs`) only when the bridge depends on the new
-behavior - that constant is what turns an older revision into the menu bar's
-"Update recommended" nudge.
+change. Revision and compatibility policy belongs to this target's descriptor
+in `crates/release-updater/src/targets.rs`; the board-neutral protocol and
+runtime do not apply a global minimum revision.
 
 The active-low RGB LED indicates:
 

@@ -10,20 +10,18 @@ use gamepad_state::GamepadState;
 
 use crate::{GamepadOutput, OutputDiagnostics, OutputError, OutputFeedback};
 
-pub const XIAO_USB_VENDOR_ID: u16 = 0x045e;
-pub const XIAO_USB_PRODUCT_ID: u16 = 0x028e;
-pub const XIAO_USB_MANUFACTURER: &str = "Lynxware";
-pub const XIAO_USB_PRODUCT: &str = "Steam Controller Bridge";
-/// Oldest firmware revision the host considers current. Hand-maintained:
-/// raise it only when the bridge depends on newer firmware behavior, so a
-/// working older board is not nagged to reflash after app-only releases.
-pub const MINIMUM_FIRMWARE_REVISION: u16 = 2;
+/// Board-neutral USB product marker used for zero-configuration serial
+/// discovery. Vendor, product, and manufacturer IDs deliberately remain free
+/// for independent protocol implementations.
+pub const BRIDGE_DEVICE_USB_PRODUCT: &str = "Steam Controller Bridge";
 /// How long after Ready the firmware gets to deliver its `DeviceInfo` report
 /// before the connection is classified as pre-versioning firmware.
 const FIRMWARE_REPORT_GRACE: Duration = Duration::from_secs(2);
 const DEVICE_INFO_FORMAT: u8 = 1;
 const DEVICE_INFO_EXTENSION_SIZE: usize = 8;
 const DEVICE_INFO_RECORDED_SIZE: usize = 33;
+const FIRMWARE_TARGET_TLV: u8 = 1;
+pub const MAX_FIRMWARE_TARGET_ID_LEN: usize = 64;
 const SERIAL_SERVICE_MIN_INTERVAL: Duration = Duration::from_millis(10);
 const HANDSHAKE_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
@@ -38,15 +36,102 @@ pub struct SerialDeviceInfo {
 }
 
 impl SerialDeviceInfo {
+    /// Whether this serial endpoint is safe to open as a callout connection.
+    /// macOS dial-in endpoints can block while waiting for carrier detect, so
+    /// discovery and updater flows must consistently exclude them.
     #[must_use]
-    pub fn is_xiao_bridge(&self) -> bool {
-        let is_callout = !cfg!(target_os = "macos") || self.path.starts_with("/dev/cu.");
-        is_callout
-            && self.vendor_id == Some(XIAO_USB_VENDOR_ID)
-            && self.product_id == Some(XIAO_USB_PRODUCT_ID)
-            && self.manufacturer.as_deref() == Some(XIAO_USB_MANUFACTURER)
-            && self.product.as_deref() == Some(XIAO_USB_PRODUCT)
+    pub fn is_callout_port(&self) -> bool {
+        !cfg!(target_os = "macos") || self.path.starts_with("/dev/cu.")
     }
+
+    #[must_use]
+    pub fn is_bridge_device(&self) -> bool {
+        self.is_callout_port() && self.product.as_deref() == Some(BRIDGE_DEVICE_USB_PRODUCT)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FirmwareTargetId {
+    length: u8,
+    bytes: [u8; MAX_FIRMWARE_TARGET_ID_LEN],
+}
+
+impl FirmwareTargetId {
+    /// Creates a bounded target identifier suitable for the `DeviceInfo` wire
+    /// extension and signed release catalog lookup.
+    ///
+    /// # Errors
+    /// Returns an error unless the value is a non-empty lowercase ASCII slug
+    /// containing only letters, digits, dots, and hyphens.
+    pub fn new(value: &str) -> Result<Self, FirmwareTargetIdError> {
+        if value.is_empty()
+            || value.len() > MAX_FIRMWARE_TARGET_ID_LEN
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-".contains(&byte)
+            })
+            || !value
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            || !value
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+        {
+            return Err(FirmwareTargetIdError);
+        }
+        let length = u8::try_from(value.len()).map_err(|_| FirmwareTargetIdError)?;
+        let mut bytes = [0; MAX_FIRMWARE_TARGET_ID_LEN];
+        bytes[..value.len()].copy_from_slice(value.as_bytes());
+        Ok(Self { length, bytes })
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..usize::from(self.length)]).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for FirmwareTargetId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("FirmwareTargetId")
+            .field(&self.as_str())
+            .finish()
+    }
+}
+
+impl std::fmt::Display for FirmwareTargetId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for FirmwareTargetId {
+    type Error = FirmwareTargetIdError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirmwareTargetIdError;
+
+impl std::fmt::Display for FirmwareTargetIdError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("firmware target ID must be 1-64 lowercase ASCII slug characters")
+    }
+}
+
+impl std::error::Error for FirmwareTargetIdError {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FirmwareTarget {
+    #[default]
+    Unreported,
+    Reported(FirmwareTargetId),
+    Malformed,
 }
 
 pub trait ByteTransport {
@@ -259,6 +344,7 @@ pub enum FirmwareInstallState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FirmwareInfo {
+    pub target: FirmwareTarget,
     pub version: FirmwareVersion,
     pub capabilities: FirmwareCapabilities,
     pub install_state: FirmwareInstallState,
@@ -297,15 +383,6 @@ impl FirmwareVersion {
             Self::Pending | Self::UnsupportedFormat(_) | Self::Malformed | Self::Unreported => None,
         }
     }
-
-    #[must_use]
-    pub const fn update_recommended(self) -> bool {
-        match self {
-            Self::Unreported | Self::Malformed => true,
-            Self::Reported(revision) => revision < MINIMUM_FIRMWARE_REVISION,
-            Self::Pending | Self::UnsupportedFormat(_) => false,
-        }
-    }
 }
 
 fn parse_device_info(payload: &[u8]) -> FirmwareInfo {
@@ -322,14 +399,17 @@ fn parse_device_info(payload: &[u8]) -> FirmwareInfo {
             let version = FirmwareVersion::Reported(u16::from_le_bytes([*low, *high]));
             let capabilities =
                 FirmwareCapabilities::from_bits(u32::from_le_bytes([*cap0, *cap1, *cap2, *cap3]));
-            let install_state = match *state {
-                0 => FirmwareInstallState::Unsupported,
-                1 => FirmwareInstallState::Pending,
+            let (install_state, extension_offset) = match *state {
+                0 => (
+                    FirmwareInstallState::Unsupported,
+                    DEVICE_INFO_EXTENSION_SIZE,
+                ),
+                1 => (FirmwareInstallState::Pending, DEVICE_INFO_EXTENSION_SIZE),
                 2 if payload.len() >= DEVICE_INFO_RECORDED_SIZE => {
                     let installed_at =
                         u64::from_le_bytes(payload[8..16].try_into().expect("length checked"));
                     let install_id: [u8; 16] = payload[16..32].try_into().expect("length checked");
-                    match InstallSource::try_from(payload[32]) {
+                    let state = match InstallSource::try_from(payload[32]) {
                         Ok(source)
                             if installed_at > 0
                                 && i64::try_from(installed_at).is_ok()
@@ -342,11 +422,14 @@ fn parse_device_info(payload: &[u8]) -> FirmwareInfo {
                             })
                         }
                         Ok(_) | Err(_) => FirmwareInstallState::Invalid,
-                    }
+                    };
+                    (state, DEVICE_INFO_RECORDED_SIZE)
                 }
-                2 | 3..=u8::MAX => FirmwareInstallState::Invalid,
+                2 => (FirmwareInstallState::Invalid, payload.len()),
+                3..=u8::MAX => (FirmwareInstallState::Invalid, DEVICE_INFO_EXTENSION_SIZE),
             };
             FirmwareInfo {
+                target: parse_firmware_target(&payload[extension_offset..]),
                 version,
                 capabilities,
                 install_state,
@@ -361,6 +444,37 @@ fn parse_device_info(payload: &[u8]) -> FirmwareInfo {
             ..FirmwareInfo::default()
         },
     }
+}
+
+fn parse_firmware_target(mut extensions: &[u8]) -> FirmwareTarget {
+    let mut target = FirmwareTarget::Unreported;
+    while !extensions.is_empty() {
+        if extensions.len() < 2 {
+            return FirmwareTarget::Malformed;
+        }
+        let tag = extensions[0];
+        let length = usize::from(extensions[1]);
+        extensions = &extensions[2..];
+        if extensions.len() < length {
+            return FirmwareTarget::Malformed;
+        }
+        let value = &extensions[..length];
+        extensions = &extensions[length..];
+        if tag != FIRMWARE_TARGET_TLV {
+            continue;
+        }
+        if !matches!(target, FirmwareTarget::Unreported) {
+            return FirmwareTarget::Malformed;
+        }
+        let Ok(value) = std::str::from_utf8(value) else {
+            return FirmwareTarget::Malformed;
+        };
+        let Ok(identifier) = FirmwareTargetId::new(value) else {
+            return FirmwareTarget::Malformed;
+        };
+        target = FirmwareTarget::Reported(identifier);
+    }
+    target
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1268,22 +1382,22 @@ mod tests {
     }
 
     #[test]
-    fn xiao_filter_uses_complete_usb_identity_and_rejects_the_puck() {
-        let xiao = SerialDeviceInfo {
+    fn bridge_device_filter_uses_the_product_marker_and_callout_path() {
+        let bridge_device = SerialDeviceInfo {
             path: if cfg!(target_os = "macos") {
                 "/dev/cu.usbmodem11201".to_owned()
             } else {
                 "/dev/ttyACM0".to_owned()
             },
-            vendor_id: Some(XIAO_USB_VENDOR_ID),
-            product_id: Some(XIAO_USB_PRODUCT_ID),
+            vendor_id: Some(0x1209),
+            product_id: Some(0x0001),
             serial_number: Some("TESTSERIAL0000".to_owned()),
-            manufacturer: Some(XIAO_USB_MANUFACTURER.to_owned()),
-            product: Some(XIAO_USB_PRODUCT.to_owned()),
+            manufacturer: Some("Independent implementer".to_owned()),
+            product: Some(BRIDGE_DEVICE_USB_PRODUCT.to_owned()),
         };
-        assert!(xiao.is_xiao_bridge());
+        assert!(bridge_device.is_bridge_device());
 
-        let mut puck = xiao.clone();
+        let mut puck = bridge_device.clone();
         puck.path = if cfg!(target_os = "macos") {
             "/dev/cu.usbmodemFXB9961501D831".to_owned()
         } else {
@@ -1293,11 +1407,11 @@ mod tests {
         puck.product_id = Some(0x1304);
         puck.manufacturer = Some("Valve Software".to_owned());
         puck.product = Some("Steam Controller Puck".to_owned());
-        assert!(!puck.is_xiao_bridge());
+        assert!(!puck.is_bridge_device());
 
-        let mut dialin = xiao;
+        let mut dialin = bridge_device;
         dialin.path = "/dev/tty.usbmodem11201".to_owned();
-        assert_eq!(dialin.is_xiao_bridge(), !cfg!(target_os = "macos"));
+        assert_eq!(dialin.is_bridge_device(), !cfg!(target_os = "macos"));
     }
 
     #[test]
@@ -1526,11 +1640,11 @@ mod tests {
         connection.poll(Duration::ZERO).unwrap();
         assert_eq!(connection.firmware(), FirmwareVersion::Reported(3));
         assert_eq!(connection.firmware().revision(), Some(3));
-        assert!(!connection.firmware().update_recommended());
 
         assert_eq!(
             parse_device_info(&[1, 7, 1]),
             FirmwareInfo {
+                target: FirmwareTarget::Unreported,
                 version: FirmwareVersion::Reported(263),
                 capabilities: FirmwareCapabilities::default(),
                 install_state: FirmwareInstallState::Unsupported,
@@ -1552,16 +1666,61 @@ mod tests {
         extended.extend_from_slice(&receipt.installed_at.to_le_bytes());
         extended.extend_from_slice(&receipt.install_id);
         extended.push(InstallSource::AppCenter as u8);
-        extended.extend_from_slice(&[0xaa, 0xbb]);
+        extended.extend_from_slice(&[0xaa, 2, 0xbb, 0xcc]);
         assert_eq!(
             parse_device_info(&extended),
             FirmwareInfo {
+                target: FirmwareTarget::Unreported,
                 version: FirmwareVersion::Reported(2),
                 capabilities: FirmwareCapabilities::ENTER_UF2_BOOTLOADER
                     | FirmwareCapabilities::INSTALL_RECEIPT,
                 install_state: FirmwareInstallState::Recorded(receipt),
             }
         );
+        extended.extend_from_slice(&[FIRMWARE_TARGET_TLV, 19]);
+        extended.extend_from_slice(b"seeed-xiao-nrf52840");
+        assert_eq!(
+            parse_device_info(&extended),
+            FirmwareInfo {
+                target: FirmwareTarget::Reported(
+                    FirmwareTargetId::new("seeed-xiao-nrf52840").unwrap()
+                ),
+                version: FirmwareVersion::Reported(2),
+                capabilities: FirmwareCapabilities::ENTER_UF2_BOOTLOADER
+                    | FirmwareCapabilities::INSTALL_RECEIPT,
+                install_state: FirmwareInstallState::Recorded(receipt),
+            }
+        );
+
+        let mut targeted = vec![1, 3, 0, 0, 0, 0, 0, 1];
+        targeted.extend_from_slice(&[FIRMWARE_TARGET_TLV, 19]);
+        targeted.extend_from_slice(b"seeed-xiao-nrf52840");
+        assert_eq!(
+            parse_device_info(&targeted).target,
+            FirmwareTarget::Reported(FirmwareTargetId::new("seeed-xiao-nrf52840").unwrap())
+        );
+    }
+
+    #[test]
+    fn firmware_target_extensions_fail_closed_without_invalidating_the_revision() {
+        let payload = |extensions: &[u8]| {
+            let mut payload = vec![1, 3, 0, 0, 0, 0, 0, 1];
+            payload.extend_from_slice(extensions);
+            payload
+        };
+        for malformed in [
+            vec![FIRMWARE_TARGET_TLV],
+            vec![FIRMWARE_TARGET_TLV, 4, b'x'],
+            vec![FIRMWARE_TARGET_TLV, 1, b'X'],
+            vec![FIRMWARE_TARGET_TLV, 1, b'x', FIRMWARE_TARGET_TLV, 1, b'y'],
+        ] {
+            let info = parse_device_info(&payload(&malformed));
+            assert_eq!(info.version, FirmwareVersion::Reported(3));
+            assert_eq!(info.target, FirmwareTarget::Malformed);
+        }
+
+        let info = parse_device_info(&payload(&[7, 2, 0xaa, 0xbb]));
+        assert_eq!(info.target, FirmwareTarget::Unreported);
     }
 
     #[test]
@@ -1613,6 +1772,7 @@ mod tests {
             assert_eq!(
                 parse_device_info(&invalid),
                 FirmwareInfo {
+                    target: FirmwareTarget::Unreported,
                     version: FirmwareVersion::Reported(2),
                     capabilities: FirmwareCapabilities::ENTER_UF2_BOOTLOADER
                         | FirmwareCapabilities::INSTALL_RECEIPT,
@@ -1620,9 +1780,6 @@ mod tests {
                 }
             );
         }
-        assert!(!FirmwareVersion::UnsupportedFormat(2).update_recommended());
-        assert!(FirmwareVersion::Malformed.update_recommended());
-        assert!(!FirmwareVersion::Pending.update_recommended());
     }
 
     #[test]
@@ -1777,7 +1934,6 @@ mod tests {
             .poll(Duration::from_millis(500) + FIRMWARE_REPORT_GRACE)
             .unwrap();
         assert_eq!(connection.firmware(), FirmwareVersion::Unreported);
-        assert!(connection.firmware().update_recommended());
     }
 
     #[test]
@@ -1799,17 +1955,6 @@ mod tests {
             .push_back(response(Message::DeviceInfo(vec![1, 2, 0])));
         connection.poll(FIRMWARE_REPORT_GRACE).unwrap();
         assert_eq!(connection.firmware(), FirmwareVersion::Reported(2));
-    }
-
-    #[test]
-    fn the_minimum_revision_bounds_the_update_recommendation() {
-        assert!(
-            FirmwareVersion::Reported(MINIMUM_FIRMWARE_REVISION.saturating_sub(1))
-                .update_recommended()
-                || MINIMUM_FIRMWARE_REVISION == 0
-        );
-        assert!(!FirmwareVersion::Reported(MINIMUM_FIRMWARE_REVISION).update_recommended());
-        assert!(!FirmwareVersion::Reported(MINIMUM_FIRMWARE_REVISION + 1).update_recommended());
     }
 
     #[test]

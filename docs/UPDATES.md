@@ -9,10 +9,19 @@ timeouts, temporary files, and hard byte limits.
 The `release-updater` workspace crate verifies an Ed25519 signature over the raw
 manifest before parsing it. The signed manifest binds the application version,
 minimum macOS version, release notes, application identity, firmware/app
-compatibility, protocol and device-info formats, XIAO board and UF2 family IDs,
-post-flash USB identity, and every artifact's exact size and SHA-256. Cached
+compatibility, protocol and device-info formats, firmware target,
+target-specific board and UF2 family IDs, post-flash USB identity, and every
+artifact's exact size and SHA-256. Cached
 metadata cannot move backward in either application version or firmware
 revision.
+
+Signed manifest schema v1 deliberately retains one `firmware` entry. The app
+resolves that entry through its local firmware-target catalog before accepting
+the metadata or installing anything. The catalog currently contains one
+target: Seeed Studio XIAO nRF52840/Sense (`seeed-xiao-nrf52840`), with its
+minimum compatible revision, application/factory/bootloader USB identities,
+accepted board IDs, UF2 family, recovery instructions, and UF2 installer
+strategy. A multi-firmware manifest is deferred until another artifact exists.
 
 ## Production setup
 
@@ -47,17 +56,29 @@ DFU zip remains an internal developer and CI artifact produced by
 
 ## Firmware installation
 
-Firmware revision 2 advertises automatic UF2 entry and installation receipt
-capabilities. App Center requests UF2 mode, waits up to 2 seconds for the
-correlated readiness response, then waits up to 15 seconds for the mounted
-volume. Unsupported or failed automatic entry opens a 60-second manual recovery
-window asking for two quick presses of the tiny reset button beside the USB-C
-connector. Revision 1 therefore needs one final manual migration.
+The current XIAO firmware is revision 3 and reports target
+`seeed-xiao-nrf52840`. Revision 2 introduced automatic UF2 entry and
+installation receipts but did not report a target. App Center uses automatic
+UF2 entry and target-specific update recommendations only when the running
+firmware reports the exact catalog target. It waits up to 2 seconds for the
+correlated readiness response, then up to 15 seconds for the mounted volume.
+
+Targetless legacy firmware, malformed target identity, and a different valid
+target remain usable for bridging and receive no automatic firmware prompt or
+bootloader command. A user may still choose the explicitly labeled
+**Install or Recover XIAO Firmware** action. For unidentified application
+firmware the app releases the serial device and opens a 60-second manual
+recovery window asking for two quick presses of the reset button beside the
+USB-C connector.
+
+Before writing, the manual and automatic paths both require exactly one
+accepted XIAO/Sense board ID and the catalog UF2 family. Multiple devices or a
+wrong board fail closed.
 
 After copying and syncing the signed UF2, App Center waits up to 30 seconds for
-the application device. It requires the exact target revision and a `Pending`
-receipt marker. It then supplies the current UTC Unix time, an OS-random 128-bit
-installation ID, and the `AppCenter` source. Success requires the correlated
+the application device. It requires the exact returned target ID and revision
+plus a `Pending` receipt marker. It then supplies the current UTC Unix time, an
+OS-random 128-bit installation ID, and the `AppCenter` source. Success requires the correlated
 acknowledgement and a second read of the identical committed receipt. A normal
 runtime that first sees `Pending` after a developer flash records the same shape
 of receipt with source `FirstObserved`.

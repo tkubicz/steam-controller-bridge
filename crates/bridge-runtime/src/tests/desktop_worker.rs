@@ -420,11 +420,11 @@ impl PowerOffWriter for FakePowerOffWriter {
 fn serial_info(path: &str, serial: &str) -> SerialDeviceInfo {
     SerialDeviceInfo {
         path: path.to_owned(),
-        vendor_id: Some(bridge_output::XIAO_USB_VENDOR_ID),
-        product_id: Some(bridge_output::XIAO_USB_PRODUCT_ID),
+        vendor_id: Some(0x1209),
+        product_id: Some(0x0001),
         serial_number: Some(serial.to_owned()),
-        manufacturer: Some(bridge_output::XIAO_USB_MANUFACTURER.to_owned()),
-        product: Some(bridge_output::XIAO_USB_PRODUCT.to_owned()),
+        manufacturer: Some("Independent implementer".to_owned()),
+        product: Some(bridge_output::BRIDGE_DEVICE_USB_PRODUCT.to_owned()),
     }
 }
 
@@ -474,7 +474,7 @@ fn a_unique_active_source_is_required() {
 fn runtime_defaults_to_zero_configuration_serial_bridge() {
     let config = RuntimeConfig::default();
     assert_eq!(config.controller, ControllerSelection::AutoActive);
-    assert_eq!(config.serial, SerialSelection::AutoXiao);
+    assert_eq!(config.serial, SerialSelection::AutoBridgeDevice);
     assert_eq!(config.output, OutputSelection::Serial);
     assert_eq!(config.lizard_mode, LizardMode::Suppress);
     assert_eq!(config.idle_shutdown_timeout, Some(Duration::from_mins(15)));
@@ -901,4 +901,3 @@ impl DesktopInputSink for FailingMotionSink {
 fn desktop_snapshot(buttons: steam_controller_protocol::SteamButtons) -> DesktopInputSnapshot {
     DesktopInputSnapshot::buttons_only(buttons)
 }
-

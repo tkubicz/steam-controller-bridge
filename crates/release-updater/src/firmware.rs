@@ -11,14 +11,12 @@ use bridge_output::{
     FirmwareInstallState, FirmwareVersion, SerialConfig, SerialDeviceInfo, SerialOutput,
 };
 
+use crate::{
+    firmware_matches_target, firmware_target, verify_artifact, FirmwareInstallerStrategy,
+    FirmwareRelease, FirmwareTargetDescriptor,
+};
 #[cfg(test)]
-use crate::UF2_FAMILY_ID;
-use crate::{verify_artifact, FirmwareRelease, FIRMWARE_BOARD_ID};
-
-const SEEED_VENDOR_ID: u16 = 0x2886;
-const XIAO_APPLICATION_PRODUCT_IDS: [u16; 2] = [0x8044, 0x8045];
-const XIAO_BOOTLOADER_PRODUCT_IDS: [u16; 2] = [0x0044, 0x0045];
-const XIAO_SENSE_BOARD_ID: &str = "Seeed_XIAO_nRF52840_Sense";
+use crate::{FIRMWARE_BOARD_ID, UF2_FAMILY_ID, XIAO_NRF52840_TARGET, XIAO_SENSE_BOARD_ID};
 const AUTOMATIC_BOOTLOADER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTOMATIC_BOOTLOADER_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const MANUAL_BOOTLOADER_WAIT_TIMEOUT: Duration = Duration::from_mins(1);
@@ -94,6 +92,7 @@ pub enum FirmwareFlashError {
     Io(io::Error),
     Discovery(String),
     WrongBoard(String),
+    UnsupportedTarget(String),
     InvalidUf2(String),
     Cancelled,
     Timeout(&'static str),
@@ -113,6 +112,9 @@ impl std::fmt::Display for FirmwareFlashError {
             Self::Io(error) => write!(formatter, "firmware I/O failed: {error}"),
             Self::Discovery(error) => write!(formatter, "cannot select firmware device: {error}"),
             Self::WrongBoard(board) => write!(formatter, "unsupported bootloader board: {board}"),
+            Self::UnsupportedTarget(target) => {
+                write!(formatter, "unsupported firmware target: {target}")
+            }
             Self::InvalidUf2(error) => write!(formatter, "invalid UF2 firmware: {error}"),
             Self::Cancelled => write!(formatter, "firmware update cancelled"),
             Self::Timeout(stage) => write!(formatter, "timed out while {stage}"),
@@ -156,19 +158,21 @@ impl From<io::Error> for FirmwareFlashError {
     }
 }
 
-pub fn discover_firmware_devices() -> Result<Vec<FirmwareDevice>, FirmwareFlashError> {
+pub fn discover_firmware_devices(
+    target: &FirmwareTargetDescriptor,
+) -> Result<Vec<FirmwareDevice>, FirmwareFlashError> {
     let devices = available_serial_devices()
         .map_err(|error| FirmwareFlashError::Discovery(error.to_string()))?
         .into_iter()
         .filter_map(|device| {
-            if device.is_xiao_bridge() {
+            if device.is_bridge_device() {
                 Some(FirmwareDevice {
                     path: device.path,
                     kind: FirmwareDeviceKind::BridgeApplication,
                     serial_number: device.serial_number,
                 })
             } else {
-                factory_xiao_kind(&device).map(|kind| FirmwareDevice {
+                target_device_kind(&device, target).map(|kind| FirmwareDevice {
                     path: device.path,
                     kind,
                     serial_number: device.serial_number,
@@ -179,19 +183,23 @@ pub fn discover_firmware_devices() -> Result<Vec<FirmwareDevice>, FirmwareFlashE
     Ok(devices)
 }
 
-fn factory_xiao_kind(device: &SerialDeviceInfo) -> Option<FirmwareDeviceKind> {
-    let callout = !cfg!(target_os = "macos") || device.path.starts_with("/dev/cu.");
-    if !callout || device.vendor_id != Some(SEEED_VENDOR_ID) {
+fn target_device_kind(
+    device: &SerialDeviceInfo,
+    target: &FirmwareTargetDescriptor,
+) -> Option<FirmwareDeviceKind> {
+    if !device.is_callout_port() {
         return None;
     }
-    match device.product_id {
-        Some(product_id) if XIAO_APPLICATION_PRODUCT_IDS.contains(&product_id) => {
-            Some(FirmwareDeviceKind::FactoryApplication)
-        }
-        Some(product_id) if XIAO_BOOTLOADER_PRODUCT_IDS.contains(&product_id) => {
-            Some(FirmwareDeviceKind::Uf2Bootloader)
-        }
-        _ => None,
+    let identity = crate::UsbIdentity {
+        vendor_id: device.vendor_id?,
+        product_id: device.product_id?,
+    };
+    if target.factory_application_usb.contains(&identity) {
+        Some(FirmwareDeviceKind::FactoryApplication)
+    } else if target.bootloader_usb.contains(&identity) {
+        Some(FirmwareDeviceKind::Uf2Bootloader)
+    } else {
+        None
     }
 }
 
@@ -262,12 +270,17 @@ pub fn flash_firmware(
     cancelled: &AtomicBool,
     progress: impl FnMut(FirmwareFlashProgress),
 ) -> Result<FirmwareInfo, FirmwareFlashError> {
+    let target = firmware_target(&release.target)
+        .ok_or_else(|| FirmwareFlashError::UnsupportedTarget(release.target.clone()))?;
     verify_artifact(artifact_path, &release.artifact)
         .map_err(|error| FirmwareFlashError::Artifact(error.to_string()))?;
-    validate_uf2(artifact_path, release.uf2_family_id)?;
+    match target.installer {
+        FirmwareInstallerStrategy::Uf2 => validate_uf2(artifact_path, target.uf2_family_id)?,
+    }
     let mut adapter = NativeFlashAdapter {
         started: Instant::now(),
         firmware_session: None,
+        target,
     };
     flash_with_adapter(
         &mut adapter,
@@ -302,6 +315,7 @@ trait FlashAdapter {
 struct NativeFlashAdapter {
     started: Instant,
     firmware_session: Option<(String, SerialOutput)>,
+    target: &'static FirmwareTargetDescriptor,
 }
 
 impl NativeFlashAdapter {
@@ -328,7 +342,7 @@ impl NativeFlashAdapter {
 
 impl FlashAdapter for NativeFlashAdapter {
     fn devices(&mut self) -> Result<Vec<FirmwareDevice>, FirmwareFlashError> {
-        discover_firmware_devices()
+        discover_firmware_devices(self.target)
     }
 
     fn volumes(&mut self, root: &Path) -> Result<Vec<BootloaderVolume>, FirmwareFlashError> {
@@ -401,12 +415,21 @@ fn flash_with_adapter(
     cancelled: &AtomicBool,
     mut progress: impl FnMut(FirmwareFlashProgress),
 ) -> Result<FirmwareInfo, FirmwareFlashError> {
+    let target = firmware_target(&release.target)
+        .ok_or_else(|| FirmwareFlashError::UnsupportedTarget(release.target.clone()))?;
     progress(FirmwareFlashProgress::LookingForDevice);
     if cancelled.load(Ordering::Acquire) {
         return Err(FirmwareFlashError::Cancelled);
     }
 
-    let prepared = prepare_flash_target(adapter, release, volumes_root, cancelled, &mut progress)?;
+    let prepared = prepare_flash_target(
+        adapter,
+        target,
+        release,
+        volumes_root,
+        cancelled,
+        &mut progress,
+    )?;
     if cancelled.load(Ordering::Acquire) {
         return Err(FirmwareFlashError::CancelledInBootloader);
     }
@@ -416,6 +439,7 @@ fn flash_with_adapter(
 
     verify_reconnected_firmware(
         adapter,
+        target,
         release,
         prepared.expected_serial.as_deref(),
         prepared.pre_flash_state,
@@ -439,11 +463,14 @@ impl PreFlashState {
         }
     }
 
-    fn proves_fresh_image(self, target: u16) -> bool {
+    fn proves_fresh_image(self, target: &FirmwareTargetDescriptor, revision: u16) -> bool {
         match self {
             Self::FactoryApplication => true,
+            Self::Bridge(previous) if !firmware_matches_target(previous, target) => true,
             Self::Bridge(previous) => match previous.version {
-                FirmwareVersion::Reported(revision) if revision != target => true,
+                FirmwareVersion::Reported(previous_revision) if previous_revision != revision => {
+                    true
+                }
                 FirmwareVersion::Reported(_) => {
                     matches!(previous.install_state, FirmwareInstallState::Recorded(_))
                 }
@@ -465,16 +492,15 @@ struct PreparedFlash {
 
 fn prepare_flash_target(
     adapter: &mut impl FlashAdapter,
+    target: &FirmwareTargetDescriptor,
     release: &FirmwareRelease,
     volumes_root: &Path,
     cancelled: &AtomicBool,
     progress: &mut impl FnMut(FirmwareFlashProgress),
 ) -> Result<PreparedFlash, FirmwareFlashError> {
-    let mounted = select_supported_volume(adapter.volumes(volumes_root)?)?;
+    let mounted = select_supported_volume(adapter.volumes(volumes_root)?, target)?;
     let devices = adapter.devices()?;
-    let expected_serial = devices
-        .first()
-        .and_then(|device| device.serial_number.clone());
+    let mut expected_serial = None;
     let mut automatic_entry_may_have_started = false;
     let mut pre_flash_state = PreFlashState::Unknown;
     let volume = if let Some(volume) = mounted {
@@ -483,28 +509,45 @@ fn prepare_flash_target(
                 .iter()
                 .any(|device| device.kind != FirmwareDeviceKind::Uf2Bootloader)
         {
-            return Err(FirmwareFlashError::Discovery(
-                "more than one compatible XIAO is connected; disconnect extras".to_owned(),
-            ));
+            return Err(FirmwareFlashError::Discovery(format!(
+                "more than one compatible {} device is connected; disconnect extras",
+                target.display_name
+            )));
         }
+        expected_serial = devices
+            .first()
+            .and_then(|device| device.serial_number.clone());
         volume
     } else {
         if devices.len() != 1 {
             return Err(FirmwareFlashError::Discovery(
-                "connect exactly one compatible XIAO, or mount exactly one supported UF2 drive"
-                    .to_owned(),
+                format!(
+                    "connect exactly one compatible {} device, or mount exactly one supported UF2 drive",
+                    target.display_name
+                ),
             ));
         }
         let device = &devices[0];
         let info = if device.kind == FirmwareDeviceKind::BridgeApplication {
             let info = adapter.firmware_info(&device.path)?;
-            validate_version_policy(info.version, release.revision)?;
+            // Even an unidentified or different target is valuable evidence
+            // after manual recovery: a newly matching target or changed
+            // revision proves that the image started despite an expected UF2
+            // disconnect error. It still must not authorize automatic entry.
             pre_flash_state = PreFlashState::Bridge(info);
-            Some(info)
+            if firmware_matches_target(info, target) {
+                validate_version_policy(info.version, release.revision)?;
+                expected_serial.clone_from(&device.serial_number);
+                Some(info)
+            } else {
+                adapter.release_device();
+                None
+            }
         } else {
             if device.kind == FirmwareDeviceKind::FactoryApplication {
                 pre_flash_state = PreFlashState::FactoryApplication;
             }
+            expected_serial.clone_from(&device.serial_number);
             None
         };
 
@@ -529,6 +572,7 @@ fn prepare_flash_target(
                         cancelled,
                         AUTOMATIC_BOOTLOADER_WAIT_TIMEOUT,
                         true,
+                        target,
                     ) {
                         Ok(volume) => Some(volume),
                         Err(FirmwareFlashError::Timeout(_)) => None,
@@ -551,6 +595,7 @@ fn prepare_flash_target(
                 cancelled,
                 MANUAL_BOOTLOADER_WAIT_TIMEOUT,
                 automatic_entry_may_have_started,
+                target,
             )?
         }
     };
@@ -563,6 +608,7 @@ fn prepare_flash_target(
 
 fn verify_reconnected_firmware(
     adapter: &mut impl FlashAdapter,
+    target: &FirmwareTargetDescriptor,
     release: &FirmwareRelease,
     expected_serial: Option<&str>,
     pre_flash_state: PreFlashState,
@@ -579,9 +625,10 @@ fn verify_reconnected_firmware(
             continue;
         };
         if devices.len() > 1 {
-            return Err(FirmwareFlashError::Discovery(
-                "more than one compatible XIAO reconnected; disconnect extras".to_owned(),
-            ));
+            return Err(FirmwareFlashError::Discovery(format!(
+                "more than one compatible {} device reconnected; disconnect extras",
+                target.display_name
+            )));
         }
         let matching: Vec<_> = devices
             .into_iter()
@@ -596,13 +643,18 @@ fn verify_reconnected_firmware(
         }
         let path = &matching[0].path;
         match adapter.firmware_info(path) {
-            Ok(info) if info.version == FirmwareVersion::Reported(release.revision) => {
+            Ok(info)
+                if firmware_matches_target(info, target)
+                    && info.version == FirmwareVersion::Reported(release.revision) =>
+            {
                 if info.install_state != FirmwareInstallState::Pending {
                     return Err(FirmwareFlashError::ReceiptExpectedPending(
                         info.install_state,
                     ));
                 }
-                if copy_error.is_some() && !pre_flash_state.proves_fresh_image(release.revision) {
+                if copy_error.is_some()
+                    && !pre_flash_state.proves_fresh_image(target, release.revision)
+                {
                     return Err(copy_error
                         .take()
                         .expect("copy error was checked as present")
@@ -631,17 +683,19 @@ fn verify_reconnected_firmware(
                 let verified = adapter
                     .firmware_info(path)
                     .map_err(|error| FirmwareFlashError::ReceiptRecording(error.to_string()))?;
-                if verified.version != FirmwareVersion::Reported(release.revision)
+                if !firmware_matches_target(verified, target)
+                    || verified.version != FirmwareVersion::Reported(release.revision)
                     || verified.install_state != FirmwareInstallState::Recorded(requested)
                 {
                     return Err(FirmwareFlashError::ReceiptMismatch);
                 }
                 return Ok(verified);
             }
-            Ok(FirmwareInfo {
-                version: FirmwareVersion::Reported(revision),
-                ..
-            }) => last_revision = Some(revision),
+            Ok(info) if firmware_matches_target(info, target) => {
+                if let FirmwareVersion::Reported(revision) = info.version {
+                    last_revision = Some(revision);
+                }
+            }
             Ok(_) | Err(_) => {}
         }
     }
@@ -683,11 +737,12 @@ fn new_install_receipt(
 
 #[cfg(test)]
 fn supported_volume(root: &Path) -> Result<Option<BootloaderVolume>, FirmwareFlashError> {
-    select_supported_volume(discover_bootloader_volumes(root)?)
+    select_supported_volume(discover_bootloader_volumes(root)?, &XIAO_NRF52840_TARGET)
 }
 
 fn select_supported_volume(
     volumes: Vec<BootloaderVolume>,
+    target: &FirmwareTargetDescriptor,
 ) -> Result<Option<BootloaderVolume>, FirmwareFlashError> {
     if volumes.len() > 1 {
         return Err(FirmwareFlashError::Discovery(
@@ -697,14 +752,14 @@ fn select_supported_volume(
     let Some(volume) = volumes.into_iter().next() else {
         return Ok(None);
     };
-    if !supported_board_id(&volume.board_id) {
+    if !supported_board_id(&volume.board_id, target) {
         return Err(FirmwareFlashError::WrongBoard(volume.board_id));
     }
     Ok(Some(volume))
 }
 
-fn supported_board_id(board_id: &str) -> bool {
-    matches!(board_id, FIRMWARE_BOARD_ID | XIAO_SENSE_BOARD_ID)
+fn supported_board_id(board_id: &str, target: &FirmwareTargetDescriptor) -> bool {
+    target.accepted_board_ids.contains(&board_id)
 }
 
 fn wait_for_volume(
@@ -713,6 +768,7 @@ fn wait_for_volume(
     cancelled: &AtomicBool,
     timeout: Duration,
     entered_bootloader: bool,
+    target: &FirmwareTargetDescriptor,
 ) -> Result<BootloaderVolume, FirmwareFlashError> {
     let deadline = adapter.elapsed() + timeout;
     while adapter.elapsed() < deadline {
@@ -723,14 +779,12 @@ fn wait_for_volume(
                 FirmwareFlashError::Cancelled
             });
         }
-        if let Some(volume) = select_supported_volume(adapter.volumes(root)?)? {
+        if let Some(volume) = select_supported_volume(adapter.volumes(root)?, target)? {
             return Ok(volume);
         }
         adapter.wait(Duration::from_millis(250));
     }
-    Err(FirmwareFlashError::Timeout(
-        "waiting for the XIAO UF2 drive; quickly press the tiny reset button beside the USB-C connector twice while manual recovery is waiting",
-    ))
+    Err(FirmwareFlashError::Timeout(target.manual_recovery_timeout))
 }
 
 fn copy_and_flush(source: &Path, destination: &Path) -> io::Result<()> {
@@ -748,6 +802,7 @@ fn copy_and_flush(source: &Path, destination: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bridge_output::{FirmwareTarget, FirmwareTargetId};
     use std::collections::VecDeque;
 
     fn uf2_block(family: u32) -> [u8; UF2_BLOCK_SIZE] {
@@ -825,6 +880,7 @@ mod tests {
         automatic_entry_error: bool,
         automatic_entry_requests: usize,
         copy_error: bool,
+        copy_requests: usize,
     }
 
     impl FlashAdapter for FakeAdapter {
@@ -852,6 +908,9 @@ mod tests {
                 install_state: self
                     .recorded_receipt
                     .map_or(self.default_install_state, FirmwareInstallState::Recorded),
+                target: FirmwareTarget::Reported(
+                    FirmwareTargetId::new(crate::FIRMWARE_TARGET_ID).unwrap(),
+                ),
             })
         }
 
@@ -893,6 +952,7 @@ mod tests {
         }
 
         fn copy_and_flush(&mut self, _source: &Path, _destination: &Path) -> Result<(), io::Error> {
+            self.copy_requests += 1;
             if self.copy_error {
                 Err(io::Error::other("bootloader disappeared"))
             } else {
@@ -927,6 +987,7 @@ mod tests {
             automatic_entry_error: false,
             automatic_entry_requests: 0,
             copy_error: false,
+            copy_requests: 0,
         }
     }
 
@@ -939,6 +1000,9 @@ mod tests {
             version: FirmwareVersion::Reported(revision),
             capabilities,
             install_state,
+            target: FirmwareTarget::Reported(
+                FirmwareTargetId::new(crate::FIRMWARE_TARGET_ID).unwrap(),
+            ),
         }
     }
 
@@ -1001,6 +1065,127 @@ mod tests {
         assert!(progress.contains(&FirmwareFlashProgress::RequestingBootloader));
         assert!(progress.contains(&FirmwareFlashProgress::WaitingForBootloader));
         assert!(!progress.contains(&FirmwareFlashProgress::ManualRecovery));
+    }
+
+    #[test]
+    fn unidentified_or_different_targets_never_request_automatic_bootloader_entry() {
+        for reported_target in [
+            FirmwareTarget::Unreported,
+            FirmwareTarget::Malformed,
+            FirmwareTarget::Reported(FirmwareTargetId::new("community-nrf52840").unwrap()),
+        ] {
+            let mut adapter = fake();
+            adapter.volumes.push_back(Vec::new());
+            adapter.volumes.push_back(Vec::new());
+            adapter.volumes.push_back(vec![volume()]);
+            adapter.devices.push_back(vec![device(true)]);
+            adapter.devices.push_back(vec![device(true)]);
+            let mut unidentified = info(
+                2,
+                FirmwareCapabilities::ENTER_UF2_BOOTLOADER | FirmwareCapabilities::INSTALL_RECEIPT,
+                FirmwareInstallState::Recorded(FirmwareInstallReceipt {
+                    installed_at: 100,
+                    install_id: [1; 16],
+                    source: FirmwareInstallSource::FirstObserved,
+                }),
+            );
+            unidentified.target = reported_target;
+            adapter.infos.push_back(unidentified);
+            adapter.default_version = FirmwareVersion::Reported(3);
+            adapter.default_capabilities = FirmwareCapabilities::INSTALL_RECEIPT;
+            let mut progress = Vec::new();
+
+            flash_with_adapter(
+                &mut adapter,
+                Path::new("firmware.uf2"),
+                &release(3),
+                Path::new("/Volumes"),
+                &AtomicBool::new(false),
+                |state| progress.push(state),
+            )
+            .unwrap();
+
+            assert_eq!(adapter.automatic_entry_requests, 0);
+            assert!(!progress.contains(&FirmwareFlashProgress::RequestingBootloader));
+            assert!(progress.contains(&FirmwareFlashProgress::ManualRecovery));
+        }
+    }
+
+    #[test]
+    fn targetless_legacy_update_accepts_disconnect_after_verified_revision_three_reconnect() {
+        let mut adapter = fake();
+        adapter.volumes.push_back(Vec::new());
+        adapter.volumes.push_back(Vec::new());
+        adapter.volumes.push_back(vec![volume()]);
+        adapter.devices.push_back(vec![device(true)]);
+        adapter.devices.push_back(vec![device(true)]);
+        let mut legacy = info(
+            2,
+            FirmwareCapabilities::ENTER_UF2_BOOTLOADER | FirmwareCapabilities::INSTALL_RECEIPT,
+            FirmwareInstallState::Recorded(FirmwareInstallReceipt {
+                installed_at: 100,
+                install_id: [1; 16],
+                source: FirmwareInstallSource::FirstObserved,
+            }),
+        );
+        legacy.target = FirmwareTarget::Unreported;
+        adapter.infos.push_back(legacy);
+        adapter.default_version = FirmwareVersion::Reported(3);
+        adapter.default_capabilities = FirmwareCapabilities::INSTALL_RECEIPT;
+        adapter.copy_error = true;
+        let mut progress = Vec::new();
+
+        let verified = flash_with_adapter(
+            &mut adapter,
+            Path::new("firmware.uf2"),
+            &release(3),
+            Path::new("/Volumes"),
+            &AtomicBool::new(false),
+            |state| progress.push(state),
+        )
+        .unwrap();
+
+        assert_eq!(adapter.automatic_entry_requests, 0);
+        assert!(progress.contains(&FirmwareFlashProgress::ManualRecovery));
+        assert_eq!(verified.version, FirmwareVersion::Reported(3));
+        assert!(matches!(
+            verified.install_state,
+            FirmwareInstallState::Recorded(FirmwareInstallReceipt {
+                source: FirmwareInstallSource::AppCenter,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn reconnect_verification_rejects_a_different_target_at_the_expected_revision() {
+        let mut adapter = fake();
+        adapter.volumes.push_back(vec![volume()]);
+        adapter.devices.push_back(vec![bootloader_device()]);
+        adapter.default_devices = vec![device(true)];
+        let mut different = info(
+            3,
+            FirmwareCapabilities::INSTALL_RECEIPT,
+            FirmwareInstallState::Pending,
+        );
+        different.target =
+            FirmwareTarget::Reported(FirmwareTargetId::new("community-nrf52840").unwrap());
+        adapter.infos.push_back(different);
+
+        assert!(matches!(
+            flash_with_adapter(
+                &mut adapter,
+                Path::new("firmware.uf2"),
+                &release(3),
+                Path::new("/Volumes"),
+                &AtomicBool::new(false),
+                |_| {},
+            ),
+            Err(FirmwareFlashError::Revision {
+                expected: 3,
+                actual: None
+            })
+        ));
     }
 
     #[test]
@@ -1380,10 +1565,13 @@ mod tests {
     #[test]
     fn standard_and_sense_bootloader_boards_are_supported() {
         for board_id in [FIRMWARE_BOARD_ID, XIAO_SENSE_BOARD_ID] {
-            assert!(select_supported_volume(vec![BootloaderVolume {
-                root: PathBuf::from("/Volumes/XIAO"),
-                board_id: board_id.to_owned(),
-            }])
+            assert!(select_supported_volume(
+                vec![BootloaderVolume {
+                    root: PathBuf::from("/Volumes/XIAO"),
+                    board_id: board_id.to_owned(),
+                }],
+                &XIAO_NRF52840_TARGET,
+            )
             .unwrap()
             .is_some());
         }
@@ -1420,7 +1608,30 @@ mod tests {
     }
 
     #[test]
-    fn factory_xiao_detection_accepts_standard_and_sense_usb_ids() {
+    fn wrong_bootloader_board_is_rejected_before_any_write() {
+        let mut adapter = fake();
+        adapter.volumes.push_back(vec![BootloaderVolume {
+            root: PathBuf::from("/Volumes/WRONG"),
+            board_id: "community_board".to_owned(),
+        }]);
+
+        assert!(matches!(
+            flash_with_adapter(
+                &mut adapter,
+                Path::new("firmware.uf2"),
+                &release(3),
+                Path::new("/Volumes"),
+                &AtomicBool::new(false),
+                |_| {},
+            ),
+            Err(FirmwareFlashError::WrongBoard(board)) if board == "community_board"
+        ));
+        assert_eq!(adapter.copy_requests, 0);
+        assert_eq!(adapter.automatic_entry_requests, 0);
+    }
+
+    #[test]
+    fn target_device_detection_accepts_standard_and_sense_usb_ids() {
         for (product_id, expected) in [
             (0x8044, FirmwareDeviceKind::FactoryApplication),
             (0x0044, FirmwareDeviceKind::Uf2Bootloader),
@@ -1428,14 +1639,17 @@ mod tests {
             (0x0045, FirmwareDeviceKind::Uf2Bootloader),
         ] {
             assert_eq!(
-                factory_xiao_kind(&SerialDeviceInfo {
-                    path: "/dev/cu.fixture".to_owned(),
-                    vendor_id: Some(SEEED_VENDOR_ID),
-                    product_id: Some(product_id),
-                    serial_number: None,
-                    manufacturer: Some("Seeed".to_owned()),
-                    product: None,
-                }),
+                target_device_kind(
+                    &SerialDeviceInfo {
+                        path: "/dev/cu.fixture".to_owned(),
+                        vendor_id: Some(0x2886),
+                        product_id: Some(product_id),
+                        serial_number: None,
+                        manufacturer: Some("Seeed".to_owned()),
+                        product: None,
+                    },
+                    &XIAO_NRF52840_TARGET,
+                ),
                 Some(expected)
             );
         }

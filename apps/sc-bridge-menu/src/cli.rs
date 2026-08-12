@@ -46,7 +46,7 @@ pub enum Command {
     ProfileOverlay,
 }
 
-#[derive(Debug, Clone, Copy, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct AppCenterArgs {
     /// Page to open. Defaults to About, or Updates in demo mode.
     #[arg(long, value_enum)]
@@ -65,7 +65,7 @@ pub struct AppCenterArgs {
 impl AppCenterArgs {
     #[cfg(any(feature = "updater", test))]
     #[must_use]
-    pub fn page(self) -> AppCenterPage {
+    pub fn page(&self) -> AppCenterPage {
         self.tab.unwrap_or(if self.demo.is_some() {
             AppCenterPage::Updates
         } else {

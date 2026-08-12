@@ -9,12 +9,12 @@ use super::{
     DecodedReport, DesktopBindingsWorker, DesktopInputSnapshot, DeviceError, DeviceEvent,
     DumpOutput, Duration, File, FileOutput, FirmwareInstallReceipt, GamepadOutput, HapticsState,
     HapticsStatus, HidDeviceInfo, HidSession, IdleActivityTracker, Instant, JoinHandle, LizardMode,
-    LizardModeHeartbeat, LizardStatus, MockOutput, Mutex, Ordering, OutputFeedback,
-    OutputSelection, PadFeedbackRequest, PadHapticGain, PadHapticSide, PickerConfig, PickerEvent,
-    PickerEventSink, PickerInput, PickerRuntime, ProcessOutcome, RawHidReport, Receiver,
-    RecordingError, RecordingEvent, RecordingWriter, RuntimeCommand, RuntimeConfig, RuntimeState,
-    SerialDeviceInfo, SerialOutput, SerialSelection, ShutdownTrigger, StableTransitionRun,
-    SteamButton, SupervisorIterationTimer, SyncSender, TrySendError, VecDeque, XiaoStatus,
+    LizardModeHeartbeat, LizardStatus, MockOutput, Mutex, Ordering, OutputBackend, OutputFeedback,
+    OutputSelection, OutputStatus, PadFeedbackRequest, PadHapticGain, PadHapticSide, PickerConfig,
+    PickerEvent, PickerEventSink, PickerInput, PickerRuntime, ProcessOutcome, RawHidReport,
+    Receiver, RecordingError, RecordingEvent, RecordingWriter, RuntimeCommand, RuntimeConfig,
+    RuntimeState, SerialDeviceInfo, SerialOutput, SerialSelection, ShutdownTrigger,
+    StableTransitionRun, SteamButton, SupervisorIterationTimer, SyncSender, TrySendError, VecDeque,
     ACTIVE_SLOT_TIMEOUT, BATTERY_STATUS_FRESHNESS, COMMAND_TIMEOUT, DISCOVERY_INTERVAL,
     EXTENDED_INPUT_REPORT_ID, EXTENDED_INPUT_REPORT_SIZE, INPUT_MAILBOX_CAPACITY, INPUT_REPORT_ID,
     INPUT_REPORT_SIZE, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED,
@@ -77,7 +77,7 @@ pub(crate) struct Supervisor {
     shutdown_requested: bool,
     pending_stop_acks: Vec<CommandAck>,
     pending_shutdown_acks: Vec<CommandAck>,
-    preferred_xiao_serial: Option<String>,
+    preferred_output_serial: Option<String>,
     controller_enumerator: Option<ControllerEnumerator>,
     controller_discovery: ControllerDiscoveryState<HidSession>,
     indexed_controller_discovery: IndexedControllerDiscoveryState,
@@ -110,7 +110,7 @@ impl Supervisor {
             shutdown_requested: false,
             pending_stop_acks: Vec::new(),
             pending_shutdown_acks: Vec::new(),
-            preferred_xiao_serial: None,
+            preferred_output_serial: None,
             controller_enumerator: None,
             controller_discovery: ControllerDiscoveryState::new(),
             indexed_controller_discovery: IndexedControllerDiscoveryState::new(),
@@ -176,7 +176,7 @@ impl Supervisor {
             ) {
                 self.transition(
                     RuntimeState::Discovering,
-                    "Looking for Steam Controller 2 and XIAO",
+                    "Looking for Steam Controller 2 and a bridge device",
                     None,
                 );
             }
@@ -207,13 +207,13 @@ impl Supervisor {
                     if !service_waiting_output(retained_output.as_mut()) {
                         retained_output = None;
                         self.update_status(|status| {
-                            status.xiao = XiaoStatus::default();
+                            status.output = OutputStatus::configured(&self.config.output);
                         });
                     } else if let Some(session) = retained_output.as_mut() {
                         // The firmware's DeviceInfo usually lands after
-                        // discovery published XiaoStatus; keep it current
+                        // discovery published OutputStatus; keep it current
                         // while no controller is present.
-                        self.refresh_xiao_firmware(session);
+                        self.refresh_output_firmware(session);
                     }
                     let delay =
                         controller_discovery_loop_delay(controller_discovery_started.elapsed());
@@ -248,7 +248,7 @@ impl Supervisor {
                 Ok((ActiveExit::OutputLost(message), _, _)) => {
                     retained_output = None;
                     self.update_status(|status| {
-                        status.xiao = XiaoStatus::default();
+                        status.output = OutputStatus::configured(&self.config.output);
                     });
                     self.transition(RuntimeState::Waiting, &message, Some(&message));
                 }

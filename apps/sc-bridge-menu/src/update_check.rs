@@ -9,13 +9,14 @@ use std::sync::Once;
 use std::thread;
 use std::time::Duration;
 
-use bridge_runtime::FirmwareVersion;
+use bridge_runtime::FirmwareInfo;
 #[cfg(debug_assertions)]
 use release_updater::LocalReleaseClient;
 use release_updater::{
-    classify_firmware_release, embedded_trusted_keys, refresh_catalog_if_due, ArtifactDescriptor,
-    CatalogRefresh, FirmwareReleaseState, LatestReleaseClient, ReleaseCache, ReleaseManifestV1,
-    ReleaseSource, TrustedPublicKey,
+    classify_firmware_release, embedded_trusted_keys, firmware_matches_target, firmware_target,
+    refresh_catalog_if_due, ArtifactDescriptor, CatalogRefresh, FirmwareRelease,
+    FirmwareReleaseState, LatestReleaseClient, ReleaseCache, ReleaseManifestV1, ReleaseSource,
+    TrustedPublicKey,
 };
 use semver::Version;
 
@@ -231,17 +232,29 @@ impl UpdateChecker {
         }
     }
 
-    pub fn available(&self, firmware: FirmwareVersion) -> bool {
+    pub fn available(&self, firmware: Option<FirmwareInfo>) -> bool {
         let Some(manifest) = &self.manifest else {
             return false;
         };
         if self.running_version < manifest.application_version {
             return true;
         }
-        self.running_version >= manifest.firmware.minimum_application_version
-            && classify_firmware_release(firmware, manifest.firmware.revision)
-                == FirmwareReleaseState::UpdateAvailable
+        firmware_update_available(&self.running_version, &manifest.firmware, firmware)
     }
+}
+
+fn firmware_update_available(
+    running_version: &Version,
+    release: &FirmwareRelease,
+    firmware: Option<FirmwareInfo>,
+) -> bool {
+    let Some((firmware, target)) = firmware.zip(firmware_target(&release.target)) else {
+        return false;
+    };
+    running_version >= &release.minimum_application_version
+        && firmware_matches_target(firmware, target)
+        && classify_firmware_release(firmware.version, release.revision)
+            == FirmwareReleaseState::UpdateAvailable
 }
 
 fn remove_obsolete_application_cache(cache: &ReleaseCache, artifact: &ArtifactDescriptor) {
@@ -251,4 +264,78 @@ fn remove_obsolete_application_cache(cache: &ReleaseCache, artifact: &ArtifactDe
 
 pub(crate) fn running_version() -> Version {
     Version::parse(env!("CARGO_PKG_VERSION")).expect("package version is semver")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bridge_runtime::{FirmwareTarget, FirmwareTargetId, FirmwareVersion};
+    use release_updater::{
+        ArtifactDescriptor, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID,
+        XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
+    };
+
+    fn release() -> FirmwareRelease {
+        FirmwareRelease {
+            target: FIRMWARE_TARGET_ID.to_owned(),
+            revision: 3,
+            minimum_application_version: Version::new(1, 6, 0),
+            protocol_version: 1,
+            device_info_format: 1,
+            board_id: FIRMWARE_BOARD_ID.to_owned(),
+            uf2_family_id: UF2_FAMILY_ID,
+            usb_vendor_id: XIAO_USB_VENDOR_ID,
+            usb_product_id: XIAO_USB_PRODUCT_ID,
+            usb_manufacturer: XIAO_USB_MANUFACTURER.to_owned(),
+            usb_product: XIAO_USB_PRODUCT.to_owned(),
+            artifact: ArtifactDescriptor {
+                name: "firmware.uf2".to_owned(),
+                size: 1,
+                sha256: "11".repeat(32),
+            },
+        }
+    }
+
+    fn firmware(target: FirmwareTarget, revision: u16) -> FirmwareInfo {
+        FirmwareInfo {
+            target,
+            version: FirmwareVersion::Reported(revision),
+            ..FirmwareInfo::default()
+        }
+    }
+
+    #[test]
+    fn firmware_notification_requires_an_exact_catalog_target_match() {
+        let release = release();
+        let app = Version::new(1, 6, 0);
+        let matching = FirmwareTarget::Reported(FirmwareTargetId::new(FIRMWARE_TARGET_ID).unwrap());
+        assert!(firmware_update_available(
+            &app,
+            &release,
+            Some(firmware(matching, 2))
+        ));
+        assert!(!firmware_update_available(
+            &app,
+            &release,
+            Some(firmware(FirmwareTarget::Unreported, 2))
+        ));
+        assert!(!firmware_update_available(
+            &app,
+            &release,
+            Some(firmware(FirmwareTarget::Malformed, 2))
+        ));
+        assert!(!firmware_update_available(
+            &app,
+            &release,
+            Some(firmware(
+                FirmwareTarget::Reported(FirmwareTargetId::new("community-nrf52840").unwrap()),
+                2,
+            ))
+        ));
+        assert!(!firmware_update_available(
+            &app,
+            &release,
+            Some(firmware(matching, 3))
+        ));
+    }
 }

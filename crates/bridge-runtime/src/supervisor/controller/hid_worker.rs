@@ -255,7 +255,7 @@ impl HidWorker {
             .map_err(|error| {
                 format!(
                     "lizard-mode suppression failed before input was accepted; \
-                     XIAO was not activated: {error}"
+                     bridge device was not activated: {error}"
                 )
             })?;
 
@@ -307,7 +307,7 @@ impl HidWorker {
                     if let Err(error) = lizard.service(worker_started.elapsed(), &session) {
                         worker_latest_report.clear(&dropped);
                         let _ = failure_sender.send(format!(
-                            "lizard-mode refresh failed; XIAO was neutralized and input stopped: {error}"
+                            "lizard-mode refresh failed; the bridge device was neutralized and input stopped: {error}"
                         ));
                         break;
                     }
