@@ -1,9 +1,7 @@
 use std::fs;
 #[cfg(debug_assertions)]
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
 #[cfg(debug_assertions)]
 use std::sync::Once;
 use std::thread;
@@ -14,9 +12,9 @@ use bridge_runtime::FirmwareInfo;
 use release_updater::LocalReleaseClient;
 use release_updater::{
     classify_firmware_release, embedded_trusted_keys, firmware_matches_target, firmware_target,
-    refresh_catalog_if_due, ArtifactDescriptor, CatalogRefresh, FirmwareRelease,
-    FirmwareReleaseState, LatestReleaseClient, ReleaseCache, ReleaseManifestV1, ReleaseSource,
-    TrustedPublicKey,
+    firmware_targets, refresh_catalog, ArtifactDescriptor, CatalogRefresh, CatalogRefreshError,
+    CatalogRefreshPolicy, FirmwareRelease, FirmwareReleaseState, LatestReleaseClient, ReleaseCache,
+    ReleaseManifestV1, ReleaseSource, TrustedPublicKey,
 };
 use semver::Version;
 
@@ -28,7 +26,7 @@ static LOCAL_UPDATE_NOTICE: Once = Once::new();
 
 #[derive(Clone)]
 enum UpdateChannel {
-    Production,
+    Production(LatestReleaseClient),
     #[cfg(debug_assertions)]
     Local(LocalReleaseClient),
 }
@@ -41,17 +39,11 @@ pub(crate) struct UpdateContext {
 }
 
 impl UpdateContext {
-    pub(crate) fn source(&self, cancellation: Option<Arc<AtomicBool>>) -> Box<dyn ReleaseSource> {
+    pub(crate) fn source(&self) -> &dyn ReleaseSource {
         match &self.channel {
-            UpdateChannel::Production => cancellation.map_or_else(
-                || Box::new(LatestReleaseClient::default()) as Box<dyn ReleaseSource>,
-                |flag| Box::new(LatestReleaseClient::cancellable(flag)),
-            ),
+            UpdateChannel::Production(source) => source,
             #[cfg(debug_assertions)]
-            UpdateChannel::Local(source) => cancellation.map_or_else(
-                || Box::new(source.clone()) as Box<dyn ReleaseSource>,
-                |flag| Box::new(source.clone().cancellable(flag)),
-            ),
+            UpdateChannel::Local(source) => source,
         }
     }
 
@@ -65,7 +57,7 @@ impl UpdateContext {
 
     pub(crate) fn check_interval(&self) -> Duration {
         match &self.channel {
-            UpdateChannel::Production => CHECK_INTERVAL,
+            UpdateChannel::Production(_) => CHECK_INTERVAL,
             #[cfg(debug_assertions)]
             UpdateChannel::Local(_) => Duration::ZERO,
         }
@@ -73,7 +65,7 @@ impl UpdateContext {
 
     pub(crate) fn is_local(&self) -> bool {
         match &self.channel {
-            UpdateChannel::Production => false,
+            UpdateChannel::Production(_) => false,
             #[cfg(debug_assertions)]
             UpdateChannel::Local(_) => true,
         }
@@ -82,15 +74,15 @@ impl UpdateContext {
     #[cfg(debug_assertions)]
     pub(crate) fn local_root(&self) -> Option<&Path> {
         match &self.channel {
-            UpdateChannel::Production => None,
+            UpdateChannel::Production(_) => None,
             UpdateChannel::Local(source) => Some(source.root()),
         }
     }
 }
 
 impl UpdateChannel {
-    #[cfg(debug_assertions)]
     fn configured() -> Result<Self, String> {
+        #[cfg(debug_assertions)]
         if let Some(root) = development_update_source() {
             let source = LocalReleaseClient::new(&root).map_err(|error| {
                 format!(
@@ -106,12 +98,16 @@ impl UpdateChannel {
             });
             return Ok(Self::Local(source));
         }
-        Ok(Self::Production)
+        Ok(Self::Production(
+            LatestReleaseClient::new().map_err(|error| error.to_string())?,
+        ))
     }
 
     fn cache(&self) -> Result<ReleaseCache, String> {
         match self {
-            Self::Production => ReleaseCache::for_current_user().map_err(|error| error.to_string()),
+            Self::Production(_) => {
+                ReleaseCache::for_current_user().map_err(|error| error.to_string())
+            }
             #[cfg(debug_assertions)]
             Self::Local(source) => Ok(ReleaseCache::for_local_source(source.root())),
         }
@@ -121,10 +117,8 @@ impl UpdateChannel {
 /// The embedded trust anchors and selected release source, or the user-facing
 /// reason updates cannot work in this build.
 pub(crate) fn update_context() -> Result<UpdateContext, String> {
-    #[cfg(debug_assertions)]
     let channel = UpdateChannel::configured()?;
-    #[cfg(not(debug_assertions))]
-    let channel = UpdateChannel::Production;
+    firmware_targets().map_err(|error| error.to_string())?;
     let keys = embedded_trusted_keys().map_err(|error| error.to_string())?;
     if keys.is_empty() {
         let message = match channel {
@@ -132,7 +126,7 @@ pub(crate) fn update_context() -> Result<UpdateContext, String> {
             UpdateChannel::Local(_) => {
                 "Local updates require a trusted development key in SC_BRIDGE_UPDATE_PUBLIC_KEYS."
             }
-            UpdateChannel::Production => {
+            UpdateChannel::Production(_) => {
                 "Secure updates are unavailable in this source build: no release public key is embedded."
             }
         };
@@ -155,7 +149,7 @@ pub(crate) fn development_update_source() -> Option<PathBuf> {
 
 pub struct UpdateChecker {
     manifest: Option<ReleaseManifestV1>,
-    result: Option<Receiver<Result<CatalogRefresh, String>>>,
+    result: Option<Receiver<Result<CatalogRefresh, CatalogRefreshError>>>,
     running_version: Version,
 }
 
@@ -191,12 +185,12 @@ impl UpdateChecker {
             if let Some(artifact) = obsolete_application {
                 remove_obsolete_application_cache(context.cache(), &artifact);
             }
-            let source = context.source(None);
-            let _ = sender.send(refresh_catalog_if_due(
-                source.as_ref(),
+            let source = context.source();
+            let _ = sender.send(refresh_catalog(
+                source,
                 context.cache(),
                 context.keys(),
-                context.check_interval(),
+                CatalogRefreshPolicy::IfDue(context.check_interval()),
                 &running_version,
             ));
         });
@@ -248,7 +242,8 @@ fn firmware_update_available(
     release: &FirmwareRelease,
     firmware: Option<FirmwareInfo>,
 ) -> bool {
-    let Some((firmware, target)) = firmware.zip(firmware_target(&release.target)) else {
+    let target = firmware_target(&release.target).ok().flatten();
+    let Some((firmware, target)) = firmware.zip(target) else {
         return false;
     };
     running_version >= &release.minimum_application_version
@@ -257,7 +252,10 @@ fn firmware_update_available(
             == FirmwareReleaseState::UpdateAvailable
 }
 
-fn remove_obsolete_application_cache(cache: &ReleaseCache, artifact: &ArtifactDescriptor) {
+pub(crate) fn remove_obsolete_application_cache(
+    cache: &ReleaseCache,
+    artifact: &ArtifactDescriptor,
+) {
     let _ = fs::remove_dir_all(cache.root().join("staged-app"));
     let _ = fs::remove_file(cache.artifact_path(artifact));
 }
@@ -270,30 +268,19 @@ pub(crate) fn running_version() -> Version {
 mod tests {
     use super::*;
     use bridge_runtime::{FirmwareTarget, FirmwareTargetId, FirmwareVersion};
-    use release_updater::{
-        ArtifactDescriptor, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID,
-        XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
-    };
+    use release_updater::{firmware_targets, ArtifactDescriptor};
 
     fn release() -> FirmwareRelease {
-        FirmwareRelease {
-            target: FIRMWARE_TARGET_ID.to_owned(),
-            revision: 3,
-            minimum_application_version: Version::new(1, 6, 0),
-            protocol_version: 1,
-            device_info_format: 1,
-            board_id: FIRMWARE_BOARD_ID.to_owned(),
-            uf2_family_id: UF2_FAMILY_ID,
-            usb_vendor_id: XIAO_USB_VENDOR_ID,
-            usb_product_id: XIAO_USB_PRODUCT_ID,
-            usb_manufacturer: XIAO_USB_MANUFACTURER.to_owned(),
-            usb_product: XIAO_USB_PRODUCT.to_owned(),
-            artifact: ArtifactDescriptor {
+        let target = &firmware_targets().unwrap()[0];
+        target.firmware_release(
+            3,
+            Version::new(1, 6, 0),
+            ArtifactDescriptor {
                 name: "firmware.uf2".to_owned(),
                 size: 1,
                 sha256: "11".repeat(32),
             },
-        }
+        )
     }
 
     fn firmware(target: FirmwareTarget, revision: u16) -> FirmwareInfo {
@@ -308,7 +295,7 @@ mod tests {
     fn firmware_notification_requires_an_exact_catalog_target_match() {
         let release = release();
         let app = Version::new(1, 6, 0);
-        let matching = FirmwareTarget::Reported(FirmwareTargetId::new(FIRMWARE_TARGET_ID).unwrap());
+        let matching = FirmwareTarget::Reported(FirmwareTargetId::new(&release.target).unwrap());
         assert!(firmware_update_available(
             &app,
             &release,
@@ -337,5 +324,26 @@ mod tests {
             &release,
             Some(firmware(matching, 3))
         ));
+    }
+
+    #[test]
+    fn obsolete_application_cleanup_removes_staging_and_the_old_artifact() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = ReleaseCache::new(directory.path().to_owned());
+        let artifact = ArtifactDescriptor {
+            name: "application.zip".to_owned(),
+            size: 3,
+            sha256: "11".repeat(32),
+        };
+        let artifact_path = cache.artifact_path(&artifact);
+        fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+        fs::write(&artifact_path, b"old").unwrap();
+        let staged = cache.root().join("staged-app/Steam Controller Bridge.app");
+        fs::create_dir_all(&staged).unwrap();
+
+        remove_obsolete_application_cache(&cache, &artifact);
+
+        assert!(!artifact_path.exists());
+        assert!(!cache.root().join("staged-app").exists());
     }
 }

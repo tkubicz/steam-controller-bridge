@@ -5,8 +5,9 @@ use base64::Engine as _;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use semver::Version;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-use crate::{firmware_target, APPLICATION_BUNDLE_ID};
+use crate::{firmware_target, FirmwareTargetCatalogError, APPLICATION_BUNDLE_ID};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,32 +104,19 @@ pub fn embedded_trusted_keys() -> Result<Vec<TrustedPublicKey>, ManifestError> {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum ManifestError {
+    #[error("invalid release signature envelope: {0}")]
     InvalidSignatureEnvelope(String),
+    #[error("release has no trusted signature")]
     NoTrustedSignature,
+    #[error("invalid signed release manifest: {0}")]
     InvalidJson(String),
+    #[error("invalid release manifest field: {0}")]
     InvalidField(String),
+    #[error(transparent)]
+    TargetCatalog(#[from] FirmwareTargetCatalogError),
 }
-
-impl std::fmt::Display for ManifestError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::InvalidSignatureEnvelope(error) => {
-                write!(formatter, "invalid release signature envelope: {error}")
-            }
-            Self::NoTrustedSignature => write!(formatter, "release has no trusted signature"),
-            Self::InvalidJson(error) => {
-                write!(formatter, "invalid signed release manifest: {error}")
-            }
-            Self::InvalidField(error) => {
-                write!(formatter, "invalid release manifest field: {error}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ManifestError {}
 
 /// Verifies at least one signature over the exact manifest bytes before JSON
 /// parsing. Unknown key ids are ignored to allow staged key rotation.
@@ -200,7 +188,7 @@ fn validate_manifest(manifest: &ReleaseManifestV1) -> Result<(), ManifestError> 
             "application identity/version mismatch".to_owned(),
         ));
     }
-    let Some(target) = firmware_target(&manifest.firmware.target) else {
+    let Some(target) = firmware_target(&manifest.firmware.target)? else {
         return Err(ManifestError::InvalidField(
             "unsupported firmware target".to_owned(),
         ));
@@ -267,13 +255,11 @@ pub(crate) fn valid_release_component(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID, XIAO_USB_MANUFACTURER,
-        XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
-    };
+    use crate::firmware_targets;
     use ed25519_dalek::{Signer as _, SigningKey};
 
     fn manifest() -> ReleaseManifestV1 {
+        let target = &firmware_targets().unwrap()[0];
         ReleaseManifestV1 {
             schema_version: 1,
             release_tag: "v1.5.0".to_owned(),
@@ -289,24 +275,15 @@ mod tests {
                     sha256: "11".repeat(32),
                 },
             },
-            firmware: FirmwareRelease {
-                target: FIRMWARE_TARGET_ID.to_owned(),
-                revision: 2,
-                minimum_application_version: Version::new(1, 5, 0),
-                protocol_version: 1,
-                device_info_format: 1,
-                board_id: FIRMWARE_BOARD_ID.to_owned(),
-                uf2_family_id: UF2_FAMILY_ID,
-                usb_vendor_id: XIAO_USB_VENDOR_ID,
-                usb_product_id: XIAO_USB_PRODUCT_ID,
-                usb_manufacturer: XIAO_USB_MANUFACTURER.to_owned(),
-                usb_product: XIAO_USB_PRODUCT.to_owned(),
-                artifact: ArtifactDescriptor {
+            firmware: target.firmware_release(
+                2,
+                Version::new(1, 5, 0),
+                ArtifactDescriptor {
                     name: "steam-controller-bridge-xiao-nrf52840.uf2".to_owned(),
                     size: 24,
                     sha256: "22".repeat(32),
                 },
-            },
+            ),
         }
     }
 
@@ -340,10 +317,10 @@ mod tests {
         );
         let mut tampered = bytes;
         tampered[0] ^= 1;
-        assert_eq!(
+        assert!(matches!(
             verify_signed_manifest(&tampered, &signatures, &[key]),
             Err(ManifestError::NoTrustedSignature)
-        );
+        ));
     }
 
     #[test]

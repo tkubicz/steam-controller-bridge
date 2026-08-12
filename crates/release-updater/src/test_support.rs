@@ -1,6 +1,3 @@
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -8,14 +5,11 @@ use serde_json::json;
 
 use crate::TrustedPublicKey;
 
-static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-pub(crate) fn temporary_directory(label: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "release-updater-{label}-{}-{}",
-        std::process::id(),
-        TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ))
+pub(crate) fn temporary_directory(label: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("release-updater-{label}-"))
+        .tempdir()
+        .unwrap()
 }
 
 pub(crate) fn signed_metadata(

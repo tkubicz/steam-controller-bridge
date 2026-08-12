@@ -174,7 +174,9 @@ fn serial_output_name(status: &BridgeStatus) -> &'static str {
         .and_then(|firmware| match firmware.target {
             FirmwareTarget::Reported(identifier) => {
                 release_updater::firmware_target(identifier.as_str())
-                    .map(|target| target.compact_display_name)
+                    .ok()
+                    .flatten()
+                    .map(|target| target.compact_display_name.as_str())
             }
             FirmwareTarget::Unreported | FirmwareTarget::Malformed => None,
         })

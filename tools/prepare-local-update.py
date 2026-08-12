@@ -160,6 +160,8 @@ def prepare(output: Path) -> None:
             str(paths["firmware"]),
             "--firmware-header",
             "firmware/xiao-nrf52840/src/firmware_version.h",
+            "--firmware-target",
+            "seeed-xiao-nrf52840",
             "--output",
             str(output),
             "--key-id",

@@ -4,8 +4,25 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use semver::Version;
+use thiserror::Error;
 
-use crate::{verify_artifact, ApplicationRelease, APPLICATION_BUNDLE_ID};
+use crate::{verify_artifact, ApplicationRelease, ArtifactError, APPLICATION_BUNDLE_ID};
+
+#[derive(Debug, Error)]
+pub enum ApplicationError {
+    #[error("application update I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Artifact(#[from] ArtifactError),
+    #[error("{0}")]
+    Invalid(String),
+    #[error("invalid version {value:?}: {source}")]
+    Version {
+        value: String,
+        #[source]
+        source: semver::Error,
+    },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedApplication {
@@ -43,13 +60,14 @@ fn guided_replacement_supported_at(executable: &Path, running_version: &str) -> 
     identifier == APPLICATION_BUNDLE_ID && version == running_version
 }
 
-pub fn installed_macos_version() -> Result<Version, String> {
+pub fn installed_macos_version() -> Result<Version, ApplicationError> {
     let output = Command::new("/usr/bin/sw_vers")
         .arg("-productVersion")
-        .output()
-        .map_err(|error| error.to_string())?;
+        .output()?;
     if !output.status.success() {
-        return Err("sw_vers could not determine the macOS version".to_owned());
+        return Err(ApplicationError::Invalid(
+            "sw_vers could not determine the macOS version".to_owned(),
+        ));
     }
     parse_version(String::from_utf8_lossy(&output.stdout).trim())
 }
@@ -58,36 +76,36 @@ pub fn stage_application(
     archive: &Path,
     release: &ApplicationRelease,
     staging_root: &Path,
-) -> Result<StagedApplication, String> {
-    verify_artifact(archive, &release.artifact).map_err(|error| error.to_string())?;
+) -> Result<StagedApplication, ApplicationError> {
+    verify_artifact(archive, &release.artifact)?;
     if staging_root.exists() {
-        fs::remove_dir_all(staging_root).map_err(|error| error.to_string())?;
+        fs::remove_dir_all(staging_root)?;
     }
-    fs::create_dir_all(staging_root).map_err(|error| error.to_string())?;
+    fs::create_dir_all(staging_root)?;
     let output = Command::new("/usr/bin/ditto")
         .args(["-x", "-k"])
         .arg(archive)
         .arg(staging_root)
-        .output()
-        .map_err(|error| error.to_string())?;
+        .output()?;
     if !output.status.success() {
-        return Err(format!(
+        return Err(ApplicationError::Invalid(format!(
             "cannot extract application update: {}",
             String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        )));
     }
-    let mut entries = fs::read_dir(staging_root)
-        .map_err(|error| error.to_string())?
-        .collect::<Result<Vec<_>, io::Error>>()
-        .map_err(|error| error.to_string())?;
+    let mut entries = fs::read_dir(staging_root)?.collect::<Result<Vec<_>, io::Error>>()?;
     if entries.len() != 1 {
-        return Err("application archive must contain exactly one top-level item".to_owned());
+        return Err(ApplicationError::Invalid(
+            "application archive must contain exactly one top-level item".to_owned(),
+        ));
     }
     let bundle_path = entries.remove(0).path();
     if bundle_path.file_name().and_then(|name| name.to_str()) != Some("Steam Controller Bridge.app")
         || !bundle_path.is_dir()
     {
-        return Err("application archive does not contain Steam Controller Bridge.app".to_owned());
+        return Err(ApplicationError::Invalid(
+            "application archive does not contain Steam Controller Bridge.app".to_owned(),
+        ));
     }
     let plist = bundle_path.join("Contents/Info.plist");
     let bundle_identifier = plist_value(&plist, "CFBundleIdentifier")?;
@@ -96,20 +114,19 @@ pub fn stage_application(
         || bundle_identifier != release.bundle_identifier
         || version != release.version
     {
-        return Err(
+        return Err(ApplicationError::Invalid(
             "staged application identity or version does not match signed metadata".to_owned(),
-        );
+        ));
     }
     let verification = Command::new("/usr/bin/codesign")
         .args(["--verify", "--deep", "--strict"])
         .arg(&bundle_path)
-        .output()
-        .map_err(|error| error.to_string())?;
+        .output()?;
     if !verification.status.success() {
-        return Err(format!(
+        return Err(ApplicationError::Invalid(format!(
             "staged application code signature is invalid: {}",
             String::from_utf8_lossy(&verification.stderr).trim()
-        ));
+        )));
     }
     Ok(StagedApplication {
         bundle_path,
@@ -117,39 +134,39 @@ pub fn stage_application(
     })
 }
 
-fn plist_value(path: &Path, key: &str) -> Result<String, String> {
+fn plist_value(path: &Path, key: &str) -> Result<String, ApplicationError> {
     let output = Command::new("/usr/libexec/PlistBuddy")
         .args(["-c", &format!("Print :{key}")])
         .arg(path)
-        .output()
-        .map_err(|error| error.to_string())?;
+        .output()?;
     if !output.status.success() {
-        return Err(format!("application Info.plist has no {key}"));
+        return Err(ApplicationError::Invalid(format!(
+            "application Info.plist has no {key}"
+        )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn parse_version(value: &str) -> Result<Version, String> {
+fn parse_version(value: &str) -> Result<Version, ApplicationError> {
     let components = value.split('.').count();
     let normalized = match components {
         1 => format!("{value}.0.0"),
         2 => format!("{value}.0"),
         _ => value.to_owned(),
     };
-    Version::parse(&normalized).map_err(|error| format!("invalid version {value:?}: {error}"))
+    Version::parse(&normalized).map_err(|source| ApplicationError::Version {
+        value: value.to_owned(),
+        source,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn fixture_bundle(version: &str) -> (PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "release-updater-guided-replacement-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        let contents = root.join("Steam Controller Bridge.app/Contents");
+    fn fixture_bundle(version: &str) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let contents = root.path().join("Steam Controller Bridge.app/Contents");
         let executable = contents.join("MacOS/sc-bridge-menu");
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
         fs::write(
@@ -180,9 +197,8 @@ mod tests {
 
     #[test]
     fn guided_replacement_uses_the_calling_app_version() {
-        let (root, executable) = fixture_bundle("9.8.7");
+        let (_root, executable) = fixture_bundle("9.8.7");
         assert!(guided_replacement_supported_at(&executable, "9.8.7"));
         assert!(!guided_replacement_supported_at(&executable, "1.4.0"));
-        let _ = fs::remove_dir_all(root);
     }
 }

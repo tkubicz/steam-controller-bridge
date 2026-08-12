@@ -12,10 +12,14 @@ clap.workspace = true
 ed25519-dalek.workspace = true
 semver.workspace = true
 rustix.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 serialport.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

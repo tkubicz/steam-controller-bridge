@@ -3,8 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use release_updater::{
-    ensure_release_artifact, installed_macos_version, refresh_catalog_if_due, stage_application,
-    CatalogRefresh, FirmwareFlashProgress, FirmwareTargetDescriptor, ReleaseManifestV1,
+    ensure_release_artifact_cancellable, installed_macos_version, refresh_catalog_cancellable,
+    stage_application, CatalogRefresh, CatalogRefreshPolicy, FirmwareFlashProgress,
+    FirmwareTargetDescriptor, ReleaseManifestV1,
 };
 
 use crate::update_check::{running_version, UpdateContext};
@@ -12,15 +13,17 @@ use crate::update_check::{running_version, UpdateContext};
 pub(super) fn fetch_catalog(
     context: &UpdateContext,
     cancellation: &Arc<AtomicBool>,
+    policy: CatalogRefreshPolicy,
 ) -> Result<CatalogRefresh, String> {
-    let source = context.source(Some(Arc::clone(cancellation)));
-    refresh_catalog_if_due(
-        source.as_ref(),
+    refresh_catalog_cancellable(
+        context.source(),
         context.cache(),
         context.keys(),
-        context.check_interval(),
+        policy,
         &running_version(),
+        Some(cancellation),
     )
+    .map_err(|error| error.to_string())
 }
 
 pub(super) fn download_and_stage_application(
@@ -31,20 +34,21 @@ pub(super) fn download_and_stage_application(
     if cancellation.load(Ordering::Acquire) {
         return Err("application update cancelled".to_owned());
     }
-    if installed_macos_version()? < manifest.minimum_macos {
+    if installed_macos_version().map_err(|error| error.to_string())? < manifest.minimum_macos {
         return Err(format!(
             "This release requires macOS {} or newer.",
             manifest.minimum_macos
         ));
     }
-    let source = context.source(Some(Arc::clone(cancellation)));
     let artifact = &manifest.application.artifact;
-    let path = ensure_release_artifact(
-        source.as_ref(),
+    let path = ensure_release_artifact_cancellable(
+        context.source(),
         context.cache(),
         &manifest.release_tag,
         artifact,
-    )?;
+        Some(cancellation),
+    )
+    .map_err(|error| error.to_string())?;
     if cancellation.load(Ordering::Acquire) {
         return Err("application update cancelled".to_owned());
     }
@@ -52,7 +56,8 @@ pub(super) fn download_and_stage_application(
         &path,
         &manifest.application,
         &context.cache().root().join("staged-app"),
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     Ok(staged.bundle_path)
 }
 
@@ -61,21 +66,24 @@ pub(super) fn download_firmware(
     manifest: &ReleaseManifestV1,
     cancellation: &Arc<AtomicBool>,
 ) -> Result<PathBuf, String> {
-    let source = context.source(Some(Arc::clone(cancellation)));
     let artifact = &manifest.firmware.artifact;
-    ensure_release_artifact(
-        source.as_ref(),
+    ensure_release_artifact_cancellable(
+        context.source(),
         context.cache(),
         &manifest.release_tag,
         artifact,
+        Some(cancellation),
     )
+    .map_err(|error| error.to_string())
 }
 
 pub(super) fn progress_text(
     progress: &FirmwareFlashProgress,
     target: Option<&FirmwareTargetDescriptor>,
 ) -> String {
-    let target_name = target.map_or("supported firmware target", |target| target.display_name);
+    let target_name = target.map_or("supported firmware target", |target| {
+        target.display_name.as_str()
+    });
     match progress {
         FirmwareFlashProgress::LookingForDevice => {
             format!("Looking for one compatible {target_name} device…")

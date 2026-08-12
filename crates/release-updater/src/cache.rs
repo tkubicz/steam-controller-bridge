@@ -1,4 +1,4 @@
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -7,65 +7,33 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 #[cfg(debug_assertions)]
 use sha2::{Digest as _, Sha256};
+use tempfile::Builder as TempFileBuilder;
+use thiserror::Error;
 
 #[cfg(debug_assertions)]
 use crate::artifact::lower_hex;
-use crate::temporary::unique_temporary_path;
 use crate::{
     verify_artifact, verify_signed_manifest, ArtifactDescriptor, ArtifactError, ManifestError,
     ReleaseManifestV1, TrustedPublicKey,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum CacheError {
-    Io(io::Error),
-    Manifest(ManifestError),
-    Artifact(ArtifactError),
+    #[error("update cache I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
+    #[error(transparent)]
+    Artifact(#[from] ArtifactError),
+    #[error("update cache metadata is invalid: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("refusing release metadata rollback from app {cached_application}/firmware {cached_firmware} to app {candidate_application}/firmware {candidate_firmware}")]
     Rollback {
         cached_application: Version,
         candidate_application: Version,
         cached_firmware: u16,
         candidate_firmware: u16,
     },
-}
-
-impl std::fmt::Display for CacheError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(error) => write!(formatter, "update cache I/O failed: {error}"),
-            Self::Manifest(error) => error.fmt(formatter),
-            Self::Artifact(error) => error.fmt(formatter),
-            Self::Rollback {
-                cached_application,
-                candidate_application,
-                cached_firmware,
-                candidate_firmware,
-            } => write!(
-                formatter,
-                "refusing release metadata rollback from app {cached_application}/firmware {cached_firmware} to app {candidate_application}/firmware {candidate_firmware}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for CacheError {}
-
-impl From<io::Error> for CacheError {
-    fn from(value: io::Error) -> Self {
-        Self::Io(value)
-    }
-}
-
-impl From<ManifestError> for CacheError {
-    fn from(value: ManifestError) -> Self {
-        Self::Manifest(value)
-    }
-}
-
-impl From<ArtifactError> for CacheError {
-    fn from(value: ArtifactError) -> Self {
-        Self::Artifact(value)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -127,8 +95,7 @@ impl ReleaseCache {
         &self,
         trusted_keys: &[TrustedPublicKey],
     ) -> Result<ReleaseManifestV1, CacheError> {
-        let cached: CachedMetadata = serde_json::from_slice(&fs::read(self.metadata_path())?)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let cached: CachedMetadata = serde_json::from_slice(&fs::read(self.metadata_path())?)?;
         Ok(verify_signed_manifest(
             &cached.manifest,
             &cached.signatures,
@@ -159,8 +126,7 @@ impl ReleaseCache {
         let cached = serde_json::to_vec(&CachedMetadata {
             manifest: manifest_bytes.to_vec(),
             signatures: signature_bytes.to_vec(),
-        })
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        })?;
         atomic_write(&self.metadata_path(), &cached)?;
         Ok(candidate)
     }
@@ -210,26 +176,13 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("cache path has no parent"))?;
     fs::create_dir_all(parent)?;
-    let temporary = unique_temporary_path(
-        parent,
-        path.file_name()
-            .unwrap_or_else(|| std::ffi::OsStr::new("update")),
-        "tmp",
-    );
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    let mut temporary = TempFileBuilder::new()
+        .prefix(".release-updater-cache-")
+        .tempfile_in(parent)?;
+    temporary.write_all(bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -240,29 +193,27 @@ mod tests {
     #[test]
     fn due_when_missing_and_not_immediately_after_write() {
         let root = temporary_directory("cache");
-        let _ = fs::remove_dir_all(&root);
-        let cache = ReleaseCache::new(root.clone());
+        let cache = ReleaseCache::new(root.path().to_owned());
         let current = Version::new(1, 5, 0);
         let upgraded = Version::new(1, 6, 0);
         assert!(cache.check_due(Duration::from_mins(1), &current));
         cache.mark_check_success(&current).unwrap();
         assert!(!cache.check_due(Duration::from_mins(1), &current));
         assert!(cache.check_due(Duration::from_mins(1), &upgraded));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn local_sources_use_stable_isolated_temporary_caches() {
         let first = temporary_directory("local-cache-first");
         let second = temporary_directory("local-cache-second");
-        let first_cache = ReleaseCache::for_local_source(&first);
+        let first_cache = ReleaseCache::for_local_source(first.path());
         assert_eq!(
             first_cache.root(),
-            ReleaseCache::for_local_source(&first).root()
+            ReleaseCache::for_local_source(first.path()).root()
         );
         assert_ne!(
             first_cache.root(),
-            ReleaseCache::for_local_source(&second).root()
+            ReleaseCache::for_local_source(second.path()).root()
         );
         assert!(first_cache
             .root()
@@ -272,8 +223,7 @@ mod tests {
     #[test]
     fn cache_replacement_is_atomic_and_refuses_either_version_rollback() {
         let root = temporary_directory("rollback");
-        let _ = fs::remove_dir_all(&root);
-        let cache = ReleaseCache::new(root.clone());
+        let cache = ReleaseCache::new(root.path().to_owned());
         let (manifest, signatures, key) = signed_metadata("1.5.0", 5);
         cache
             .store_manifest(&manifest, &signatures, std::slice::from_ref(&key))
@@ -293,6 +243,5 @@ mod tests {
             cache.load_manifest(&[key]).unwrap().application_version,
             Version::new(1, 5, 0)
         );
-        let _ = fs::remove_dir_all(root);
     }
 }
