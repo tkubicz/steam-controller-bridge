@@ -5,6 +5,21 @@ Published history may be corrected directly when this file and the matching
 GitHub Release are updated together. Versions follow [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.6.0...v1.7.0) (2026-08-12)
+
+
+### Features
+
+* **firmware:** automate UF2 updates with verified installation receipts ([b6f78cd](https://github.com/tkubicz/steam-controller-bridge/commit/b6f78cd0fc7872fc5264d42e13363a8ae9834b0d))
+* **menu:** clarify bridge hardware and firmware status ([c6789e3](https://github.com/tkubicz/steam-controller-bridge/commit/c6789e38a82d7e605fef2a30f320f8b3d4940094))
+* support protocol-compatible bridge devices ([c6789e3](https://github.com/tkubicz/steam-controller-bridge/commit/c6789e38a82d7e605fef2a30f320f8b3d4940094))
+
+
+### Bug Fixes
+
+* **app-center:** keep catalog and firmware status accurate after failures ([b6f78cd](https://github.com/tkubicz/steam-controller-bridge/commit/b6f78cd0fc7872fc5264d42e13363a8ae9834b0d))
+* **updater:** stop reporting verified firmware flashes as failed ([c6789e3](https://github.com/tkubicz/steam-controller-bridge/commit/c6789e38a82d7e605fef2a30f320f8b3d4940094))
+
 ## [1.6.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.5.0...v1.6.0) (2026-08-11)
 
 
