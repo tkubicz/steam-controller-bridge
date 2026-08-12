@@ -12,11 +12,9 @@ use bridge_output::{
 };
 
 use crate::{
-    firmware_matches_target, firmware_target, verify_artifact, FirmwareInstallerStrategy,
-    FirmwareRelease, FirmwareTargetDescriptor,
+    firmware_matches_target, firmware_target, verify_artifact, ArtifactError,
+    FirmwareInstallerStrategy, FirmwareRelease, FirmwareTargetDescriptor,
 };
-#[cfg(test)]
-use crate::{FIRMWARE_BOARD_ID, UF2_FAMILY_ID, XIAO_NRF52840_TARGET, XIAO_SENSE_BOARD_ID};
 const AUTOMATIC_BOOTLOADER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTOMATIC_BOOTLOADER_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const MANUAL_BOOTLOADER_WAIT_TIMEOUT: Duration = Duration::from_mins(1);
@@ -87,75 +85,38 @@ pub const fn classify_firmware_release(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum FirmwareFlashError {
-    Io(io::Error),
+    #[error("firmware I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("cannot select firmware device: {0}")]
     Discovery(String),
+    #[error("unsupported bootloader board: {0}")]
     WrongBoard(String),
+    #[error("unsupported firmware target: {0}")]
     UnsupportedTarget(String),
+    #[error("invalid UF2 firmware: {0}")]
     InvalidUf2(String),
+    #[error("firmware update cancelled")]
     Cancelled,
-    Timeout(&'static str),
+    #[error("timed out while {0}")]
+    Timeout(String),
+    #[error("firmware verification reported {actual:?}; expected revision {expected}")]
     Revision { expected: u16, actual: Option<u16> },
-    Artifact(String),
+    #[error("firmware artifact failed verification: {0}")]
+    Artifact(#[from] ArtifactError),
+    #[error("refusing to downgrade newer firmware")]
     NewerFirmware,
+    #[error("current firmware revision could not be verified; reconnect and retry")]
     VersionUnavailable,
+    #[error("firmware revision started, but its installation marker is {0:?}; expected a fresh pending receipt")]
     ReceiptExpectedPending(FirmwareInstallState),
+    #[error("firmware started successfully, but installation verification is incomplete: {0}")]
     ReceiptRecording(String),
+    #[error("firmware started successfully, but the committed installation receipt did not match the requested receipt")]
     ReceiptMismatch,
+    #[error("firmware update cancelled after entering the UF2 bootloader; unplug and reconnect the board to return it to normal operation")]
     CancelledInBootloader,
-}
-
-impl std::fmt::Display for FirmwareFlashError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(error) => write!(formatter, "firmware I/O failed: {error}"),
-            Self::Discovery(error) => write!(formatter, "cannot select firmware device: {error}"),
-            Self::WrongBoard(board) => write!(formatter, "unsupported bootloader board: {board}"),
-            Self::UnsupportedTarget(target) => {
-                write!(formatter, "unsupported firmware target: {target}")
-            }
-            Self::InvalidUf2(error) => write!(formatter, "invalid UF2 firmware: {error}"),
-            Self::Cancelled => write!(formatter, "firmware update cancelled"),
-            Self::Timeout(stage) => write!(formatter, "timed out while {stage}"),
-            Self::Revision { expected, actual } => write!(
-                formatter,
-                "firmware verification reported {actual:?}; expected revision {expected}"
-            ),
-            Self::Artifact(error) => {
-                write!(formatter, "firmware artifact failed verification: {error}")
-            }
-            Self::NewerFirmware => write!(formatter, "refusing to downgrade newer firmware"),
-            Self::VersionUnavailable => write!(
-                formatter,
-                "current firmware revision could not be verified; reconnect and retry"
-            ),
-            Self::ReceiptExpectedPending(actual) => write!(
-                formatter,
-                "firmware revision started, but its installation marker is {actual:?}; expected a fresh pending receipt"
-            ),
-            Self::ReceiptRecording(error) => write!(
-                formatter,
-                "firmware started successfully, but installation verification is incomplete: {error}"
-            ),
-            Self::ReceiptMismatch => write!(
-                formatter,
-                "firmware started successfully, but the committed installation receipt did not match the requested receipt"
-            ),
-            Self::CancelledInBootloader => write!(
-                formatter,
-                "firmware update cancelled after entering the UF2 bootloader; unplug and reconnect the board to return it to normal operation"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for FirmwareFlashError {}
-
-impl From<io::Error> for FirmwareFlashError {
-    fn from(value: io::Error) -> Self {
-        Self::Io(value)
-    }
 }
 
 pub fn discover_firmware_devices(
@@ -272,8 +233,7 @@ pub fn flash_firmware(
 ) -> Result<FirmwareInfo, FirmwareFlashError> {
     let target = firmware_target(&release.target)
         .ok_or_else(|| FirmwareFlashError::UnsupportedTarget(release.target.clone()))?;
-    verify_artifact(artifact_path, &release.artifact)
-        .map_err(|error| FirmwareFlashError::Artifact(error.to_string()))?;
+    verify_artifact(artifact_path, &release.artifact)?;
     match target.installer {
         FirmwareInstallerStrategy::Uf2 => validate_uf2(artifact_path, target.uf2_family_id)?,
     }
@@ -737,7 +697,12 @@ fn new_install_receipt(
 
 #[cfg(test)]
 fn supported_volume(root: &Path) -> Result<Option<BootloaderVolume>, FirmwareFlashError> {
-    select_supported_volume(discover_bootloader_volumes(root)?, &XIAO_NRF52840_TARGET)
+    select_supported_volume(discover_bootloader_volumes(root)?, test_target())
+}
+
+#[cfg(test)]
+fn test_target() -> &'static FirmwareTargetDescriptor {
+    &crate::firmware_targets().expect("embedded target catalog")[0]
 }
 
 fn select_supported_volume(
@@ -759,7 +724,10 @@ fn select_supported_volume(
 }
 
 fn supported_board_id(board_id: &str, target: &FirmwareTargetDescriptor) -> bool {
-    target.accepted_board_ids.contains(&board_id)
+    target
+        .accepted_board_ids
+        .iter()
+        .any(|accepted| accepted == board_id)
 }
 
 fn wait_for_volume(
@@ -784,7 +752,9 @@ fn wait_for_volume(
         }
         adapter.wait(Duration::from_millis(250));
     }
-    Err(FirmwareFlashError::Timeout(target.manual_recovery_timeout))
+    Err(FirmwareFlashError::Timeout(
+        target.manual_recovery_timeout.clone(),
+    ))
 }
 
 fn copy_and_flush(source: &Path, destination: &Path) -> io::Result<()> {
@@ -816,24 +786,16 @@ mod tests {
     }
 
     fn release(revision: u16) -> FirmwareRelease {
-        FirmwareRelease {
-            target: crate::FIRMWARE_TARGET_ID.to_owned(),
+        let target = test_target();
+        target.firmware_release(
             revision,
-            minimum_application_version: semver::Version::new(1, 4, 0),
-            protocol_version: 1,
-            device_info_format: 1,
-            board_id: FIRMWARE_BOARD_ID.to_owned(),
-            uf2_family_id: UF2_FAMILY_ID,
-            usb_vendor_id: crate::XIAO_USB_VENDOR_ID,
-            usb_product_id: crate::XIAO_USB_PRODUCT_ID,
-            usb_manufacturer: crate::XIAO_USB_MANUFACTURER.to_owned(),
-            usb_product: crate::XIAO_USB_PRODUCT.to_owned(),
-            artifact: crate::ArtifactDescriptor {
+            semver::Version::new(1, 4, 0),
+            crate::ArtifactDescriptor {
                 name: "firmware.uf2".to_owned(),
                 size: 1,
                 sha256: "11".repeat(32),
             },
-        }
+        )
     }
 
     fn device(bridge_firmware: bool) -> FirmwareDevice {
@@ -859,7 +821,7 @@ mod tests {
     fn volume() -> BootloaderVolume {
         BootloaderVolume {
             root: PathBuf::from("/Volumes/FIXTURE"),
-            board_id: FIRMWARE_BOARD_ID.to_owned(),
+            board_id: test_target().manifest_board_id.clone(),
         }
     }
 
@@ -908,9 +870,7 @@ mod tests {
                 install_state: self
                     .recorded_receipt
                     .map_or(self.default_install_state, FirmwareInstallState::Recorded),
-                target: FirmwareTarget::Reported(
-                    FirmwareTargetId::new(crate::FIRMWARE_TARGET_ID).unwrap(),
-                ),
+                target: FirmwareTarget::Reported(test_target().id),
             })
         }
 
@@ -1000,9 +960,7 @@ mod tests {
             version: FirmwareVersion::Reported(revision),
             capabilities,
             install_state,
-            target: FirmwareTarget::Reported(
-                FirmwareTargetId::new(crate::FIRMWARE_TARGET_ID).unwrap(),
-            ),
+            target: FirmwareTarget::Reported(test_target().id),
         }
     }
 
@@ -1526,51 +1484,53 @@ mod tests {
 
     #[test]
     fn validates_every_uf2_block_and_family() {
-        let path = std::env::temp_dir().join(format!("release-updater-{}.uf2", std::process::id()));
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("firmware.uf2");
+        let family = test_target().uf2_family_id;
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&uf2_block(UF2_FAMILY_ID));
-        bytes.extend_from_slice(&uf2_block(UF2_FAMILY_ID));
+        bytes.extend_from_slice(&uf2_block(family));
+        bytes.extend_from_slice(&uf2_block(family));
         fs::write(&path, &bytes).unwrap();
-        validate_uf2(&path, UF2_FAMILY_ID).unwrap();
+        validate_uf2(&path, family).unwrap();
         bytes[28] ^= 1;
         fs::write(&path, &bytes).unwrap();
         assert!(matches!(
-            validate_uf2(&path, UF2_FAMILY_ID),
+            validate_uf2(&path, family),
             Err(FirmwareFlashError::InvalidUf2(_))
         ));
-        let _ = fs::remove_file(path);
     }
 
     #[test]
     fn bootloader_identity_comes_from_info_file_not_volume_name() {
-        let root =
-            std::env::temp_dir().join(format!("release-updater-volumes-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
         fs::create_dir_all(root.join("anything")).unwrap();
         fs::write(
             root.join("anything/INFO_UF2.TXT"),
-            format!("UF2 Bootloader\nBoard-ID: {FIRMWARE_BOARD_ID}\n"),
+            format!(
+                "UF2 Bootloader\nBoard-ID: {}\n",
+                test_target().manifest_board_id
+            ),
         )
         .unwrap();
         assert_eq!(
-            discover_bootloader_volumes(&root).unwrap(),
+            discover_bootloader_volumes(root).unwrap(),
             vec![BootloaderVolume {
                 root: root.join("anything"),
-                board_id: FIRMWARE_BOARD_ID.to_owned(),
+                board_id: test_target().manifest_board_id.clone(),
             }]
         );
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
     fn standard_and_sense_bootloader_boards_are_supported() {
-        for board_id in [FIRMWARE_BOARD_ID, XIAO_SENSE_BOARD_ID] {
+        for board_id in &test_target().accepted_board_ids {
             assert!(select_supported_volume(
                 vec![BootloaderVolume {
                     root: PathBuf::from("/Volumes/XIAO"),
-                    board_id: board_id.to_owned(),
+                    board_id: board_id.clone(),
                 }],
-                &XIAO_NRF52840_TARGET,
+                test_target(),
             )
             .unwrap()
             .is_some());
@@ -1579,11 +1539,8 @@ mod tests {
 
     #[test]
     fn wrong_and_multiple_bootloader_boards_are_rejected() {
-        let root = std::env::temp_dir().join(format!(
-            "release-updater-board-selection-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
         fs::create_dir_all(root.join("wrong")).unwrap();
         fs::write(
             root.join("wrong/INFO_UF2.TXT"),
@@ -1591,20 +1548,19 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            supported_volume(&root),
+            supported_volume(root),
             Err(FirmwareFlashError::WrongBoard(_))
         ));
         fs::create_dir_all(root.join("plain")).unwrap();
         fs::write(
             root.join("plain/INFO_UF2.TXT"),
-            format!("Board-ID: {FIRMWARE_BOARD_ID}\n"),
+            format!("Board-ID: {}\n", test_target().manifest_board_id),
         )
         .unwrap();
         assert!(matches!(
-            supported_volume(&root),
+            supported_volume(root),
             Err(FirmwareFlashError::Discovery(_))
         ));
-        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1648,7 +1604,7 @@ mod tests {
                         manufacturer: Some("Seeed".to_owned()),
                         product: None,
                     },
-                    &XIAO_NRF52840_TARGET,
+                    test_target(),
                 ),
                 Some(expected)
             );

@@ -3,8 +3,11 @@
 The menu app checks the latest stable GitHub release at most once every 24
 hours. It downloads only the manifest and signature envelope during that check.
 Artifact URLs are derived from the fixed repository, signed tag, and signed
-asset names. `/usr/bin/curl` uses HTTPS-only redirects, fixed connect/overall
-timeouts, temporary files, and hard byte limits.
+asset names. A private `reqwest` client uses Rustls with TLS 1.2 or newer,
+system proxy discovery, HTTPS-only redirects, fixed connect/overall timeouts,
+cancellable streamed reads, RAII temporary files, and hard byte limits.
+**Check Again** bypasses only the 24-hour freshness throttle; signatures,
+rollback protection, locking, cache validation, and artifact policy are unchanged.
 
 The `release-updater` workspace crate verifies an Ed25519 signature over the raw
 manifest before parsing it. The signed manifest binds the application version,
@@ -16,12 +19,17 @@ metadata cannot move backward in either application version or firmware
 revision.
 
 Signed manifest schema v1 deliberately retains one `firmware` entry. The app
-resolves that entry through its local firmware-target catalog before accepting
-the metadata or installing anything. The catalog currently contains one
+resolves that entry through the schema-versioned `firmware-targets.json`
+catalog embedded in the application before accepting the metadata or installing
+anything. Rust code contains no board-specific updater constants. The catalog currently contains one
 target: Seeed Studio XIAO nRF52840/Sense (`seeed-xiao-nrf52840`), with its
 minimum compatible revision, application/factory/bootloader USB identities,
 accepted board IDs, UF2 family, recovery instructions, and UF2 installer
 strategy. A multi-firmware manifest is deferred until another artifact exists.
+Catalog parsing is fail-closed: unknown fields, unsupported schemas or
+installers, malformed hexadecimal identities, duplicates, empty required
+values, and inconsistent primary board IDs disable updater discovery and
+installation without affecting normal bridge operation.
 
 ## Production setup
 
@@ -142,12 +150,36 @@ trusted keys, updater network access, release assets, or connected hardware:
 cargo run -p sc-bridge-menu -- app-center --demo --tab updates
 ```
 
-Preview the fully up-to-date state, including the collapsed current release
-notes and firmware reinstall action:
+Preview a fresh firmware installation or an application-current/firmware-update
+combination directly:
 
 ```sh
-cargo run -p sc-bridge-menu -- app-center --demo current --tab updates
+cargo run -p sc-bridge-menu -- app-center --demo firmware-install
+cargo run -p sc-bridge-menu -- app-center --demo firmware-update
 ```
+
+The demo catalog covers every distinct steady Updates-page branch without
+contacting update services or hardware:
+
+- application: `available`, `application-update`, `application-staged`,
+  `application-newer`, and `current`;
+- firmware: `firmware-install`, `firmware-update`, `firmware-newer`, and
+  `firmware-newer-format`;
+- target association: `target-unreported`, `target-malformed`, and
+  `target-different`;
+- installation receipt: `receipt-unavailable`, `receipt-pending`,
+  `receipt-invalid`, and `receipt-first-observed`;
+- catalog: `catalog-stale`, `catalog-error`, and `catalog-checking`.
+- operations: `application-downloading`, `replacement-waiting`,
+  `firmware-looking`, `firmware-requesting-bootloader`,
+  `firmware-waiting-for-bootloader`, `firmware-manual-recovery`,
+  `firmware-writing`, `firmware-reconnecting`, `firmware-recording-receipt`,
+  and `firmware-verifying-receipt`.
+
+Running with `--demo` and no value remains an alias for the combined
+application-and-firmware update preview. Demo **Check Again**, download,
+installation, reveal, and replacement actions mutate only the in-memory
+preview.
 
 The same fixture can open the other tabs directly:
 

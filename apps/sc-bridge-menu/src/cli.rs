@@ -76,7 +76,63 @@ impl AppCenterArgs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum DemoMode {
+    /// Application and firmware updates are both available.
     Available,
+    /// Only the application needs an update.
+    ApplicationUpdate,
+    /// The application update is downloaded and ready to replace.
+    ApplicationStaged,
+    /// The application update download and verification are in progress.
+    ApplicationDownloading,
+    /// The application is newer than the selected release.
+    ApplicationNewer,
+    /// A factory board is ready for its first firmware installation.
+    FirmwareInstall,
+    /// The application is current and a firmware update is available.
+    FirmwareUpdate,
+    /// The connected firmware is newer than the selected release.
+    FirmwareNewer,
+    /// The connected firmware uses a newer `DeviceInfo` format.
+    FirmwareNewerFormat,
+    /// Firmware reports a revision but no target identity.
+    TargetUnreported,
+    /// Firmware reports a malformed target identity.
+    TargetMalformed,
+    /// Firmware reports a different valid target identity.
+    TargetDifferent,
+    /// Current firmware does not support installation receipts.
+    ReceiptUnavailable,
+    /// Current firmware has not committed its installation receipt yet.
+    ReceiptPending,
+    /// Current firmware reports a corrupted installation receipt.
+    ReceiptInvalid,
+    /// Current firmware was first observed after a manual flash.
+    ReceiptFirstObserved,
+    /// Verified metadata is visible, but its refresh failed.
+    CatalogStale,
+    /// No verified update catalog is available.
+    CatalogError,
+    /// The initial signed catalog check is in progress.
+    CatalogChecking,
+    /// Firmware preparation is looking for a compatible bridge device.
+    FirmwareLooking,
+    /// Firmware preparation is requesting automatic bootloader mode.
+    FirmwareRequestingBootloader,
+    /// Firmware preparation is waiting for the automatic UF2 drive.
+    FirmwareWaitingForBootloader,
+    /// Firmware preparation is waiting for manual recovery.
+    FirmwareManualRecovery,
+    /// Firmware bytes are being written and cancellation is locked out.
+    FirmwareWriting,
+    /// The flashed bridge device is reconnecting.
+    FirmwareReconnecting,
+    /// The updater is recording the installation receipt.
+    FirmwareRecordingReceipt,
+    /// The updater is verifying the committed installation receipt.
+    FirmwareVerifyingReceipt,
+    /// The bridge is releasing hardware before application replacement.
+    ReplacementWaiting,
+    /// Application and firmware both match the selected release.
     Current,
 }
 
@@ -142,6 +198,43 @@ mod tests {
         };
         assert_eq!(arguments.demo, Some(DemoMode::Current));
         assert_eq!(arguments.page(), AppCenterPage::Changelog);
+    }
+
+    #[test]
+    fn update_demo_scenarios_are_exposed_as_cli_values() {
+        for value in [
+            "application-update",
+            "application-staged",
+            "application-downloading",
+            "application-newer",
+            "firmware-install",
+            "firmware-update",
+            "firmware-newer",
+            "firmware-newer-format",
+            "target-unreported",
+            "target-malformed",
+            "target-different",
+            "receipt-unavailable",
+            "receipt-pending",
+            "receipt-invalid",
+            "receipt-first-observed",
+            "catalog-stale",
+            "catalog-error",
+            "catalog-checking",
+            "firmware-looking",
+            "firmware-requesting-bootloader",
+            "firmware-waiting-for-bootloader",
+            "firmware-manual-recovery",
+            "firmware-writing",
+            "firmware-reconnecting",
+            "firmware-recording-receipt",
+            "firmware-verifying-receipt",
+            "replacement-waiting",
+        ] {
+            let cli = Cli::try_parse_from(["sc-bridge-menu", "app-center", "--demo", value])
+                .unwrap_or_else(|error| panic!("cannot parse demo `{value}`: {error}"));
+            assert!(matches!(cli.command, Some(Command::AppCenter(_))));
+        }
     }
 
     #[test]

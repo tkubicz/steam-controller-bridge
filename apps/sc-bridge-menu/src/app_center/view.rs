@@ -6,16 +6,21 @@ use eframe::egui;
 use release_updater::{
     classify_firmware_release, firmware_target, FirmwareReleaseState, ReleaseManifestV1,
 };
-use ui_theme::{
-    ACCENT, ACCENT_SUBTLE, BORDER, DANGER, MUTED_TEXT, ON_ACCENT, SUCCESS, SURFACE, TEXT,
-};
+use ui_theme::{ActionButton, ACCENT, BORDER, DANGER, MUTED_TEXT, SUCCESS, SURFACE, TEXT};
 
-use super::{Activity, AppCenter, CatalogStatus, StatusPlacement, StatusTone};
+use super::{Activity, AppCenter, StatusPlacement, StatusTone};
 use crate::app_center_protocol::{
     FirmwareDetails, FirmwareInstallStatus, FirmwareReceiptSource, FirmwareStatus,
     FirmwareTargetStatus,
 };
 use crate::window_ui::{full_width_card, render_release_notes};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirmwareAction {
+    None,
+    Disabled(&'static str),
+    Install(&'static str),
+}
 
 impl AppCenter {
     pub(super) fn updates_page(&mut self, ui: &mut egui::Ui) {
@@ -33,10 +38,13 @@ impl AppCenter {
             ui.add_space(10.0);
         }
         self.status_banner(ui, StatusPlacement::Page);
-        if self.catalog_status == CatalogStatus::Failed && !self.busy() {
+        if self.catalog_status.shows_check_again() {
             ui.add_space(10.0);
-            if secondary_button(ui, "Retry Check", true).clicked() {
-                self.catalog_status.retry_if_failed();
+            let checking = self.catalog_status == super::CatalogStatus::Checking;
+            if update_refresh_button(ui, "Check Again", self.operation_available(), checking)
+                .clicked()
+            {
+                self.check_again(ui.ctx().clone());
             }
         }
         ui.add_space(14.0);
@@ -79,10 +87,6 @@ impl AppCenter {
                         "The new version is staged and ready to replace the installed app.",
                     );
                     ui.add_space(12.0);
-                    if secondary_button(ui, "Show New App and Applications", true).clicked() {
-                        self.reveal_application();
-                    }
-                    ui.add_space(6.0);
                     if self.replacement_supported {
                         ui.label(
                             egui::RichText::new("Quit the bridge, drag the revealed app into Applications, choose Replace, then launch it. Right-click Open may be required for this ad-hoc-signed build.")
@@ -94,15 +98,23 @@ impl AppCenter {
                                 .color(MUTED_TEXT),
                         );
                     }
-                    ui.add_space(10.0);
-                    if primary_button(
-                        ui,
-                        "Quit Bridge for Replacement",
-                        self.replacement_supported && self.operation_available(),
-                    )
-                    .clicked()
-                    {
-                        self.quit_for_replacement(ui.ctx().clone());
+                    self.application_operation_status(ui);
+                    if self.operation_available() {
+                        ui.add_space(12.0);
+                        if update_action_button(ui, "Show New App and Applications", true).clicked()
+                        {
+                            self.reveal_application();
+                        }
+                        ui.add_space(6.0);
+                        if update_action_button(
+                            ui,
+                            "Quit Bridge for Replacement",
+                            self.replacement_supported,
+                        )
+                        .clicked()
+                        {
+                            self.quit_for_replacement(ui.ctx().clone());
+                        }
                     }
                 }
                 std::cmp::Ordering::Less => {
@@ -112,15 +124,12 @@ impl AppCenter {
                         &format!("Version {} is ready", manifest.application_version),
                         "Download and verify the application before replacing the installed version.",
                     );
-                    ui.add_space(12.0);
-                    if primary_button(
-                        ui,
-                        "Download Application Update",
-                        self.operation_available(),
-                    )
-                    .clicked()
-                    {
-                        self.download_application(manifest.clone(), ui.ctx().clone());
+                    self.application_operation_status(ui);
+                    if self.operation_available() {
+                        ui.add_space(12.0);
+                        if update_action_button(ui, "Download Application Update", true).clicked() {
+                            self.download_application(manifest.clone(), ui.ctx().clone());
+                        }
                     }
                 }
                 std::cmp::Ordering::Equal => {
@@ -164,7 +173,7 @@ impl AppCenter {
             };
             let target_name = firmware_target(&manifest.firmware.target)
                 .map_or(manifest.firmware.target.as_str(), |target| {
-                    target.display_name
+                    target.display_name.as_str()
                 });
             let target_association = match &self.firmware.target {
                 FirmwareTargetStatus::Reported(_) if target_matches => "target verified",
@@ -187,29 +196,38 @@ impl AppCenter {
                 badge_colour,
             );
             ui.add_space(14.0);
-            self.firmware_operation_status(ui);
             let show_reinstall = !app_pending
                 && !app_incompatible
                 && release_state == Some(FirmwareReleaseState::Current);
-            self.firmware_release_action(
+            if target_matches {
+                firmware_receipt_callout(ui, self.firmware.version, self.firmware.install);
+                ui.add_space(12.0);
+            }
+            let action = self.firmware_release_context(
                 ui,
                 manifest,
                 release_state,
                 app_pending,
                 app_incompatible,
             );
-            self.firmware_installation_details(ui, manifest, target_matches, show_reinstall);
+            self.firmware_operation_status(ui);
+            self.firmware_action(ui, manifest, action);
+            self.firmware_installation_footer(
+                ui,
+                manifest,
+                show_reinstall && self.operation_available(),
+            );
         });
     }
 
-    fn firmware_release_action(
-        &mut self,
+    fn firmware_release_context(
+        &self,
         ui: &mut egui::Ui,
         manifest: &ReleaseManifestV1,
         release_state: Option<FirmwareReleaseState>,
         app_pending: bool,
         app_incompatible: bool,
-    ) {
+    ) -> FirmwareAction {
         if app_pending {
             status_callout(
                 ui,
@@ -217,9 +235,7 @@ impl AppCenter {
                 "Application update required first",
                 "Replace and relaunch the application before installing this firmware.",
             );
-            ui.add_space(12.0);
-            let _ = primary_button(ui, "Update Application First", false);
-            return;
+            return FirmwareAction::Disabled("Update Application First");
         }
         if app_incompatible {
             status_callout(
@@ -228,10 +244,10 @@ impl AppCenter {
                 "Newer application required",
                 "The installed application cannot communicate with this firmware revision.",
             );
-            return;
+            return FirmwareAction::None;
         }
         match release_state {
-            None => self.unidentified_firmware_action(ui, manifest),
+            None => self.unidentified_firmware_context(ui),
             Some(FirmwareReleaseState::Pending) => {
                 status_callout(
                     ui,
@@ -239,16 +255,7 @@ impl AppCenter {
                     "Firmware information unavailable",
                     "A factory XIAO does not report bridge firmware. Install the signed firmware, or wait and reconnect if a bridge-enabled board is still starting.",
                 );
-                ui.add_space(12.0);
-                if primary_button(
-                    ui,
-                    "Install or Recover XIAO Firmware",
-                    self.operation_available(),
-                )
-                .clicked()
-                {
-                    self.install_firmware(manifest.clone(), ui.ctx().clone());
-                }
+                FirmwareAction::Install("Install or Recover XIAO Firmware")
             }
             Some(FirmwareReleaseState::Newer) => {
                 status_callout(
@@ -257,6 +264,7 @@ impl AppCenter {
                     &self.firmware_newer_title(),
                     "Downgrading the connected board is disabled.",
                 );
+                FirmwareAction::None
             }
             Some(FirmwareReleaseState::Current) => {
                 status_callout(
@@ -265,6 +273,7 @@ impl AppCenter {
                     "Firmware is up to date",
                     &self.firmware_current_message(),
                 );
+                FirmwareAction::None
             }
             Some(FirmwareReleaseState::UpdateAvailable) => {
                 status_callout(
@@ -273,17 +282,12 @@ impl AppCenter {
                     &format!("Revision {} is ready", manifest.firmware.revision),
                     "The board and firmware are verified before anything is written.",
                 );
-                ui.add_space(12.0);
-                if primary_button(ui, "Install Firmware Update", self.operation_available())
-                    .clicked()
-                {
-                    self.install_firmware(manifest.clone(), ui.ctx().clone());
-                }
+                FirmwareAction::Install("Install Firmware Update")
             }
         }
     }
 
-    fn unidentified_firmware_action(&mut self, ui: &mut egui::Ui, manifest: &ReleaseManifestV1) {
+    fn unidentified_firmware_context(&self, ui: &mut egui::Ui) -> FirmwareAction {
         let (title, identity) = match &self.firmware.target {
             FirmwareTargetStatus::Unreported => (
                 "Firmware target unidentified",
@@ -306,41 +310,48 @@ impl AppCenter {
                 "{identity} Normal bridging remains available, but automatic recommendations and bootloader commands are disabled."
             ),
         );
+        FirmwareAction::Install("Install or Recover XIAO Firmware")
+    }
+
+    fn firmware_action(
+        &mut self,
+        ui: &mut egui::Ui,
+        manifest: &ReleaseManifestV1,
+        action: FirmwareAction,
+    ) {
+        if !self.operation_available() {
+            return;
+        }
+        let (label, enabled) = match action {
+            FirmwareAction::None => return,
+            FirmwareAction::Disabled(label) => (label, false),
+            FirmwareAction::Install(label) => (label, true),
+        };
         ui.add_space(12.0);
-        if primary_button(
-            ui,
-            "Install or Recover XIAO Firmware",
-            self.operation_available(),
-        )
-        .clicked()
-        {
+        if update_action_button(ui, label, enabled).clicked() {
             self.install_firmware(manifest.clone(), ui.ctx().clone());
         }
     }
 
-    fn firmware_installation_details(
+    fn firmware_installation_footer(
         &mut self,
         ui: &mut egui::Ui,
         manifest: &ReleaseManifestV1,
-        target_matches: bool,
         show_reinstall: bool,
     ) {
         ui.add_space(12.0);
-        if target_matches {
-            firmware_receipt_callout(ui, self.firmware.version, self.firmware.install);
-        }
         if show_reinstall {
-            ui.add_space(12.0);
-            if firmware_reinstall_action(ui, self.operation_available()).clicked() {
+            if firmware_reinstall_action(ui).clicked() {
                 self.install_firmware(manifest.clone(), ui.ctx().clone());
             }
+            ui.add_space(12.0);
         }
-        ui.add_space(14.0);
         ui.separator();
         ui.add_space(6.0);
         let target = firmware_target(&manifest.firmware.target);
-        let target_name =
-            target.map_or("the selected firmware target", |target| target.display_name);
+        let target_name = target.map_or("the selected firmware target", |target| {
+            target.display_name.as_str()
+        });
         ui.label(
             egui::RichText::new(format!(
                 "During installation, the temporary {target_name} UF2 drive disconnects automatically. macOS may show a harmless \"Disk Not Ejected Properly\" notification even when verification succeeds."
@@ -369,16 +380,30 @@ impl AppCenter {
         if self.status_placement != StatusPlacement::Firmware {
             return;
         }
+        ui.add_space(12.0);
         self.status_banner(ui, StatusPlacement::Firmware);
         if matches!(self.activity, Activity::Busy { can_cancel: true }) {
             ui.add_space(10.0);
-            if secondary_button(ui, "Cancel Before Writing", true).clicked() {
+            if update_action_button(ui, "Cancel Before Writing", true).clicked() {
                 self.cancel.store(true, Ordering::Release);
-                "Cancelling safely…".clone_into(&mut self.status);
+                if self.demo.is_some() {
+                    self.activity = Activity::Idle;
+                    self.firmware_write_started = false;
+                    "Demo: firmware preparation cancelled safely.".clone_into(&mut self.status);
+                } else {
+                    "Cancelling safely…".clone_into(&mut self.status);
+                }
                 self.status_tone = StatusTone::Info;
             }
         }
-        ui.add_space(14.0);
+    }
+
+    fn application_operation_status(&mut self, ui: &mut egui::Ui) {
+        if self.status_placement != StatusPlacement::Application {
+            return;
+        }
+        ui.add_space(12.0);
+        self.status_banner(ui, StatusPlacement::Application);
     }
 
     fn release_notes(
@@ -604,29 +629,35 @@ fn status_callout(ui: &mut egui::Ui, colour: egui::Color32, title: &str, body: &
         });
 }
 
-fn primary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(egui::RichText::new(label).strong().color(ON_ACCENT))
-            .fill(ACCENT)
-            .stroke(egui::Stroke::NONE)
-            .corner_radius(8)
-            .min_size(egui::vec2(180.0, 36.0)),
+fn update_action_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
+    show_update_action_button(ui, ActionButton::new(label).enabled(enabled))
+}
+
+fn update_refresh_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    enabled: bool,
+    spinning: bool,
+) -> egui::Response {
+    show_update_action_button(
+        ui,
+        ActionButton::new(label)
+            .enabled(enabled)
+            .refresh_icon(spinning),
     )
 }
 
-fn secondary_button(ui: &mut egui::Ui, label: &str, enabled: bool) -> egui::Response {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(egui::RichText::new(label).strong().color(TEXT))
-            .fill(SURFACE)
-            .stroke(egui::Stroke::new(1.0, BORDER))
-            .corner_radius(8)
-            .min_size(egui::vec2(164.0, 36.0)),
-    )
+fn show_update_action_button(ui: &mut egui::Ui, button: ActionButton<'_>) -> egui::Response {
+    let width = ui.available_width().min(320.0);
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+        button.min_size(egui::vec2(width, 38.0)).show(ui)
+    })
+    .inner
 }
 
-fn firmware_reinstall_action(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+/// The whole card is hidden while an operation is running, so its button is
+/// only ever built in an actionable state.
+fn firmware_reinstall_action(ui: &mut egui::Ui) -> egui::Response {
     let inner_width = (ui.available_width() - 28.0 - 2.0).max(0.0);
     egui::Frame::new()
         .fill(SURFACE)
@@ -646,18 +677,7 @@ fn firmware_reinstall_action(ui: &mut egui::Ui, enabled: bool) -> egui::Response
                     .color(MUTED_TEXT),
             );
             ui.add_space(4.0);
-            ui.add_enabled(
-                enabled,
-                egui::Button::new(
-                    egui::RichText::new("Reinstall Firmware")
-                        .strong()
-                        .color(ACCENT),
-                )
-                .fill(ACCENT_SUBTLE)
-                .stroke(egui::Stroke::new(1.0, ACCENT.gamma_multiply(0.7)))
-                .corner_radius(8)
-                .min_size(egui::vec2(180.0, 36.0)),
-            )
+            update_action_button(ui, "Reinstall Firmware", true)
         })
         .inner
 }
@@ -734,7 +754,7 @@ mod tests {
 
     #[test]
     fn release_state_requires_the_exact_target_except_while_the_report_is_pending() {
-        let target = release_updater::FIRMWARE_TARGET_ID;
+        let target = release_updater::firmware_targets().unwrap()[0].id.as_str();
         let pending = FirmwareDetails::default();
         assert_eq!(
             firmware_release_state(&pending, target, 3),
@@ -767,7 +787,7 @@ mod tests {
 
     #[test]
     fn uf2_disconnect_notice_explains_the_expected_macos_warning() {
-        let target = firmware_target(release_updater::FIRMWARE_TARGET_ID).unwrap();
+        let target = &release_updater::firmware_targets().unwrap()[0];
         let notice = format!(
             "During installation, the temporary {} UF2 drive disconnects automatically. macOS may show a harmless \"Disk Not Ejected Properly\" notification even when verification succeeds.",
             target.display_name

@@ -12,6 +12,10 @@
 
 use eframe::egui;
 
+mod action_button;
+
+pub use action_button::ActionButton;
+
 const TEXT_COVERAGE_GAMMA: f32 = 0.7;
 
 #[cfg(target_os = "macos")]

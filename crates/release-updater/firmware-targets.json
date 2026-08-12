@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "id": "seeed-xiao-nrf52840",
+      "display_name": "Seeed Studio XIAO nRF52840 / Sense",
+      "compact_display_name": "XIAO nRF52840",
+      "minimum_compatible_revision": 2,
+      "application_usb": {
+        "vendor_id": "0x045e",
+        "product_id": "0x028e"
+      },
+      "application_manufacturer": "Lynxware",
+      "application_product": "Steam Controller Bridge",
+      "factory_application_usb": [
+        { "vendor_id": "0x2886", "product_id": "0x8044" },
+        { "vendor_id": "0x2886", "product_id": "0x8045" }
+      ],
+      "bootloader_usb": [
+        { "vendor_id": "0x2886", "product_id": "0x0044" },
+        { "vendor_id": "0x2886", "product_id": "0x0045" }
+      ],
+      "primary_board_id": "Seeed_XIAO_nRF52840",
+      "accepted_board_ids": [
+        "Seeed_XIAO_nRF52840",
+        "Seeed_XIAO_nRF52840_Sense"
+      ],
+      "uf2_family_id": "0xada52840",
+      "installer": "uf2",
+      "manual_recovery": "Quickly press the tiny reset button beside the USB-C connector twice while this recovery window is open",
+      "manual_recovery_timeout": "waiting for the XIAO UF2 drive; quickly press the tiny reset button beside the USB-C connector twice while manual recovery is waiting"
+    }
+  ]
+}

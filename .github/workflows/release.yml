@@ -247,6 +247,7 @@ jobs:
             --application release/steam-controller-bridge-macos.zip \
             --firmware release/steam-controller-bridge-xiao-nrf52840.uf2 \
             --firmware-header firmware/xiao-nrf52840/src/firmware_version.h \
+            --firmware-target seeed-xiao-nrf52840 \
             --output release \
             --key-id "${UPDATE_SIGNING_KEY_ID}"
       - name: Checksum every release asset

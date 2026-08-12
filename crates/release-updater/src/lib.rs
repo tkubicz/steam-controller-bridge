@@ -18,13 +18,13 @@ mod firmware;
 mod manifest;
 mod network;
 mod targets;
-mod temporary;
 #[cfg(test)]
 mod test_support;
 
 #[cfg(target_os = "macos")]
 pub use application::{
-    guided_replacement_supported, installed_macos_version, stage_application, StagedApplication,
+    guided_replacement_supported, installed_macos_version, stage_application, ApplicationError,
+    StagedApplication,
 };
 pub use artifact::{sha256_hex, verify_artifact, ArtifactError};
 pub use cache::{CacheError, ReleaseCache};
@@ -41,14 +41,13 @@ pub use manifest::{
 #[cfg(debug_assertions)]
 pub use network::LocalReleaseClient;
 pub use network::{
-    download_to_path, ensure_release_artifact, refresh_catalog_if_due, CatalogRefresh,
-    DownloadError, LatestReleaseClient, ReleaseSource,
+    download_to_path, ensure_release_artifact, ensure_release_artifact_cancellable,
+    refresh_catalog, refresh_catalog_cancellable, ArtifactFetchError, CatalogRefresh,
+    CatalogRefreshError, CatalogRefreshPolicy, DownloadError, LatestReleaseClient, ReleaseSource,
 };
 pub use targets::{
-    firmware_matches_target, firmware_target, FirmwareInstallerStrategy, FirmwareTargetDescriptor,
-    UsbIdentity, FIRMWARE_BOARD_ID, FIRMWARE_TARGET_ID, UF2_FAMILY_ID,
-    XIAO_MINIMUM_COMPATIBLE_REVISION, XIAO_NRF52840_TARGET, XIAO_SENSE_BOARD_ID,
-    XIAO_USB_MANUFACTURER, XIAO_USB_PRODUCT, XIAO_USB_PRODUCT_ID, XIAO_USB_VENDOR_ID,
+    firmware_matches_target, firmware_target, firmware_targets, FirmwareInstallerStrategy,
+    FirmwareTargetCatalogError, FirmwareTargetDescriptor, UsbIdentity,
 };
 
 /// GitHub repository that owns the only accepted production update channel.

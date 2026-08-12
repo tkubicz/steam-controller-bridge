@@ -3,6 +3,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use sha2::{Digest as _, Sha256};
+use thiserror::Error;
 
 use crate::ArtifactDescriptor;
 
@@ -17,31 +18,14 @@ pub(crate) fn lower_hex(bytes: &[u8]) -> String {
     encoded
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ArtifactError {
-    Io(io::Error),
+    #[error("cannot read update artifact: {0}")]
+    Io(#[from] io::Error),
+    #[error("artifact size is {actual}, expected {expected}")]
     Size { expected: u64, actual: u64 },
+    #[error("artifact SHA-256 does not match signed metadata")]
     Sha256,
-}
-
-impl std::fmt::Display for ArtifactError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(error) => write!(formatter, "cannot read update artifact: {error}"),
-            Self::Size { expected, actual } => {
-                write!(formatter, "artifact size is {actual}, expected {expected}")
-            }
-            Self::Sha256 => write!(formatter, "artifact SHA-256 does not match signed metadata"),
-        }
-    }
-}
-
-impl std::error::Error for ArtifactError {}
-
-impl From<io::Error> for ArtifactError {
-    fn from(value: io::Error) -> Self {
-        Self::Io(value)
-    }
 }
 
 pub fn sha256_hex(path: &Path) -> Result<String, ArtifactError> {
@@ -79,8 +63,8 @@ mod tests {
 
     #[test]
     fn artifact_requires_exact_size_and_hash() {
-        let path =
-            std::env::temp_dir().join(format!("release-updater-artifact-{}", std::process::id()));
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("artifact");
         fs::write(&path, b"abc").unwrap();
         let descriptor = ArtifactDescriptor {
             name: "a".to_owned(),
@@ -93,6 +77,5 @@ mod tests {
             verify_artifact(&path, &descriptor),
             Err(ArtifactError::Sha256)
         ));
-        let _ = fs::remove_file(path);
     }
 }
