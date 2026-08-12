@@ -149,13 +149,12 @@ impl AppCenter {
             let installed = &self.installed;
             let app_pending = installed < &manifest.application_version;
             let app_incompatible = installed < &manifest.firmware.minimum_application_version;
-            let target_matches = self
-                .firmware
-                .target_id()
-                .is_some_and(|target| target.as_str() == manifest.firmware.target);
-            let release_state = target_matches.then(|| {
-                classify_firmware_release(self.firmware.version.into(), manifest.firmware.revision)
-            });
+            let target_matches = firmware_target_matches(&self.firmware, &manifest.firmware.target);
+            let release_state = firmware_release_state(
+                &self.firmware,
+                &manifest.firmware.target,
+                manifest.firmware.revision,
+            );
             let (badge, badge_colour) = match release_state {
                 Some(FirmwareReleaseState::Pending) => ("Checking firmware", MUTED_TEXT),
                 Some(FirmwareReleaseState::UpdateAvailable) => ("Update available", ACCENT),
@@ -243,7 +242,7 @@ impl AppCenter {
                 ui.add_space(12.0);
                 if primary_button(
                     ui,
-                    "Install or Recover Firmware",
+                    "Install or Recover XIAO Firmware",
                     self.operation_available(),
                 )
                 .clicked()
@@ -547,18 +546,40 @@ fn firmware_description(status: FirmwareStatus) -> String {
     }
 }
 
+fn firmware_target_matches(firmware: &FirmwareDetails, release_target: &str) -> bool {
+    firmware
+        .target_id()
+        .is_some_and(|target| target.as_str() == release_target)
+}
+
+/// `None` marks firmware whose reported identity is outside this release's
+/// target. A pending report is not an identity verdict yet - a factory board
+/// or a still-starting bridge keeps its dedicated checking guidance instead of
+/// reading as a foreign target.
+fn firmware_release_state(
+    firmware: &FirmwareDetails,
+    release_target: &str,
+    release_revision: u16,
+) -> Option<FirmwareReleaseState> {
+    (firmware.version == FirmwareStatus::Pending
+        || firmware_target_matches(firmware, release_target))
+    .then(|| classify_firmware_release(firmware.version.into(), release_revision))
+}
+
 pub(super) fn firmware_badge(firmware: &FirmwareDetails) -> String {
+    // Pending and newer-format reports carry no parseable identity, so the
+    // version state must win before the target check declares them
+    // unidentified.
     let target_is_supported = firmware
         .target_id()
         .is_some_and(|identifier| firmware_target(identifier.as_str()).is_some());
-    if !target_is_supported {
-        return "Firmware unidentified".to_owned();
-    }
     match firmware.version {
-        FirmwareStatus::Reported(revision) => format!("Firmware rev {revision}"),
-        FirmwareStatus::UnsupportedFormat(_) => "Firmware newer".to_owned(),
         FirmwareStatus::Pending => "Checking firmware".to_owned(),
-        FirmwareStatus::Malformed | FirmwareStatus::Unreported => {
+        FirmwareStatus::UnsupportedFormat(_) => "Firmware newer".to_owned(),
+        FirmwareStatus::Reported(revision) if target_is_supported => {
+            format!("Firmware rev {revision}")
+        }
+        FirmwareStatus::Reported(_) | FirmwareStatus::Malformed | FirmwareStatus::Unreported => {
             "Firmware unidentified".to_owned()
         }
     }
@@ -709,6 +730,39 @@ mod tests {
             assert_eq!(title, "Installation date unavailable");
             assert!(!body.contains("revision 1"), "misleading copy: {body}");
         }
+    }
+
+    #[test]
+    fn release_state_requires_the_exact_target_except_while_the_report_is_pending() {
+        let target = release_updater::FIRMWARE_TARGET_ID;
+        let pending = FirmwareDetails::default();
+        assert_eq!(
+            firmware_release_state(&pending, target, 3),
+            Some(FirmwareReleaseState::Pending)
+        );
+
+        let matching = FirmwareDetails {
+            target: FirmwareTargetStatus::Reported(target.to_owned()),
+            version: FirmwareStatus::Reported(2),
+            ..FirmwareDetails::default()
+        };
+        assert_eq!(
+            firmware_release_state(&matching, target, 3),
+            Some(FirmwareReleaseState::UpdateAvailable)
+        );
+
+        let targetless = FirmwareDetails {
+            version: FirmwareStatus::Reported(2),
+            ..FirmwareDetails::default()
+        };
+        assert_eq!(firmware_release_state(&targetless, target, 3), None);
+
+        let different = FirmwareDetails {
+            target: FirmwareTargetStatus::Reported("community-nrf52840".to_owned()),
+            version: FirmwareStatus::Reported(2),
+            ..FirmwareDetails::default()
+        };
+        assert_eq!(firmware_release_state(&different, target, 3), None);
     }
 
     #[test]

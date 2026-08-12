@@ -6,8 +6,9 @@ bridge device does the gamepad translation; the project currently provides and
 updates firmware for Seeed Studio XIAO nRF52840/Sense.
 
 > **Requirements:** macOS 13 or later, a **Steam Controller 2 (2026)**, and a
-> XIAO nRF52840 or XIAO nRF52840 Sense. The original 2015 Steam Controller and its receiver
-> use a different protocol and are not supported.
+> protocol-compatible serial bridge device; the project supplies firmware for
+> the XIAO nRF52840 and XIAO nRF52840 Sense. The original 2015 Steam Controller
+> and its receiver use a different protocol and are not supported.
 
 For hardware requirements, firmware flashing, Steam Controller 2 pairing,
 macOS permissions, daily startup, verification, and troubleshooting, start with

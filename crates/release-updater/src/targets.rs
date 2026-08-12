@@ -26,7 +26,11 @@ pub struct FirmwareTargetDescriptor {
     pub accepted_board_ids: &'static [&'static str],
     pub uf2_family_id: u32,
     pub installer: FirmwareInstallerStrategy,
+    /// Complete imperative sentence shown while the manual recovery window is
+    /// open.
     pub manual_recovery: &'static str,
+    /// Continues "timed out while …" when no bootloader volume ever mounts.
+    pub manual_recovery_timeout: &'static str,
 }
 
 pub const XIAO_USB_VENDOR_ID: u16 = 0x045e;
@@ -79,7 +83,8 @@ pub const XIAO_NRF52840_TARGET: FirmwareTargetDescriptor = FirmwareTargetDescrip
     accepted_board_ids: &XIAO_BOARD_IDS,
     uf2_family_id: UF2_FAMILY_ID,
     installer: FirmwareInstallerStrategy::Uf2,
-    manual_recovery: "quickly press the tiny reset button beside the USB-C connector twice while this recovery window is open",
+    manual_recovery: "Quickly press the tiny reset button beside the USB-C connector twice while this recovery window is open",
+    manual_recovery_timeout: "waiting for the XIAO UF2 drive; quickly press the tiny reset button beside the USB-C connector twice while manual recovery is waiting",
 };
 
 #[must_use]

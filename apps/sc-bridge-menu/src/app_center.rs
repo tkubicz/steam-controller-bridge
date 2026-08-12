@@ -1278,6 +1278,19 @@ mod tests {
         let mut pending = supported;
         pending.version = FirmwareStatus::Pending;
         assert_eq!(firmware_badge(&pending), "Checking firmware");
+        // A live check and a newer report never carry a parsed target, so the
+        // version state must decide these badges on its own.
+        assert_eq!(
+            firmware_badge(&FirmwareDetails::default()),
+            "Checking firmware"
+        );
+        assert_eq!(
+            firmware_badge(&FirmwareDetails {
+                version: FirmwareStatus::UnsupportedFormat(2),
+                ..FirmwareDetails::default()
+            }),
+            "Firmware newer"
+        );
         assert_eq!(
             firmware_badge(&FirmwareDetails {
                 target: FirmwareTargetStatus::Reported("another-device".to_owned()),

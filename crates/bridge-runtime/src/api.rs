@@ -158,25 +158,13 @@ pub struct ControllerStatus {
     pub last_state_age: Option<Duration>,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct OutputStatus {
     pub backend: OutputBackend,
     pub endpoint: Option<String>,
     pub stable_id: Option<String>,
     pub ready: bool,
     pub firmware: Option<FirmwareInfo>,
-}
-
-impl Default for OutputStatus {
-    fn default() -> Self {
-        Self {
-            backend: OutputBackend::SerialBridge,
-            endpoint: None,
-            stable_id: None,
-            ready: false,
-            firmware: None,
-        }
-    }
 }
 
 impl OutputStatus {

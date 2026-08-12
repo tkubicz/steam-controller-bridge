@@ -784,7 +784,7 @@ fn wait_for_volume(
         }
         adapter.wait(Duration::from_millis(250));
     }
-    Err(FirmwareFlashError::Timeout(target.manual_recovery))
+    Err(FirmwareFlashError::Timeout(target.manual_recovery_timeout))
 }
 
 fn copy_and_flush(source: &Path, destination: &Path) -> io::Result<()> {
