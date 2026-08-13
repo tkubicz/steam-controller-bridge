@@ -12,8 +12,8 @@ impl MenuApp {
             }
             items.puck_dock.set_checked(self.settings.power_off_on_puck);
             items
-                .output_xiao
-                .set_checked(self.settings.output == OutputPreference::XiaoUsbBridge);
+                .output_bridge_device
+                .set_checked(self.settings.output == OutputPreference::BridgeDevice);
             items
                 .output_virtual_hid
                 .set_checked(self.settings.output == OutputPreference::VirtualHid);

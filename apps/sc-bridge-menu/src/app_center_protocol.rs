@@ -16,7 +16,7 @@ use crate::line_protocol::read_bounded_line;
 
 pub const MAX_IPC_LINE_BYTES: usize = 4 * 1024;
 // Version 4: firmware details explicitly distinguish a selected non-firmware
-// output from a XIAO whose firmware report is not available yet.
+// output from a bridge device whose firmware report is not available yet.
 const IPC_PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]

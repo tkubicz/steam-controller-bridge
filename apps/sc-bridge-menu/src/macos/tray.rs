@@ -138,11 +138,11 @@ impl MenuApp {
             ],
         )
         .map_err(|error| error.to_string())?;
-        let output_xiao = CheckMenuItem::with_id(
-            OUTPUT_XIAO_ID,
-            "XIAO USB Bridge",
+        let output_bridge_device = CheckMenuItem::with_id(
+            OUTPUT_BRIDGE_DEVICE_ID,
+            "Bridge Device",
             true,
-            self.settings.output == OutputPreference::XiaoUsbBridge,
+            self.settings.output == OutputPreference::BridgeDevice,
             None,
         );
         let output_virtual_hid = CheckMenuItem::with_id(
@@ -156,7 +156,7 @@ impl MenuApp {
             "Output",
             true,
             &[
-                &output_xiao as &dyn tray_icon::menu::IsMenuItem,
+                &output_bridge_device as &dyn tray_icon::menu::IsMenuItem,
                 &output_virtual_hid,
             ],
         )
@@ -305,7 +305,7 @@ impl MenuApp {
             updates,
             idle_shutdown,
             puck_dock,
-            output_xiao,
+            output_bridge_device,
             output_virtual_hid,
             bindings_submenu,
             binding_profiles,
@@ -503,7 +503,7 @@ impl MenuApp {
                 }
                 self.update_setting_checkmarks();
             }
-            OUTPUT_XIAO_ID => self.begin_output_change(OutputPreference::XiaoUsbBridge),
+            OUTPUT_BRIDGE_DEVICE_ID => self.begin_output_change(OutputPreference::BridgeDevice),
             OUTPUT_VIRTUAL_HID_ID => self.begin_output_change(OutputPreference::VirtualHid),
             COPY_ERROR_ID => {
                 let recovery_error = self.app_center_recovery.problem().map(str::to_owned);
@@ -664,7 +664,7 @@ impl MenuApp {
 
     fn set_output_items_enabled(&self, enabled: bool) {
         if let Some(items) = &self.items {
-            items.output_xiao.set_enabled(enabled);
+            items.output_bridge_device.set_enabled(enabled);
             items.output_virtual_hid.set_enabled(enabled);
         }
     }

@@ -20,14 +20,14 @@ pub(super) enum PermissionStage {
 #[serde(rename_all = "snake_case")]
 pub(super) enum OutputPreference {
     #[default]
-    XiaoUsbBridge,
+    BridgeDevice,
     VirtualHid,
 }
 
 impl OutputPreference {
     pub(super) fn runtime_selection(self) -> Result<OutputSelection, String> {
         match self {
-            Self::XiaoUsbBridge => Ok(OutputSelection::Serial),
+            Self::BridgeDevice => Ok(OutputSelection::Serial),
             Self::VirtualHid => bundled_virtual_hid_helper_path()
                 .map(VirtualHidConfig::new)
                 .map(OutputSelection::VirtualHid),
@@ -193,7 +193,7 @@ impl Default for AppSettings {
             version: SETTINGS_VERSION,
             idle_shutdown_minutes: Some(15),
             power_off_on_puck: false,
-            output: OutputPreference::XiaoUsbBridge,
+            output: OutputPreference::BridgeDevice,
             active_binding_profile: default_binding_profile_id(),
             profile_overlay_enabled: false,
             profile_overlay_hold_ms: default_overlay_hold_ms(),

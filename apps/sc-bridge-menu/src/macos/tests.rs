@@ -168,7 +168,7 @@ fn menu_settings_round_trip_and_invalid_data_falls_back() {
 }
 
 #[test]
-fn version_three_settings_migrate_to_xiao_and_version_four_preserves_virtual_hid() {
+fn version_three_settings_migrate_to_the_bridge_device_and_version_four_preserves_virtual_hid() {
     let path = temporary_settings_path("output-migration");
     fs::write(
         &path,
@@ -178,7 +178,7 @@ fn version_three_settings_migrate_to_xiao_and_version_four_preserves_virtual_hid
     let (migrated, warning) = load_settings(&path);
     assert!(warning.is_none());
     assert_eq!(migrated.version, SETTINGS_VERSION);
-    assert_eq!(migrated.output, OutputPreference::XiaoUsbBridge);
+    assert_eq!(migrated.output, OutputPreference::BridgeDevice);
 
     let virtual_hid = AppSettings {
         output: OutputPreference::VirtualHid,

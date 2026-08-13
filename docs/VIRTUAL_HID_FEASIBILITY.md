@@ -44,7 +44,7 @@ the virtual transport, report delivery, or generic descriptor. It proves that
 `IOHIDUserDevice` can reach GameController and the browser, but it does not
 make the project a Microsoft product; the existing project disclaimer continues
 to apply. The experimental virtual backend now exposes only this proven
-combination, matching the XIAO firmware. A paired VID/PID override remains for
+combination, matching the bridge firmware. A paired VID/PID override remains for
 development.
 
 Automated simulator runs omit the Guide/Steam system button by default because

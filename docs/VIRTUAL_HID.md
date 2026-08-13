@@ -3,14 +3,15 @@
 Steam Controller Bridge has an opt-in macOS virtual-gamepad backend implemented
 entirely in Rust with the public IOKit `IOHIDUserDevice` API. It does not use
 Swift or CoreHID today. The implementation sits behind the same `GamepadOutput`
-boundary as the proven serial/XIAO backend, so a future provider can replace
-the helper without changing controller decoding or mapping.
+boundary as the proven serial bridge-device backend, so a future provider can
+replace the helper without changing controller decoding or mapping.
 
-XIAO USB Bridge remains the default for new and migrated installations. The
-application never silently falls back between XIAO and virtual HID. Choose
-**Output > Virtual Gamepad — Experimental** explicitly in a packaged build.
-Switching sends neutral to the old output, releases it, and only then opens the
-new backend. Stop, quit, sleep, wake, and updater suspension use the same order.
+The serial bridge device remains the default for new and migrated installations.
+The application never silently falls back between the bridge device and virtual
+HID. Choose **Output > Virtual Gamepad — Experimental** explicitly in a packaged
+build. Switching sends neutral to the old output, releases it, and only then
+opens the new backend. Stop, quit, sleep, wake, and updater suspension use the
+same order.
 
 ## Entitlement limitation
 
@@ -29,7 +30,7 @@ Only the nested Rust helper app receives the entitlement. The menu app does
 not. The helper communicates with its parent over bounded, versioned JSON-lines
 stdio and is released when stdin closes. The first milestone is input-only:
 host set/get reports are counted and diagnosed, but virtual rumble is not
-claimed. XIAO remains the proven dual-rumble backend.
+claimed. The bridge device remains the proven dual-rumble backend.
 
 ## Development commands
 
@@ -44,9 +45,10 @@ cargo run -p gamepad-simulator -- automated \
 
 The virtual backend has one fixed, tested contract: USB transport, the pinned
 Xbox-style descriptor, and its 20-byte input report. Its default identity is
-`045e:028e`, matching the compatibility identity already used by the XIAO
-firmware. The disposable-VM matrix showed that this complete combination is the
-only tested one that reaches GameController and the offline browser tester.
+`045e:028e`, matching the Xbox 360 compatibility identity the bridge firmware
+already enumerates with. The disposable-VM matrix showed that this complete
+combination is the only tested one that reaches GameController and the offline
+browser tester.
 
 The simulator, replay tool, and CLI bridge retain a narrow development hatch to
 override only the identity. Both values must be supplied together:
@@ -56,9 +58,9 @@ override only the identity. Both values must be supplied together:
 ```
 
 The override does not change the transport, descriptor, report bytes, or
-mapping. The packaged menu intentionally exposes none of these knobs. XIAO
-remains the app-wide default output and there is no silent fallback between
-backends.
+mapping. The packaged menu intentionally exposes none of these knobs. The
+bridge device remains the app-wide default output and there is no silent
+fallback between backends.
 
 Run the final command live only in the disposable VM described below. Replay
 and `sc-bridge` accept the same output/helper pair. Development commands require
@@ -80,5 +82,5 @@ The macOS builder accepts `SC_BRIDGE_CODESIGN_IDENTITY` (default `-`),
 with `packaging/macos/VirtualHidHelper.entitlements`, signs the outer app without
 `--deep`, and uses `--deep --strict` only for final verification.
 
-See [the IPC contract](VIRTUAL_HID_IPC.md), [the feasibility matrix and VM
-runbook](VIRTUAL_HID_FEASIBILITY.md), and [the implementation plan](VIRTUAL_HID_IMPLEMENTATION_PLAN.md).
+See [the IPC contract](VIRTUAL_HID_IPC.md) and [the feasibility matrix and VM
+runbook](VIRTUAL_HID_FEASIBILITY.md).

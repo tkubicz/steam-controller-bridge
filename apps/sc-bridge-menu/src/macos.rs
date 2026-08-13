@@ -113,7 +113,7 @@ const IDLE_10_ID: &str = "idle-10";
 const IDLE_15_ID: &str = "idle-15";
 const IDLE_30_ID: &str = "idle-30";
 const PUCK_DOCK_ID: &str = "puck-dock-power-off";
-const OUTPUT_XIAO_ID: &str = "output-xiao";
+const OUTPUT_BRIDGE_DEVICE_ID: &str = "output-bridge-device";
 const OUTPUT_VIRTUAL_HID_ID: &str = "output-virtual-hid";
 const OVERLAY_ENABLED_ID: &str = "profile-overlay-enabled";
 const OVERLAY_HOLD_PREFIX: &str = "profile-overlay-hold:";
@@ -162,7 +162,7 @@ struct MenuItems {
     updates: MenuItem,
     idle_shutdown: Vec<(Option<u64>, CheckMenuItem)>,
     puck_dock: CheckMenuItem,
-    output_xiao: CheckMenuItem,
+    output_bridge_device: CheckMenuItem,
     output_virtual_hid: CheckMenuItem,
     bindings_submenu: Submenu,
     binding_profiles: Vec<(String, CheckMenuItem)>,
@@ -314,7 +314,7 @@ impl MenuApp {
         let output = settings.output.runtime_selection().map_err(|error| {
             format!(
                 "cannot start with the saved gamepad output: {error}. Run the packaged \
-                 application, or set \"output\" to \"xiao_usb_bridge\" in {}",
+                 application, or set \"output\" to \"bridge_device\" in {}",
                 settings_path.display()
             )
         })?;

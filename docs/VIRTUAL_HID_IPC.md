@@ -38,7 +38,7 @@ fixed type/size header `00 14`; bytes 2-3 contain D-pad and button bits; bytes
 ```
 
 The default identity is `045e:028e`, matching the compatibility identity used
-by the XIAO firmware and the only identity proven to register through macOS
+by the bridge firmware and the only identity proven to register through macOS
 GameController in the disposable VM. Callers may override `vendor_id` and
 `product_id` together for development, but cannot replace the descriptor,
 transport, report encoder, or validation contract.
