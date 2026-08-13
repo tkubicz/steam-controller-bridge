@@ -8,6 +8,9 @@ use crate::{VirtualHidError, VirtualHidErrorClass};
 pub const HELPER_PROTOCOL_VERSION: u16 = 3;
 pub const DEFAULT_VENDOR_ID: u16 = 0x045e;
 pub const DEFAULT_PRODUCT_ID: u16 = 0x028e;
+pub const DEVICE_SERIAL_NUMBER: &str = "SCBRIDGE-VIRTUAL-GAMEPAD-1";
+pub const DEVICE_PHYSICAL_UNIQUE_ID: &str = "SCBRIDGE-VIRTUAL-GAMEPAD-1";
+pub const DEVICE_LOCATION_ID: i32 = 0x5343_4201;
 pub const INPUT_REPORT_LEN: usize = 20;
 pub const MAX_LINE_LEN: usize = 65_536;
 pub const MAX_RAW_REPORT_LEN: usize = 4_096;
@@ -294,6 +297,9 @@ mod tests {
 
     #[test]
     fn descriptor_is_pinned() {
+        assert_eq!(DEVICE_SERIAL_NUMBER, "SCBRIDGE-VIRTUAL-GAMEPAD-1");
+        assert_eq!(DEVICE_PHYSICAL_UNIQUE_ID, "SCBRIDGE-VIRTUAL-GAMEPAD-1");
+        assert_eq!(DEVICE_LOCATION_ID, 0x5343_4201);
         assert_eq!(GAMEPAD_REPORT_DESCRIPTOR.len(), 212);
         assert_eq!(GAMEPAD_REPORT_DESCRIPTOR[0..6], [5, 1, 9, 5, 161, 1]);
         assert_eq!(GAMEPAD_REPORT_DESCRIPTOR.last(), Some(&0xc0));

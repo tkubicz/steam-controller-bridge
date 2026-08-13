@@ -673,6 +673,34 @@ fn hardware_release_finishes_before_command_acknowledgement() {
 }
 
 #[test]
+fn ordinary_stop_disconnects_virtual_hid_before_acknowledgement() {
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let output = OutputSession {
+        output: Box::new(DropOrderOutput(Arc::clone(&order))),
+        serial_device: None,
+        capabilities: OutputCapabilities::VIRTUAL_HID,
+        first_observed_receipt: FirstObservedReceiptState::Idle,
+    };
+    let release_order = Arc::clone(&order);
+    let ack_order = Arc::clone(&order);
+    let (ack, receiver) = mpsc::channel::<Result<(), String>>();
+    let observer = thread::spawn(move || {
+        receiver.recv().unwrap().unwrap();
+        ack_order.lock().unwrap().push("ack");
+    });
+
+    acknowledge_after_hardware_release(
+        output,
+        move || release_order.lock().unwrap().push("controllers"),
+        &ack,
+        Ok(()),
+    );
+    observer.join().unwrap();
+
+    assert_eq!(*order.lock().unwrap(), ["output", "controllers", "ack"]);
+}
+
+#[test]
 fn a_slow_desktop_operation_is_preceded_by_neutral_on_the_wire() {
     // Regression: constructing the desktop-input sink, or destroying it
     // after a backend failure, can block this thread beyond the firmware's

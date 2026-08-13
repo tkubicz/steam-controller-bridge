@@ -10,13 +10,17 @@ use objc2_core_foundation::{
     CFBoolean, CFBundle, CFData, CFDictionary, CFIndex, CFNumber, CFRetained, CFString, CFType,
 };
 use objc2_io_kit::{
-    kIOHIDManufacturerKey, kIOHIDPrimaryUsageKey, kIOHIDPrimaryUsagePageKey, kIOHIDProductIDKey,
-    kIOHIDProductKey, kIOHIDReportDescriptorKey, kIOHIDTransportKey, kIOHIDVendorIDKey,
+    kIOHIDLocationIDKey, kIOHIDManufacturerKey, kIOHIDPhysicalDeviceUniqueIDKey,
+    kIOHIDPrimaryUsageKey, kIOHIDPrimaryUsagePageKey, kIOHIDProductIDKey, kIOHIDProductKey,
+    kIOHIDReportDescriptorKey, kIOHIDSerialNumberKey, kIOHIDTransportKey, kIOHIDVendorIDKey,
     kIOReturnUnsupported, IOHIDReportType, IOHIDUserDevice, IOHIDUserDeviceGetReportBlock,
     IOHIDUserDeviceOptions, IOHIDUserDeviceSetReportBlock, IOReturn,
 };
 
-use crate::contract::{HelperResponse, HidReportType, HELPER_PROTOCOL_VERSION};
+use crate::contract::{
+    HelperResponse, HidReportType, DEVICE_LOCATION_ID, DEVICE_PHYSICAL_UNIQUE_ID,
+    DEVICE_SERIAL_NUMBER, HELPER_PROTOCOL_VERSION,
+};
 use crate::{
     VirtualHidError, VirtualHidErrorClass, VirtualHidHelperMetadata, GAMEPAD_REPORT_DESCRIPTOR,
     NEUTRAL_INPUT_REPORT,
@@ -188,16 +192,22 @@ fn device_properties(vendor_id: u16, product_id: u16) -> CFRetained<CFDictionary
         key(kIOHIDProductIDKey),
         key(kIOHIDProductKey),
         key(kIOHIDManufacturerKey),
+        key(kIOHIDSerialNumberKey),
+        key(kIOHIDPhysicalDeviceUniqueIDKey),
+        key(kIOHIDLocationIDKey),
         key(kIOHIDTransportKey),
         key(kIOHIDPrimaryUsagePageKey),
         key(kIOHIDPrimaryUsageKey),
     ];
-    let values: [CFRetained<CFType>; 8] = [
+    let values: [CFRetained<CFType>; 11] = [
         CFData::from_static_bytes(GAMEPAD_REPORT_DESCRIPTOR).into(),
         CFNumber::new_i32(i32::from(vendor_id)).into(),
         CFNumber::new_i32(i32::from(product_id)).into(),
         CFString::from_str("Steam Controller Bridge Virtual Gamepad").into(),
         CFString::from_str("Lynxware").into(),
+        CFString::from_str(DEVICE_SERIAL_NUMBER).into(),
+        CFString::from_str(DEVICE_PHYSICAL_UNIQUE_ID).into(),
+        CFNumber::new_i32(DEVICE_LOCATION_ID).into(),
         CFString::from_str("USB").into(),
         CFNumber::new_i32(0x01).into(),
         CFNumber::new_i32(0x05).into(),

@@ -11,7 +11,7 @@ The application never silently falls back between the bridge device and virtual
 HID. Choose **Output > Virtual Gamepad — Experimental** explicitly in a packaged
 build. Switching sends neutral to the old output, releases it, and only then
 opens the new backend. Stop, quit, sleep, wake, and updater suspension use the
-same order.
+same order. When stopped, the virtual controller is disconnected from macOS.
 
 ## Entitlement limitation
 
@@ -49,6 +49,11 @@ Xbox-style descriptor, and its 20-byte input report. Its default identity is
 already enumerates with. The disposable-VM matrix showed that this complete
 combination is the only tested one that reaches GameController and the offline
 browser tester.
+The HID properties include a stable serial, physical-device unique ID, and
+location ID. This gives macOS stable identity material when the device is
+recreated after Start, app relaunch, wake, or update. The disposable VM must
+still confirm that System Settings reconnects its existing remembered profile
+instead of creating another one.
 
 The simulator, replay tool, and CLI bridge retain a narrow development hatch to
 override only the identity. Both values must be supplied together:
