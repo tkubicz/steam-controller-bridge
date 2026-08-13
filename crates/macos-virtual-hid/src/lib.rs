@@ -15,6 +15,41 @@ pub use contract::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Runtime opt-in used by release binaries before they expose or open the
+/// entitlement-gated virtual-HID backend.
+pub const ENABLE_VIRTUAL_HID_ENV: &str = "SC_BRIDGE_ENABLE_VIRTUAL_HID";
+
+/// Resolves the shared command-line/environment opt-in for virtual HID.
+///
+/// An explicit command-line flag takes precedence. Without it, the environment
+/// variable accepts `1`/`true` to enable and an empty value or `0`/`false` to
+/// disable, matched without regard to ASCII case.
+///
+/// # Errors
+///
+/// Returns an error when [`ENABLE_VIRTUAL_HID_ENV`] contains any other value or
+/// is not valid Unicode.
+pub fn virtual_hid_enabled(command_line: bool) -> Result<bool, String> {
+    if command_line {
+        return Ok(true);
+    }
+    std::env::var_os(ENABLE_VIRTUAL_HID_ENV).map_or(Ok(false), |value| {
+        parse_virtual_hid_enabled(&value)
+            .ok_or_else(|| format!("{ENABLE_VIRTUAL_HID_ENV} must be empty, 0, false, 1, or true"))
+    })
+}
+
+fn parse_virtual_hid_enabled(value: &std::ffi::OsStr) -> Option<bool> {
+    let value = value.to_str()?.trim();
+    if value.is_empty() || value == "0" || value.eq_ignore_ascii_case("false") {
+        Some(false)
+    } else if value == "1" || value.eq_ignore_ascii_case("true") {
+        Some(true)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VirtualHidConfig {
     pub helper_path: PathBuf,
@@ -347,5 +382,20 @@ mod tests {
         assert!(parse_usb_id("").is_err());
         assert!(parse_usb_id("cafe").is_err());
         assert!(parse_usb_id("0x10000").is_err());
+    }
+
+    #[test]
+    fn virtual_hid_opt_in_values_are_strict_and_case_insensitive() {
+        use std::ffi::OsStr;
+
+        for value in ["", "0", "false", "FALSE", " false "] {
+            assert_eq!(parse_virtual_hid_enabled(OsStr::new(value)), Some(false));
+        }
+        for value in ["1", "true", "TRUE", " true "] {
+            assert_eq!(parse_virtual_hid_enabled(OsStr::new(value)), Some(true));
+        }
+        for value in ["yes", "2", "enabled"] {
+            assert_eq!(parse_virtual_hid_enabled(OsStr::new(value)), None);
+        }
     }
 }

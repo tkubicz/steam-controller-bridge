@@ -21,6 +21,10 @@ use macos_virtual_hid::{parse_usb_id, VirtualHidOptions};
 #[derive(Debug, Clone, Parser)]
 #[command(name = "sc-bridge", version, about, long_about = None)]
 pub(crate) struct Cli {
+    /// Expose the entitlement-gated experimental virtual-HID backend.
+    #[arg(long)]
+    pub(crate) enable_virtual_hid: bool,
+
     /// Input mode.
     #[arg(long, value_enum, default_value_t = InputMode::Live)]
     pub(crate) input: InputMode,
@@ -206,7 +210,13 @@ impl Cli {
     /// This runs before any backend is constructed, which also fixes a
     /// long-standing wart: `--input replay --output file` used to create and
     /// truncate the output file before noticing that `--file` was missing.
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    pub(crate) fn validate(&self, virtual_hid_enabled: bool) -> Result<(), String> {
+        if self.output() == OutputArg::VirtualHid && !virtual_hid_enabled {
+            return Err(format!(
+                "virtual HID output is experimental; pass --enable-virtual-hid or set {}=1",
+                macos_virtual_hid::ENABLE_VIRTUAL_HID_ENV
+            ));
+        }
         match self.input {
             InputMode::Live => self.validate_live(),
             InputMode::Replay => self.validate_replay(),
@@ -291,7 +301,9 @@ mod tests {
     fn reject(args: &[&str]) -> String {
         let cli = Cli::try_parse_from(std::iter::once("sc-bridge").chain(args.iter().copied()));
         match cli {
-            Ok(cli) => cli.validate().expect_err("should have been rejected"),
+            Ok(cli) => cli
+                .validate(cli.enable_virtual_hid)
+                .expect_err("should have been rejected"),
             Err(error) => error.to_string(),
         }
     }
@@ -312,7 +324,8 @@ mod tests {
         assert!(cli.duration_secs.is_none());
         assert!(!cli.serial_log);
         assert!(!cli.deterministic);
-        cli.validate().expect("a bare live run is valid");
+        cli.validate(cli.enable_virtual_hid)
+            .expect("a bare live run is valid");
     }
 
     #[test]
@@ -357,6 +370,7 @@ mod tests {
         assert!(message.contains("virtual-hid-product-id"));
 
         let cli = parse(&[
+            "--enable-virtual-hid",
             "--output",
             "virtual-hid",
             "--virtual-hid-helper",
@@ -368,7 +382,7 @@ mod tests {
         ]);
         assert_eq!(cli.virtual_hid_vendor_id, Some(0xcafe));
         assert_eq!(cli.virtual_hid_product_id, Some(0x4001));
-        cli.validate().unwrap();
+        cli.validate(cli.enable_virtual_hid).unwrap();
     }
 
     #[test]
@@ -400,9 +414,10 @@ mod tests {
         );
         // Both live backends support controller shutdown.
         parse(&["--idle-shutdown", "5"])
-            .validate()
+            .validate(false)
             .expect("serial is the live default");
         parse(&[
+            "--enable-virtual-hid",
             "--output",
             "virtual-hid",
             "--virtual-hid-helper",
@@ -410,8 +425,29 @@ mod tests {
             "--idle-shutdown",
             "5",
         ])
-        .validate()
+        .validate(true)
         .expect("virtual HID is also a live output");
+    }
+
+    #[test]
+    fn virtual_hid_output_requires_the_explicit_runtime_opt_in() {
+        let arguments = [
+            "--output",
+            "virtual-hid",
+            "--virtual-hid-helper",
+            "/tmp/sc-virtual-hid-helper",
+        ];
+        let message = reject(&arguments);
+        assert!(message.contains("--enable-virtual-hid"), "{message}");
+        assert!(
+            message.contains("SC_BRIDGE_ENABLE_VIRTUAL_HID=1"),
+            "{message}"
+        );
+
+        let mut enabled = vec!["--enable-virtual-hid"];
+        enabled.extend(arguments);
+        let cli = parse(&enabled);
+        cli.validate(cli.enable_virtual_hid).unwrap();
     }
 
     #[test]
@@ -464,7 +500,7 @@ mod tests {
             "--port",
             "/dev/cu.x",
         ])
-        .validate()
+        .validate(false)
         .expect("an explicit port is enough");
     }
 

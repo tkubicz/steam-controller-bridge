@@ -17,6 +17,9 @@ Steam Controller Bridge turns a **Steam Controller 2** into a standard
 Xbox-layout USB gamepad for macOS. It works in browsers, native games, and cloud
 gaming services without Steam or a kernel extension. The proven default uses a
 small USB bridge; an entitlement-gated virtual-gamepad backend is experimental.
+That backend is hidden during normal launches and requires an explicit runtime
+flag or environment opt-in; the downloadable artifact does not claim that an
+ordinary normal-security installation can create virtual devices.
 
 The controller connects through its official Puck or directly over Bluetooth.
 A small protocol-compatible bridge device handles the gamepad-facing USB

@@ -153,7 +153,7 @@ impl MenuApp {
             None,
         );
         let output_submenu = Submenu::with_items(
-            "Output",
+            "Gamepad Output",
             true,
             &[
                 &output_bridge_device as &dyn tray_icon::menu::IsMenuItem,
@@ -241,7 +241,11 @@ impl MenuApp {
         let copy_error_visible = initial_status.last_error.is_some();
         let hardware_rows = MenuModel::from_status(&initial_status).hardware_rows;
         let mut root_items: Vec<&dyn tray_icon::menu::IsMenuItem> =
-            vec![&bridge, &status, &run_toggle, &separators[0]];
+            vec![&bridge, &status, &run_toggle];
+        if self.virtual_hid_enabled {
+            root_items.push(&output_submenu);
+        }
+        root_items.push(&separators[0]);
         for row in hardware_status_rows(hardware_rows) {
             root_items.push(match row {
                 HardwareStatusRow::Input => &input,
@@ -264,7 +268,6 @@ impl MenuApp {
             &separators[2],
             &automatic_shutdown,
             &shutdown_submenu,
-            &output_submenu,
             &separators[3],
             &current_profile,
             &bindings_submenu,
@@ -596,6 +599,14 @@ impl MenuApp {
     }
 
     fn begin_output_change(&mut self, preference: OutputPreference) {
+        if preference == OutputPreference::VirtualHid && !self.virtual_hid_enabled {
+            self.output_change_problem = Some(format!(
+                "Virtual HID is disabled; relaunch with --enable-virtual-hid or set \
+                 {ENABLE_VIRTUAL_HID_ENV}=1"
+            ));
+            self.update_setting_checkmarks();
+            return;
+        }
         if preference == self.settings.output || self.output_change.is_some() {
             self.update_setting_checkmarks();
             return;

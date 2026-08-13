@@ -18,6 +18,7 @@ use desktop_bindings::{
     preflight_accessibility_access, preflight_post_event_access, request_accessibility_access,
     request_input_monitoring_access, request_post_event_access, BindingStore, PermissionState,
 };
+use macos_virtual_hid::ENABLE_VIRTUAL_HID_ENV;
 use objc2::{rc::Retained, MainThreadMarker};
 use objc2_app_kit::{
     NSApplicationActivationOptions, NSImage, NSRunningApplication, NSStatusBarButton,
@@ -118,7 +119,7 @@ const OUTPUT_VIRTUAL_HID_ID: &str = "output-virtual-hid";
 const OVERLAY_ENABLED_ID: &str = "profile-overlay-enabled";
 const OVERLAY_HOLD_PREFIX: &str = "profile-overlay-hold:";
 const PICKER_EVENT_MAILBOX_CAPACITY: usize = 32;
-pub fn run() -> Result<(), String> {
+pub fn run(virtual_hid_enabled: bool) -> Result<(), String> {
     // A menu bar app has no windows and no Dock icon, and it must not take
     // focus when it starts. Winit otherwise runs as a regular foreground app
     // and calls `activateIgnoringOtherApps` at launch. In that state macOS
@@ -131,7 +132,7 @@ pub fn run() -> Result<(), String> {
         .with_activate_ignoring_other_apps(false)
         .build()
         .map_err(|error| error.to_string())?;
-    let mut app = MenuApp::new(event_loop.create_proxy())?;
+    let mut app = MenuApp::new(event_loop.create_proxy(), virtual_hid_enabled)?;
     event_loop
         .run_app(&mut app)
         .map_err(|error| error.to_string())
@@ -230,6 +231,8 @@ struct MenuApp {
     next_poll: Instant,
     logger: StatusLogger,
     settings: AppSettings,
+    /// Product-surface gate only; macOS still enforces the helper entitlement.
+    virtual_hid_enabled: bool,
     settings_path: PathBuf,
     bindings_path: PathBuf,
     binding_store: BindingStore,
@@ -289,7 +292,7 @@ impl AppCenterRecovery {
 }
 
 impl MenuApp {
-    fn new(proxy: EventLoopProxy<()>) -> Result<Self, String> {
+    fn new(proxy: EventLoopProxy<()>, virtual_hid_enabled: bool) -> Result<Self, String> {
         let settings_path = settings_path()?;
         let (settings, warning) = load_settings(&settings_path);
         if let Some(warning) = warning {
@@ -307,10 +310,12 @@ impl MenuApp {
         }
         save_settings(&settings_path, &settings)?;
         let bindings_file_fingerprint = bindings_file_fingerprint(&bindings_path)?;
-        // A stored preference the current binary cannot honour must not leave
-        // the user with an app that only fails to launch, so the error names
-        // the file and the value that unsticks it.
-        let output = settings.output.runtime_selection().map_err(|error| {
+        // The dormant gate never resolves or launches the helper. Once enabled,
+        // a bad packaged path still names the saved value that unsticks launch.
+        let effective_output = settings
+            .output
+            .when_virtual_hid_enabled(virtual_hid_enabled);
+        let output = effective_output.runtime_selection().map_err(|error| {
             format!(
                 "cannot start with the saved gamepad output: {error}. Run the packaged \
                  application, or set \"output\" to \"bridge_device\" in {}",
@@ -361,6 +366,7 @@ impl MenuApp {
             next_poll: Instant::now(),
             logger: StatusLogger::new()?,
             settings,
+            virtual_hid_enabled,
             settings_path,
             bindings_path,
             binding_store,

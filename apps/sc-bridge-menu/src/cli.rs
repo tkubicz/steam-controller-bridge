@@ -27,6 +27,10 @@ fn launch_arguments(arguments: impl Iterator<Item = OsString>) -> impl Iterator<
     about = "Steam Controller Bridge menu app"
 )]
 pub struct Cli {
+    /// Expose the entitlement-gated experimental virtual-HID backend.
+    #[arg(long, global = true)]
+    pub enable_virtual_hid: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -144,6 +148,15 @@ mod tests {
     #[test]
     fn no_subcommand_launches_the_menu() {
         let cli = Cli::try_parse_from(["sc-bridge-menu"]).expect("menu arguments");
+        assert!(cli.command.is_none());
+        assert!(!cli.enable_virtual_hid);
+    }
+
+    #[test]
+    fn virtual_hid_runtime_opt_in_is_a_global_flag() {
+        let cli = Cli::try_parse_from(["sc-bridge-menu", "--enable-virtual-hid"])
+            .expect("menu arguments");
+        assert!(cli.enable_virtual_hid);
         assert!(cli.command.is_none());
     }
 

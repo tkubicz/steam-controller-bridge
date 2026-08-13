@@ -25,6 +25,14 @@ pub(super) enum OutputPreference {
 }
 
 impl OutputPreference {
+    pub(super) const fn when_virtual_hid_enabled(self, enabled: bool) -> Self {
+        if enabled {
+            self
+        } else {
+            Self::BridgeDevice
+        }
+    }
+
     pub(super) fn runtime_selection(self) -> Result<OutputSelection, String> {
         match self {
             Self::BridgeDevice => Ok(OutputSelection::Serial),

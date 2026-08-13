@@ -34,8 +34,9 @@ mod window_ui;
 
 #[cfg(target_os = "macos")]
 fn main() {
-    let result = match cli::parse().command {
-        None => macos::run(),
+    let cli = cli::parse();
+    let result = match cli.command {
+        None => macos_virtual_hid::virtual_hid_enabled(cli.enable_virtual_hid).and_then(macos::run),
         Some(cli::Command::AppCenter(arguments)) => {
             #[cfg(feature = "updater")]
             {

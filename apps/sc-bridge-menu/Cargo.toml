@@ -27,6 +27,7 @@ tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 clap.workspace = true
+macos-virtual-hid = { path = "../../crates/macos-virtual-hid" }
 eframe = { workspace = true, optional = true }
 ui-theme = { path = "../../crates/ui-theme", optional = true }
 # Only the editor draws a controller; the overlay does not.

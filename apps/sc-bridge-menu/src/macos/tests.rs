@@ -190,6 +190,20 @@ fn version_three_settings_migrate_to_the_bridge_device_and_version_four_preserve
 }
 
 #[test]
+fn a_disabled_virtual_hid_gate_uses_serial_without_destroying_the_saved_preference() {
+    let saved = OutputPreference::VirtualHid;
+    assert_eq!(
+        saved.when_virtual_hid_enabled(false),
+        OutputPreference::BridgeDevice
+    );
+    assert_eq!(
+        saved.when_virtual_hid_enabled(true),
+        OutputPreference::VirtualHid
+    );
+    assert_eq!(saved, OutputPreference::VirtualHid);
+}
+
+#[test]
 fn bundled_helper_resolution_never_searches_path() {
     let executable =
         Path::new("/Applications/Steam Controller Bridge.app/Contents/MacOS/sc-bridge-menu");

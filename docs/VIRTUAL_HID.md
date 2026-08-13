@@ -7,9 +7,12 @@ boundary as the proven serial bridge-device backend, so a future provider can
 replace the helper without changing controller decoding or mapping.
 
 The serial bridge device remains the default for new and migrated installations.
-The application never silently falls back between the bridge device and virtual
-HID. Choose **Output > Virtual Gamepad — Experimental** explicitly in a packaged
-build. Switching sends neutral to the old output, releases it, and only then
+Normal menu and CLI launches keep virtual HID hidden and refuse to open it. Opt
+in for that process with `--enable-virtual-hid` or
+`SC_BRIDGE_ENABLE_VIRTUAL_HID=1`. In the packaged menu, this reveals
+**Gamepad Output > Virtual Gamepad — Experimental** directly below Start/Stop.
+The application never silently falls back after an enabled process selects a
+backend. Switching sends neutral to the old output, releases it, and only then
 opens the new backend. Stop, quit, sleep, wake, and updater suspension use the
 same order. When stopped, the virtual controller is disconnected from macOS.
 
@@ -41,6 +44,19 @@ cargo test -p macos-virtual-hid --test dry_run_ipc
 cargo run -p gamepad-simulator -- automated \
   --output virtual-hid \
   --virtual-hid-helper ./target/debug/sc-virtual-hid-helper
+
+cargo run -p sc-bridge -- \
+  --enable-virtual-hid \
+  --output virtual-hid \
+  --virtual-hid-helper ./target/debug/sc-virtual-hid-helper
+```
+
+The equivalent environment opt-in is:
+
+```bash
+SC_BRIDGE_ENABLE_VIRTUAL_HID=1 cargo run -p sc-bridge -- \
+  --output virtual-hid \
+  --virtual-hid-helper ./target/debug/sc-virtual-hid-helper
 ```
 
 The virtual backend has one fixed, tested contract: USB transport, the pinned
@@ -67,10 +83,23 @@ mapping. The packaged menu intentionally exposes none of these knobs. The
 bridge device remains the app-wide default output and there is no silent
 fallback between backends.
 
-Run the final command live only in the disposable VM described below. Replay
-and `sc-bridge` accept the same output/helper pair. Development commands require
-an explicit path. The packaged menu resolves only its exact nested helper path
-and never searches `PATH`.
+Run the final commands live only in the disposable VM described below.
+`sc-bridge` requires the runtime opt-in in both live and replay modes. The
+standalone simulator and replay development tools accept the same output/helper
+pair without the product-surface gate. Development commands require an explicit
+path. The packaged menu resolves only its exact nested helper path and never
+searches `PATH`.
+
+The same packaged menu artifact can be launched experimentally without a
+separate build:
+
+```bash
+open "Steam Controller Bridge.app" --args --enable-virtual-hid
+```
+
+Alternatively, launch its executable directly with
+`SC_BRIDGE_ENABLE_VIRTUAL_HID=1`. The opt-in only exposes the backend; it does
+not bypass macOS entitlement enforcement.
 
 For system recognition, check `GCController.controllers` and System Settings
 before treating the offline [Gamepad API tester](../tools/gamepad-api-tester.html)
