@@ -1,27 +1,29 @@
 use super::{
     automatic_shutdown_phase, available_serial_devices, bounded_error, choose_unique_active,
     controller_inventory_scan_interval, desktop_transition_mask, io, json, masked_serial, mpsc,
-    next_stable_controller_scan_interval, picker_status, same_controller_collection, thread,
-    validate_idle_shutdown_timeout, Arc, AtomicBool, AtomicU64, AutomaticShutdownPhase,
-    AutomaticShutdownRuntime, BridgeEngine, BridgeStatus, CommandAck, ConnectionState,
-    ControllerChargeState, ControllerCooldown, ControllerDiscoveryState, ControllerEnumerator,
-    ControllerSelection, ControllerSourceStatus, ControllerStatus, ControllerTransport,
-    DecodedReport, DesktopBindingsWorker, DesktopInputSnapshot, DeviceError, DeviceEvent,
-    DumpOutput, Duration, File, FileOutput, FirmwareInstallReceipt, GamepadOutput, HapticsState,
-    HapticsStatus, HidDeviceInfo, HidSession, IdleActivityTracker, Instant, JoinHandle, LizardMode,
-    LizardModeHeartbeat, LizardStatus, MockOutput, Mutex, Ordering, OutputBackend, OutputFeedback,
-    OutputSelection, OutputStatus, PadFeedbackRequest, PadHapticGain, PadHapticSide, PickerConfig,
-    PickerEvent, PickerEventSink, PickerInput, PickerRuntime, ProcessOutcome, RawHidReport,
-    Receiver, RecordingError, RecordingEvent, RecordingWriter, RuntimeCommand, RuntimeConfig,
-    RuntimeState, SerialDeviceInfo, SerialOutput, SerialSelection, ShutdownTrigger,
-    StableTransitionRun, SteamButton, SupervisorIterationTimer, SyncSender, TrySendError, VecDeque,
-    ACTIVE_SLOT_TIMEOUT, BATTERY_STATUS_FRESHNESS, COMMAND_TIMEOUT, DISCOVERY_INTERVAL,
-    EXTENDED_INPUT_REPORT_ID, EXTENDED_INPUT_REPORT_SIZE, INPUT_MAILBOX_CAPACITY, INPUT_REPORT_ID,
-    INPUT_REPORT_SIZE, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED,
-    MIN_STABLE_CONTROLLER_SCAN_INTERVAL, PAD_FEEDBACK_RETRY_INTERVAL, POWER_OFF_BURST_INTERVAL,
-    POWER_OFF_BURST_WRITES, POWER_OFF_COOLDOWN, RUMBLE_LEASE_TIMEOUT, RUMBLE_REFRESH_INTERVAL,
-    RUMBLE_RETRY_INTERVAL, RUNTIME_POLL_INTERVAL, STATUS_INTERVAL, WAKE_SETTLE_DELAY,
+    next_stable_controller_scan_interval, output_reopens_with_backoff, picker_status,
+    same_controller_collection, thread, validate_idle_shutdown_timeout, Arc, AtomicBool, AtomicU64,
+    AutomaticShutdownPhase, AutomaticShutdownRuntime, BridgeEngine, BridgeStatus, CommandAck,
+    ConnectionState, ControllerChargeState, ControllerCooldown, ControllerDiscoveryState,
+    ControllerEnumerator, ControllerSelection, ControllerSourceStatus, ControllerStatus,
+    ControllerTransport, DecodedReport, DesktopBindingsWorker, DesktopInputSnapshot, DeviceError,
+    DeviceEvent, DumpOutput, Duration, File, FileOutput, FirmwareInstallReceipt, GamepadOutput,
+    HapticsState, HapticsStatus, HidDeviceInfo, HidSession, IdleActivityTracker, Instant,
+    JoinHandle, LizardMode, LizardModeHeartbeat, LizardStatus, MockOutput, Mutex, Ordering,
+    OutputCapabilities, OutputError, OutputFeedback, OutputRetryState, OutputSelection,
+    OutputStatus, PadFeedbackRequest, PadHapticGain, PadHapticSide, PickerConfig, PickerEvent,
+    PickerEventSink, PickerInput, PickerRuntime, ProcessOutcome, RawHidReport, Receiver,
+    RecordingError, RecordingEvent, RecordingWriter, RuntimeCommand, RuntimeConfig, RuntimeState,
+    SerialDeviceInfo, SerialOutput, SerialSelection, ShutdownTrigger, StableTransitionRun,
+    SteamButton, SupervisorIterationTimer, SyncSender, TrySendError, VecDeque, ACTIVE_SLOT_TIMEOUT,
+    BATTERY_STATUS_FRESHNESS, COMMAND_TIMEOUT, DISCOVERY_INTERVAL, EXTENDED_INPUT_REPORT_ID,
+    EXTENDED_INPUT_REPORT_SIZE, INPUT_MAILBOX_CAPACITY, INPUT_REPORT_ID, INPUT_REPORT_SIZE,
+    KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED, MIN_STABLE_CONTROLLER_SCAN_INTERVAL,
+    PAD_FEEDBACK_RETRY_INTERVAL, POWER_OFF_BURST_INTERVAL, POWER_OFF_BURST_WRITES,
+    POWER_OFF_COOLDOWN, RUMBLE_LEASE_TIMEOUT, RUMBLE_REFRESH_INTERVAL, RUMBLE_RETRY_INTERVAL,
+    RUNTIME_POLL_INTERVAL, STATUS_INTERVAL, WAKE_SETTLE_DELAY,
 };
+use macos_virtual_hid::VirtualHidOutput;
 
 mod active_session;
 mod commands;
@@ -77,6 +79,9 @@ pub(crate) struct Supervisor {
     shutdown_requested: bool,
     pending_stop_acks: Vec<CommandAck>,
     pending_shutdown_acks: Vec<CommandAck>,
+    pending_output_change: Option<(OutputSelection, CommandAck)>,
+    output_retry: OutputRetryState,
+    virtual_helper_restarts: u64,
     preferred_output_serial: Option<String>,
     controller_enumerator: Option<ControllerEnumerator>,
     controller_discovery: ControllerDiscoveryState<HidSession>,
@@ -95,6 +100,8 @@ impl Supervisor {
         startup_blocker: Option<String>,
     ) -> Self {
         let automatic_shutdown = AutomaticShutdownRuntime::new(&config);
+        let desired_running =
+            startup_blocker.is_none() || !OutputCapabilities::for_selection(&config.output).live;
         let desktop_bindings =
             DesktopBindingsWorker::spawn(config.binding_profile.clone(), Arc::clone(&status));
         Self {
@@ -103,13 +110,16 @@ impl Supervisor {
             status,
             desktop_bindings,
             commands,
-            desired_running: startup_blocker.is_none(),
+            desired_running,
             startup_blocker,
             suspension: SuspensionState::default(),
             wake_settle: None,
             shutdown_requested: false,
             pending_stop_acks: Vec::new(),
             pending_shutdown_acks: Vec::new(),
+            pending_output_change: None,
+            output_retry: OutputRetryState::new(Instant::now()),
+            virtual_helper_restarts: 0,
             preferred_output_serial: None,
             controller_enumerator: None,
             controller_discovery: ControllerDiscoveryState::new(),
@@ -121,16 +131,32 @@ impl Supervisor {
 
     #[allow(clippy::too_many_lines)] // The supervisor keeps endpoint ownership transitions linear.
     pub(crate) fn run(&mut self) {
-        let mut retained_output = None;
-        if let Some(error) = self.startup_blocker.clone() {
-            self.transition(
-                RuntimeState::Error,
-                "Hardware safety monitor unavailable",
-                Some(&error),
-            );
+        let mut retained_output: Option<OutputSession> = None;
+        if OutputCapabilities::for_selection(&self.config.output).live {
+            if let Some(error) = self.startup_blocker.clone() {
+                self.transition(
+                    RuntimeState::Error,
+                    "Hardware safety monitor unavailable",
+                    Some(&error),
+                );
+            }
         }
         loop {
             self.service_idle_commands();
+            if let Some((selection, acknowledgement)) = self.pending_output_change.take() {
+                let cleanup = retained_output.as_mut().map_or(Ok(()), |output| {
+                    output.output.send_neutral().map_err(|error| {
+                        format!("cannot neutralize old output before backend switch: {error}")
+                    })
+                });
+                drop(retained_output.take());
+                self.clear_controller_discovery();
+                if cleanup.is_ok() {
+                    self.apply_output_selection(selection);
+                }
+                let _ = acknowledgement.send(cleanup);
+                continue;
+            }
             if self.shutdown_requested {
                 drop(retained_output.take());
                 self.clear_controller_discovery();
@@ -181,18 +207,42 @@ impl Supervisor {
                 );
             }
             if retained_output.is_none() {
+                let now = Instant::now();
+                if now < self.output_retry.next_attempt {
+                    self.wait_or_command(
+                        self.output_retry
+                            .next_attempt
+                            .saturating_duration_since(now),
+                    );
+                    continue;
+                }
                 match self.discover_output() {
-                    Discovery::Ready(output) => retained_output = Some(output),
-                    Discovery::Wait { detail, error } => {
+                    OutputDiscovery::Ready(output) => {
+                        self.output_retry.mark_ready(Instant::now());
+                        retained_output = Some(output);
+                    }
+                    OutputDiscovery::Wait { detail, error } => {
                         self.clear_hardware_status();
                         self.transition(RuntimeState::Waiting, &detail, error.as_deref());
                         self.wait_or_command(DISCOVERY_INTERVAL);
                         continue;
                     }
-                    Discovery::Error(message) => {
+                    OutputDiscovery::Retry { detail, error } => {
+                        self.schedule_output_retry();
+                        self.clear_hardware_status();
+                        self.transition(RuntimeState::Waiting, &detail, Some(&error));
+                        continue;
+                    }
+                    OutputDiscovery::Error(message) => {
                         self.clear_hardware_status();
                         self.transition(RuntimeState::Error, &message, Some(&message));
                         self.wait_or_command(DISCOVERY_INTERVAL);
+                        continue;
+                    }
+                    OutputDiscovery::Blocked(message) => {
+                        self.clear_hardware_status();
+                        self.desired_running = false;
+                        self.transition(RuntimeState::Error, &message, Some(&message));
                         continue;
                     }
                 }
@@ -204,16 +254,35 @@ impl Supervisor {
                 Discovery::Wait { detail, error } => {
                     self.clear_controller_status();
                     self.transition(RuntimeState::Waiting, &detail, error.as_deref());
-                    if !service_waiting_output(retained_output.as_mut()) {
-                        retained_output = None;
-                        self.update_status(|status| {
-                            status.output = OutputStatus::configured(&self.config.output);
-                        });
-                    } else if let Some(session) = retained_output.as_mut() {
-                        // The firmware's DeviceInfo usually lands after
-                        // discovery published OutputStatus; keep it current
-                        // while no controller is present.
-                        self.refresh_output_firmware(session);
+                    match service_waiting_output(retained_output.as_mut()) {
+                        Ok(()) => {
+                            if let Some(session) = retained_output
+                                .as_mut()
+                                .filter(|session| session.capabilities.firmware)
+                            {
+                                // The firmware's DeviceInfo usually lands after
+                                // discovery published OutputStatus; keep it current
+                                // while no controller is present.
+                                self.refresh_output_firmware(session);
+                            }
+                        }
+                        Err(error) => {
+                            let permanent = matches!(&error, OutputError::Configuration(_));
+                            let message = format!("gamepad output failed while waiting: {error}");
+                            retained_output = None;
+                            self.update_status(|status| {
+                                status.output = OutputStatus::configured(&self.config.output);
+                            });
+                            if permanent {
+                                self.desired_running = false;
+                                self.transition(RuntimeState::Error, &message, Some(&message));
+                            } else {
+                                if output_reopens_with_backoff(&self.config.output) {
+                                    self.schedule_output_retry();
+                                }
+                                self.transition(RuntimeState::Waiting, &message, Some(&message));
+                            }
+                        }
                     }
                     let delay =
                         controller_discovery_loop_delay(controller_discovery_started.elapsed());
@@ -247,10 +316,29 @@ impl Supervisor {
                 }
                 Ok((ActiveExit::OutputLost(message), _, _)) => {
                     retained_output = None;
+                    if output_reopens_with_backoff(&self.config.output) {
+                        self.schedule_output_retry();
+                    }
                     self.update_status(|status| {
                         status.output = OutputStatus::configured(&self.config.output);
                     });
                     self.transition(RuntimeState::Waiting, &message, Some(&message));
+                }
+                Ok((ActiveExit::OutputBlocked(message), _, _)) => {
+                    retained_output = None;
+                    self.desired_running = false;
+                    self.update_status(|status| {
+                        status.output = OutputStatus::configured(&self.config.output);
+                    });
+                    self.transition(RuntimeState::Error, &message, Some(&message));
+                }
+                Ok((ActiveExit::OutputChange(selection, ack), output, cleanup)) => {
+                    drop(output);
+                    self.clear_controller_discovery();
+                    if cleanup.is_ok() {
+                        self.apply_output_selection(selection);
+                    }
+                    let _ = ack.send(cleanup);
                 }
                 Ok((ActiveExit::AutomaticShutdown { info, trigger }, output, _)) => {
                     retained_output = Some(output);

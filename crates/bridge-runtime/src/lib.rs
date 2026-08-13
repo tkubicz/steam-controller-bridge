@@ -17,8 +17,8 @@ pub use api::{
     AutomaticShutdownPhase, AutomaticShutdownStatus, BridgeStatus, ControllerChargeState,
     ControllerSelection, ControllerSourceStatus, ControllerStatus, DesktopBindingsState,
     DesktopBindingsStatus, HapticsState, HapticsStatus, LizardMode, LizardStatus, OutputBackend,
-    OutputSelection, OutputStatus, ProfilePickerStatus, PuckDockAction, RuntimeConfig,
-    RuntimeError, RuntimeState, SerialSelection, ShutdownTrigger,
+    OutputCapabilities, OutputSelection, OutputStatus, ProfilePickerStatus, PuckDockAction,
+    RuntimeConfig, RuntimeError, RuntimeState, SerialSelection, ShutdownTrigger, VirtualHidStatus,
 };
 pub(crate) use automatic_shutdown::{
     automatic_shutdown_phase, binding_status_for_profile, validate_idle_shutdown_timeout,
@@ -33,7 +33,8 @@ pub(crate) use desktop::{
 pub(crate) use picker::PickerRuntime;
 pub(crate) use runtime::{picker_status, CommandAck, RuntimeCommand};
 pub use runtime::{
-    BridgeHandle, BridgeRuntime, PendingUpdateResume, PickerEventSink, UpdateResumePoll,
+    BridgeHandle, BridgeRuntime, CommandPoll, OutputChangePoll, PendingOutputChange,
+    PendingUpdateResume, PickerEventSink, UpdateResumePoll,
 };
 // Re-exported so frontends can render firmware status without depending on
 // bridge-output directly.
@@ -58,8 +59,8 @@ use std::time::{Duration, Instant};
 
 use bridge_core::{BridgeEngine, ProcessOutcome};
 use bridge_output::{
-    available_serial_devices, DumpOutput, FileOutput, GamepadOutput, MockOutput, OutputFeedback,
-    SerialDeviceInfo, SerialOutput,
+    available_serial_devices, DumpOutput, FileOutput, GamepadOutput, MockOutput, OutputError,
+    OutputFeedback, SerialDeviceInfo, SerialOutput,
 };
 #[cfg(test)]
 use desktop_bindings::PadSample;
@@ -70,6 +71,7 @@ use desktop_bindings::{
 use gamepad_state::OutputSuppression;
 #[cfg(target_os = "macos")]
 use macos_power_monitor::{PowerEvent, PowerMonitor};
+pub use macos_virtual_hid::VirtualHidConfig;
 use profile_picker::{Picker, PickerEvents, PickerInput};
 // Frontends drive the wheel and render it, so its vocabulary is part of the
 // runtime's public surface.
@@ -112,6 +114,54 @@ pub use status_log::{
 use idle_shutdown::IdleActivityTracker;
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_millis(500);
+const OUTPUT_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const OUTPUT_RETRY_MAX: Duration = Duration::from_secs(30);
+const OUTPUT_RETRY_STABILITY: Duration = Duration::from_secs(30);
+
+/// Retry policy belongs to the supervisor, not to the public description of a
+/// backend's user-facing capabilities.
+const fn output_reopens_with_backoff(selection: &OutputSelection) -> bool {
+    matches!(selection, OutputSelection::VirtualHid(_))
+}
+
+#[derive(Debug)]
+struct OutputRetryState {
+    next_attempt: Instant,
+    delay: Duration,
+    ready_since: Option<Instant>,
+}
+
+impl OutputRetryState {
+    fn new(now: Instant) -> Self {
+        Self {
+            next_attempt: now,
+            delay: OUTPUT_RETRY_INITIAL,
+            ready_since: None,
+        }
+    }
+
+    fn reset(&mut self, now: Instant) {
+        *self = Self::new(now);
+    }
+
+    fn mark_ready(&mut self, now: Instant) {
+        self.next_attempt = now;
+        self.ready_since = Some(now);
+    }
+
+    fn schedule_after_failure(&mut self, now: Instant) {
+        if self
+            .ready_since
+            .take()
+            .is_some_and(|ready| now.saturating_duration_since(ready) >= OUTPUT_RETRY_STABILITY)
+        {
+            self.delay = OUTPUT_RETRY_INITIAL;
+        }
+        self.next_attempt = now + self.delay;
+        self.delay = (self.delay * 2).min(OUTPUT_RETRY_MAX);
+    }
+}
+
 /// The longest a `WillSleep` callback waits for the hardware teardown before
 /// acknowledging the sleep anyway. Far above every bounded teardown step, and
 /// safely under macOS's ~30-second forced-sleep cap.

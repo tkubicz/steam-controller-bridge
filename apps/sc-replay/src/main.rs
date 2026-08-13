@@ -9,6 +9,7 @@ use bridge_output::{
     DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput, SerialConfig, SerialOutput,
 };
 use clap::{Parser, ValueEnum};
+use macos_virtual_hid::{parse_usb_id, VirtualHidOptions};
 use recording::{ReplayOptions, ReplaySession, ReplayTiming, KIND_MAPPED_GAMEPAD_STATE};
 
 /// Replays a recorded session through any output backend.
@@ -61,6 +62,18 @@ struct Cli {
     /// Log serial frame bytes.
     #[arg(long)]
     serial_log: bool,
+
+    /// Rust `IOHIDUserDevice` helper executable; required by `--output virtual-hid`.
+    #[arg(long, value_name = "PATH")]
+    virtual_hid_helper: Option<PathBuf>,
+
+    /// Override the virtual controller vendor ID (decimal or 0x-prefixed hex).
+    #[arg(long, value_name = "VID", value_parser = parse_usb_id, requires = "virtual_hid_product_id")]
+    virtual_hid_vendor_id: Option<u16>,
+
+    /// Override the virtual controller product ID (decimal or 0x-prefixed hex).
+    #[arg(long, value_name = "PID", value_parser = parse_usb_id, requires = "virtual_hid_vendor_id")]
+    virtual_hid_product_id: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -74,6 +87,7 @@ enum OutputArg {
     File,
     Mock,
     Serial,
+    VirtualHid,
 }
 
 fn main() {
@@ -136,7 +150,15 @@ fn validate_cli(cli: &Cli) -> Result<(), String> {
             Err("--output serial requires --port PATH".to_owned())
         }
         OutputArg::Serial if cli.baud == 0 => Err("--baud must be greater than zero".to_owned()),
-        _ => Ok(()),
+        _ => virtual_hid_options(cli).validate(cli.output == OutputArg::VirtualHid),
+    }
+}
+
+fn virtual_hid_options(cli: &Cli) -> VirtualHidOptions {
+    VirtualHidOptions {
+        helper_path: cli.virtual_hid_helper.clone(),
+        vendor_id: cli.virtual_hid_vendor_id,
+        product_id: cli.virtual_hid_product_id,
     }
 }
 
@@ -217,6 +239,7 @@ fn make_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
             )
             .map_err(|error| error.to_string())?,
         ),
+        OutputArg::VirtualHid => Box::new(virtual_hid_options(cli).open()?),
     })
 }
 
@@ -273,5 +296,40 @@ mod tests {
     fn compact_remains_an_alias_for_dump() {
         let cli = parse(&["sc-replay", "recording.jsonl", "--output", "compact"]);
         assert_eq!(cli.output, OutputArg::Dump);
+    }
+
+    #[test]
+    fn identity_override_is_paired_and_requires_virtual_hid_output() {
+        assert!(Cli::try_parse_from([
+            "sc-replay",
+            "recording.jsonl",
+            "--virtual-hid-vendor-id",
+            "0xcafe",
+        ])
+        .is_err());
+        let cli = parse(&[
+            "sc-replay",
+            "recording.jsonl",
+            "--virtual-hid-vendor-id",
+            "0xcafe",
+            "--virtual-hid-product-id",
+            "0x4001",
+        ]);
+        assert!(validate_cli(&cli).is_err());
+        let cli = parse(&[
+            "sc-replay",
+            "recording.jsonl",
+            "--output",
+            "virtual-hid",
+            "--virtual-hid-helper",
+            "/tmp/helper",
+            "--virtual-hid-vendor-id",
+            "0xcafe",
+            "--virtual-hid-product-id",
+            "16385",
+        ]);
+        assert_eq!(cli.virtual_hid_vendor_id, Some(0xcafe));
+        assert_eq!(cli.virtual_hid_product_id, Some(0x4001));
+        assert!(validate_cli(&cli).is_ok());
     }
 }

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/gamepad-state",
     "crates/macos-power-monitor",
+    "crates/macos-virtual-hid",
     "crates/bridge-protocol",
     "crates/bridge-output",
     "crates/bridge-core",
@@ -58,6 +59,8 @@ winit = "0.30.13"
 serialport = { version = "4.9.0", default-features = false }
 getrandom = "0.3.4"
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
 ctrlc = "3.5.2"
 enigo = { version = "0.6.1", features = ["platform_specific"] }
 core-foundation = "0.10.1"

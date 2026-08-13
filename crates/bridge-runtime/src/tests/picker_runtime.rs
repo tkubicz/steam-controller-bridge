@@ -523,7 +523,8 @@ fn pending_manual_firmware_gets_one_first_observed_receipt() {
             recorded: Arc::clone(&recorded),
             pending_response: None,
         }),
-        device: None,
+        serial_device: Some(serial_info("/dev/cu.test", "TESTSERIAL")),
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::Serial),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
 
@@ -603,7 +604,8 @@ fn a_lost_receipt_ack_retries_the_same_receipt_after_backoff() {
         output: Box::new(DroppedReceiptAckOutput {
             attempts: Arc::clone(&attempts),
         }),
-        device: None,
+        serial_device: Some(serial_info("/dev/cu.test", "TESTSERIAL")),
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::Serial),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
 
@@ -634,7 +636,8 @@ fn hardware_release_finishes_before_command_acknowledgement() {
     let order = Arc::new(Mutex::new(Vec::new()));
     let output = OutputSession {
         output: Box::new(DropOrderOutput(Arc::clone(&order))),
-        device: None,
+        serial_device: None,
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     let release_order = Arc::clone(&order);
@@ -656,6 +659,36 @@ fn hardware_release_finishes_before_command_acknowledgement() {
 }
 
 #[test]
+fn ordinary_stop_disconnects_virtual_hid_before_acknowledgement() {
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let output = OutputSession {
+        output: Box::new(DropOrderOutput(Arc::clone(&order))),
+        serial_device: None,
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::VirtualHid(
+            VirtualHidConfig::new(std::path::PathBuf::from("helper")),
+        )),
+        first_observed_receipt: FirstObservedReceiptState::Idle,
+    };
+    let release_order = Arc::clone(&order);
+    let ack_order = Arc::clone(&order);
+    let (ack, receiver) = mpsc::channel::<Result<(), String>>();
+    let observer = thread::spawn(move || {
+        receiver.recv().unwrap().unwrap();
+        ack_order.lock().unwrap().push("ack");
+    });
+
+    acknowledge_after_hardware_release(
+        output,
+        move || release_order.lock().unwrap().push("controllers"),
+        &ack,
+        Ok(()),
+    );
+    observer.join().unwrap();
+
+    assert_eq!(*order.lock().unwrap(), ["output", "controllers", "ack"]);
+}
+
+#[test]
 fn a_slow_desktop_operation_is_preceded_by_neutral_on_the_wire() {
     // Regression: constructing the desktop-input sink, or destroying it
     // after a backend failure, can block this thread beyond the firmware's
@@ -664,7 +697,8 @@ fn a_slow_desktop_operation_is_preceded_by_neutral_on_the_wire() {
     let states = Arc::new(Mutex::new(Vec::new()));
     let mut session = OutputSession {
         output: Box::new(SharedOutput(Arc::clone(&states))),
-        device: None,
+        serial_device: None,
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     let mut engine = BridgeEngine::new(BridgeConfig::default(), MapperConfig::default()).unwrap();

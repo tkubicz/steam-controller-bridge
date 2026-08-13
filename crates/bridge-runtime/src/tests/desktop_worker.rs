@@ -483,6 +483,127 @@ fn runtime_defaults_to_zero_configuration_serial_bridge() {
 }
 
 #[test]
+fn output_capabilities_come_from_the_selection_not_from_a_serial_device() {
+    let serial = OutputCapabilities::for_selection(&OutputSelection::Serial);
+    assert_eq!(
+        serial,
+        OutputCapabilities {
+            live: true,
+            firmware: true,
+        }
+    );
+    let virtual_hid = OutputCapabilities::for_selection(&OutputSelection::VirtualHid(
+        VirtualHidConfig::new(std::path::PathBuf::from("helper")),
+    ));
+    assert_eq!(
+        virtual_hid,
+        OutputCapabilities {
+            live: true,
+            firmware: false,
+        }
+    );
+    // Every passive backend is indistinguishable from the default.
+    for passive in [
+        OutputSelection::Mock,
+        OutputSelection::File(std::path::PathBuf::from("out.jsonl")),
+    ] {
+        assert_eq!(
+            OutputCapabilities::for_selection(&passive),
+            OutputCapabilities::default()
+        );
+    }
+    // And the published status carries the same answer the supervisor uses.
+    assert_eq!(
+        OutputStatus::configured(&OutputSelection::Serial).capabilities,
+        serial
+    );
+}
+
+#[test]
+fn unstable_output_restarts_back_off_until_a_stable_session_resets_them() {
+    let started = Instant::now();
+    let mut retry = OutputRetryState::new(started);
+
+    retry.mark_ready(started);
+    retry.schedule_after_failure(started + Duration::from_secs(1));
+    assert_eq!(retry.next_attempt, started + Duration::from_secs(2));
+
+    let reopened = retry.next_attempt;
+    retry.mark_ready(reopened);
+    retry.schedule_after_failure(reopened + Duration::from_secs(1));
+    assert_eq!(retry.next_attempt, reopened + Duration::from_secs(3));
+
+    let stable = retry.next_attempt;
+    retry.mark_ready(stable);
+    let failed = stable + OUTPUT_RETRY_STABILITY;
+    retry.schedule_after_failure(failed);
+    assert_eq!(retry.next_attempt, failed + OUTPUT_RETRY_INITIAL);
+}
+
+struct ConfigurationFailureOutput;
+
+impl GamepadOutput for ConfigurationFailureOutput {
+    fn send_state(
+        &mut self,
+        _state: &gamepad_state::GamepadState,
+    ) -> Result<(), OutputError> {
+        Ok(())
+    }
+
+    fn service(&mut self) -> Result<(), OutputError> {
+        Err(OutputError::Configuration("permanent".to_owned()))
+    }
+}
+
+#[test]
+fn waiting_output_service_preserves_permanent_failure_classification() {
+    let mut output = OutputSession {
+        output: Box::new(ConfigurationFailureOutput),
+        serial_device: None,
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
+        first_observed_receipt: FirstObservedReceiptState::Idle,
+    };
+    assert!(matches!(
+        service_waiting_output(Some(&mut output)),
+        Err(OutputError::Configuration(_))
+    ));
+}
+
+#[test]
+fn flattened_output_errors_keep_their_permanence_classification() {
+    // `process_report` hands the active loop a flattened string, so both
+    // classifiers have to survive the round trip through `Display`.
+    let permanent =
+        bridge_core::BridgeError::Output(OutputError::Configuration("no entitlement".to_owned()))
+            .to_string();
+    assert!(is_output_error(&permanent), "{permanent}");
+    assert!(is_permanent_output_error(&permanent), "{permanent}");
+
+    let transient =
+        bridge_core::BridgeError::Output(OutputError::Transport("helper exited".to_owned()))
+            .to_string();
+    assert!(is_output_error(&transient), "{transient}");
+    assert!(!is_permanent_output_error(&transient), "{transient}");
+}
+
+#[test]
+fn only_an_already_unusable_output_is_excused_from_neutral_before_release() {
+    // A blocked output is as incapable of accepting neutral as a lost one, so
+    // requiring it would bury the real failure under a neutralization error
+    // and skip the supervisor's dedicated handling for that exit.
+    assert!(!ActiveExit::OutputLost("lost".to_owned()).requires_neutral_before_release());
+    assert!(!ActiveExit::OutputBlocked("blocked".to_owned()).requires_neutral_before_release());
+    assert!(ActiveExit::SourceLost.requires_neutral_before_release());
+    let (ack, _receiver) = mpsc::channel();
+    assert!(ActiveExit::StoppedWithAck(ack).requires_neutral_before_release());
+    let (ack, _receiver) = mpsc::channel();
+    assert!(
+        ActiveExit::OutputChange(OutputSelection::Mock, ack).requires_neutral_before_release(),
+        "a backend switch must still neutralize the output it is replacing"
+    );
+}
+
+#[test]
 fn runtime_timeout_updates_enforce_the_documented_minimum_and_maximum() {
     assert!(validate_idle_shutdown_timeout(None).is_ok());
     assert!(validate_idle_shutdown_timeout(Some(Duration::from_secs(59))).is_err());

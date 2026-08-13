@@ -1,11 +1,11 @@
 use super::{
     automatic_shutdown_phase, binding_status_for_profile, mpsc, thread, Arc,
     AutomaticShutdownStatus, BindingProfile, BridgeStatus, Duration, JoinHandle, Mutex,
-    OutputStatus, PickerConfig, PickerEvent, PickerRoster, ProfilePickerStatus, PuckDockAction,
-    RuntimeConfig, RuntimeError, RuntimeState, Supervisor, COMMAND_TIMEOUT,
+    OutputSelection, OutputStatus, PickerConfig, PickerEvent, PickerRoster, ProfilePickerStatus,
+    PuckDockAction, RuntimeConfig, RuntimeError, RuntimeState, Supervisor, COMMAND_TIMEOUT,
 };
 #[cfg(target_os = "macos")]
-use super::{bounded_error, OutputSelection, PowerEvent, PowerMonitor, SLEEP_TEARDOWN_ACK_TIMEOUT};
+use super::{bounded_error, PowerEvent, PowerMonitor, SLEEP_TEARDOWN_ACK_TIMEOUT};
 
 pub(crate) type CommandAck = mpsc::Sender<Result<(), String>>;
 
@@ -15,6 +15,7 @@ pub(crate) enum RuntimeCommand {
     Shutdown(CommandAck),
     SetIdleShutdown(Option<Duration>, CommandAck),
     SetPuckDockAction(PuckDockAction, CommandAck),
+    SetOutput(OutputSelection, CommandAck),
     SetBindingProfile(Box<Option<BindingProfile>>, CommandAck),
     EnableDesktopBindings(CommandAck),
     SetPickerConfig(Option<PickerConfig>, CommandAck),
@@ -68,17 +69,14 @@ impl BridgeRuntime {
         let worker_status = Arc::clone(&status);
         let (command_sender, command_receiver) = mpsc::channel();
         #[cfg(target_os = "macos")]
-        let (power_monitor, startup_blocker) = if config.output == OutputSelection::Serial {
+        let (power_monitor, startup_blocker) =
             match power_monitor(Arc::clone(&status), command_sender.clone()) {
                 Ok(monitor) => (Some(monitor), None),
                 Err(error) => {
                     eprintln!("level=error event=system_power_monitor_failed error={error:?}");
                     (None, Some(error))
                 }
-            }
-        } else {
-            (None, None)
-        };
+            };
         #[cfg(not(target_os = "macos"))]
         let startup_blocker = None;
         let join = thread::spawn(move || {
@@ -164,9 +162,9 @@ pub struct BridgeHandle {
     power_monitor: Mutex<Option<PowerMonitor>>,
 }
 
-/// The result of polling a non-blocking updater-resume request.
+/// The result of polling any non-blocking runtime command.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdateResumePoll {
+pub enum CommandPoll {
     Pending,
     /// The deadline elapsed, but the original command remains queued and may
     /// still acknowledge later. Reported at most once per request.
@@ -174,15 +172,58 @@ pub enum UpdateResumePoll {
     Complete(Result<(), RuntimeError>),
 }
 
+/// Kept as names the frontends already use; both polls answer the same
+/// question, so they are one type rather than three copies of one enum.
+pub type UpdateResumePoll = CommandPoll;
+/// The result of polling a non-blocking output-backend change.
+pub type OutputChangePoll = CommandPoll;
+
 /// A queued updater-resume request whose acknowledgement can be polled by a UI.
 pub struct PendingUpdateResume {
+    command: PendingCommand,
+}
+
+/// A safety-ordered output change whose acknowledgement can be polled by a UI.
+pub struct PendingOutputChange {
+    command: PendingCommand,
+}
+
+impl PendingOutputChange {
+    fn new(receiver: mpsc::Receiver<Result<(), String>>) -> Self {
+        Self {
+            command: PendingCommand::new(receiver),
+        }
+    }
+
+    /// Checks for completion without blocking the caller.
+    #[must_use]
+    pub fn poll(&mut self) -> OutputChangePoll {
+        self.command.poll("output change")
+    }
+}
+
+impl PendingUpdateResume {
+    fn new(receiver: mpsc::Receiver<Result<(), String>>) -> Self {
+        Self {
+            command: PendingCommand::new(receiver),
+        }
+    }
+
+    /// Checks for completion without blocking the caller.
+    #[must_use]
+    pub fn poll(&mut self) -> UpdateResumePoll {
+        self.command.poll("recovery")
+    }
+}
+
+struct PendingCommand {
     receiver: mpsc::Receiver<Result<(), String>>,
     deadline: std::time::Instant,
     timeout_reported: bool,
     completion: Option<Result<(), RuntimeError>>,
 }
 
-impl PendingUpdateResume {
+impl PendingCommand {
     fn new(receiver: mpsc::Receiver<Result<(), String>>) -> Self {
         Self {
             receiver,
@@ -192,27 +233,25 @@ impl PendingUpdateResume {
         }
     }
 
-    /// Checks for completion without blocking the caller.
-    #[must_use]
-    pub fn poll(&mut self) -> UpdateResumePoll {
+    fn poll(&mut self, operation: &str) -> CommandPoll {
         if let Some(result) = &self.completion {
-            return UpdateResumePoll::Complete(result.clone());
+            return CommandPoll::Complete(result.clone());
         }
         let result = match self.receiver.try_recv() {
-            Ok(result) => UpdateResumePoll::Complete(result.map_err(RuntimeError)),
+            Ok(result) => CommandPoll::Complete(result.map_err(RuntimeError)),
             Err(mpsc::TryRecvError::Empty) if std::time::Instant::now() < self.deadline => {
-                UpdateResumePoll::Pending
+                CommandPoll::Pending
             }
             Err(mpsc::TryRecvError::Empty) if !self.timeout_reported => {
                 self.timeout_reported = true;
-                UpdateResumePoll::TimedOut
+                CommandPoll::TimedOut
             }
-            Err(mpsc::TryRecvError::Empty) => UpdateResumePoll::Pending,
-            Err(mpsc::TryRecvError::Disconnected) => UpdateResumePoll::Complete(Err(RuntimeError(
-                "bridge runtime stopped before acknowledging recovery".to_owned(),
+            Err(mpsc::TryRecvError::Empty) => CommandPoll::Pending,
+            Err(mpsc::TryRecvError::Disconnected) => CommandPoll::Complete(Err(RuntimeError(
+                format!("bridge runtime stopped before acknowledging {operation}"),
             ))),
         };
-        if let UpdateResumePoll::Complete(completion) = &result {
+        if let CommandPoll::Complete(completion) = &result {
             self.completion = Some(completion.clone());
         }
         result
@@ -266,6 +305,18 @@ impl BridgeHandle {
     /// Returns an error if the runtime thread has stopped.
     pub fn request_set_puck_dock_action(&self, action: PuckDockAction) -> Result<(), RuntimeError> {
         self.request(|ack| RuntimeCommand::SetPuckDockAction(action, ack))
+    }
+
+    /// Begins a neutralize-release-create output transition without blocking the caller.
+    ///
+    /// # Errors
+    /// Returns an error if the runtime has already stopped.
+    pub fn begin_set_output(
+        &self,
+        selection: OutputSelection,
+    ) -> Result<PendingOutputChange, RuntimeError> {
+        self.begin_command(|ack| RuntimeCommand::SetOutput(selection, ack))
+            .map(PendingOutputChange::new)
     }
 
     /// Queues a binding-profile switch without restarting HID or serial.
@@ -521,7 +572,7 @@ mod tests {
     fn update_resume_timeout_keeps_waiting_for_the_original_acknowledgement() {
         let (sender, receiver) = mpsc::channel();
         let mut timed_out = PendingUpdateResume::new(receiver);
-        timed_out.deadline = std::time::Instant::now()
+        timed_out.command.deadline = std::time::Instant::now()
             .checked_sub(Duration::from_millis(1))
             .unwrap();
         assert_eq!(timed_out.poll(), UpdateResumePoll::TimedOut);
@@ -541,5 +592,15 @@ mod tests {
         )));
         assert_eq!(disconnected.poll(), expected);
         assert_eq!(disconnected.poll(), expected);
+    }
+
+    #[test]
+    fn output_change_poll_is_nonblocking_and_completion_is_stable() {
+        let (sender, receiver) = mpsc::channel();
+        let mut request = PendingOutputChange::new(receiver);
+        assert_eq!(request.poll(), OutputChangePoll::Pending);
+        sender.send(Ok(())).unwrap();
+        assert_eq!(request.poll(), OutputChangePoll::Complete(Ok(())));
+        assert_eq!(request.poll(), OutputChangePoll::Complete(Ok(())));
     }
 }

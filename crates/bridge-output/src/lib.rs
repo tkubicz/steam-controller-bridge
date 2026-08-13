@@ -17,12 +17,20 @@ pub use serial::{
     SerialOutput, SerialStatus, BRIDGE_DEVICE_USB_PRODUCT, MAX_FIRMWARE_TARGET_ID_LEN,
 };
 
+/// The rendered prefix of [`OutputError::Configuration`]. Callers that only
+/// see a flattened error string classify against this constant, so the wording
+/// and the classification cannot drift apart.
+pub const CONFIGURATION_FAILURE_PREFIX: &str = "output configuration failed";
+
 #[derive(Debug)]
 pub enum OutputError {
     Io(io::Error),
     InvalidState(gamepad_state::InvalidState),
     Protocol(bridge_protocol::ProtocolError),
     Transport(String),
+    /// A failure that reopening the same backend cannot clear: a missing or
+    /// unauthorized helper, a rejected protocol, or invalid configuration.
+    Configuration(String),
 }
 
 impl std::fmt::Display for OutputError {
@@ -32,6 +40,7 @@ impl std::fmt::Display for OutputError {
             Self::InvalidState(error) => write!(f, "invalid gamepad state: {error}"),
             Self::Protocol(error) => write!(f, "protocol encoding failed: {error}"),
             Self::Transport(error) => write!(f, "output transport failed: {error}"),
+            Self::Configuration(error) => write!(f, "{CONFIGURATION_FAILURE_PREFIX}: {error}"),
         }
     }
 }
@@ -145,6 +154,16 @@ pub struct OutputDiagnostics {
     pub state_refreshes: u64,
     pub rumble_commands_received: u64,
     pub rumble_commands_coalesced: u64,
+    pub virtual_reports_dispatched: u64,
+    pub virtual_reports_coalesced: u64,
+    pub virtual_helper_restarts: u64,
+    pub virtual_protocol_failures: u64,
+    pub virtual_set_reports_received: u64,
+    pub virtual_get_reports_received: u64,
+    /// Delegate diagnostics the virtual-HID helper dropped rather than block
+    /// a host callback, recovered from gaps in its event sequence.
+    pub virtual_delegate_reports_dropped: u64,
+    pub virtual_fatal_errors: u64,
 }
 
 #[derive(Debug, Default)]

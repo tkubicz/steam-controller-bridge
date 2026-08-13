@@ -10,7 +10,8 @@ use bridge_output::{
 };
 use clap::{Parser, ValueEnum};
 use gamepad_simulator::{apply_keyboard_command, automated_sequence};
-use gamepad_state::GamepadState;
+use gamepad_state::{Button, GamepadState};
+use macos_virtual_hid::{parse_usb_id, VirtualHidOptions};
 use recording::RecordingOutput;
 
 /// Drives any output backend with synthetic gamepad states.
@@ -42,6 +43,29 @@ struct Cli {
     #[arg(long)]
     serial_log: bool,
 
+    /// Rust `IOHIDUserDevice` helper executable; required by `--output virtual-hid`.
+    /// Example: gamepad-simulator automated --output virtual-hid --virtual-hid-helper ./sc-virtual-hid-helper
+    #[arg(long, value_name = "PATH")]
+    virtual_hid_helper: Option<PathBuf>,
+
+    /// Override the virtual controller vendor ID (decimal or 0x-prefixed hex).
+    #[arg(
+        long,
+        value_name = "VID",
+        value_parser = parse_usb_id,
+        requires = "virtual_hid_product_id"
+    )]
+    virtual_hid_vendor_id: Option<u16>,
+
+    /// Override the virtual controller product ID (decimal or 0x-prefixed hex).
+    #[arg(
+        long,
+        value_name = "PID",
+        value_parser = parse_usb_id,
+        requires = "virtual_hid_vendor_id"
+    )]
+    virtual_hid_product_id: Option<u16>,
+
     /// Automated cycles.
     #[arg(long, value_name = "N", default_value_t = 1)]
     cycles: u32,
@@ -49,6 +73,11 @@ struct Cli {
     /// Delay between states; 0 sends as fast as the backend allows.
     #[arg(long, value_name = "N", default_value_t = 50)]
     interval_ms: u64,
+
+    /// Include the Guide/Steam system button in automated mode. On macOS this
+    /// can invoke the Games app, so automated runs omit it by default.
+    #[arg(long)]
+    include_guide_button: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -70,6 +99,7 @@ enum OutputArg {
     Recording,
     Mock,
     Serial,
+    VirtualHid,
 }
 
 fn main() {
@@ -81,6 +111,7 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
+    validate_cli(&cli)?;
     // The mode is validated by clap before this point, so an unknown mode can
     // no longer create or truncate an output file on its way to failing.
     let mut output = make_output(&cli)?;
@@ -88,7 +119,7 @@ fn run() -> Result<(), String> {
         Mode::Automated => {
             let interval_ms = cli.interval_ms;
             for _ in 0..cli.cycles {
-                for state in automated_sequence(32) {
+                for state in automated_states(cli.include_guide_button) {
                     output
                         .send_state(&state)
                         .map_err(|error| error.to_string())?;
@@ -102,6 +133,28 @@ fn run() -> Result<(), String> {
         Mode::Keyboard => keyboard_mode(&mut *output)?,
     }
     Ok(())
+}
+
+fn automated_states(include_guide_button: bool) -> Vec<GamepadState> {
+    let mut states = automated_sequence(32);
+    if !include_guide_button {
+        for state in &mut states {
+            state.buttons.set(Button::Guide, false);
+        }
+    }
+    states
+}
+
+fn validate_cli(cli: &Cli) -> Result<(), String> {
+    virtual_hid_options(cli).validate(cli.output == OutputArg::VirtualHid)
+}
+
+fn virtual_hid_options(cli: &Cli) -> VirtualHidOptions {
+    VirtualHidOptions {
+        helper_path: cli.virtual_hid_helper.clone(),
+        vendor_id: cli.virtual_hid_vendor_id,
+        product_id: cli.virtual_hid_product_id,
+    }
 }
 
 fn keyboard_mode(output: &mut dyn GamepadOutput) -> Result<(), String> {
@@ -179,5 +232,66 @@ fn make_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
             )
             .map_err(|error| error.to_string())?,
         ),
+        OutputArg::VirtualHid => Box::new(virtual_hid_options(cli).open()?),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_override_is_paired_and_requires_virtual_hid_output() {
+        assert!(Cli::try_parse_from([
+            "gamepad-simulator",
+            "automated",
+            "--virtual-hid-vendor-id",
+            "0xcafe",
+        ])
+        .is_err());
+
+        let cli = Cli::try_parse_from([
+            "gamepad-simulator",
+            "automated",
+            "--virtual-hid-vendor-id",
+            "0xcafe",
+            "--virtual-hid-product-id",
+            "0x4001",
+        ])
+        .unwrap();
+        assert!(validate_cli(&cli).is_err());
+
+        let cli = Cli::try_parse_from([
+            "gamepad-simulator",
+            "automated",
+            "--output",
+            "virtual-hid",
+            "--virtual-hid-helper",
+            "/tmp/helper",
+            "--virtual-hid-vendor-id",
+            "0xcafe",
+            "--virtual-hid-product-id",
+            "16385",
+        ])
+        .unwrap();
+        assert_eq!(cli.virtual_hid_vendor_id, Some(0xcafe));
+        assert_eq!(cli.virtual_hid_product_id, Some(0x4001));
+        assert!(validate_cli(&cli).is_ok());
+    }
+
+    #[test]
+    fn automated_runs_omit_the_system_guide_button_by_default() {
+        let default = Cli::try_parse_from(["gamepad-simulator", "automated"]).unwrap();
+        assert!(!default.include_guide_button);
+        let explicit =
+            Cli::try_parse_from(["gamepad-simulator", "automated", "--include-guide-button"])
+                .unwrap();
+        assert!(explicit.include_guide_button);
+        assert!(automated_states(false)
+            .iter()
+            .all(|state| !state.buttons.contains(Button::Guide)));
+        assert!(automated_states(true)
+            .iter()
+            .any(|state| state.buttons.contains(Button::Guide)));
+    }
 }

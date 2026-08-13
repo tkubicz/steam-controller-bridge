@@ -79,6 +79,24 @@ pub(crate) enum Discovery<T> {
     Error(String),
 }
 
+/// Output discovery can also ask to be retried with backoff, or report that
+/// this backend will never open. Controller discovery has no equivalent, so
+/// the two no longer share an outcome type and neither carries arms its
+/// producer cannot emit.
+pub(crate) enum OutputDiscovery {
+    Ready(OutputSession),
+    Wait {
+        detail: String,
+        error: Option<String>,
+    },
+    Retry {
+        detail: String,
+        error: String,
+    },
+    Error(String),
+    Blocked(String),
+}
+
 pub(crate) struct ActiveControllerSource {
     pub(crate) info: HidDeviceInfo,
     pub(crate) session: HidSession,
@@ -87,7 +105,8 @@ pub(crate) struct ActiveControllerSource {
 
 pub(crate) struct OutputSession {
     pub(crate) output: Box<dyn GamepadOutput>,
-    pub(crate) device: Option<SerialDeviceInfo>,
+    pub(crate) serial_device: Option<SerialDeviceInfo>,
+    pub(crate) capabilities: OutputCapabilities,
     pub(crate) first_observed_receipt: FirstObservedReceiptState,
 }
 
@@ -131,22 +150,22 @@ pub(crate) fn neutralize_before_desktop_work(
     }
 }
 
-pub(crate) fn service_waiting_output(output: Option<&mut OutputSession>) -> bool {
-    output.is_some_and(|output| match output.output.service() {
-        Ok(()) => {
-            while output.output.take_feedback().is_some() {}
-            true
-        }
-        Err(error) => {
-            eprintln!("level=warn event=output_device_lost phase=waiting error={error:?} action=rediscover");
-            false
-        }
-    })
+pub(crate) fn service_waiting_output(
+    output: Option<&mut OutputSession>,
+) -> Result<(), OutputError> {
+    let Some(output) = output else {
+        return Ok(());
+    };
+    output.output.service()?;
+    while output.output.take_feedback().is_some() {}
+    Ok(())
 }
 
 pub(crate) enum ActiveExit {
     SourceLost,
     OutputLost(String),
+    OutputBlocked(String),
+    OutputChange(OutputSelection, CommandAck),
     AutomaticShutdown {
         info: HidDeviceInfo,
         trigger: ShutdownTrigger,
@@ -160,8 +179,19 @@ impl ActiveExit {
     pub(crate) const fn has_acknowledgement(&self) -> bool {
         matches!(
             self,
-            Self::StoppedWithAck(_) | Self::ShutdownWithAck(_) | Self::SuspendedWithAck(_)
+            Self::StoppedWithAck(_)
+                | Self::ShutdownWithAck(_)
+                | Self::SuspendedWithAck(_)
+                | Self::OutputChange(_, _)
         )
+    }
+
+    /// Whether the output must accept a neutral state before the session is
+    /// released. False only where the exit itself means the output is already
+    /// unusable: demanding neutral there would replace the real diagnosis with
+    /// a neutralization failure that says nothing new.
+    pub(crate) const fn requires_neutral_before_release(&self) -> bool {
+        !matches!(self, Self::OutputLost(_) | Self::OutputBlocked(_))
     }
 }
 
@@ -179,16 +209,60 @@ pub(crate) fn acknowledge_after_hardware_release(
     let _ = acknowledgement.send(result);
 }
 
+pub(crate) struct OpenedNonserialOutput {
+    pub(crate) output: Box<dyn GamepadOutput>,
+    pub(crate) virtual_hid: Option<crate::VirtualHidStatus>,
+}
+
+pub(crate) enum OutputOpenError {
+    /// Worth reopening later; carries the status detail to show while waiting,
+    /// which only the backend that failed can word correctly.
+    Transient {
+        detail: String,
+        error: String,
+    },
+    Permanent(String),
+}
+
 pub(crate) fn make_nonserial_output(
     selection: &OutputSelection,
-) -> Result<Box<dyn GamepadOutput>, String> {
+) -> Result<OpenedNonserialOutput, OutputOpenError> {
     match selection {
-        OutputSelection::Serial => Err("serial output requires bridge-device discovery".to_owned()),
-        OutputSelection::Dump(format) => Ok(Box::new(DumpOutput::new(io::stdout(), *format))),
+        OutputSelection::Serial => Err(OutputOpenError::Permanent(
+            "serial output requires bridge-device discovery".to_owned(),
+        )),
+        OutputSelection::VirtualHid(config) => VirtualHidOutput::open(config.clone())
+            .map(|output| {
+                let virtual_hid = Some(output.helper_metadata());
+                OpenedNonserialOutput {
+                    output: Box::new(output),
+                    virtual_hid,
+                }
+            })
+            .map_err(|error| {
+                if error.is_permanent_configuration_failure() {
+                    OutputOpenError::Permanent(error.to_string())
+                } else {
+                    OutputOpenError::Transient {
+                        detail: "Waiting to restart the virtual HID helper".to_owned(),
+                        error: error.to_string(),
+                    }
+                }
+            }),
+        OutputSelection::Dump(format) => Ok(OpenedNonserialOutput {
+            output: Box::new(DumpOutput::new(io::stdout(), *format)),
+            virtual_hid: None,
+        }),
         OutputSelection::File(path) => FileOutput::create(path)
-            .map(|output| Box::new(output) as Box<dyn GamepadOutput>)
-            .map_err(|error| error.to_string()),
-        OutputSelection::Mock => Ok(Box::new(MockOutput::default())),
+            .map(|output| OpenedNonserialOutput {
+                output: Box::new(output),
+                virtual_hid: None,
+            })
+            .map_err(|error| OutputOpenError::Permanent(error.to_string())),
+        OutputSelection::Mock => Ok(OpenedNonserialOutput {
+            output: Box::new(MockOutput::default()),
+            virtual_hid: None,
+        }),
     }
 }
 
@@ -375,6 +449,14 @@ pub(crate) fn process_report(
 
 pub(crate) fn is_output_error(message: &str) -> bool {
     message.contains("output failed") || message.contains("serial") || message.contains("transport")
+}
+
+/// Recovers the permanent/transient split from an error that
+/// [`process_report`] has already flattened to a string. Anchored to
+/// [`bridge_output::CONFIGURATION_FAILURE_PREFIX`] so it tracks the rendering
+/// of [`OutputError::Configuration`].
+pub(crate) fn is_permanent_output_error(message: &str) -> bool {
+    message.contains(bridge_output::CONFIGURATION_FAILURE_PREFIX)
 }
 
 pub(crate) fn valid_battery_percent(percent: u8) -> Option<u8> {

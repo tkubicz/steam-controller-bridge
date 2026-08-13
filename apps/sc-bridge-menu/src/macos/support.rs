@@ -4,7 +4,7 @@ use super::*;
 
 static SETTINGS_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub(super) const SETTINGS_VERSION: u32 = 3;
+pub(super) const SETTINGS_VERSION: u32 = 4;
 /// Hold durations the menu offers, in milliseconds.
 pub(super) const OVERLAY_HOLD_CHOICES: [u64; 2] = [2_000, 3_000];
 
@@ -14,6 +14,33 @@ pub(super) enum PermissionStage {
     PostEvent,
     Accessibility,
     Ready,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum OutputPreference {
+    #[default]
+    BridgeDevice,
+    VirtualHid,
+}
+
+impl OutputPreference {
+    pub(super) const fn when_virtual_hid_enabled(self, enabled: bool) -> Self {
+        if enabled {
+            self
+        } else {
+            Self::BridgeDevice
+        }
+    }
+
+    pub(super) fn runtime_selection(self) -> Result<OutputSelection, String> {
+        match self {
+            Self::BridgeDevice => Ok(OutputSelection::Serial),
+            Self::VirtualHid => bundled_virtual_hid_helper_path()
+                .map(VirtualHidConfig::new)
+                .map(OutputSelection::VirtualHid),
+        }
+    }
 }
 
 pub(super) const fn permission_stage(
@@ -37,6 +64,8 @@ pub(super) struct AppSettings {
     pub(super) version: u32,
     pub(super) idle_shutdown_minutes: Option<u64>,
     pub(super) power_off_on_puck: bool,
+    #[serde(default)]
+    pub(super) output: OutputPreference,
     #[serde(default = "default_binding_profile_id")]
     pub(super) active_binding_profile: String,
     /// Whether holding Quick Access opens the in-game profile wheel. Off by
@@ -172,6 +201,7 @@ impl Default for AppSettings {
             version: SETTINGS_VERSION,
             idle_shutdown_minutes: Some(15),
             power_off_on_puck: false,
+            output: OutputPreference::BridgeDevice,
             active_binding_profile: default_binding_profile_id(),
             profile_overlay_enabled: false,
             profile_overlay_hold_ms: default_overlay_hold_ms(),
@@ -215,7 +245,7 @@ pub(super) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
     let parsed = serde_json::from_slice::<AppSettings>(&bytes).map_err(|error| error.to_string());
     match parsed {
         Ok(mut settings)
-            if matches!(settings.version, 1 | 2 | SETTINGS_VERSION)
+            if matches!(settings.version, 1 | 2 | 3 | SETTINGS_VERSION)
                 && settings
                     .idle_shutdown_minutes
                     .is_none_or(|minutes| matches!(minutes, 5 | 10 | 15 | 30)) =>
@@ -243,6 +273,27 @@ pub(super) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
             Some(format!("invalid settings JSON: {error}")),
         ),
     }
+}
+
+pub(super) fn bundled_virtual_hid_helper_path() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("cannot locate menu executable: {error}"))?;
+    bundled_virtual_hid_helper_path_from(&executable)
+}
+
+pub(super) fn bundled_virtual_hid_helper_path_from(executable: &Path) -> Result<PathBuf, String> {
+    let macos = executable
+        .parent()
+        .ok_or("menu executable has no parent directory")?;
+    let contents = macos
+        .parent()
+        .ok_or("menu executable is not inside an app Contents directory")?;
+    if macos.file_name().and_then(|name| name.to_str()) != Some("MacOS") {
+        return Err("menu executable is not in Contents/MacOS".to_owned());
+    }
+    Ok(contents
+        .join("Helpers/Steam Controller Bridge Virtual HID Helper.app")
+        .join("Contents/MacOS/sc-virtual-hid-helper"))
 }
 
 /// Best-effort removal of temporaries left behind when an earlier save died

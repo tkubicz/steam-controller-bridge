@@ -5,6 +5,7 @@ use bridge_core::{BridgeConfig, BridgeMetrics};
 use bridge_output::{DumpFormat, FirmwareInfo, OutputDiagnostics, SerialConfig};
 use controller_mapper::MapperConfig;
 use desktop_bindings::BindingProfile;
+use macos_virtual_hid::VirtualHidConfig;
 use profile_picker::{PickerConfig, PickerRoster};
 use steam_controller_device::{masked_serial, ControllerTransport, HidDeviceInfo};
 
@@ -63,6 +64,7 @@ impl ControllerChargeState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputSelection {
     Serial,
+    VirtualHid(VirtualHidConfig),
     Dump(DumpFormat),
     File(PathBuf),
     Mock,
@@ -72,6 +74,7 @@ pub enum OutputSelection {
 pub enum OutputBackend {
     #[default]
     SerialBridge,
+    VirtualHid,
     Dump,
     File,
     Mock,
@@ -81,6 +84,7 @@ impl From<&OutputSelection> for OutputBackend {
     fn from(selection: &OutputSelection) -> Self {
         match selection {
             OutputSelection::Serial => Self::SerialBridge,
+            OutputSelection::VirtualHid(_) => Self::VirtualHid,
             OutputSelection::Dump(_) => Self::Dump,
             OutputSelection::File(_) => Self::File,
             OutputSelection::Mock => Self::Mock,
@@ -158,6 +162,41 @@ pub struct ControllerStatus {
     pub last_state_age: Option<Duration>,
 }
 
+/// What a backend can actually do, derived from the selection alone so every
+/// decision asks the same question instead of re-listing backends. `live`
+/// means the output drives a real device: it must be neutralized and released
+/// around sleep and stop, and powering the controller down is meaningful.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OutputCapabilities {
+    pub live: bool,
+    pub firmware: bool,
+}
+
+impl OutputCapabilities {
+    #[must_use]
+    pub const fn for_selection(selection: &OutputSelection) -> Self {
+        match selection {
+            OutputSelection::Serial => Self {
+                live: true,
+                firmware: true,
+            },
+            OutputSelection::VirtualHid(_) => Self {
+                live: true,
+                firmware: false,
+            },
+            OutputSelection::Dump(_) | OutputSelection::File(_) | OutputSelection::Mock => Self {
+                live: false,
+                firmware: false,
+            },
+        }
+    }
+}
+
+/// Re-exported rather than restated, for the same reason as the firmware
+/// types: frontends render the helper's identity without depending on the
+/// virtual-HID crate, and a field added there cannot go missing here.
+pub use macos_virtual_hid::VirtualHidHelperMetadata as VirtualHidStatus;
+
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct OutputStatus {
     pub backend: OutputBackend,
@@ -165,6 +204,10 @@ pub struct OutputStatus {
     pub stable_id: Option<String>,
     pub ready: bool,
     pub firmware: Option<FirmwareInfo>,
+    pub virtual_hid: Option<VirtualHidStatus>,
+    /// Published so frontends can ask what this backend supports instead of
+    /// naming backends themselves.
+    pub capabilities: OutputCapabilities,
 }
 
 impl OutputStatus {
@@ -173,20 +216,14 @@ impl OutputStatus {
         let endpoint = match selection {
             OutputSelection::Dump(_) => Some("stdout".to_owned()),
             OutputSelection::File(path) => Some(path.display().to_string()),
+            OutputSelection::VirtualHid(_) => Some("macOS virtual gamepad".to_owned()),
             OutputSelection::Serial | OutputSelection::Mock => None,
         };
         Self {
             backend: OutputBackend::from(selection),
             endpoint,
+            capabilities: OutputCapabilities::for_selection(selection),
             ..Self::default()
-        }
-    }
-
-    #[must_use]
-    pub fn ready_nonserial(selection: &OutputSelection) -> Self {
-        Self {
-            ready: true,
-            ..Self::configured(selection)
         }
     }
 }
@@ -202,6 +239,8 @@ impl std::fmt::Debug for OutputStatus {
             .field("stable_id", &masked_serial(self.stable_id.as_deref()))
             .field("ready", &self.ready)
             .field("firmware", &self.firmware)
+            .field("virtual_hid", &self.virtual_hid)
+            .field("capabilities", &self.capabilities)
             .finish()
     }
 }

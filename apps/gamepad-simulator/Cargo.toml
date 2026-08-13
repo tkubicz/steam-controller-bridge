@@ -10,6 +10,7 @@ publish = false
 bridge-output = { path = "../../crates/bridge-output" }
 clap.workspace = true
 gamepad-state = { path = "../../crates/gamepad-state" }
+macos-virtual-hid = { path = "../../crates/macos-virtual-hid" }
 recording = { path = "../../crates/recording" }
 
 [lints]

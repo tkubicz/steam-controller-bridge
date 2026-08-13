@@ -1295,6 +1295,7 @@ impl GamepadOutput for SerialOutput {
             state_refreshes: metrics.state_refreshes,
             rumble_commands_received: metrics.rumble_commands_received,
             rumble_commands_coalesced: metrics.rumble_commands_coalesced,
+            ..OutputDiagnostics::default()
         }
     }
 }

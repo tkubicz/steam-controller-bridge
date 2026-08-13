@@ -519,6 +519,7 @@ fn demo_matching_firmware(
     install: FirmwareInstallStatus,
 ) -> FirmwareDetails {
     FirmwareDetails {
+        available: true,
         target: FirmwareTargetStatus::Reported(target.id.to_string()),
         version,
         capabilities: (FirmwareCapabilities::ENTER_UF2_BOOTLOADER
@@ -825,7 +826,7 @@ impl AppCenter {
     }
 
     fn install_firmware(&mut self, manifest: ReleaseManifestV1, ctx: egui::Context) {
-        if !self.operation_available() {
+        if !self.firmware.available || !self.operation_available() {
             return;
         }
         if self.demo.is_some() {
@@ -1177,7 +1178,9 @@ impl AppCenter {
                         ui.add_space(7.0);
                         ui.horizontal_wrapped(|ui| {
                             hero_badge(ui, &format!("App {}", self.installed), ACCENT);
-                            hero_badge(ui, &firmware_badge(&self.firmware), ACCENT);
+                            if self.firmware.available {
+                                hero_badge(ui, &firmware_badge(&self.firmware), ACCENT);
+                            }
                             if let Some(mode) = self.demo {
                                 hero_badge(ui, &format!("Demo · {}", mode.label()), MUTED_TEXT);
                             }

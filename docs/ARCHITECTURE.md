@@ -1,5 +1,8 @@
 # Architecture
 
+The optional Rust `IOHIDUserDevice` output, helper isolation, and backend-switch
+lifecycle are documented in [Experimental virtual HID](VIRTUAL_HID.md).
+
 Steam Controller Bridge separates controller input, mapping, output, desktop
 automation, and UI so each safety boundary has one owner.
 

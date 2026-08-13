@@ -30,9 +30,10 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
+    let virtual_hid_enabled = macos_virtual_hid::virtual_hid_enabled(cli.enable_virtual_hid)?;
     // Every cross-field rule is checked before a backend is built, so a bad
     // combination cannot leave a truncated output file behind.
-    cli.validate()?;
+    cli.validate(virtual_hid_enabled)?;
     match cli.input {
         InputMode::Live => run_live(&cli),
         InputMode::Replay => run_replay(&cli),
@@ -118,6 +119,7 @@ fn live_config(cli: &Cli) -> Result<RuntimeConfig, String> {
 fn live_output(cli: &Cli) -> Result<OutputSelection, String> {
     Ok(match cli.output() {
         OutputArg::Serial => OutputSelection::Serial,
+        OutputArg::VirtualHid => OutputSelection::VirtualHid(cli.virtual_hid().config()?),
         OutputArg::Dump => OutputSelection::Dump(DumpFormat::Compact),
         OutputArg::Pretty => OutputSelection::Dump(DumpFormat::Pretty),
         OutputArg::Json => OutputSelection::Dump(DumpFormat::Json),
@@ -214,6 +216,7 @@ fn make_replay_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
                 .map_err(|error| error.to_string())?,
             )
         }
+        OutputArg::VirtualHid => Box::new(cli.virtual_hid().open()?),
     })
 }
 
@@ -227,14 +230,14 @@ mod tests {
     fn live(values: &[&str]) -> Result<RuntimeConfig, String> {
         let cli = Cli::try_parse_from(std::iter::once("sc-bridge").chain(values.iter().copied()))
             .map_err(|error| error.to_string())?;
-        cli.validate()?;
+        cli.validate(cli.enable_virtual_hid)?;
         live_config(&cli)
     }
 
     fn replay(values: &[&str]) -> Result<(), String> {
         let cli = Cli::try_parse_from(std::iter::once("sc-bridge").chain(values.iter().copied()))
             .map_err(|error| error.to_string())?;
-        cli.validate()?;
+        cli.validate(cli.enable_virtual_hid)?;
         run_replay(&cli)
     }
 

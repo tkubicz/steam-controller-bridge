@@ -159,6 +159,8 @@ fn output_label(status: &BridgeStatus) -> String {
         OutputBackend::SerialBridge if status.output.ready => serial_output_name(status),
         OutputBackend::SerialBridge if status.output.endpoint.is_some() => "Connecting",
         OutputBackend::SerialBridge => "Not Detected",
+        OutputBackend::VirtualHid if status.output.ready => "Virtual Gamepad",
+        OutputBackend::VirtualHid => "Virtual Gamepad (Not Ready)",
         OutputBackend::Dump => "Diagnostic Dump",
         OutputBackend::File => "File",
         OutputBackend::Mock => "Mock",
@@ -412,7 +414,6 @@ mod tests {
                 last_state_age: Some(std::time::Duration::ZERO),
             },
             output: OutputStatus {
-                backend: OutputBackend::SerialBridge,
                 endpoint: Some("/dev/cu.usbmodem-example".to_owned()),
                 stable_id: Some("redacted".to_owned()),
                 ready: true,
@@ -423,6 +424,7 @@ mod tests {
                     ),
                     ..bridge_runtime::FirmwareInfo::default()
                 }),
+                ..OutputStatus::configured(&bridge_runtime::OutputSelection::Serial)
             },
             ..BridgeStatus::default()
         }
@@ -466,6 +468,28 @@ mod tests {
         assert_eq!(running.haptics, "Haptics: Active");
         assert_eq!(running.current_profile, "Current Profile: None · Disabled");
         assert_eq!(running.automatic_shutdown, "Auto shutdown: Off");
+    }
+
+    #[test]
+    fn virtual_hid_has_an_explicit_label_and_no_firmware_row() {
+        let status = BridgeStatus {
+            state: RuntimeState::Running,
+            output: OutputStatus {
+                ready: true,
+                virtual_hid: Some(bridge_runtime::VirtualHidStatus {
+                    protocol_version: 1,
+                    dry_run: true,
+                    ..bridge_runtime::VirtualHidStatus::default()
+                }),
+                ..OutputStatus::configured(&bridge_runtime::OutputSelection::VirtualHid(
+                    bridge_runtime::VirtualHidConfig::new(std::path::PathBuf::from("helper")),
+                ))
+            },
+            ..BridgeStatus::default()
+        };
+        let model = MenuModel::from_status(&status);
+        assert_eq!(model.output, "Output: Virtual Gamepad");
+        assert!(!model.hardware_rows.firmware);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use super::*;
 
 use bridge_output::{
     new_firmware_install_receipt, random_firmware_request_id, FirmwareInfo, FirmwareInstallReceipt,
-    FirmwareInstallSource, FirmwareInstallState,
+    FirmwareInstallSource, FirmwareInstallState, OutputDiagnostics,
 };
 
 const FIRST_OBSERVED_RECEIPT_RETRY: Duration = Duration::from_secs(5);
@@ -31,15 +31,22 @@ impl Supervisor {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "keeping the exhaustive idle command dispatch in one match makes lifecycle ownership explicit"
+    )]
     pub(super) fn apply_idle_command(&mut self, command: RuntimeCommand) {
         match command {
             RuntimeCommand::Start(ack) => {
-                if let Some(error) = &self.startup_blocker {
-                    let _ = ack.send(Err(error.clone()));
-                } else {
-                    self.desired_running = true;
-                    let _ = ack.send(Ok(()));
+                if OutputCapabilities::for_selection(&self.config.output).live {
+                    if let Some(error) = &self.startup_blocker {
+                        let _ = ack.send(Err(error.clone()));
+                        return;
+                    }
                 }
+                self.desired_running = true;
+                self.reset_output_retry();
+                let _ = ack.send(Ok(()));
             }
             RuntimeCommand::Stop(ack) => {
                 self.desired_running = false;
@@ -108,6 +115,11 @@ impl Supervisor {
                 self.update_status(|status| status.automatic_shutdown = automatic);
                 let _ = ack.send(Ok(()));
             }
+            RuntimeCommand::SetOutput(selection, ack) => {
+                if let Some((selection, ack)) = self.accept_output_change(selection, ack) {
+                    self.pending_output_change = Some((selection, ack));
+                }
+            }
             RuntimeCommand::SetBindingProfile(profile, ack) => {
                 let profile = *profile;
                 self.config.binding_profile.clone_from(&profile);
@@ -144,7 +156,11 @@ impl Supervisor {
     // Commands act on the whole active session, and bundling its parts into a
     // struct only to unpack them again here would hide which ones each command
     // actually touches.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "active command dispatch must visibly coordinate every live session component"
+    )]
     pub(super) fn service_active_commands(
         &mut self,
         now: Duration,
@@ -157,11 +173,13 @@ impl Supervisor {
         while let Ok(command) = self.commands.try_recv() {
             match command {
                 RuntimeCommand::Start(ack) => {
-                    if let Some(error) = &self.startup_blocker {
-                        let _ = ack.send(Err(error.clone()));
-                    } else {
-                        let _ = ack.send(Ok(()));
+                    if OutputCapabilities::for_selection(&self.config.output).live {
+                        if let Some(error) = &self.startup_blocker {
+                            let _ = ack.send(Err(error.clone()));
+                            continue;
+                        }
                     }
+                    let _ = ack.send(Ok(()));
                 }
                 RuntimeCommand::Stop(ack) => {
                     self.desired_running = false;
@@ -216,6 +234,11 @@ impl Supervisor {
                     eprintln!("level=info event=puck_dock_action_changed action={action:?}");
                     let _ = ack.send(Ok(()));
                 }
+                RuntimeCommand::SetOutput(selection, ack) => {
+                    if let Some((selection, ack)) = self.accept_output_change(selection, ack) {
+                        return Some(ActiveExit::OutputChange(selection, ack));
+                    }
+                }
                 RuntimeCommand::SetBindingProfile(profile, ack) => {
                     neutralize_before_desktop_work(engine, output);
                     worker.clear_pad_feedback();
@@ -260,6 +283,72 @@ impl Supervisor {
 
     pub(super) fn emit_picker_event(&self, event: PickerEvent) {
         (self.picker_events)(event);
+    }
+
+    /// Screens an output-change request against the states that must own the
+    /// hardware first. Returns the request only when the caller should carry
+    /// out the switch; every rejection and no-op is acknowledged here, so both
+    /// the idle and active dispatchers apply exactly the same rules.
+    fn accept_output_change(
+        &self,
+        selection: OutputSelection,
+        acknowledgement: CommandAck,
+    ) -> Option<(OutputSelection, CommandAck)> {
+        if self.suspension.update {
+            let _ = acknowledgement.send(Err(
+                "cannot change output while a firmware update owns hardware".to_owned(),
+            ));
+        } else if selection == self.config.output {
+            let _ = acknowledgement.send(Ok(()));
+        } else if OutputCapabilities::for_selection(&selection).live
+            && self.startup_blocker.is_some()
+        {
+            let _ = acknowledgement
+                .send(Err(self.startup_blocker.clone().unwrap_or_else(|| {
+                    "system power monitor is unavailable".to_owned()
+                })));
+        } else {
+            return Some((selection, acknowledgement));
+        }
+        None
+    }
+
+    pub(super) fn apply_output_selection(&mut self, selection: OutputSelection) {
+        self.config.output = selection;
+        self.reset_output_retry();
+        // The counter describes one backend's helper, so it is meaningless
+        // once a different backend owns the output.
+        self.virtual_helper_restarts = 0;
+        self.update_status(|status| {
+            status.output = OutputStatus::configured(&self.config.output);
+            status.output_diagnostics = OutputDiagnostics::default();
+            status.last_error = None;
+        });
+        if self.desired_running && !self.suspension.active() {
+            self.transition(RuntimeState::Discovering, "Switching gamepad output", None);
+        }
+    }
+
+    pub(super) fn reset_output_retry(&mut self) {
+        self.output_retry.reset(Instant::now());
+    }
+
+    /// The backend cannot count its own restarts, because a restart is the
+    /// supervisor discarding it and opening another. Read diagnostics through
+    /// here so that stays true at every call site.
+    pub(super) fn output_diagnostics(&self, output: &OutputSession) -> OutputDiagnostics {
+        OutputDiagnostics {
+            virtual_helper_restarts: self.virtual_helper_restarts,
+            ..output.output.diagnostics()
+        }
+    }
+
+    pub(super) fn schedule_output_retry(&mut self) {
+        self.output_retry.schedule_after_failure(Instant::now());
+        self.virtual_helper_restarts = self.virtual_helper_restarts.wrapping_add(1);
+        self.update_status(|status| {
+            status.output_diagnostics.virtual_helper_restarts = self.virtual_helper_restarts;
+        });
     }
 
     /// Closes the wheel and tells the frontend, for a controller that went away
@@ -328,6 +417,9 @@ impl Supervisor {
     /// so a torn-down serial session keeps the last known value until the
     /// existing output-lost reset clears it.
     pub(crate) fn refresh_output_firmware(&self, output: &mut OutputSession) {
+        if !output.capabilities.firmware || output.serial_device.is_none() {
+            return;
+        }
         let Some(mut reported) = output.output.firmware_info() else {
             return;
         };

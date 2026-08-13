@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Steam Controller Bridge — Offline Gamepad Tester</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background: #111318;
+      color: #edf0f7;
+    }
+    body {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1, h2 { font-family: system-ui, sans-serif; }
+    .hint, .empty { color: #aab2c2; }
+    .gamepad {
+      margin: 18px 0;
+      padding: 16px;
+      border: 1px solid #353b48;
+      border-radius: 10px;
+      background: #191c23;
+    }
+    .metadata {
+      display: grid;
+      grid-template-columns: max-content 1fr;
+      gap: 6px 12px;
+      overflow-wrap: anywhere;
+    }
+    .label { color: #8fb9ff; }
+    .values {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 6px;
+    }
+    .value {
+      padding: 6px 8px;
+      border-radius: 5px;
+      background: #252a35;
+    }
+    .pressed { background: #185d3b; color: #d8ffe9; }
+    #events {
+      min-height: 4em;
+      max-height: 12em;
+      overflow: auto;
+      white-space: pre-wrap;
+      color: #c9d1df;
+    }
+  </style>
+</head>
+<body>
+  <h1>Offline Gamepad API tester</h1>
+  <p class="hint">
+    Open this file before starting the virtual HID helper. It uses no network
+    resources. Keep this window focused and press a gamepad button if the
+    browser requires user interaction before exposing a device.
+  </p>
+  <section aria-labelledby="events-heading">
+    <h2 id="events-heading">Connection events</h2>
+    <div id="events">Waiting for a gamepad…</div>
+  </section>
+  <section aria-labelledby="devices-heading">
+    <h2 id="devices-heading">Devices</h2>
+    <div id="devices" class="empty">No Gamepad API devices reported.</div>
+  </section>
+  <script>
+    "use strict";
+
+    const devices = document.querySelector("#devices");
+    const events = document.querySelector("#events");
+    const eventLines = [];
+
+    function logEvent(message) {
+      eventLines.push(`${new Date().toISOString()}  ${message}`);
+      while (eventLines.length > 40) eventLines.shift();
+      events.textContent = eventLines.join("\n");
+      events.scrollTop = events.scrollHeight;
+    }
+
+    function row(label, value) {
+      const fragment = document.createDocumentFragment();
+      const key = document.createElement("span");
+      key.className = "label";
+      key.textContent = label;
+      const content = document.createElement("span");
+      content.textContent = value;
+      fragment.append(key, content);
+      return fragment;
+    }
+
+    function values(title, entries) {
+      const section = document.createElement("section");
+      const heading = document.createElement("h3");
+      heading.textContent = title;
+      const grid = document.createElement("div");
+      grid.className = "values";
+      for (const entry of entries) {
+        const cell = document.createElement("span");
+        cell.className = `value${entry.active ? " pressed" : ""}`;
+        cell.textContent = entry.text;
+        grid.append(cell);
+      }
+      section.append(heading, grid);
+      return section;
+    }
+
+    function render() {
+      const gamepads = Array.from(navigator.getGamepads?.() ?? []).filter(Boolean);
+      devices.replaceChildren();
+
+      if (gamepads.length === 0) {
+        devices.className = "empty";
+        devices.textContent = "No Gamepad API devices reported.";
+        requestAnimationFrame(render);
+        return;
+      }
+
+      devices.className = "";
+      for (const gamepad of gamepads) {
+        const card = document.createElement("article");
+        card.className = "gamepad";
+        const heading = document.createElement("h3");
+        heading.textContent = `Gamepad ${gamepad.index}`;
+        const metadata = document.createElement("div");
+        metadata.className = "metadata";
+        metadata.append(
+          row("id", gamepad.id),
+          row("mapping", gamepad.mapping || "(empty)"),
+          row("connected", String(gamepad.connected)),
+          row("timestamp", String(gamepad.timestamp)),
+          row("axes", String(gamepad.axes.length)),
+          row("buttons", String(gamepad.buttons.length))
+        );
+
+        const axes = values("Axes", gamepad.axes.map((value, index) => ({
+          text: `${index}: ${value.toFixed(5)}`,
+          active: Math.abs(value) > 0.01,
+        })));
+        const buttons = values("Buttons", gamepad.buttons.map((button, index) => ({
+          text: `${index}: ${button.value.toFixed(5)}${button.pressed ? " pressed" : ""}`,
+          active: button.pressed || button.value > 0.01,
+        })));
+
+        card.append(heading, metadata, axes, buttons);
+        devices.append(card);
+      }
+      requestAnimationFrame(render);
+    }
+
+    window.addEventListener("gamepadconnected", event => {
+      const gamepad = event.gamepad;
+      logEvent(`connected index=${gamepad.index} id=${JSON.stringify(gamepad.id)} mapping=${JSON.stringify(gamepad.mapping)}`);
+    });
+    window.addEventListener("gamepaddisconnected", event => {
+      const gamepad = event.gamepad;
+      logEvent(`disconnected index=${gamepad.index} id=${JSON.stringify(gamepad.id)}`);
+    });
+
+    requestAnimationFrame(render);
+  </script>
+</body>
+</html>

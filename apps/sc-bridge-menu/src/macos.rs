@@ -8,15 +8,17 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bridge_runtime::{
-    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, PendingUpdateResume,
-    PickerConfig, PickerEvent, PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord,
-    StatusLogTracker, UpdateResumePoll,
+    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, OutputChangePoll,
+    OutputSelection, PendingOutputChange, PendingUpdateResume, PickerConfig, PickerEvent,
+    PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord, StatusLogTracker,
+    UpdateResumePoll, VirtualHidConfig,
 };
 use desktop_bindings::{
     default_store_path, input_monitoring_access, load_or_create_store, parse_store,
     preflight_accessibility_access, preflight_post_event_access, request_accessibility_access,
     request_input_monitoring_access, request_post_event_access, BindingStore, PermissionState,
 };
+use macos_virtual_hid::ENABLE_VIRTUAL_HID_ENV;
 use objc2::{rc::Retained, MainThreadMarker};
 use objc2_app_kit::{
     NSApplicationActivationOptions, NSImage, NSRunningApplication, NSStatusBarButton,
@@ -52,10 +54,12 @@ mod tray;
 
 use icons::{template_icon, NativeTrayIcons};
 use logging::{copy_diagnostics, StatusLogger};
+#[cfg(test)]
+use support::bundled_virtual_hid_helper_path_from;
 use support::{
     bindings_file_fingerprint, load_settings, permission_stage, picker_roster,
     resolve_picker_commit, save_settings, settings_path, AppSettings, BindingsFileFingerprint,
-    PermissionStage, PickerEventMailbox, OVERLAY_HOLD_CHOICES,
+    OutputPreference, PermissionStage, PickerEventMailbox, OVERLAY_HOLD_CHOICES,
 };
 pub(crate) use system::open_path;
 #[cfg(feature = "updater")]
@@ -110,10 +114,12 @@ const IDLE_10_ID: &str = "idle-10";
 const IDLE_15_ID: &str = "idle-15";
 const IDLE_30_ID: &str = "idle-30";
 const PUCK_DOCK_ID: &str = "puck-dock-power-off";
+const OUTPUT_BRIDGE_DEVICE_ID: &str = "output-bridge-device";
+const OUTPUT_VIRTUAL_HID_ID: &str = "output-virtual-hid";
 const OVERLAY_ENABLED_ID: &str = "profile-overlay-enabled";
 const OVERLAY_HOLD_PREFIX: &str = "profile-overlay-hold:";
 const PICKER_EVENT_MAILBOX_CAPACITY: usize = 32;
-pub fn run() -> Result<(), String> {
+pub fn run(virtual_hid_enabled: bool) -> Result<(), String> {
     // A menu bar app has no windows and no Dock icon, and it must not take
     // focus when it starts. Winit otherwise runs as a regular foreground app
     // and calls `activateIgnoringOtherApps` at launch. In that state macOS
@@ -126,7 +132,7 @@ pub fn run() -> Result<(), String> {
         .with_activate_ignoring_other_apps(false)
         .build()
         .map_err(|error| error.to_string())?;
-    let mut app = MenuApp::new(event_loop.create_proxy())?;
+    let mut app = MenuApp::new(event_loop.create_proxy(), virtual_hid_enabled)?;
     event_loop
         .run_app(&mut app)
         .map_err(|error| error.to_string())
@@ -157,6 +163,8 @@ struct MenuItems {
     updates: MenuItem,
     idle_shutdown: Vec<(Option<u64>, CheckMenuItem)>,
     puck_dock: CheckMenuItem,
+    output_bridge_device: CheckMenuItem,
+    output_virtual_hid: CheckMenuItem,
     bindings_submenu: Submenu,
     binding_profiles: Vec<(String, CheckMenuItem)>,
     overlay_submenu: Submenu,
@@ -223,6 +231,8 @@ struct MenuApp {
     next_poll: Instant,
     logger: StatusLogger,
     settings: AppSettings,
+    /// Product-surface gate only; macOS still enforces the helper entitlement.
+    virtual_hid_enabled: bool,
     settings_path: PathBuf,
     bindings_path: PathBuf,
     binding_store: BindingStore,
@@ -252,6 +262,8 @@ struct MenuApp {
     /// host also owns the updater's safety-ordered bridge lifecycle requests.
     app_center_host: AppCenterHost,
     app_center_recovery: AppCenterRecovery,
+    output_change: Option<(PendingOutputChange, OutputPreference)>,
+    output_change_problem: Option<String>,
     #[cfg(feature = "updater")]
     update_checker: UpdateChecker,
     #[cfg(feature = "updater")]
@@ -280,7 +292,7 @@ impl AppCenterRecovery {
 }
 
 impl MenuApp {
-    fn new(proxy: EventLoopProxy<()>) -> Result<Self, String> {
+    fn new(proxy: EventLoopProxy<()>, virtual_hid_enabled: bool) -> Result<Self, String> {
         let settings_path = settings_path()?;
         let (settings, warning) = load_settings(&settings_path);
         if let Some(warning) = warning {
@@ -298,7 +310,20 @@ impl MenuApp {
         }
         save_settings(&settings_path, &settings)?;
         let bindings_file_fingerprint = bindings_file_fingerprint(&bindings_path)?;
+        // The dormant gate never resolves or launches the helper. Once enabled,
+        // a bad packaged path still names the saved value that unsticks launch.
+        let effective_output = settings
+            .output
+            .when_virtual_hid_enabled(virtual_hid_enabled);
+        let output = effective_output.runtime_selection().map_err(|error| {
+            format!(
+                "cannot start with the saved gamepad output: {error}. Run the packaged \
+                 application, or set \"output\" to \"bridge_device\" in {}",
+                settings_path.display()
+            )
+        })?;
         let config = RuntimeConfig {
+            output,
             idle_shutdown_timeout: settings
                 .idle_shutdown_minutes
                 .map(|minutes| Duration::from_secs(minutes * 60)),
@@ -341,6 +366,7 @@ impl MenuApp {
             next_poll: Instant::now(),
             logger: StatusLogger::new()?,
             settings,
+            virtual_hid_enabled,
             settings_path,
             bindings_path,
             binding_store,
@@ -357,6 +383,8 @@ impl MenuApp {
             editor_children: Vec::new(),
             app_center_host: AppCenterHost::new(),
             app_center_recovery: AppCenterRecovery::Idle,
+            output_change: None,
+            output_change_problem: None,
             #[cfg(feature = "updater")]
             update_checker: UpdateChecker::new(),
             #[cfg(feature = "updater")]
@@ -398,6 +426,7 @@ impl ApplicationHandler for MenuApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.recover_app_center_suspension();
+        self.poll_output_change();
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             self.handle_menu_event(event.id.as_ref(), event_loop);
         }

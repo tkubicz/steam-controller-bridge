@@ -11,6 +11,12 @@ impl MenuApp {
                 item.set_checked(*minutes == self.settings.idle_shutdown_minutes);
             }
             items.puck_dock.set_checked(self.settings.power_off_on_puck);
+            items
+                .output_bridge_device
+                .set_checked(self.settings.output == OutputPreference::BridgeDevice);
+            items
+                .output_virtual_hid
+                .set_checked(self.settings.output == OutputPreference::VirtualHid);
             for (profile_id, item) in &items.binding_profiles {
                 item.set_checked(*profile_id == self.settings.active_binding_profile);
             }
