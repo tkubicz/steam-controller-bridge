@@ -162,9 +162,9 @@ pub struct BridgeHandle {
     power_monitor: Mutex<Option<PowerMonitor>>,
 }
 
-/// The result of polling a non-blocking updater-resume request.
+/// The result of polling any non-blocking runtime command.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdateResumePoll {
+pub enum CommandPoll {
     Pending,
     /// The deadline elapsed, but the original command remains queued and may
     /// still acknowledge later. Reported at most once per request.
@@ -172,30 +172,15 @@ pub enum UpdateResumePoll {
     Complete(Result<(), RuntimeError>),
 }
 
+/// Kept as names the frontends already use; both polls answer the same
+/// question, so they are one type rather than three copies of one enum.
+pub type UpdateResumePoll = CommandPoll;
+/// The result of polling a non-blocking output-backend change.
+pub type OutputChangePoll = CommandPoll;
+
 /// A queued updater-resume request whose acknowledgement can be polled by a UI.
 pub struct PendingUpdateResume {
     command: PendingCommand,
-}
-
-struct PendingCommand {
-    receiver: mpsc::Receiver<Result<(), String>>,
-    deadline: std::time::Instant,
-    timeout_reported: bool,
-    completion: Option<Result<(), RuntimeError>>,
-}
-
-enum PendingCommandPoll {
-    Pending,
-    TimedOut,
-    Complete(Result<(), RuntimeError>),
-}
-
-/// The result of polling a non-blocking output-backend change.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OutputChangePoll {
-    Pending,
-    TimedOut,
-    Complete(Result<(), RuntimeError>),
 }
 
 /// A safety-ordered output change whose acknowledgement can be polled by a UI.
@@ -210,13 +195,10 @@ impl PendingOutputChange {
         }
     }
 
+    /// Checks for completion without blocking the caller.
     #[must_use]
     pub fn poll(&mut self) -> OutputChangePoll {
-        match self.command.poll("output change") {
-            PendingCommandPoll::Pending => OutputChangePoll::Pending,
-            PendingCommandPoll::TimedOut => OutputChangePoll::TimedOut,
-            PendingCommandPoll::Complete(result) => OutputChangePoll::Complete(result),
-        }
+        self.command.poll("output change")
     }
 }
 
@@ -230,12 +212,15 @@ impl PendingUpdateResume {
     /// Checks for completion without blocking the caller.
     #[must_use]
     pub fn poll(&mut self) -> UpdateResumePoll {
-        match self.command.poll("recovery") {
-            PendingCommandPoll::Pending => UpdateResumePoll::Pending,
-            PendingCommandPoll::TimedOut => UpdateResumePoll::TimedOut,
-            PendingCommandPoll::Complete(result) => UpdateResumePoll::Complete(result),
-        }
+        self.command.poll("recovery")
     }
+}
+
+struct PendingCommand {
+    receiver: mpsc::Receiver<Result<(), String>>,
+    deadline: std::time::Instant,
+    timeout_reported: bool,
+    completion: Option<Result<(), RuntimeError>>,
 }
 
 impl PendingCommand {
@@ -248,27 +233,25 @@ impl PendingCommand {
         }
     }
 
-    fn poll(&mut self, operation: &str) -> PendingCommandPoll {
+    fn poll(&mut self, operation: &str) -> CommandPoll {
         if let Some(result) = &self.completion {
-            return PendingCommandPoll::Complete(result.clone());
+            return CommandPoll::Complete(result.clone());
         }
         let result = match self.receiver.try_recv() {
-            Ok(result) => PendingCommandPoll::Complete(result.map_err(RuntimeError)),
+            Ok(result) => CommandPoll::Complete(result.map_err(RuntimeError)),
             Err(mpsc::TryRecvError::Empty) if std::time::Instant::now() < self.deadline => {
-                PendingCommandPoll::Pending
+                CommandPoll::Pending
             }
             Err(mpsc::TryRecvError::Empty) if !self.timeout_reported => {
                 self.timeout_reported = true;
-                PendingCommandPoll::TimedOut
+                CommandPoll::TimedOut
             }
-            Err(mpsc::TryRecvError::Empty) => PendingCommandPoll::Pending,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                PendingCommandPoll::Complete(Err(RuntimeError(format!(
-                    "bridge runtime stopped before acknowledging {operation}"
-                ))))
-            }
+            Err(mpsc::TryRecvError::Empty) => CommandPoll::Pending,
+            Err(mpsc::TryRecvError::Disconnected) => CommandPoll::Complete(Err(RuntimeError(
+                format!("bridge runtime stopped before acknowledging {operation}"),
+            ))),
         };
-        if let PendingCommandPoll::Complete(completion) = &result {
+        if let CommandPoll::Complete(completion) = &result {
             self.completion = Some(completion.clone());
         }
         result

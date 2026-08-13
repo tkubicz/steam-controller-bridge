@@ -330,10 +330,10 @@ impl MenuApp {
             .problem()
             .map(str::to_owned)
             .or_else(|| self.output_change_problem.clone());
-        if let Err(error) = self.app_center_host.update_firmware(
-            status.output.backend == OutputBackend::SerialBridge,
-            status.output.firmware,
-        ) {
+        if let Err(error) = self
+            .app_center_host
+            .update_firmware(status.output.capabilities.firmware, status.output.firmware)
+        {
             eprintln!("cannot update app window firmware status: {error}");
         }
         #[cfg(feature = "updater")]
@@ -429,11 +429,10 @@ impl MenuApp {
 
     pub(super) fn show_app_center(&mut self, page: AppCenterPage) {
         let output = self.runtime.status().output;
-        match self.app_center_host.launch(
-            page,
-            output.backend == OutputBackend::SerialBridge,
-            output.firmware,
-        ) {
+        match self
+            .app_center_host
+            .launch(page, output.capabilities.firmware, output.firmware)
+        {
             Ok(reused) => {
                 if reused
                     && self
@@ -611,8 +610,7 @@ impl MenuApp {
         };
         match self.runtime.begin_set_output(selection) {
             Ok(request) => {
-                self.output_change = Some(request);
-                self.pending_output_preference = Some(preference);
+                self.output_change = Some((request, preference));
                 self.output_change_problem = None;
                 self.set_output_items_enabled(false);
             }
@@ -624,7 +622,7 @@ impl MenuApp {
     }
 
     pub(super) fn poll_output_change(&mut self) {
-        let Some(request) = self.output_change.as_mut() else {
+        let Some((request, _)) = self.output_change.as_mut() else {
             return;
         };
         match request.poll() {
@@ -636,24 +634,24 @@ impl MenuApp {
                 );
             }
             OutputChangePoll::Complete(result) => {
-                self.output_change = None;
-                let preference = self.pending_output_preference.take();
-                match (result, preference) {
-                    (Ok(()), Some(preference)) => {
-                        self.settings.output = preference;
-                        self.output_change_problem = None;
-                        if let Err(error) = save_settings(&self.settings_path, &self.settings) {
-                            self.output_change_problem = Some(format!(
-                                "Output changed but settings could not be saved: {error}"
-                            ));
+                // The request and the preference it was raised for are stored
+                // and taken together, so a completion cannot arrive without
+                // knowing which selection it completed.
+                if let Some((_, preference)) = self.output_change.take() {
+                    match result {
+                        Ok(()) => {
+                            self.settings.output = preference;
+                            self.output_change_problem = None;
+                            if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+                                self.output_change_problem = Some(format!(
+                                    "Output changed but settings could not be saved: {error}"
+                                ));
+                            }
                         }
-                    }
-                    (Err(error), _) => {
-                        self.output_change_problem = Some(format!("Output change failed: {error}"));
-                    }
-                    (Ok(()), None) => {
-                        self.output_change_problem =
-                            Some("Output changed without a pending menu selection".to_owned());
+                        Err(error) => {
+                            self.output_change_problem =
+                                Some(format!("Output change failed: {error}"));
+                        }
                     }
                 }
                 self.set_output_items_enabled(true);

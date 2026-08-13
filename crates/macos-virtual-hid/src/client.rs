@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs;
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -261,12 +261,16 @@ impl VirtualHidOutput {
                 )
             })?;
         let mut child = ChildGuard::new(child);
-        let mut stdin = child.child_mut().stdin.take().ok_or_else(|| {
+        // serde_json emits one write per JSON token, and a pipe turns each of
+        // those into a syscall. Buffering collapses a report to the single
+        // write the explicit flush in `write_json_line` already implies.
+        let stdin = child.child_mut().stdin.take().ok_or_else(|| {
             VirtualHidError::new(
                 VirtualHidErrorClass::SpawnFailed,
                 "virtual HID helper stdin was not captured",
             )
         })?;
+        let mut stdin = BufWriter::new(stdin);
         let stdout = child.child_mut().stdout.take().ok_or_else(|| {
             VirtualHidError::new(
                 VirtualHidErrorClass::SpawnFailed,
@@ -607,7 +611,7 @@ fn classify_startup_status(
 #[allow(clippy::too_many_arguments)]
 fn run_worker(
     mut child: Child,
-    mut stdin: ChildStdin,
+    mut stdin: BufWriter<ChildStdin>,
     responses: mpsc::Receiver<ReaderEvent>,
     reader: JoinHandle<()>,
     mailbox: &Mailbox,

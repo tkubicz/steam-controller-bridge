@@ -9,8 +9,8 @@ use super::{
     DecodedReport, DesktopBindingsWorker, DesktopInputSnapshot, DeviceError, DeviceEvent,
     DumpOutput, Duration, File, FileOutput, FirmwareInstallReceipt, GamepadOutput, HapticsState,
     HapticsStatus, HidDeviceInfo, HidSession, IdleActivityTracker, Instant, JoinHandle, LizardMode,
-    LizardModeHeartbeat, LizardStatus, MockOutput, Mutex, Ordering, OutputBackend, OutputError,
-    OutputFeedback, OutputSelection, OutputStatus, PadFeedbackRequest, PadHapticGain,
+    LizardModeHeartbeat, LizardStatus, MockOutput, Mutex, Ordering, OutputCapabilities,
+    OutputError, OutputFeedback, OutputSelection, OutputStatus, PadFeedbackRequest, PadHapticGain,
     PadHapticSide, PickerConfig, PickerEvent, PickerEventSink, PickerInput, PickerRuntime,
     ProcessOutcome, RawHidReport, Receiver, RecordingError, RecordingEvent, RecordingWriter,
     RuntimeCommand, RuntimeConfig, RuntimeState, SerialDeviceInfo, SerialOutput, SerialSelection,
@@ -101,7 +101,8 @@ impl Supervisor {
         startup_blocker: Option<String>,
     ) -> Self {
         let automatic_shutdown = AutomaticShutdownRuntime::new(&config);
-        let desired_running = startup_blocker.is_none() || !requires_power_monitor(&config.output);
+        let desired_running =
+            startup_blocker.is_none() || !OutputCapabilities::for_selection(&config.output).live;
         let desktop_bindings =
             DesktopBindingsWorker::spawn(config.binding_profile.clone(), Arc::clone(&status));
         Self {
@@ -133,7 +134,7 @@ impl Supervisor {
     #[allow(clippy::too_many_lines)] // The supervisor keeps endpoint ownership transitions linear.
     pub(crate) fn run(&mut self) {
         let mut retained_output: Option<OutputSession> = None;
-        if requires_power_monitor(&self.config.output) {
+        if OutputCapabilities::for_selection(&self.config.output).live {
             if let Some(error) = self.startup_blocker.clone() {
                 self.transition(
                     RuntimeState::Error,
@@ -214,30 +215,30 @@ impl Supervisor {
                     continue;
                 }
                 match self.discover_output() {
-                    Discovery::Ready(output) => {
+                    OutputDiscovery::Ready(output) => {
                         self.output_retry_delay = OUTPUT_RETRY_INITIAL;
                         self.next_output_attempt = Instant::now();
                         retained_output = Some(output);
                     }
-                    Discovery::Wait { detail, error } => {
+                    OutputDiscovery::Wait { detail, error } => {
                         self.clear_hardware_status();
                         self.transition(RuntimeState::Waiting, &detail, error.as_deref());
                         self.wait_or_command(DISCOVERY_INTERVAL);
                         continue;
                     }
-                    Discovery::Retry { detail, error } => {
+                    OutputDiscovery::Retry { detail, error } => {
                         self.schedule_output_retry();
                         self.clear_hardware_status();
                         self.transition(RuntimeState::Waiting, &detail, Some(&error));
                         continue;
                     }
-                    Discovery::Error(message) => {
+                    OutputDiscovery::Error(message) => {
                         self.clear_hardware_status();
                         self.transition(RuntimeState::Error, &message, Some(&message));
                         self.wait_or_command(DISCOVERY_INTERVAL);
                         continue;
                     }
-                    Discovery::Blocked(message) => {
+                    OutputDiscovery::Blocked(message) => {
                         self.clear_hardware_status();
                         self.desired_running = false;
                         self.transition(RuntimeState::Error, &message, Some(&message));
@@ -275,7 +276,9 @@ impl Supervisor {
                                 self.desired_running = false;
                                 self.transition(RuntimeState::Error, &message, Some(&message));
                             } else {
-                                if matches!(self.config.output, OutputSelection::VirtualHid(_)) {
+                                if OutputCapabilities::for_selection(&self.config.output)
+                                    .reopen_with_backoff
+                                {
                                     self.schedule_output_retry();
                                 }
                                 self.transition(RuntimeState::Waiting, &message, Some(&message));
@@ -289,22 +292,11 @@ impl Supervisor {
                     }
                     continue;
                 }
-                Discovery::Retry { detail, error } => {
-                    self.clear_controller_status();
-                    self.transition(RuntimeState::Waiting, &detail, Some(&error));
-                    continue;
-                }
                 Discovery::Error(message) => {
                     self.clear_controller_status();
                     self.transition(RuntimeState::Error, &message, Some(&message));
                     retained_output = None;
                     self.wait_or_command(DISCOVERY_INTERVAL);
-                    continue;
-                }
-                Discovery::Blocked(message) => {
-                    self.clear_controller_status();
-                    self.desired_running = false;
-                    self.transition(RuntimeState::Error, &message, Some(&message));
                     continue;
                 }
             };
@@ -325,7 +317,7 @@ impl Supervisor {
                 }
                 Ok((ActiveExit::OutputLost(message), _, _)) => {
                     retained_output = None;
-                    if matches!(self.config.output, OutputSelection::VirtualHid(_)) {
+                    if OutputCapabilities::for_selection(&self.config.output).reopen_with_backoff {
                         self.schedule_output_retry();
                     }
                     self.update_status(|status| {
@@ -418,11 +410,4 @@ impl Supervisor {
             self.transition(RuntimeState::Stopped, "Bridge stopped", None);
         }
     }
-}
-
-pub(crate) const fn requires_power_monitor(selection: &OutputSelection) -> bool {
-    matches!(
-        selection,
-        OutputSelection::Serial | OutputSelection::VirtualHid(_)
-    )
 }

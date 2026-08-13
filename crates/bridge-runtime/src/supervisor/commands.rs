@@ -6,7 +6,7 @@ use super::*;
 
 use bridge_output::{
     new_firmware_install_receipt, random_firmware_request_id, FirmwareInfo, FirmwareInstallReceipt,
-    FirmwareInstallSource, FirmwareInstallState,
+    FirmwareInstallSource, FirmwareInstallState, OutputDiagnostics,
 };
 
 const FIRST_OBSERVED_RECEIPT_RETRY: Duration = Duration::from_secs(5);
@@ -38,7 +38,7 @@ impl Supervisor {
     pub(super) fn apply_idle_command(&mut self, command: RuntimeCommand) {
         match command {
             RuntimeCommand::Start(ack) => {
-                if requires_power_monitor(&self.config.output) {
+                if OutputCapabilities::for_selection(&self.config.output).live {
                     if let Some(error) = &self.startup_blocker {
                         let _ = ack.send(Err(error.clone()));
                         return;
@@ -173,7 +173,7 @@ impl Supervisor {
         while let Ok(command) = self.commands.try_recv() {
             match command {
                 RuntimeCommand::Start(ack) => {
-                    if requires_power_monitor(&self.config.output) {
+                    if OutputCapabilities::for_selection(&self.config.output).live {
                         if let Some(error) = &self.startup_blocker {
                             let _ = ack.send(Err(error.clone()));
                             continue;
@@ -300,7 +300,9 @@ impl Supervisor {
             ));
         } else if selection == self.config.output {
             let _ = acknowledgement.send(Ok(()));
-        } else if requires_power_monitor(&selection) && self.startup_blocker.is_some() {
+        } else if OutputCapabilities::for_selection(&selection).live
+            && self.startup_blocker.is_some()
+        {
             let _ = acknowledgement
                 .send(Err(self.startup_blocker.clone().unwrap_or_else(|| {
                     "system power monitor is unavailable".to_owned()
@@ -319,7 +321,7 @@ impl Supervisor {
         self.virtual_helper_restarts = 0;
         self.update_status(|status| {
             status.output = OutputStatus::configured(&self.config.output);
-            status.output_diagnostics = bridge_output::OutputDiagnostics::default();
+            status.output_diagnostics = OutputDiagnostics::default();
             status.last_error = None;
         });
         if self.desired_running && !self.suspension.active() {
@@ -330,6 +332,16 @@ impl Supervisor {
     pub(super) fn reset_output_retry(&mut self) {
         self.next_output_attempt = Instant::now();
         self.output_retry_delay = OUTPUT_RETRY_INITIAL;
+    }
+
+    /// The backend cannot count its own restarts, because a restart is the
+    /// supervisor discarding it and opening another. Read diagnostics through
+    /// here so that stays true at every call site.
+    pub(super) fn output_diagnostics(&self, output: &OutputSession) -> OutputDiagnostics {
+        OutputDiagnostics {
+            virtual_helper_restarts: self.virtual_helper_restarts,
+            ..output.output.diagnostics()
+        }
     }
 
     pub(super) fn schedule_output_retry(&mut self) {

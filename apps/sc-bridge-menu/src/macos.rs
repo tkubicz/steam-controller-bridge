@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bridge_runtime::{
-    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, OutputBackend,
-    OutputChangePoll, OutputSelection, PendingOutputChange, PendingUpdateResume, PickerConfig,
-    PickerEvent, PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord, StatusLogTracker,
+    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, OutputChangePoll,
+    OutputSelection, PendingOutputChange, PendingUpdateResume, PickerConfig, PickerEvent,
+    PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord, StatusLogTracker,
     UpdateResumePoll, VirtualHidConfig,
 };
 use desktop_bindings::{
@@ -259,8 +259,7 @@ struct MenuApp {
     /// host also owns the updater's safety-ordered bridge lifecycle requests.
     app_center_host: AppCenterHost,
     app_center_recovery: AppCenterRecovery,
-    output_change: Option<PendingOutputChange>,
-    pending_output_preference: Option<OutputPreference>,
+    output_change: Option<(PendingOutputChange, OutputPreference)>,
     output_change_problem: Option<String>,
     #[cfg(feature = "updater")]
     update_checker: UpdateChecker,
@@ -379,7 +378,6 @@ impl MenuApp {
             app_center_host: AppCenterHost::new(),
             app_center_recovery: AppCenterRecovery::Idle,
             output_change: None,
-            pending_output_preference: None,
             output_change_problem: None,
             #[cfg(feature = "updater")]
             update_checker: UpdateChecker::new(),

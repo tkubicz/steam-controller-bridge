@@ -483,24 +483,42 @@ fn runtime_defaults_to_zero_configuration_serial_bridge() {
 }
 
 #[test]
-fn output_capabilities_do_not_infer_liveness_from_a_serial_device() {
+fn output_capabilities_come_from_the_selection_not_from_a_serial_device() {
+    let serial = OutputCapabilities::for_selection(&OutputSelection::Serial);
     assert_eq!(
-        OutputCapabilities::SERIAL,
+        serial,
         OutputCapabilities {
             live: true,
-            controller_shutdown: true,
             firmware: true,
+            reopen_with_backoff: false,
         }
     );
+    let virtual_hid = OutputCapabilities::for_selection(&OutputSelection::VirtualHid(
+        VirtualHidConfig::new(std::path::PathBuf::from("helper")),
+    ));
     assert_eq!(
-        OutputCapabilities::VIRTUAL_HID,
+        virtual_hid,
         OutputCapabilities {
             live: true,
-            controller_shutdown: true,
             firmware: false,
+            reopen_with_backoff: true,
         }
     );
-    assert_eq!(OutputCapabilities::PASSIVE, OutputCapabilities::default());
+    // Every passive backend is indistinguishable from the default.
+    for passive in [
+        OutputSelection::Mock,
+        OutputSelection::File(std::path::PathBuf::from("out.jsonl")),
+    ] {
+        assert_eq!(
+            OutputCapabilities::for_selection(&passive),
+            OutputCapabilities::default()
+        );
+    }
+    // And the published status carries the same answer the supervisor uses.
+    assert_eq!(
+        OutputStatus::configured(&OutputSelection::Serial).capabilities,
+        serial
+    );
 }
 
 struct ConfigurationFailureOutput;
@@ -523,7 +541,7 @@ fn waiting_output_service_preserves_permanent_failure_classification() {
     let mut output = OutputSession {
         output: Box::new(ConfigurationFailureOutput),
         serial_device: None,
-        capabilities: OutputCapabilities::VIRTUAL_HID,
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     assert!(matches!(

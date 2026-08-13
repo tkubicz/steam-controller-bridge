@@ -17,8 +17,8 @@ pub use api::{
     AutomaticShutdownPhase, AutomaticShutdownStatus, BridgeStatus, ControllerChargeState,
     ControllerSelection, ControllerSourceStatus, ControllerStatus, DesktopBindingsState,
     DesktopBindingsStatus, HapticsState, HapticsStatus, LizardMode, LizardStatus, OutputBackend,
-    OutputSelection, OutputStatus, ProfilePickerStatus, PuckDockAction, RuntimeConfig,
-    RuntimeError, RuntimeState, SerialSelection, ShutdownTrigger, VirtualHidStatus,
+    OutputCapabilities, OutputSelection, OutputStatus, ProfilePickerStatus, PuckDockAction,
+    RuntimeConfig, RuntimeError, RuntimeState, SerialSelection, ShutdownTrigger, VirtualHidStatus,
 };
 pub(crate) use automatic_shutdown::{
     automatic_shutdown_phase, binding_status_for_profile, validate_idle_shutdown_timeout,
@@ -33,8 +33,8 @@ pub(crate) use desktop::{
 pub(crate) use picker::PickerRuntime;
 pub(crate) use runtime::{picker_status, CommandAck, RuntimeCommand};
 pub use runtime::{
-    BridgeHandle, BridgeRuntime, OutputChangePoll, PendingOutputChange, PendingUpdateResume,
-    PickerEventSink, UpdateResumePoll,
+    BridgeHandle, BridgeRuntime, CommandPoll, OutputChangePoll, PendingOutputChange,
+    PendingUpdateResume, PickerEventSink, UpdateResumePoll,
 };
 // Re-exported so frontends can render firmware status without depending on
 // bridge-output directly.

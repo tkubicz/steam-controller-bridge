@@ -523,15 +523,8 @@ fn pending_manual_firmware_gets_one_first_observed_receipt() {
             recorded: Arc::clone(&recorded),
             pending_response: None,
         }),
-        serial_device: Some(SerialDeviceInfo {
-            path: "/dev/cu.test".to_owned(),
-            vendor_id: None,
-            product_id: None,
-            serial_number: None,
-            manufacturer: None,
-            product: None,
-        }),
-        capabilities: OutputCapabilities::SERIAL,
+        serial_device: Some(serial_info("/dev/cu.test", "TESTSERIAL")),
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::Serial),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
 
@@ -611,15 +604,8 @@ fn a_lost_receipt_ack_retries_the_same_receipt_after_backoff() {
         output: Box::new(DroppedReceiptAckOutput {
             attempts: Arc::clone(&attempts),
         }),
-        serial_device: Some(SerialDeviceInfo {
-            path: "/dev/cu.test".to_owned(),
-            vendor_id: None,
-            product_id: None,
-            serial_number: None,
-            manufacturer: None,
-            product: None,
-        }),
-        capabilities: OutputCapabilities::SERIAL,
+        serial_device: Some(serial_info("/dev/cu.test", "TESTSERIAL")),
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::Serial),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
 
@@ -651,7 +637,7 @@ fn hardware_release_finishes_before_command_acknowledgement() {
     let output = OutputSession {
         output: Box::new(DropOrderOutput(Arc::clone(&order))),
         serial_device: None,
-        capabilities: OutputCapabilities::PASSIVE,
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     let release_order = Arc::clone(&order);
@@ -678,7 +664,7 @@ fn ordinary_stop_disconnects_virtual_hid_before_acknowledgement() {
     let output = OutputSession {
         output: Box::new(DropOrderOutput(Arc::clone(&order))),
         serial_device: None,
-        capabilities: OutputCapabilities::VIRTUAL_HID,
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     let release_order = Arc::clone(&order);
@@ -710,7 +696,7 @@ fn a_slow_desktop_operation_is_preceded_by_neutral_on_the_wire() {
     let mut session = OutputSession {
         output: Box::new(SharedOutput(Arc::clone(&states))),
         serial_device: None,
-        capabilities: OutputCapabilities::PASSIVE,
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     let mut engine = BridgeEngine::new(BridgeConfig::default(), MapperConfig::default()).unwrap();

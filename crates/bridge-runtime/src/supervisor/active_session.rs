@@ -285,7 +285,10 @@ impl Supervisor {
             };
             if let Err(error) = service_result {
                 let message = format!("gamepad output service failed: {error}");
-                break if is_permanent_output_error(&error.to_string()) {
+                break if matches!(
+                    error,
+                    bridge_core::BridgeError::Output(OutputError::Configuration(_))
+                ) {
                     ActiveExit::OutputBlocked(message)
                 } else {
                     ActiveExit::OutputLost(message)
@@ -319,7 +322,7 @@ impl Supervisor {
                 .or_else(|| dock_retry_due.then_some(ShutdownTrigger::PuckDock))
                 .or_else(|| idle_shutdown_due.then_some(ShutdownTrigger::IdleTimeout));
             if let Some(trigger) = automatic_trigger {
-                if !output.capabilities.controller_shutdown {
+                if !output.capabilities.live {
                     eprintln!(
                         "level=warn event=automatic_shutdown_skipped trigger={trigger:?} reason=output_not_ready"
                     );
@@ -386,8 +389,7 @@ impl Supervisor {
                     Instant::now(),
                 );
                 let binding_status = self.desktop_bindings.status();
-                let mut output_diagnostics = output.output.diagnostics();
-                output_diagnostics.virtual_helper_restarts = self.virtual_helper_restarts;
+                let output_diagnostics = self.output_diagnostics(&output);
                 self.update_status(|status| {
                     status.bridge_metrics = engine.metrics();
                     status.output_diagnostics = output_diagnostics;
@@ -406,9 +408,7 @@ impl Supervisor {
                 // Internal serial reconnects restart firmware reporting at
                 // Pending without the supervisor noticing; this re-resolves
                 // the report on the same cadence.
-                if output.capabilities.firmware {
-                    self.refresh_output_firmware(&mut output);
-                }
+                self.refresh_output_firmware(&mut output);
                 last_status = Instant::now();
             }
         };
@@ -423,8 +423,7 @@ impl Supervisor {
             .automatic_shutdown
             .status(&self.config, None, Instant::now());
         let binding_status = self.desktop_bindings.status();
-        let mut output_diagnostics = output.output.diagnostics();
-        output_diagnostics.virtual_helper_restarts = self.virtual_helper_restarts;
+        let output_diagnostics = self.output_diagnostics(&output);
         self.update_status(|status| {
             status.bridge_metrics = engine.metrics();
             status.output_diagnostics = output_diagnostics;

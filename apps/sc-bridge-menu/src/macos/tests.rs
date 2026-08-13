@@ -560,7 +560,6 @@ fn diagnostics_never_expose_a_whole_device_serial() {
             active: true,
         },
         output: bridge_runtime::OutputStatus {
-            backend: bridge_runtime::OutputBackend::SerialBridge,
             endpoint: Some("/dev/cu.usbmodem11201".to_owned()),
             stable_id: Some("5E6EF905E5468F85".to_owned()),
             ready: true,
@@ -568,7 +567,7 @@ fn diagnostics_never_expose_a_whole_device_serial() {
                 version: bridge_runtime::FirmwareVersion::Reported(1),
                 ..bridge_runtime::FirmwareInfo::default()
             }),
-            virtual_hid: None,
+            ..bridge_runtime::OutputStatus::configured(&bridge_runtime::OutputSelection::Serial)
         },
         ..BridgeStatus::default()
     });

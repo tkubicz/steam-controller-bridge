@@ -414,7 +414,6 @@ mod tests {
                 last_state_age: Some(std::time::Duration::ZERO),
             },
             output: OutputStatus {
-                backend: OutputBackend::SerialBridge,
                 endpoint: Some("/dev/cu.usbmodem-example".to_owned()),
                 stable_id: Some("redacted".to_owned()),
                 ready: true,
@@ -425,7 +424,7 @@ mod tests {
                     ),
                     ..bridge_runtime::FirmwareInfo::default()
                 }),
-                virtual_hid: None,
+                ..OutputStatus::configured(&bridge_runtime::OutputSelection::Serial)
             },
             ..BridgeStatus::default()
         }
@@ -476,15 +475,15 @@ mod tests {
         let status = BridgeStatus {
             state: RuntimeState::Running,
             output: OutputStatus {
-                backend: OutputBackend::VirtualHid,
-                endpoint: Some("macOS virtual gamepad".to_owned()),
                 ready: true,
                 virtual_hid: Some(bridge_runtime::VirtualHidStatus {
                     protocol_version: 1,
                     dry_run: true,
                     ..bridge_runtime::VirtualHidStatus::default()
                 }),
-                ..OutputStatus::default()
+                ..OutputStatus::configured(&bridge_runtime::OutputSelection::VirtualHid(
+                    bridge_runtime::VirtualHidConfig::new(std::path::PathBuf::from("helper")),
+                ))
             },
             ..BridgeStatus::default()
         };

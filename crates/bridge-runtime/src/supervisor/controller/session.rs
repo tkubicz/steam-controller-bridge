@@ -76,6 +76,19 @@ pub(crate) enum Discovery<T> {
         detail: String,
         error: Option<String>,
     },
+    Error(String),
+}
+
+/// Output discovery can also ask to be retried with backoff, or report that
+/// this backend will never open. Controller discovery has no equivalent, so
+/// the two no longer share an outcome type and neither carries arms its
+/// producer cannot emit.
+pub(crate) enum OutputDiscovery {
+    Ready(OutputSession),
+    Wait {
+        detail: String,
+        error: Option<String>,
+    },
     Retry {
         detail: String,
         error: String,
@@ -95,31 +108,6 @@ pub(crate) struct OutputSession {
     pub(crate) serial_device: Option<SerialDeviceInfo>,
     pub(crate) capabilities: OutputCapabilities,
     pub(crate) first_observed_receipt: FirstObservedReceiptState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct OutputCapabilities {
-    pub(crate) live: bool,
-    pub(crate) controller_shutdown: bool,
-    pub(crate) firmware: bool,
-}
-
-impl OutputCapabilities {
-    pub(crate) const SERIAL: Self = Self {
-        live: true,
-        controller_shutdown: true,
-        firmware: true,
-    };
-    pub(crate) const VIRTUAL_HID: Self = Self {
-        live: true,
-        controller_shutdown: true,
-        firmware: false,
-    };
-    pub(crate) const PASSIVE: Self = Self {
-        live: false,
-        controller_shutdown: false,
-        firmware: false,
-    };
 }
 
 #[derive(Clone, Copy)]
@@ -223,12 +211,16 @@ pub(crate) fn acknowledge_after_hardware_release(
 
 pub(crate) struct OpenedNonserialOutput {
     pub(crate) output: Box<dyn GamepadOutput>,
-    pub(crate) capabilities: OutputCapabilities,
     pub(crate) virtual_hid: Option<crate::VirtualHidStatus>,
 }
 
 pub(crate) enum OutputOpenError {
-    Transient(String),
+    /// Worth reopening later; carries the status detail to show while waiting,
+    /// which only the backend that failed can word correctly.
+    Transient {
+        detail: String,
+        error: String,
+    },
     Permanent(String),
 }
 
@@ -241,10 +233,9 @@ pub(crate) fn make_nonserial_output(
         )),
         OutputSelection::VirtualHid(config) => VirtualHidOutput::open(config.clone())
             .map(|output| {
-                let virtual_hid = Some(output.helper_metadata().into());
+                let virtual_hid = Some(output.helper_metadata());
                 OpenedNonserialOutput {
                     output: Box::new(output),
-                    capabilities: OutputCapabilities::VIRTUAL_HID,
                     virtual_hid,
                 }
             })
@@ -252,24 +243,24 @@ pub(crate) fn make_nonserial_output(
                 if error.is_permanent_configuration_failure() {
                     OutputOpenError::Permanent(error.to_string())
                 } else {
-                    OutputOpenError::Transient(error.to_string())
+                    OutputOpenError::Transient {
+                        detail: "Waiting to restart the virtual HID helper".to_owned(),
+                        error: error.to_string(),
+                    }
                 }
             }),
         OutputSelection::Dump(format) => Ok(OpenedNonserialOutput {
             output: Box::new(DumpOutput::new(io::stdout(), *format)),
-            capabilities: OutputCapabilities::PASSIVE,
             virtual_hid: None,
         }),
         OutputSelection::File(path) => FileOutput::create(path)
             .map(|output| OpenedNonserialOutput {
                 output: Box::new(output),
-                capabilities: OutputCapabilities::PASSIVE,
                 virtual_hid: None,
             })
             .map_err(|error| OutputOpenError::Permanent(error.to_string())),
         OutputSelection::Mock => Ok(OpenedNonserialOutput {
             output: Box::new(MockOutput::default()),
-            capabilities: OutputCapabilities::PASSIVE,
             virtual_hid: None,
         }),
     }

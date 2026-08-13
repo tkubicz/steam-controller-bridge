@@ -200,7 +200,6 @@ pub enum VirtualHidErrorClass {
     ProtocolViolation,
     EntitlementMissing,
     EntitlementRejected,
-    DeviceCreationFailed,
     DispatchFailed,
     AcknowledgementTimeout,
     QueueOverflow,
@@ -249,7 +248,6 @@ impl VirtualHidError {
                 | VirtualHidErrorClass::ProtocolViolation
                 | VirtualHidErrorClass::EntitlementMissing
                 | VirtualHidErrorClass::EntitlementRejected
-                | VirtualHidErrorClass::DeviceCreationFailed
         )
     }
 }

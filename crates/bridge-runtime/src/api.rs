@@ -5,7 +5,7 @@ use bridge_core::{BridgeConfig, BridgeMetrics};
 use bridge_output::{DumpFormat, FirmwareInfo, OutputDiagnostics, SerialConfig};
 use controller_mapper::MapperConfig;
 use desktop_bindings::BindingProfile;
-use macos_virtual_hid::{VirtualHidConfig, VirtualHidHelperMetadata};
+use macos_virtual_hid::VirtualHidConfig;
 use profile_picker::{PickerConfig, PickerRoster};
 use steam_controller_device::{masked_serial, ControllerTransport, HidDeviceInfo};
 
@@ -162,6 +162,47 @@ pub struct ControllerStatus {
     pub last_state_age: Option<Duration>,
 }
 
+/// What a backend can actually do, derived from the selection alone so every
+/// decision asks the same question instead of re-listing backends. `live`
+/// means the output drives a real device: it must be neutralized and released
+/// around sleep and stop, and powering the controller down is meaningful.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OutputCapabilities {
+    pub live: bool,
+    pub firmware: bool,
+    /// Whether a failed open is worth retrying on the same selection, with
+    /// backoff, rather than waiting on external discovery.
+    pub reopen_with_backoff: bool,
+}
+
+impl OutputCapabilities {
+    #[must_use]
+    pub const fn for_selection(selection: &OutputSelection) -> Self {
+        match selection {
+            OutputSelection::Serial => Self {
+                live: true,
+                firmware: true,
+                reopen_with_backoff: false,
+            },
+            OutputSelection::VirtualHid(_) => Self {
+                live: true,
+                firmware: false,
+                reopen_with_backoff: true,
+            },
+            OutputSelection::Dump(_) | OutputSelection::File(_) | OutputSelection::Mock => Self {
+                live: false,
+                firmware: false,
+                reopen_with_backoff: false,
+            },
+        }
+    }
+}
+
+/// Re-exported rather than restated, for the same reason as the firmware
+/// types: frontends render the helper's identity without depending on the
+/// virtual-HID crate, and a field added there cannot go missing here.
+pub use macos_virtual_hid::VirtualHidHelperMetadata as VirtualHidStatus;
+
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct OutputStatus {
     pub backend: OutputBackend,
@@ -170,31 +211,9 @@ pub struct OutputStatus {
     pub ready: bool,
     pub firmware: Option<FirmwareInfo>,
     pub virtual_hid: Option<VirtualHidStatus>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct VirtualHidStatus {
-    pub protocol_version: u16,
-    pub vendor_id: u16,
-    pub product_id: u16,
-    pub bundle_identifier: Option<String>,
-    pub signing_identifier: Option<String>,
-    pub entitlement_present: Option<bool>,
-    pub dry_run: bool,
-}
-
-impl From<VirtualHidHelperMetadata> for VirtualHidStatus {
-    fn from(metadata: VirtualHidHelperMetadata) -> Self {
-        Self {
-            protocol_version: metadata.protocol_version,
-            vendor_id: metadata.vendor_id,
-            product_id: metadata.product_id,
-            bundle_identifier: metadata.bundle_identifier,
-            signing_identifier: metadata.signing_identifier,
-            entitlement_present: metadata.entitlement_present,
-            dry_run: metadata.dry_run,
-        }
-    }
+    /// Published so frontends can ask what this backend supports instead of
+    /// naming backends themselves.
+    pub capabilities: OutputCapabilities,
 }
 
 impl OutputStatus {
@@ -209,6 +228,7 @@ impl OutputStatus {
         Self {
             backend: OutputBackend::from(selection),
             endpoint,
+            capabilities: OutputCapabilities::for_selection(selection),
             ..Self::default()
         }
     }
@@ -226,6 +246,7 @@ impl std::fmt::Debug for OutputStatus {
             .field("ready", &self.ready)
             .field("firmware", &self.firmware)
             .field("virtual_hid", &self.virtual_hid)
+            .field("capabilities", &self.capabilities)
             .finish()
     }
 }

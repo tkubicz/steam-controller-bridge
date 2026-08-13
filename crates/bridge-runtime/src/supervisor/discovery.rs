@@ -5,7 +5,7 @@
 use super::*;
 
 impl Supervisor {
-    pub(super) fn discover_output(&mut self) -> Discovery<OutputSession> {
+    pub(super) fn discover_output(&mut self) -> OutputDiscovery {
         if self.config.output != OutputSelection::Serial {
             return match make_nonserial_output(&self.config.output) {
                 Ok(opened) => {
@@ -16,25 +16,24 @@ impl Supervisor {
                             ..OutputStatus::configured(&self.config.output)
                         };
                     });
-                    Discovery::Ready(OutputSession {
+                    OutputDiscovery::Ready(OutputSession {
                         output: opened.output,
                         serial_device: None,
-                        capabilities: opened.capabilities,
+                        capabilities: OutputCapabilities::for_selection(&self.config.output),
                         first_observed_receipt: FirstObservedReceiptState::Idle,
                     })
                 }
-                Err(OutputOpenError::Transient(message)) => Discovery::Retry {
-                    detail: "Waiting to restart the virtual HID helper".to_owned(),
-                    error: message,
-                },
-                Err(OutputOpenError::Permanent(message)) => Discovery::Blocked(message),
+                Err(OutputOpenError::Transient { detail, error }) => {
+                    OutputDiscovery::Retry { detail, error }
+                }
+                Err(OutputOpenError::Permanent(message)) => OutputDiscovery::Blocked(message),
             };
         }
 
         let devices = match available_serial_devices() {
             Ok(devices) => devices,
             Err(error) => {
-                return Discovery::Wait {
+                return OutputDiscovery::Wait {
                     detail: "Cannot enumerate serial ports".to_owned(),
                     error: Some(error.to_string()),
                 };
@@ -50,7 +49,7 @@ impl Supervisor {
                     format!("Waiting for bridge-device serial port {path}")
                 }
             };
-            return Discovery::Wait {
+            return OutputDiscovery::Wait {
                 detail,
                 error: None,
             };
@@ -69,7 +68,7 @@ impl Supervisor {
             }
         }
         if valid.is_empty() {
-            return Discovery::Wait {
+            return OutputDiscovery::Wait {
                 detail:
                     "Waiting for a bridge device that completes the protocol-v1 Hello handshake"
                         .to_owned(),
@@ -80,7 +79,7 @@ impl Supervisor {
         let selected_index =
             match choose_output_index(&valid, self.preferred_output_serial.as_deref()) {
                 Ok(index) => index,
-                Err(message) => return Discovery::Error(message),
+                Err(message) => return OutputDiscovery::Error(message),
             };
         let (info, output) = valid.swap_remove(selected_index);
         self.preferred_output_serial.clone_from(&info.serial_number);
@@ -90,12 +89,11 @@ impl Supervisor {
         let firmware = output.firmware_info().unwrap_or_default();
         self.update_status(|status| {
             status.output = OutputStatus {
-                backend: OutputBackend::SerialBridge,
                 endpoint: Some(info.path.clone()),
                 stable_id: info.serial_number.clone(),
                 ready: true,
                 firmware: Some(firmware),
-                virtual_hid: None,
+                ..OutputStatus::configured(&self.config.output)
             };
         });
         eprintln!(
@@ -103,10 +101,10 @@ impl Supervisor {
             info.path,
             masked_serial(info.serial_number.as_deref())
         );
-        Discovery::Ready(OutputSession {
+        OutputDiscovery::Ready(OutputSession {
             output: Box::new(output),
             serial_device: Some(info),
-            capabilities: OutputCapabilities::SERIAL,
+            capabilities: OutputCapabilities::for_selection(&self.config.output),
             first_observed_receipt: FirstObservedReceiptState::Idle,
         })
     }

@@ -156,17 +156,12 @@ impl VirtualDevice {
         // these owners could race an IOKit callback, so intentionally preserve
         // them until the helper process exits and the OS reclaims its address
         // space.
-        self.device.take().into_iter().for_each(std::mem::forget);
-        self.queue.take().into_iter().for_each(std::mem::forget);
-        self.set_report
-            .take()
-            .into_iter()
-            .for_each(std::mem::forget);
-        self.get_report
-            .take()
-            .into_iter()
-            .for_each(std::mem::forget);
-        self.cancel.take().into_iter().for_each(std::mem::forget);
+        // Forgetting the `Option` suppresses the inner value's destructor.
+        std::mem::forget(self.device.take());
+        std::mem::forget(self.queue.take());
+        std::mem::forget(self.set_report.take());
+        std::mem::forget(self.get_report.take());
+        std::mem::forget(self.cancel.take());
     }
 }
 
@@ -186,32 +181,46 @@ fn cancellation_timeout_error() -> VirtualHidError {
 }
 
 fn device_properties(vendor_id: u16, product_id: u16) -> CFRetained<CFDictionary<CFType, CFType>> {
-    let keys = [
-        key(kIOHIDReportDescriptorKey),
-        key(kIOHIDVendorIDKey),
-        key(kIOHIDProductIDKey),
-        key(kIOHIDProductKey),
-        key(kIOHIDManufacturerKey),
-        key(kIOHIDSerialNumberKey),
-        key(kIOHIDPhysicalDeviceUniqueIDKey),
-        key(kIOHIDLocationIDKey),
-        key(kIOHIDTransportKey),
-        key(kIOHIDPrimaryUsagePageKey),
-        key(kIOHIDPrimaryUsageKey),
+    // Paired rather than held in two positional arrays, so a property cannot
+    // be silently bound to its neighbour's key.
+    let properties: [(&CStr, CFRetained<CFType>); 11] = [
+        (
+            kIOHIDReportDescriptorKey,
+            CFData::from_static_bytes(GAMEPAD_REPORT_DESCRIPTOR).into(),
+        ),
+        (
+            kIOHIDVendorIDKey,
+            CFNumber::new_i32(i32::from(vendor_id)).into(),
+        ),
+        (
+            kIOHIDProductIDKey,
+            CFNumber::new_i32(i32::from(product_id)).into(),
+        ),
+        (
+            kIOHIDProductKey,
+            CFString::from_str("Steam Controller Bridge Virtual Gamepad").into(),
+        ),
+        (kIOHIDManufacturerKey, CFString::from_str("Lynxware").into()),
+        (
+            kIOHIDSerialNumberKey,
+            CFString::from_str(DEVICE_SERIAL_NUMBER).into(),
+        ),
+        (
+            kIOHIDPhysicalDeviceUniqueIDKey,
+            CFString::from_str(DEVICE_PHYSICAL_UNIQUE_ID).into(),
+        ),
+        (
+            kIOHIDLocationIDKey,
+            CFNumber::new_i32(DEVICE_LOCATION_ID).into(),
+        ),
+        (kIOHIDTransportKey, CFString::from_str("USB").into()),
+        (kIOHIDPrimaryUsagePageKey, CFNumber::new_i32(0x01).into()),
+        (kIOHIDPrimaryUsageKey, CFNumber::new_i32(0x05).into()),
     ];
-    let values: [CFRetained<CFType>; 11] = [
-        CFData::from_static_bytes(GAMEPAD_REPORT_DESCRIPTOR).into(),
-        CFNumber::new_i32(i32::from(vendor_id)).into(),
-        CFNumber::new_i32(i32::from(product_id)).into(),
-        CFString::from_str("Steam Controller Bridge Virtual Gamepad").into(),
-        CFString::from_str("Lynxware").into(),
-        CFString::from_str(DEVICE_SERIAL_NUMBER).into(),
-        CFString::from_str(DEVICE_PHYSICAL_UNIQUE_ID).into(),
-        CFNumber::new_i32(DEVICE_LOCATION_ID).into(),
-        CFString::from_str("USB").into(),
-        CFNumber::new_i32(0x01).into(),
-        CFNumber::new_i32(0x05).into(),
-    ];
+    let (keys, values): (Vec<_>, Vec<_>) = properties
+        .into_iter()
+        .map(|(name, value)| (key(name), value))
+        .unzip();
     CFDictionary::from_slices(
         &keys.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
         &values.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
