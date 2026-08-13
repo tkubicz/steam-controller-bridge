@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufReader, BufWriter};
-use std::process::{Child, ChildStdin, Command, Stdio};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -11,6 +13,7 @@ use gamepad_state::GamepadState;
 
 use crate::contract::{
     read_json_line, write_json_line, HelperRequest, HelperResponse, HELPER_PROTOCOL_VERSION,
+    INPUT_REPORT_LEN,
 };
 use crate::{VirtualHidConfig, VirtualHidError, VirtualHidErrorClass, VirtualHidHelperMetadata};
 
@@ -35,7 +38,7 @@ struct Acknowledgement {
 
 enum WorkItem {
     Report {
-        bytes: Vec<u8>,
+        bytes: [u8; INPUT_REPORT_LEN],
         neutral: bool,
         acknowledgement: Option<Acknowledgement>,
     },
@@ -81,7 +84,7 @@ impl Mailbox {
 
     fn enqueue_report(
         &self,
-        bytes: Vec<u8>,
+        bytes: [u8; INPUT_REPORT_LEN],
         neutral: bool,
         acknowledgement: Option<Acknowledgement>,
     ) -> Result<bool, VirtualHidError> {
@@ -199,6 +202,7 @@ impl Mailbox {
 struct SharedState {
     diagnostics: OutputDiagnostics,
     failure: Option<VirtualHidError>,
+    last_delegate_sequence: u64,
 }
 
 struct ChildGuard(Option<Child>);
@@ -381,9 +385,8 @@ impl GamepadOutput for VirtualHidOutput {
         if let Some(error) = self.failure() {
             return Err(Self::map_output_error(&error));
         }
-        let report = crate::encode_input_report(state)
-            .map_err(|error| Self::map_output_error(&error))?
-            .to_vec();
+        let report =
+            crate::encode_input_report(state).map_err(|error| Self::map_output_error(&error))?;
         match self.mailbox.enqueue_report(report, false, None) {
             Ok(coalesced) => {
                 if coalesced {
@@ -410,7 +413,7 @@ impl GamepadOutput for VirtualHidOutput {
         let deadline = Instant::now() + self.config.acknowledgement_timeout;
         self.mailbox
             .enqueue_report(
-                crate::NEUTRAL_INPUT_REPORT.to_vec(),
+                crate::NEUTRAL_INPUT_REPORT,
                 true,
                 Some(Acknowledgement { sender, deadline }),
             )
@@ -475,14 +478,20 @@ fn validate_helper_path(path: &std::path::Path) -> Result<(), VirtualHidError> {
             format!("virtual HID helper is unavailable: {error}"),
         )
     })?;
-    if metadata.is_file() {
-        Ok(())
-    } else {
-        Err(VirtualHidError::new(
+    if !metadata.is_file() {
+        return Err(VirtualHidError::new(
             VirtualHidErrorClass::MissingHelper,
             "virtual HID helper is not a regular file",
-        ))
+        ));
     }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err(VirtualHidError::new(
+            VirtualHidErrorClass::InvalidConfiguration,
+            "virtual HID helper is not executable",
+        ));
+    }
+    Ok(())
 }
 
 fn read_responses(
@@ -581,8 +590,23 @@ fn classify_startup_failure(
     child: &mut Child,
     dry_run: bool,
 ) -> VirtualHidError {
-    let status = child.try_wait().ok().flatten();
+    let status = if error.class() == VirtualHidErrorClass::HelperExited {
+        wait_for_startup_exit(child, Duration::from_millis(100))
+    } else {
+        child.try_wait().ok().flatten()
+    };
     classify_startup_status(error, status, dry_run)
+}
+
+fn wait_for_startup_exit(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            Ok(None) | Err(_) => return None,
+        }
+    }
 }
 
 fn classify_startup_status(
@@ -599,8 +623,8 @@ fn classify_startup_status(
             && status.is_some_and(|status| status.signal() == Some(9))
         {
             return VirtualHidError::new(
-                VirtualHidErrorClass::EntitlementRejected,
-                "macOS killed the virtual HID helper before startup; the embedded restricted entitlement is not authorized for this signature",
+                VirtualHidErrorClass::StartupKilled,
+                "the virtual HID helper was killed by SIGKILL before startup; on normal macOS this usually means AMFI rejected its restricted entitlement, but the signal alone cannot prove the cause",
             );
         }
     }
@@ -742,7 +766,10 @@ fn handle_unsolicited_response(
 ) -> Result<(), VirtualHidError> {
     match event {
         ReaderEvent::Response(HelperResponse::SetReport {
-            protocol, report, ..
+            protocol,
+            event_sequence,
+            report,
+            ..
         }) => {
             check_response_protocol(protocol)?;
             if report.len() > crate::contract::MAX_RAW_REPORT_LEN {
@@ -751,15 +778,18 @@ fn handle_unsolicited_response(
                     "helper sent an oversized set report",
                 ));
             }
-            state
+            let mut state = state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .diagnostics
-                .virtual_set_reports_received += 1;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            check_delegate_sequence(&mut state, event_sequence)?;
+            state.diagnostics.virtual_set_reports_received += 1;
             Ok(())
         }
         ReaderEvent::Response(HelperResponse::GetReport {
-            protocol, max_size, ..
+            protocol,
+            event_sequence,
+            max_size,
+            ..
         }) => {
             check_response_protocol(protocol)?;
             if max_size > crate::contract::MAX_RAW_REPORT_LEN {
@@ -768,11 +798,11 @@ fn handle_unsolicited_response(
                     "helper sent an oversized get-report request",
                 ));
             }
-            state
+            let mut state = state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .diagnostics
-                .virtual_get_reports_received += 1;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            check_delegate_sequence(&mut state, event_sequence)?;
+            state.diagnostics.virtual_get_reports_received += 1;
             Ok(())
         }
         ReaderEvent::Response(HelperResponse::Fatal {
@@ -802,6 +832,32 @@ fn handle_unsolicited_response(
             "virtual HID helper exited",
         )),
     }
+}
+
+/// Tracks the helper's delegate event sequence.
+///
+/// A gap is not a protocol failure. Delegate diagnostics travel over a bounded
+/// queue that the helper deliberately drops from rather than block an
+/// `IOKit` callback, so a burst of host reports legitimately skips numbers.
+/// Those are counted, because losing a diagnostic must never disable the
+/// gamepad. A repeated or decreasing sequence cannot be explained by a drop,
+/// so that remains fatal.
+fn check_delegate_sequence(state: &mut SharedState, actual: u64) -> Result<(), VirtualHidError> {
+    let expected = state.last_delegate_sequence.checked_add(1).ok_or_else(|| {
+        VirtualHidError::new(
+            VirtualHidErrorClass::ProtocolViolation,
+            "helper delegate sequence space was exhausted",
+        )
+    })?;
+    if actual < expected {
+        return Err(VirtualHidError::new(
+            VirtualHidErrorClass::ProtocolViolation,
+            format!("helper delegate sequence went backwards: expected at least {expected}, received {actual}"),
+        ));
+    }
+    state.diagnostics.virtual_delegate_reports_dropped += actual - expected;
+    state.last_delegate_sequence = actual;
+    Ok(())
 }
 
 fn check_response_protocol(protocol: u16) -> Result<(), VirtualHidError> {
@@ -886,14 +942,14 @@ mod tests {
     fn ordinary_reports_coalesce_and_neutral_supersedes_them() {
         let mailbox = Mailbox::new(2);
         assert!(!mailbox
-            .enqueue_report(vec![1; crate::INPUT_REPORT_LEN], false, None)
+            .enqueue_report([1; crate::INPUT_REPORT_LEN], false, None)
             .unwrap());
         assert!(mailbox
-            .enqueue_report(vec![2; crate::INPUT_REPORT_LEN], false, None)
+            .enqueue_report([2; crate::INPUT_REPORT_LEN], false, None)
             .unwrap());
         let (ack, _receiver) = pending();
         assert!(!mailbox
-            .enqueue_report(crate::NEUTRAL_INPUT_REPORT.to_vec(), true, Some(ack))
+            .enqueue_report(crate::NEUTRAL_INPUT_REPORT, true, Some(ack))
             .unwrap());
         let MailboxReceive::Item(WorkItem::Report { bytes, neutral, .. }) =
             mailbox.receive_timeout(Duration::ZERO)
@@ -913,10 +969,10 @@ mod tests {
         let mailbox = Mailbox::new(1);
         let (ack, _receiver) = pending();
         mailbox
-            .enqueue_report(crate::NEUTRAL_INPUT_REPORT.to_vec(), true, Some(ack))
+            .enqueue_report(crate::NEUTRAL_INPUT_REPORT, true, Some(ack))
             .unwrap();
         let error = mailbox
-            .enqueue_report(vec![1; crate::INPUT_REPORT_LEN], false, None)
+            .enqueue_report([1; crate::INPUT_REPORT_LEN], false, None)
             .unwrap_err();
         assert_eq!(error.class(), VirtualHidErrorClass::QueueOverflow);
     }
@@ -937,7 +993,7 @@ mod tests {
         let (neutral, _neutral_receiver) = pending();
         let deadline = neutral.deadline;
         mailbox
-            .enqueue_report(crate::NEUTRAL_INPUT_REPORT.to_vec(), true, Some(neutral))
+            .enqueue_report(crate::NEUTRAL_INPUT_REPORT, true, Some(neutral))
             .unwrap();
         let MailboxReceive::Item(WorkItem::Report {
             acknowledgement: Some(acknowledgement),
@@ -1023,9 +1079,57 @@ mod tests {
         assert_eq!(state.lock().unwrap().diagnostics.virtual_fatal_errors, 1);
     }
 
+    #[test]
+    fn a_dropped_delegate_diagnostic_is_counted_but_a_replayed_one_is_fatal() {
+        let state = Mutex::new(SharedState::default());
+        let deliver = |sequence| {
+            handle_unsolicited_response(
+                ReaderEvent::Response(HelperResponse::GetReport {
+                    protocol: HELPER_PROTOCOL_VERSION,
+                    event_sequence: sequence,
+                    report_type: crate::contract::HidReportType::Feature,
+                    report_id: 1,
+                    max_size: 64,
+                }),
+                &state,
+            )
+        };
+        deliver(1).unwrap();
+        deliver(2).unwrap();
+        // The helper drops delegate diagnostics under load by design, so the
+        // gap is recorded rather than allowed to disable the gamepad.
+        deliver(5).unwrap();
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.diagnostics.virtual_delegate_reports_dropped, 2);
+            assert_eq!(state.diagnostics.virtual_get_reports_received, 3);
+        }
+        // A sequence that goes backwards cannot be a drop.
+        let error = deliver(3).unwrap_err();
+        assert_eq!(error.class(), VirtualHidErrorClass::ProtocolViolation);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_helper_must_be_executable() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let helper = tempfile::NamedTempFile::new().unwrap();
+        let mut permissions = helper.as_file().metadata().unwrap().permissions();
+        permissions.set_mode(0o600);
+        helper.as_file().set_permissions(permissions).unwrap();
+        let error = validate_helper_path(helper.path()).unwrap_err();
+        assert_eq!(error.class(), VirtualHidErrorClass::InvalidConfiguration);
+
+        let mut permissions = helper.as_file().metadata().unwrap().permissions();
+        permissions.set_mode(0o700);
+        helper.as_file().set_permissions(permissions).unwrap();
+        validate_helper_path(helper.path()).unwrap();
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
-    fn startup_sigkill_is_a_permanent_entitlement_rejection() {
+    fn startup_sigkill_is_a_permanent_but_truthfully_classified_failure() {
         use std::os::unix::process::ExitStatusExt as _;
 
         let error = classify_startup_status(
@@ -1033,7 +1137,7 @@ mod tests {
             Some(std::process::ExitStatus::from_raw(9)),
             false,
         );
-        assert_eq!(error.class(), VirtualHidErrorClass::EntitlementRejected);
+        assert_eq!(error.class(), VirtualHidErrorClass::StartupKilled);
         assert!(error.is_permanent_configuration_failure());
     }
 }

@@ -330,8 +330,7 @@ impl Supervisor {
     }
 
     pub(super) fn reset_output_retry(&mut self) {
-        self.next_output_attempt = Instant::now();
-        self.output_retry_delay = OUTPUT_RETRY_INITIAL;
+        self.output_retry.reset(Instant::now());
     }
 
     /// The backend cannot count its own restarts, because a restart is the
@@ -345,8 +344,7 @@ impl Supervisor {
     }
 
     pub(super) fn schedule_output_retry(&mut self) {
-        self.next_output_attempt = Instant::now() + self.output_retry_delay;
-        self.output_retry_delay = (self.output_retry_delay * 2).min(OUTPUT_RETRY_MAX);
+        self.output_retry.schedule_after_failure(Instant::now());
         self.virtual_helper_restarts = self.virtual_helper_restarts.wrapping_add(1);
         self.update_status(|status| {
             status.output_diagnostics.virtual_helper_restarts = self.virtual_helper_restarts;

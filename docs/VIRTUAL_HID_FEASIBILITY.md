@@ -10,7 +10,7 @@
 | Packaged helper | passing | `build-macos-app.py`, `codesign --verify --deep --strict` | assembly/signature gate only; nested helper alone has the entitlement |
 | Normal-host ad-hoc helper launch | blocked as expected | packaged `--self-test` exits 137 | AMFI kills the restricted-entitlement process before `main`; unsigned release `--self-test` passes |
 | VM virtual-device creation | passing | `hidutil` shows the userspace Game Pad | lowered-security VM |
-| HID reports | passing | `sc-probe` receives changing reports | neutral/buttons/hats/axes/triggers observed |
+| HID reports | passing | `sc-probe` receives changing reports | neutral/standard buttons/hats/axes/triggers observed |
 | GameController recognition | passing with fixed contract | `045e:028e` plus the Xbox-style contract registers as a controller | now the only shipped contract |
 | System Settings | pending capture | system query recognizes the fixed contract | record the final UI result |
 | Browser Gamepad API | passing with fixed contract | offline tester sees the controller | do not tune Safari separately |
@@ -24,13 +24,13 @@
 In particular, the exit-137 result proves the normal-security entitlement gate;
 it does not exercise `IOHIDUserDevice` or indicate a descriptor problem.
 
-## Historical recognition experiment
+## Historical recognition evidence
 
 These cumulative experiments were tested in the disposable lowered-security VM
 on 2026-08-13. They explain the fixed implementation contract; they are no
 longer selectable profiles in the code:
 
-| Experiment | Transport | VID:PID | Descriptor/report | Game controller | Offline Gamepad API |
+| Candidate | Transport | VID:PID | Descriptor/report | Game controller | Offline Gamepad API |
 | --- | --- | --- | --- | --- | --- |
 | `generic-virtual` | Virtual | `cafe:4001` | generic, 14 bytes | not recognized | not visible |
 | `generic-usb` | USB | `cafe:4001` | generic, 14 bytes | not recognized | not visible |
@@ -43,7 +43,7 @@ system recognition to the known Microsoft compatibility identity rather than
 the virtual transport, report delivery, or generic descriptor. It proves that
 `IOHIDUserDevice` can reach GameController and the browser, but it does not
 make the project a Microsoft product; the existing project disclaimer continues
-to apply. The experimental virtual backend now exposes only this proven
+to apply. The virtual backend now exposes only this proven
 combination, matching the bridge firmware. A paired VID/PID override remains for
 development.
 
@@ -104,7 +104,9 @@ osascript -l JavaScript -e 'ObjC.import("GameController"); const cs=$.GCControll
 Prove layers in order:
 
 1. `hidutil list` shows `045e:028e`, Generic Desktop/Game Pad, and USB transport.
-2. A HID monitor receives neutral, buttons, hats, axes, and triggers.
+2. A HID monitor receives neutral, the 11 standard buttons, hats, axes, and
+   triggers. The pinned Xbox report intentionally omits the five bridge
+   extension buttons.
 3. Neutral appears at startup, explicit stop, timeout, and shutdown.
 4. Killing the parent removes the device without an orphan helper.
 5. Record `GCController.controllers` and System Settings.

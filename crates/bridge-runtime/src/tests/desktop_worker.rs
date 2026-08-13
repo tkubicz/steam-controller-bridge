@@ -490,7 +490,6 @@ fn output_capabilities_come_from_the_selection_not_from_a_serial_device() {
         OutputCapabilities {
             live: true,
             firmware: true,
-            reopen_with_backoff: false,
         }
     );
     let virtual_hid = OutputCapabilities::for_selection(&OutputSelection::VirtualHid(
@@ -501,7 +500,6 @@ fn output_capabilities_come_from_the_selection_not_from_a_serial_device() {
         OutputCapabilities {
             live: true,
             firmware: false,
-            reopen_with_backoff: true,
         }
     );
     // Every passive backend is indistinguishable from the default.
@@ -519,6 +517,27 @@ fn output_capabilities_come_from_the_selection_not_from_a_serial_device() {
         OutputStatus::configured(&OutputSelection::Serial).capabilities,
         serial
     );
+}
+
+#[test]
+fn unstable_output_restarts_back_off_until_a_stable_session_resets_them() {
+    let started = Instant::now();
+    let mut retry = OutputRetryState::new(started);
+
+    retry.mark_ready(started);
+    retry.schedule_after_failure(started + Duration::from_secs(1));
+    assert_eq!(retry.next_attempt, started + Duration::from_secs(2));
+
+    let reopened = retry.next_attempt;
+    retry.mark_ready(reopened);
+    retry.schedule_after_failure(reopened + Duration::from_secs(1));
+    assert_eq!(retry.next_attempt, reopened + Duration::from_secs(3));
+
+    let stable = retry.next_attempt;
+    retry.mark_ready(stable);
+    let failed = stable + OUTPUT_RETRY_STABILITY;
+    retry.schedule_after_failure(failed);
+    assert_eq!(retry.next_attempt, failed + OUTPUT_RETRY_INITIAL);
 }
 
 struct ConfigurationFailureOutput;

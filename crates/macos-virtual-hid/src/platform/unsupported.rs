@@ -13,6 +13,7 @@ impl VirtualDevice {
         _vendor_id: u16,
         _product_id: u16,
         _responses: mpsc::SyncSender<HelperResponse>,
+        _fatal_responses: mpsc::Sender<HelperResponse>,
     ) -> Result<Self, VirtualHidError> {
         Err(VirtualHidError::new(
             VirtualHidErrorClass::UnsupportedPlatform,
@@ -24,7 +25,10 @@ impl VirtualDevice {
         match *self {}
     }
 
-    pub(crate) fn dispatch(&mut self, _report: &[u8]) -> Result<(), VirtualHidError> {
+    pub(crate) fn dispatch(
+        &mut self,
+        _report: &[u8; crate::INPUT_REPORT_LEN],
+    ) -> Result<(), VirtualHidError> {
         match *self {}
     }
 

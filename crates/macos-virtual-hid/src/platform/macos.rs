@@ -45,6 +45,7 @@ impl VirtualDevice {
         vendor_id: u16,
         product_id: u16,
         responses: mpsc::SyncSender<HelperResponse>,
+        fatal_responses: mpsc::Sender<HelperResponse>,
     ) -> Result<Self, VirtualHidError> {
         let metadata = signing_metadata(vendor_id, product_id);
         let properties = device_properties(vendor_id, product_id);
@@ -60,8 +61,12 @@ impl VirtualDevice {
         .ok_or_else(|| creation_error(&metadata))?;
 
         let event_sequence = Arc::new(AtomicU64::new(1));
-        let set_report = SetReportBlock::new(responses.clone(), Arc::clone(&event_sequence));
-        let get_report = GetReportBlock::new(responses, event_sequence);
+        let set_report = SetReportBlock::new(
+            responses.clone(),
+            fatal_responses.clone(),
+            Arc::clone(&event_sequence),
+        );
+        let get_report = GetReportBlock::new(responses, fatal_responses, event_sequence);
         let (cancel_sender, cancelled) = mpsc::channel();
         let cancel: CancelBlock = RcBlock::new(move || {
             let _ = cancel_sender.send(());
@@ -101,14 +106,17 @@ impl VirtualDevice {
         self.metadata.clone()
     }
 
-    pub(crate) fn dispatch(&mut self, report: &[u8]) -> Result<(), VirtualHidError> {
+    pub(crate) fn dispatch(
+        &mut self,
+        report: &[u8; crate::INPUT_REPORT_LEN],
+    ) -> Result<(), VirtualHidError> {
         let device = self.device.as_ref().ok_or_else(|| {
             VirtualHidError::new(
                 VirtualHidErrorClass::HelperExited,
                 "virtual HID device is already released",
             )
         })?;
-        let mut bytes = report.to_vec();
+        let mut bytes = *report;
         let pointer = NonNull::new(bytes.as_mut_ptr()).expect("non-empty input report");
         // SAFETY: `pointer` addresses `bytes`, which remains live and unchanged
         // for the duration of the synchronous IOKit call.
@@ -257,6 +265,7 @@ struct BlockDescriptor<T> {
 
 struct ReportContext {
     sender: mpsc::SyncSender<HelperResponse>,
+    fatal_sender: mpsc::Sender<HelperResponse>,
     sequence: Arc<AtomicU64>,
 }
 
@@ -273,7 +282,11 @@ struct SetReportLiteral {
 struct SetReportBlock(NonNull<SetReportLiteral>);
 
 impl SetReportBlock {
-    fn new(sender: mpsc::SyncSender<HelperResponse>, sequence: Arc<AtomicU64>) -> Self {
+    fn new(
+        sender: mpsc::SyncSender<HelperResponse>,
+        fatal_sender: mpsc::Sender<HelperResponse>,
+        sequence: Arc<AtomicU64>,
+    ) -> Self {
         let literal = SetReportLiteral {
             // SAFETY: Taking the address of this Blocks runtime class does not
             // read or mutate it; the runtime replaces it in the heap copy.
@@ -282,7 +295,11 @@ impl SetReportBlock {
             reserved: 0,
             invoke: invoke_set_report,
             descriptor: &raw const SET_REPORT_DESCRIPTOR,
-            context: Arc::new(ReportContext { sender, sequence }),
+            context: Arc::new(ReportContext {
+                sender,
+                fatal_sender,
+                sequence,
+            }),
         };
         // SAFETY: `literal` has the Clang Blocks ABI layout and its descriptor
         // supplies correct copy/dispose helpers for the captured Arc.
@@ -322,7 +339,11 @@ struct GetReportLiteral {
 struct GetReportBlock(NonNull<GetReportLiteral>);
 
 impl GetReportBlock {
-    fn new(sender: mpsc::SyncSender<HelperResponse>, sequence: Arc<AtomicU64>) -> Self {
+    fn new(
+        sender: mpsc::SyncSender<HelperResponse>,
+        fatal_sender: mpsc::Sender<HelperResponse>,
+        sequence: Arc<AtomicU64>,
+    ) -> Self {
         let literal = GetReportLiteral {
             // SAFETY: See `SetReportBlock::new`.
             isa: std::ptr::addr_of!(_NSConcreteStackBlock).cast(),
@@ -330,7 +351,11 @@ impl GetReportBlock {
             reserved: 0,
             invoke: invoke_get_report,
             descriptor: &raw const GET_REPORT_DESCRIPTOR,
-            context: Arc::new(ReportContext { sender, sequence }),
+            context: Arc::new(ReportContext {
+                sender,
+                fatal_sender,
+                sequence,
+            }),
         };
         // SAFETY: See `SetReportBlock::new`.
         let copied = unsafe { _Block_copy(std::ptr::addr_of!(literal).cast()) };
@@ -370,7 +395,7 @@ unsafe extern "C" fn invoke_set_report(
     // SAFETY: The Blocks runtime passes the registered literal pointer.
     let context = unsafe { &(*block).context };
     let Some(bytes) = copy_report(report, length) else {
-        let _ = context.sender.try_send(HelperResponse::Fatal {
+        let _ = context.fatal_sender.send(HelperResponse::Fatal {
             protocol: HELPER_PROTOCOL_VERSION,
             class: VirtualHidErrorClass::ProtocolViolation,
             message: "IOHIDUserDevice delivered an invalid or oversized set report".to_owned(),

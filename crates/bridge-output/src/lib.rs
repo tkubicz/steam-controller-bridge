@@ -160,6 +160,9 @@ pub struct OutputDiagnostics {
     pub virtual_protocol_failures: u64,
     pub virtual_set_reports_received: u64,
     pub virtual_get_reports_received: u64,
+    /// Delegate diagnostics the virtual-HID helper dropped rather than block
+    /// a host callback, recovered from gaps in its event sequence.
+    pub virtual_delegate_reports_dropped: u64,
     pub virtual_fatal_errors: u64,
 }
 

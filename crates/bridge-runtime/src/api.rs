@@ -170,9 +170,6 @@ pub struct ControllerStatus {
 pub struct OutputCapabilities {
     pub live: bool,
     pub firmware: bool,
-    /// Whether a failed open is worth retrying on the same selection, with
-    /// backoff, rather than waiting on external discovery.
-    pub reopen_with_backoff: bool,
 }
 
 impl OutputCapabilities {
@@ -182,17 +179,14 @@ impl OutputCapabilities {
             OutputSelection::Serial => Self {
                 live: true,
                 firmware: true,
-                reopen_with_backoff: false,
             },
             OutputSelection::VirtualHid(_) => Self {
                 live: true,
                 firmware: false,
-                reopen_with_backoff: true,
             },
             OutputSelection::Dump(_) | OutputSelection::File(_) | OutputSelection::Mock => Self {
                 live: false,
                 firmware: false,
-                reopen_with_backoff: false,
             },
         }
     }

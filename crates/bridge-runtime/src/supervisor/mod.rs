@@ -1,27 +1,27 @@
 use super::{
     automatic_shutdown_phase, available_serial_devices, bounded_error, choose_unique_active,
     controller_inventory_scan_interval, desktop_transition_mask, io, json, masked_serial, mpsc,
-    next_stable_controller_scan_interval, picker_status, same_controller_collection, thread,
-    validate_idle_shutdown_timeout, Arc, AtomicBool, AtomicU64, AutomaticShutdownPhase,
-    AutomaticShutdownRuntime, BridgeEngine, BridgeStatus, CommandAck, ConnectionState,
-    ControllerChargeState, ControllerCooldown, ControllerDiscoveryState, ControllerEnumerator,
-    ControllerSelection, ControllerSourceStatus, ControllerStatus, ControllerTransport,
-    DecodedReport, DesktopBindingsWorker, DesktopInputSnapshot, DeviceError, DeviceEvent,
-    DumpOutput, Duration, File, FileOutput, FirmwareInstallReceipt, GamepadOutput, HapticsState,
-    HapticsStatus, HidDeviceInfo, HidSession, IdleActivityTracker, Instant, JoinHandle, LizardMode,
-    LizardModeHeartbeat, LizardStatus, MockOutput, Mutex, Ordering, OutputCapabilities,
-    OutputError, OutputFeedback, OutputSelection, OutputStatus, PadFeedbackRequest, PadHapticGain,
-    PadHapticSide, PickerConfig, PickerEvent, PickerEventSink, PickerInput, PickerRuntime,
-    ProcessOutcome, RawHidReport, Receiver, RecordingError, RecordingEvent, RecordingWriter,
-    RuntimeCommand, RuntimeConfig, RuntimeState, SerialDeviceInfo, SerialOutput, SerialSelection,
-    ShutdownTrigger, StableTransitionRun, SteamButton, SupervisorIterationTimer, SyncSender,
-    TrySendError, VecDeque, ACTIVE_SLOT_TIMEOUT, BATTERY_STATUS_FRESHNESS, COMMAND_TIMEOUT,
-    DISCOVERY_INTERVAL, EXTENDED_INPUT_REPORT_ID, EXTENDED_INPUT_REPORT_SIZE,
-    INPUT_MAILBOX_CAPACITY, INPUT_REPORT_ID, INPUT_REPORT_SIZE, KIND_DEVICE_CONNECTED,
-    KIND_DEVICE_DISCONNECTED, MIN_STABLE_CONTROLLER_SCAN_INTERVAL, OUTPUT_RETRY_INITIAL,
-    OUTPUT_RETRY_MAX, PAD_FEEDBACK_RETRY_INTERVAL, POWER_OFF_BURST_INTERVAL,
-    POWER_OFF_BURST_WRITES, POWER_OFF_COOLDOWN, RUMBLE_LEASE_TIMEOUT, RUMBLE_REFRESH_INTERVAL,
-    RUMBLE_RETRY_INTERVAL, RUNTIME_POLL_INTERVAL, STATUS_INTERVAL, WAKE_SETTLE_DELAY,
+    next_stable_controller_scan_interval, output_reopens_with_backoff, picker_status,
+    same_controller_collection, thread, validate_idle_shutdown_timeout, Arc, AtomicBool, AtomicU64,
+    AutomaticShutdownPhase, AutomaticShutdownRuntime, BridgeEngine, BridgeStatus, CommandAck,
+    ConnectionState, ControllerChargeState, ControllerCooldown, ControllerDiscoveryState,
+    ControllerEnumerator, ControllerSelection, ControllerSourceStatus, ControllerStatus,
+    ControllerTransport, DecodedReport, DesktopBindingsWorker, DesktopInputSnapshot, DeviceError,
+    DeviceEvent, DumpOutput, Duration, File, FileOutput, FirmwareInstallReceipt, GamepadOutput,
+    HapticsState, HapticsStatus, HidDeviceInfo, HidSession, IdleActivityTracker, Instant,
+    JoinHandle, LizardMode, LizardModeHeartbeat, LizardStatus, MockOutput, Mutex, Ordering,
+    OutputCapabilities, OutputError, OutputFeedback, OutputRetryState, OutputSelection,
+    OutputStatus, PadFeedbackRequest, PadHapticGain, PadHapticSide, PickerConfig, PickerEvent,
+    PickerEventSink, PickerInput, PickerRuntime, ProcessOutcome, RawHidReport, Receiver,
+    RecordingError, RecordingEvent, RecordingWriter, RuntimeCommand, RuntimeConfig, RuntimeState,
+    SerialDeviceInfo, SerialOutput, SerialSelection, ShutdownTrigger, StableTransitionRun,
+    SteamButton, SupervisorIterationTimer, SyncSender, TrySendError, VecDeque, ACTIVE_SLOT_TIMEOUT,
+    BATTERY_STATUS_FRESHNESS, COMMAND_TIMEOUT, DISCOVERY_INTERVAL, EXTENDED_INPUT_REPORT_ID,
+    EXTENDED_INPUT_REPORT_SIZE, INPUT_MAILBOX_CAPACITY, INPUT_REPORT_ID, INPUT_REPORT_SIZE,
+    KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED, MIN_STABLE_CONTROLLER_SCAN_INTERVAL,
+    PAD_FEEDBACK_RETRY_INTERVAL, POWER_OFF_BURST_INTERVAL, POWER_OFF_BURST_WRITES,
+    POWER_OFF_COOLDOWN, RUMBLE_LEASE_TIMEOUT, RUMBLE_REFRESH_INTERVAL, RUMBLE_RETRY_INTERVAL,
+    RUNTIME_POLL_INTERVAL, STATUS_INTERVAL, WAKE_SETTLE_DELAY,
 };
 use macos_virtual_hid::VirtualHidOutput;
 
@@ -80,8 +80,7 @@ pub(crate) struct Supervisor {
     pending_stop_acks: Vec<CommandAck>,
     pending_shutdown_acks: Vec<CommandAck>,
     pending_output_change: Option<(OutputSelection, CommandAck)>,
-    next_output_attempt: Instant,
-    output_retry_delay: Duration,
+    output_retry: OutputRetryState,
     virtual_helper_restarts: u64,
     preferred_output_serial: Option<String>,
     controller_enumerator: Option<ControllerEnumerator>,
@@ -119,8 +118,7 @@ impl Supervisor {
             pending_stop_acks: Vec::new(),
             pending_shutdown_acks: Vec::new(),
             pending_output_change: None,
-            next_output_attempt: Instant::now(),
-            output_retry_delay: OUTPUT_RETRY_INITIAL,
+            output_retry: OutputRetryState::new(Instant::now()),
             virtual_helper_restarts: 0,
             preferred_output_serial: None,
             controller_enumerator: None,
@@ -210,14 +208,17 @@ impl Supervisor {
             }
             if retained_output.is_none() {
                 let now = Instant::now();
-                if now < self.next_output_attempt {
-                    self.wait_or_command(self.next_output_attempt.saturating_duration_since(now));
+                if now < self.output_retry.next_attempt {
+                    self.wait_or_command(
+                        self.output_retry
+                            .next_attempt
+                            .saturating_duration_since(now),
+                    );
                     continue;
                 }
                 match self.discover_output() {
                     OutputDiscovery::Ready(output) => {
-                        self.output_retry_delay = OUTPUT_RETRY_INITIAL;
-                        self.next_output_attempt = Instant::now();
+                        self.output_retry.mark_ready(Instant::now());
                         retained_output = Some(output);
                     }
                     OutputDiscovery::Wait { detail, error } => {
@@ -276,9 +277,7 @@ impl Supervisor {
                                 self.desired_running = false;
                                 self.transition(RuntimeState::Error, &message, Some(&message));
                             } else {
-                                if OutputCapabilities::for_selection(&self.config.output)
-                                    .reopen_with_backoff
-                                {
+                                if output_reopens_with_backoff(&self.config.output) {
                                     self.schedule_output_retry();
                                 }
                                 self.transition(RuntimeState::Waiting, &message, Some(&message));
@@ -317,7 +316,7 @@ impl Supervisor {
                 }
                 Ok((ActiveExit::OutputLost(message), _, _)) => {
                     retained_output = None;
-                    if OutputCapabilities::for_selection(&self.config.output).reopen_with_backoff {
+                    if output_reopens_with_backoff(&self.config.output) {
                         self.schedule_output_retry();
                     }
                     self.update_status(|status| {

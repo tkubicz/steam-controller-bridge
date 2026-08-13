@@ -101,15 +101,21 @@ impl VirtualHidOptions {
     ///
     /// # Errors
     ///
-    /// Returns a message for a selected backend without a helper path, or for
-    /// any virtual-HID option supplied to a different backend.
+    /// Returns a message for a selected backend without a helper path, an
+    /// incomplete identity pair, or any virtual-HID option supplied to a
+    /// different backend.
     pub fn validate(&self, selected: bool) -> Result<(), String> {
         if selected {
-            return if self.helper_path.is_some() {
-                Ok(())
-            } else {
-                Err(MISSING_HELPER_PATH.to_owned())
-            };
+            if self.helper_path.is_none() {
+                return Err(MISSING_HELPER_PATH.to_owned());
+            }
+            if self.vendor_id.is_some() != self.product_id.is_some() {
+                return Err(
+                    "--virtual-hid-vendor-id and --virtual-hid-product-id must be supplied together"
+                        .to_owned(),
+                );
+            }
+            return Ok(());
         }
         if self.helper_path.is_some() {
             return Err("--virtual-hid-helper is only valid with --output virtual-hid".to_owned());
@@ -128,8 +134,10 @@ impl VirtualHidOptions {
     ///
     /// # Errors
     ///
-    /// Returns a message when no helper path was supplied.
+    /// Returns a message when no helper path was supplied or only one half of
+    /// an identity override is present.
     pub fn config(&self) -> Result<VirtualHidConfig, String> {
+        self.validate(true)?;
         let config = VirtualHidConfig::new(self.helper_path.clone().ok_or(MISSING_HELPER_PATH)?);
         Ok(match (self.vendor_id, self.product_id) {
             (Some(vendor_id), Some(product_id)) => config.with_identity(vendor_id, product_id),
@@ -196,6 +204,10 @@ pub enum VirtualHidErrorClass {
     SpawnFailed,
     StartupTimeout,
     HelperExited,
+    /// The helper died from SIGKILL before it could identify the cause. On a
+    /// normal macOS host this commonly indicates AMFI entitlement rejection,
+    /// but the signal is not definitive evidence by itself.
+    StartupKilled,
     ProtocolMismatch,
     ProtocolViolation,
     EntitlementMissing,
@@ -244,6 +256,7 @@ impl VirtualHidError {
             VirtualHidErrorClass::UnsupportedPlatform
                 | VirtualHidErrorClass::MissingHelper
                 | VirtualHidErrorClass::InvalidConfiguration
+                | VirtualHidErrorClass::StartupKilled
                 | VirtualHidErrorClass::ProtocolMismatch
                 | VirtualHidErrorClass::ProtocolViolation
                 | VirtualHidErrorClass::EntitlementMissing
@@ -301,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn an_identity_override_applies_only_when_both_halves_are_present() {
+    fn an_identity_override_requires_both_halves() {
         let base = VirtualHidOptions {
             helper_path: Some(PathBuf::from("helper")),
             ..VirtualHidOptions::default()
@@ -315,11 +328,8 @@ mod tests {
             vendor_id: Some(0xcafe),
             ..base.clone()
         };
-        let config = half.config().unwrap();
-        assert_eq!(
-            (config.vendor_id, config.product_id),
-            (DEFAULT_VENDOR_ID, DEFAULT_PRODUCT_ID)
-        );
+        assert!(half.validate(true).is_err());
+        assert!(half.config().is_err());
         let both = VirtualHidOptions {
             vendor_id: Some(0xcafe),
             product_id: Some(0x4001),

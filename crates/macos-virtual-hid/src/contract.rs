@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{VirtualHidError, VirtualHidErrorClass};
 
-pub const HELPER_PROTOCOL_VERSION: u16 = 3;
+pub const HELPER_PROTOCOL_VERSION: u16 = 4;
 pub const DEFAULT_VENDOR_ID: u16 = 0x045e;
 pub const DEFAULT_PRODUCT_ID: u16 = 0x028e;
 pub const DEVICE_SERIAL_NUMBER: &str = "SCBRIDGE-VIRTUAL-GAMEPAD-1";
@@ -49,7 +49,7 @@ pub enum HelperRequest {
     InputReport {
         protocol: u16,
         sequence: u64,
-        report: Vec<u8>,
+        report: [u8; INPUT_REPORT_LEN],
     },
     Shutdown {
         protocol: u16,
@@ -132,7 +132,9 @@ impl HelperResponse {
 /// # Errors
 ///
 /// Returns an error when the state contains an out-of-range value or uses
-/// buttons that do not fit the virtual device's 16-button contract.
+/// button bits outside the bridge's 16-button state contract. The pinned Xbox
+/// report has no representation for the five bridge extension buttons, so
+/// those bits are intentionally omitted just as they are by the XIAO backend.
 pub fn encode_input_report(
     state: &GamepadState,
 ) -> Result<[u8; INPUT_REPORT_LEN], VirtualHidError> {
@@ -192,7 +194,7 @@ fn validate_state(state: &GamepadState) -> Result<(), VirtualHidError> {
     if state.buttons.0 & !0xffff != 0 {
         return Err(VirtualHidError::new(
             VirtualHidErrorClass::InvalidConfiguration,
-            "virtual HID input supports exactly 16 buttons",
+            "virtual HID input accepts only the bridge's 16 defined buttons",
         ));
     }
     Ok(())
@@ -362,6 +364,22 @@ mod tests {
             assert_eq!(u16::from_le_bytes([report[2], report[3]]), mask);
         }
 
+        for button in [
+            Button::LeftGrip,
+            Button::RightGrip,
+            Button::Extra1,
+            Button::Extra2,
+            Button::Extra3,
+        ] {
+            let mut state = GamepadState::neutral();
+            state.buttons.set(button, true);
+            assert_eq!(
+                encode_input_report(&state).unwrap(),
+                NEUTRAL_INPUT_REPORT,
+                "the pinned Xbox report cannot represent {button:?}"
+            );
+        }
+
         let state = GamepadState {
             left_x: -1.0,
             left_y: 1.0,
@@ -408,7 +426,7 @@ mod tests {
 
     #[test]
     fn strict_json_rejects_unknown_fields_and_bad_protocol_is_visible() {
-        let mut unknown = io::Cursor::new(b"{\"type\":\"create\",\"protocol\":3,\"vendor_id\":1118,\"product_id\":654,\"extra\":true}\n");
+        let mut unknown = io::Cursor::new(b"{\"type\":\"create\",\"protocol\":4,\"vendor_id\":1118,\"product_id\":654,\"extra\":true}\n");
         assert!(read_json_line::<HelperRequest>(&mut unknown).is_err());
         let mut wrong = io::Cursor::new(
             b"{\"type\":\"create\",\"protocol\":99,\"vendor_id\":1118,\"product_id\":654}\n",
@@ -417,6 +435,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(request.protocol(), 99);
+
+        let mut short_report = io::Cursor::new(
+            b"{\"type\":\"input_report\",\"protocol\":4,\"sequence\":1,\"report\":[0,20]}\n",
+        );
+        assert!(read_json_line::<HelperRequest>(&mut short_report).is_err());
     }
 
     #[test]
@@ -443,7 +466,7 @@ mod tests {
                 HelperRequest::InputReport {
                     protocol: HELPER_PROTOCOL_VERSION,
                     sequence: 1,
-                    report: NEUTRAL_INPUT_REPORT.to_vec(),
+                    report: NEUTRAL_INPUT_REPORT,
                 },
             ),
             (

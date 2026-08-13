@@ -60,25 +60,37 @@ where
     W: Write + Send + 'static,
 {
     let (response_sender, response_receiver) = mpsc::sync_channel::<HelperResponse>(64);
+    // Delegate callbacks must never block behind diagnostic traffic. Fatal
+    // callback failures use a separate unbounded lane so they cannot be
+    // silently discarded when the bounded event queue is full.
+    let (fatal_sender, fatal_receiver) = mpsc::channel::<HelperResponse>();
     let finished = Arc::new(AtomicBool::new(false));
     let writer_finished = Arc::clone(&finished);
     let writer = thread::Builder::new()
         .name("virtual-hid-helper-writer".to_owned())
-        .spawn(move || write_responses(output, &response_receiver, &writer_finished))
+        .spawn(move || {
+            write_responses(
+                output,
+                &response_receiver,
+                &fatal_receiver,
+                &writer_finished,
+            )
+        })
         .map_err(|error| {
             VirtualHidError::new(VirtualHidErrorClass::SpawnFailed, error.to_string())
         })?;
 
-    let result = run_protocol(&mut input, &response_sender, dry_run);
+    let result = run_protocol(&mut input, &response_sender, &fatal_sender, dry_run);
     if let Err(error) = &result {
-        let _ = response_sender.send(HelperResponse::Fatal {
+        let _ = fatal_sender.send(HelperResponse::Fatal {
             protocol: HELPER_PROTOCOL_VERSION,
             class: error.class(),
             message: error.message().to_owned(),
         });
     }
-    drop(response_sender);
     finished.store(true, Ordering::Release);
+    drop(response_sender);
+    drop(fatal_sender);
     let writer_result = writer.join().map_err(|_| {
         VirtualHidError::new(
             VirtualHidErrorClass::HelperExited,
@@ -91,6 +103,7 @@ where
 fn run_protocol(
     input: &mut impl BufRead,
     responses: &mpsc::SyncSender<HelperResponse>,
+    fatal_responses: &mpsc::Sender<HelperResponse>,
     dry_run: bool,
 ) -> Result<(), VirtualHidError> {
     let Some(first) = read_json_line::<HelperRequest>(input)? else {
@@ -119,6 +132,7 @@ fn run_protocol(
             vendor_id,
             product_id,
             responses.clone(),
+            fatal_responses.clone(),
         )?)
     };
     let metadata = device.as_ref().map_or_else(
@@ -204,20 +218,40 @@ const WRITER_IDLE_POLL: Duration = Duration::from_millis(50);
 fn write_responses(
     mut output: impl Write,
     responses: &mpsc::Receiver<HelperResponse>,
+    fatal_responses: &mpsc::Receiver<HelperResponse>,
     finished: &AtomicBool,
 ) -> Result<(), VirtualHidError> {
     loop {
+        match fatal_responses.try_recv() {
+            Ok(response) => {
+                write_json_line(&mut output, &response)?;
+                return Ok(());
+            }
+            Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => {}
+        }
         match responses.recv_timeout(WRITER_IDLE_POLL) {
             Ok(response) => write_json_line(&mut output, &response)?,
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
             // A cancellation timeout deliberately leaks the registered IOKit
             // callback owners, and with them their clones of this channel's
             // sender, so a hangup is not guaranteed. The finished flag is the
-            // second exit, so the helper still terminates on its own instead
-            // of waiting to be killed. An idle timeout means the queue is
-            // already drained, so nothing is lost by returning here.
-            Err(mpsc::RecvTimeoutError::Timeout) if finished.load(Ordering::Acquire) => {
-                return Ok(())
+            // second exit, so the helper still terminates on its own after the
+            // queue has been drained.
+            Err(mpsc::RecvTimeoutError::Disconnected | mpsc::RecvTimeoutError::Timeout)
+                if finished.load(Ordering::Acquire) =>
+            {
+                // The producer publishes terminal failure before setting
+                // `finished`. Re-check its separate lane after waking so the
+                // disconnect cannot race past the fatal response.
+                if let Ok(response) = fatal_responses.try_recv() {
+                    write_json_line(&mut output, &response)?;
+                }
+                return Ok(());
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(VirtualHidError::new(
+                    VirtualHidErrorClass::HelperExited,
+                    "helper response channel disconnected before protocol completion",
+                ));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -278,9 +312,9 @@ mod tests {
     #[test]
     fn dry_run_create_report_shutdown_exchange() {
         let input = concat!(
-            "{\"type\":\"create\",\"protocol\":3,\"vendor_id\":1118,\"product_id\":654}\n",
-            "{\"type\":\"input_report\",\"protocol\":3,\"sequence\":1,\"report\":[0,20,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}\n",
-            "{\"type\":\"shutdown\",\"protocol\":3,\"sequence\":2}\n"
+            "{\"type\":\"create\",\"protocol\":4,\"vendor_id\":1118,\"product_id\":654}\n",
+            "{\"type\":\"input_report\",\"protocol\":4,\"sequence\":1,\"report\":[0,20,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}\n",
+            "{\"type\":\"shutdown\",\"protocol\":4,\"sequence\":2}\n"
         );
         let output = SharedWriter::default();
         let captured = output.clone();
@@ -307,8 +341,8 @@ mod tests {
     #[test]
     fn wrong_sequence_emits_structured_fatal() {
         let input = concat!(
-            "{\"type\":\"create\",\"protocol\":3,\"vendor_id\":1118,\"product_id\":654}\n",
-            "{\"type\":\"shutdown\",\"protocol\":3,\"sequence\":2}\n"
+            "{\"type\":\"create\",\"protocol\":4,\"vendor_id\":1118,\"product_id\":654}\n",
+            "{\"type\":\"shutdown\",\"protocol\":4,\"sequence\":2}\n"
         );
         let output = SharedWriter::default();
         let captured = output.clone();
@@ -316,6 +350,41 @@ mod tests {
         let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
         assert!(text.contains("\"type\":\"fatal\""));
         assert!(text.contains("\"class\":\"protocol_violation\""));
+    }
+
+    #[test]
+    fn fatal_response_bypasses_a_full_delegate_queue() {
+        let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        response_sender
+            .send(HelperResponse::GetReport {
+                protocol: HELPER_PROTOCOL_VERSION,
+                event_sequence: 1,
+                report_type: crate::contract::HidReportType::Feature,
+                report_id: 1,
+                max_size: 64,
+            })
+            .unwrap();
+        let (fatal_sender, fatal_receiver) = mpsc::channel();
+        fatal_sender
+            .send(HelperResponse::Fatal {
+                protocol: HELPER_PROTOCOL_VERSION,
+                class: VirtualHidErrorClass::ProtocolViolation,
+                message: "callback rejected an invalid report".to_owned(),
+            })
+            .unwrap();
+
+        let output = SharedWriter::default();
+        let captured = output.clone();
+        write_responses(
+            output,
+            &response_receiver,
+            &fatal_receiver,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let text = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("\"type\":\"fatal\""));
+        assert!(!text.contains("\"type\":\"get_report\""));
     }
 
     #[test]

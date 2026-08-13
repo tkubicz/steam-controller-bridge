@@ -664,7 +664,9 @@ fn ordinary_stop_disconnects_virtual_hid_before_acknowledgement() {
     let output = OutputSession {
         output: Box::new(DropOrderOutput(Arc::clone(&order))),
         serial_device: None,
-        capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::VirtualHid(
+            VirtualHidConfig::new(std::path::PathBuf::from("helper")),
+        )),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     let release_order = Arc::clone(&order);
