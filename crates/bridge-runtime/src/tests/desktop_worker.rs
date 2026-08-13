@@ -533,6 +533,40 @@ fn waiting_output_service_preserves_permanent_failure_classification() {
 }
 
 #[test]
+fn flattened_output_errors_keep_their_permanence_classification() {
+    // `process_report` hands the active loop a flattened string, so both
+    // classifiers have to survive the round trip through `Display`.
+    let permanent =
+        bridge_core::BridgeError::Output(OutputError::Configuration("no entitlement".to_owned()))
+            .to_string();
+    assert!(is_output_error(&permanent), "{permanent}");
+    assert!(is_permanent_output_error(&permanent), "{permanent}");
+
+    let transient =
+        bridge_core::BridgeError::Output(OutputError::Transport("helper exited".to_owned()))
+            .to_string();
+    assert!(is_output_error(&transient), "{transient}");
+    assert!(!is_permanent_output_error(&transient), "{transient}");
+}
+
+#[test]
+fn only_an_already_unusable_output_is_excused_from_neutral_before_release() {
+    // A blocked output is as incapable of accepting neutral as a lost one, so
+    // requiring it would bury the real failure under a neutralization error
+    // and skip the supervisor's dedicated handling for that exit.
+    assert!(!ActiveExit::OutputLost("lost".to_owned()).requires_neutral_before_release());
+    assert!(!ActiveExit::OutputBlocked("blocked".to_owned()).requires_neutral_before_release());
+    assert!(ActiveExit::SourceLost.requires_neutral_before_release());
+    let (ack, _receiver) = mpsc::channel();
+    assert!(ActiveExit::StoppedWithAck(ack).requires_neutral_before_release());
+    let (ack, _receiver) = mpsc::channel();
+    assert!(
+        ActiveExit::OutputChange(OutputSelection::Mock, ack).requires_neutral_before_release(),
+        "a backend switch must still neutralize the output it is replacing"
+    );
+}
+
+#[test]
 fn runtime_timeout_updates_enforce_the_documented_minimum_and_maximum() {
     assert!(validate_idle_shutdown_timeout(None).is_ok());
     assert!(validate_idle_shutdown_timeout(Some(Duration::from_secs(59))).is_err());

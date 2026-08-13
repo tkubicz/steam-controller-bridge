@@ -116,18 +116,7 @@ impl Supervisor {
                 let _ = ack.send(Ok(()));
             }
             RuntimeCommand::SetOutput(selection, ack) => {
-                if self.suspension.update {
-                    let _ = ack.send(Err(
-                        "cannot change output while a firmware update owns hardware".to_owned(),
-                    ));
-                } else if selection == self.config.output {
-                    let _ = ack.send(Ok(()));
-                } else if requires_power_monitor(&selection) && self.startup_blocker.is_some() {
-                    let _ = ack
-                        .send(Err(self.startup_blocker.clone().unwrap_or_else(|| {
-                            "system power monitor is unavailable".to_owned()
-                        })));
-                } else {
+                if let Some((selection, ack)) = self.accept_output_change(selection, ack) {
                     self.pending_output_change = Some((selection, ack));
                 }
             }
@@ -246,18 +235,7 @@ impl Supervisor {
                     let _ = ack.send(Ok(()));
                 }
                 RuntimeCommand::SetOutput(selection, ack) => {
-                    if self.suspension.update {
-                        let _ = ack.send(Err(
-                            "cannot change output while a firmware update owns hardware".to_owned(),
-                        ));
-                    } else if selection == self.config.output {
-                        let _ = ack.send(Ok(()));
-                    } else if requires_power_monitor(&selection) && self.startup_blocker.is_some() {
-                        let _ = ack
-                            .send(Err(self.startup_blocker.clone().unwrap_or_else(|| {
-                                "system power monitor is unavailable".to_owned()
-                            })));
-                    } else {
+                    if let Some((selection, ack)) = self.accept_output_change(selection, ack) {
                         return Some(ActiveExit::OutputChange(selection, ack));
                     }
                 }
@@ -307,9 +285,38 @@ impl Supervisor {
         (self.picker_events)(event);
     }
 
+    /// Screens an output-change request against the states that must own the
+    /// hardware first. Returns the request only when the caller should carry
+    /// out the switch; every rejection and no-op is acknowledged here, so both
+    /// the idle and active dispatchers apply exactly the same rules.
+    fn accept_output_change(
+        &self,
+        selection: OutputSelection,
+        acknowledgement: CommandAck,
+    ) -> Option<(OutputSelection, CommandAck)> {
+        if self.suspension.update {
+            let _ = acknowledgement.send(Err(
+                "cannot change output while a firmware update owns hardware".to_owned(),
+            ));
+        } else if selection == self.config.output {
+            let _ = acknowledgement.send(Ok(()));
+        } else if requires_power_monitor(&selection) && self.startup_blocker.is_some() {
+            let _ = acknowledgement
+                .send(Err(self.startup_blocker.clone().unwrap_or_else(|| {
+                    "system power monitor is unavailable".to_owned()
+                })));
+        } else {
+            return Some((selection, acknowledgement));
+        }
+        None
+    }
+
     pub(super) fn apply_output_selection(&mut self, selection: OutputSelection) {
         self.config.output = selection;
         self.reset_output_retry();
+        // The counter describes one backend's helper, so it is meaningless
+        // once a different backend owns the output.
+        self.virtual_helper_restarts = 0;
         self.update_status(|status| {
             status.output = OutputStatus::configured(&self.config.output);
             status.output_diagnostics = bridge_output::OutputDiagnostics::default();

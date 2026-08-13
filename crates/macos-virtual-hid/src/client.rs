@@ -15,6 +15,9 @@ use crate::contract::{
 use crate::{VirtualHidConfig, VirtualHidError, VirtualHidErrorClass, VirtualHidHelperMetadata};
 
 const RESPONSE_QUEUE_CAPACITY: usize = 64;
+/// Slack a caller adds to the deadline it handed the worker, so the worker's
+/// own precise classification wins the race against the caller giving up.
+const ACKNOWLEDGEMENT_GRACE: Duration = Duration::from_millis(100);
 
 enum ReaderEvent {
     Response(HelperResponse),
@@ -22,15 +25,22 @@ enum ReaderEvent {
     Eof,
 }
 
+/// One caller waiting on a queued item, and the single absolute deadline both
+/// it and the worker measure against. Sharing the deadline keeps the worker
+/// from waiting past the moment its caller has already given up.
+struct Acknowledgement {
+    sender: mpsc::Sender<Result<(), VirtualHidError>>,
+    deadline: Instant,
+}
+
 enum WorkItem {
     Report {
         bytes: Vec<u8>,
         neutral: bool,
-        acknowledgement: Option<mpsc::Sender<Result<(), VirtualHidError>>>,
+        acknowledgement: Option<Acknowledgement>,
     },
     Shutdown {
-        acknowledgement: mpsc::Sender<Result<(), VirtualHidError>>,
-        deadline: Instant,
+        acknowledgement: Acknowledgement,
     },
 }
 
@@ -73,7 +83,7 @@ impl Mailbox {
         &self,
         bytes: Vec<u8>,
         neutral: bool,
-        acknowledgement: Option<mpsc::Sender<Result<(), VirtualHidError>>>,
+        acknowledgement: Option<Acknowledgement>,
     ) -> Result<bool, VirtualHidError> {
         let mut state = self
             .state
@@ -111,11 +121,7 @@ impl Mailbox {
         Ok(false)
     }
 
-    fn enqueue_shutdown(
-        &self,
-        acknowledgement: mpsc::Sender<Result<(), VirtualHidError>>,
-        deadline: Instant,
-    ) -> Result<(), VirtualHidError> {
+    fn enqueue_shutdown(&self, acknowledgement: Acknowledgement) -> Result<(), VirtualHidError> {
         let mut state = self
             .state
             .lock()
@@ -127,33 +133,40 @@ impl Mailbox {
             ));
         }
         state.queue.retain(|item| !item.is_ordinary_report());
-        state.queue.push_back(WorkItem::Shutdown {
-            acknowledgement,
-            deadline,
-        });
+        state
+            .queue
+            .push_back(WorkItem::Shutdown { acknowledgement });
         self.available.notify_one();
         Ok(())
     }
 
+    /// Waits for one item, reporting `Closed` only for a genuinely closed
+    /// mailbox. The predicate is re-checked after every wake, so a spurious
+    /// condvar wakeup cannot be mistaken for a closed queue and tear the
+    /// helper down underneath a live session.
     fn receive_timeout(&self, timeout: Duration) -> MailboxReceive {
+        let deadline = Instant::now() + timeout;
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.queue.is_empty() && !state.closed {
-            let (next, wait) = self
-                .available
-                .wait_timeout(state, timeout)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state = next;
-            if wait.timed_out() && state.queue.is_empty() && !state.closed {
+        loop {
+            if let Some(item) = state.queue.pop_front() {
+                return MailboxReceive::Item(item);
+            }
+            if state.closed {
+                return MailboxReceive::Closed;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return MailboxReceive::Timeout;
             }
+            state = self
+                .available
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
         }
-        state
-            .queue
-            .pop_front()
-            .map_or(MailboxReceive::Closed, MailboxReceive::Item)
     }
 
     fn close(&self) {
@@ -172,10 +185,8 @@ impl Mailbox {
                     acknowledgement: Some(acknowledgement),
                     ..
                 }
-                | WorkItem::Shutdown {
-                    acknowledgement, ..
-                } => {
-                    let _ = acknowledgement.send(Err(error));
+                | WorkItem::Shutdown { acknowledgement } => {
+                    let _ = acknowledgement.sender.send(Err(error));
                 }
                 WorkItem::Report { .. } => {}
             }
@@ -279,7 +290,7 @@ impl VirtualHidOutput {
             },
         ) {
             drop(child);
-            let _ = reader.join();
+            join_reader(reader_receiver, reader);
             return Err(error);
         }
         let state = Arc::new(Mutex::new(SharedState::default()));
@@ -294,7 +305,7 @@ impl VirtualHidOutput {
             Err(error) => {
                 let error = classify_startup_failure(error, child.child_mut(), config.dry_run);
                 drop(child);
-                let _ = reader.join();
+                join_reader(reader_receiver, reader);
                 return Err(error);
             }
         };
@@ -310,7 +321,7 @@ impl VirtualHidOutput {
                 run_worker(
                     child.take(),
                     stdin,
-                    &reader_receiver,
+                    reader_receiver,
                     reader,
                     &worker_mailbox,
                     &worker_state,
@@ -392,10 +403,16 @@ impl GamepadOutput for VirtualHidOutput {
             return Err(Self::map_output_error(&error));
         }
         let (sender, receiver) = mpsc::channel();
+        let deadline = Instant::now() + self.config.acknowledgement_timeout;
         self.mailbox
-            .enqueue_report(crate::NEUTRAL_INPUT_REPORT.to_vec(), true, Some(sender))
+            .enqueue_report(
+                crate::NEUTRAL_INPUT_REPORT.to_vec(),
+                true,
+                Some(Acknowledgement { sender, deadline }),
+            )
             .map_err(|error| Self::map_output_error(&error))?;
-        if let Ok(result) = receiver.recv_timeout(self.config.acknowledgement_timeout) {
+        let wait = deadline.saturating_duration_since(Instant::now()) + ACKNOWLEDGEMENT_GRACE;
+        if let Ok(result) = receiver.recv_timeout(wait) {
             result.map_err(|error| Self::map_output_error(&error))
         } else {
             let error = VirtualHidError::new(
@@ -422,19 +439,29 @@ impl GamepadOutput for VirtualHidOutput {
 
 impl Drop for VirtualHidOutput {
     fn drop(&mut self) {
-        if self.worker.is_none() {
+        let Some(worker) = self.worker.take() else {
             return;
-        }
+        };
         let deadline = Instant::now() + self.config.shutdown_timeout;
         let (sender, receiver) = mpsc::channel();
-        if self.mailbox.enqueue_shutdown(sender, deadline).is_ok() {
-            let _ = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        if self
+            .mailbox
+            .enqueue_shutdown(Acknowledgement { sender, deadline })
+            .is_ok()
+        {
+            let wait = deadline.saturating_duration_since(Instant::now()) + ACKNOWLEDGEMENT_GRACE;
+            let _ = receiver.recv_timeout(wait);
         }
         self.mailbox.close();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        let _ = worker.join();
     }
+}
+
+/// Hangs up the response channel before joining, so a reader thread parked in
+/// a blocking send on a full queue cannot deadlock the teardown.
+fn join_reader(responses: mpsc::Receiver<ReaderEvent>, reader: JoinHandle<()>) {
+    drop(responses);
+    let _ = reader.join();
 }
 
 fn validate_helper_path(path: &std::path::Path) -> Result<(), VirtualHidError> {
@@ -581,7 +608,7 @@ fn classify_startup_status(
 fn run_worker(
     mut child: Child,
     mut stdin: ChildStdin,
-    responses: &mpsc::Receiver<ReaderEvent>,
+    responses: mpsc::Receiver<ReaderEvent>,
     reader: JoinHandle<()>,
     mailbox: &Mailbox,
     state: &Mutex<SharedState>,
@@ -589,12 +616,12 @@ fn run_worker(
     shutdown_timeout: Duration,
 ) {
     let mut sequence = 1_u64;
-    let mut process_deadline = Instant::now() + shutdown_timeout;
+    let mut process_deadline = None;
     loop {
         let item = match mailbox.receive_timeout(Duration::from_millis(25)) {
             MailboxReceive::Item(item) => item,
             MailboxReceive::Timeout => {
-                if let Err(error) = service_unsolicited_responses(responses, state) {
+                if let Err(error) = service_unsolicited_responses(&responses, state) {
                     latch_worker_failure(state, error);
                     break;
                 }
@@ -602,7 +629,7 @@ fn run_worker(
             }
             MailboxReceive::Closed => break,
         };
-        let (request, acknowledgement, shutdown_deadline) = match item {
+        let (request, acknowledgement, is_shutdown) = match item {
             WorkItem::Report {
                 bytes,
                 acknowledgement,
@@ -614,26 +641,27 @@ fn run_worker(
                     report: bytes,
                 },
                 acknowledgement,
-                None,
+                false,
             ),
-            WorkItem::Shutdown {
-                acknowledgement,
-                deadline,
-            } => (
+            WorkItem::Shutdown { acknowledgement } => (
                 HelperRequest::Shutdown {
                     protocol: HELPER_PROTOCOL_VERSION,
                     sequence,
                 },
                 Some(acknowledgement),
-                Some(deadline),
+                true,
             ),
         };
-        let response_timeout = shutdown_deadline.map_or(acknowledgement_timeout, |deadline| {
+        // An acknowledged item carries its caller's absolute deadline, so both
+        // sides give up at the same instant and the worker's precise error
+        // class is what the caller observes.
+        let deadline = acknowledgement.as_ref().map(|item| item.deadline);
+        let response_timeout = deadline.map_or(acknowledgement_timeout, |deadline| {
             deadline.saturating_duration_since(Instant::now())
         });
         let result = write_json_line(&mut stdin, &request)
-            .and_then(|()| wait_for_applied(responses, sequence, response_timeout, state));
-        if result.is_ok() && shutdown_deadline.is_none() {
+            .and_then(|()| wait_for_applied(&responses, sequence, response_timeout, state));
+        if result.is_ok() && !is_shutdown {
             state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -641,20 +669,23 @@ fn run_worker(
                 .virtual_reports_dispatched += 1;
         }
         if let Some(acknowledgement) = acknowledgement {
-            let _ = acknowledgement.send(result.clone());
+            let _ = acknowledgement.sender.send(result.clone());
         }
         if let Err(error) = result {
             latch_worker_failure(state, error);
             break;
         }
         sequence = sequence.wrapping_add(1);
-        if let Some(deadline) = shutdown_deadline {
+        if is_shutdown {
             process_deadline = deadline;
             break;
         }
     }
     drop(stdin);
-    let deadline = process_deadline;
+    // Every other exit reaches here without a shutdown handshake, so the helper
+    // gets its own full grace period to observe the closed stdin, release the
+    // device, and exit before it is killed.
+    let deadline = process_deadline.unwrap_or_else(|| Instant::now() + shutdown_timeout);
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -667,7 +698,7 @@ fn run_worker(
         }
     }
     mailbox.close();
-    let _ = reader.join();
+    join_reader(responses, reader);
 }
 
 fn latch_worker_failure(state: &Mutex<SharedState>, error: VirtualHidError) {
@@ -836,6 +867,17 @@ fn wait_for_applied(
 mod tests {
     use super::*;
 
+    fn pending() -> (Acknowledgement, mpsc::Receiver<Result<(), VirtualHidError>>) {
+        let (sender, receiver) = mpsc::channel();
+        (
+            Acknowledgement {
+                sender,
+                deadline: Instant::now() + Duration::from_secs(2),
+            },
+            receiver,
+        )
+    }
+
     #[test]
     fn ordinary_reports_coalesce_and_neutral_supersedes_them() {
         let mailbox = Mailbox::new(2);
@@ -845,7 +887,7 @@ mod tests {
         assert!(mailbox
             .enqueue_report(vec![2; crate::INPUT_REPORT_LEN], false, None)
             .unwrap());
-        let (ack, _receiver) = mpsc::channel();
+        let (ack, _receiver) = pending();
         assert!(!mailbox
             .enqueue_report(crate::NEUTRAL_INPUT_REPORT.to_vec(), true, Some(ack))
             .unwrap());
@@ -865,7 +907,7 @@ mod tests {
     #[test]
     fn a_full_unserviceable_mailbox_reports_overflow() {
         let mailbox = Mailbox::new(1);
-        let (ack, _receiver) = mpsc::channel();
+        let (ack, _receiver) = pending();
         mailbox
             .enqueue_report(crate::NEUTRAL_INPUT_REPORT.to_vec(), true, Some(ack))
             .unwrap();
@@ -876,18 +918,45 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_carries_one_end_to_end_deadline() {
-        let mailbox = Mailbox::new(1);
-        let (acknowledgement, _receiver) = mpsc::channel();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        mailbox.enqueue_shutdown(acknowledgement, deadline).unwrap();
-        let MailboxReceive::Item(WorkItem::Shutdown {
-            deadline: queued, ..
-        }) = mailbox.receive_timeout(Duration::ZERO)
+    fn acknowledged_work_carries_one_end_to_end_deadline() {
+        let mailbox = Mailbox::new(2);
+        let (shutdown, _shutdown_receiver) = pending();
+        let deadline = shutdown.deadline;
+        mailbox.enqueue_shutdown(shutdown).unwrap();
+        let MailboxReceive::Item(WorkItem::Shutdown { acknowledgement }) =
+            mailbox.receive_timeout(Duration::ZERO)
         else {
             panic!("shutdown was not queued");
         };
-        assert_eq!(queued, deadline);
+        assert_eq!(acknowledgement.deadline, deadline);
+
+        let (neutral, _neutral_receiver) = pending();
+        let deadline = neutral.deadline;
+        mailbox
+            .enqueue_report(crate::NEUTRAL_INPUT_REPORT.to_vec(), true, Some(neutral))
+            .unwrap();
+        let MailboxReceive::Item(WorkItem::Report {
+            acknowledgement: Some(acknowledgement),
+            ..
+        }) = mailbox.receive_timeout(Duration::ZERO)
+        else {
+            panic!("neutral was not queued");
+        };
+        assert_eq!(acknowledgement.deadline, deadline);
+    }
+
+    #[test]
+    fn a_closed_mailbox_is_distinguishable_from_an_idle_one() {
+        let mailbox = Mailbox::new(1);
+        assert!(matches!(
+            mailbox.receive_timeout(Duration::from_millis(5)),
+            MailboxReceive::Timeout
+        ));
+        mailbox.close();
+        assert!(matches!(
+            mailbox.receive_timeout(Duration::from_millis(5)),
+            MailboxReceive::Closed
+        ));
     }
 
     #[test]

@@ -308,8 +308,18 @@ impl MenuApp {
         }
         save_settings(&settings_path, &settings)?;
         let bindings_file_fingerprint = bindings_file_fingerprint(&bindings_path)?;
+        // A stored preference the current binary cannot honour must not leave
+        // the user with an app that only fails to launch, so the error names
+        // the file and the value that unsticks it.
+        let output = settings.output.runtime_selection().map_err(|error| {
+            format!(
+                "cannot start with the saved gamepad output: {error}. Run the packaged \
+                 application, or set \"output\" to \"xiao_usb_bridge\" in {}",
+                settings_path.display()
+            )
+        })?;
         let config = RuntimeConfig {
-            output: settings.output.runtime_selection()?,
+            output,
             idle_shutdown_timeout: settings
                 .idle_shutdown_minutes
                 .map(|minutes| Duration::from_secs(minutes * 60)),

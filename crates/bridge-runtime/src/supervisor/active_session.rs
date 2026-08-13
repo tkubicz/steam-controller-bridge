@@ -442,10 +442,10 @@ impl Supervisor {
         let required_cleanup =
             worker_result
                 .and(recording_result)
-                .and(if matches!(exit, ActiveExit::OutputLost(_)) {
-                    Ok(())
-                } else {
+                .and(if exit.requires_neutral_before_release() {
                     neutral_result
+                } else {
+                    Ok(())
                 });
         if exit.has_acknowledgement() {
             return Ok((exit, output, required_cleanup.and(desktop_result)));

@@ -1,6 +1,8 @@
 use std::io::{BufRead, BufReader, Write};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
+use std::time::Duration;
 
 use crate::contract::{
     read_json_line, write_json_line, HelperRequest, HelperResponse, HELPER_PROTOCOL_VERSION,
@@ -58,9 +60,11 @@ where
     W: Write + Send + 'static,
 {
     let (response_sender, response_receiver) = mpsc::sync_channel::<HelperResponse>(64);
+    let finished = Arc::new(AtomicBool::new(false));
+    let writer_finished = Arc::clone(&finished);
     let writer = thread::Builder::new()
         .name("virtual-hid-helper-writer".to_owned())
-        .spawn(move || write_responses(output, &response_receiver))
+        .spawn(move || write_responses(output, &response_receiver, &writer_finished))
         .map_err(|error| {
             VirtualHidError::new(VirtualHidErrorClass::SpawnFailed, error.to_string())
         })?;
@@ -74,6 +78,7 @@ where
         });
     }
     drop(response_sender);
+    finished.store(true, Ordering::Release);
     let writer_result = writer.join().map_err(|_| {
         VirtualHidError::new(
             VirtualHidErrorClass::HelperExited,
@@ -192,14 +197,31 @@ fn run_protocol(
     Ok(())
 }
 
+/// How long the writer waits on an idle channel before re-checking whether the
+/// protocol has finished.
+const WRITER_IDLE_POLL: Duration = Duration::from_millis(50);
+
 fn write_responses(
     mut output: impl Write,
     responses: &mpsc::Receiver<HelperResponse>,
+    finished: &AtomicBool,
 ) -> Result<(), VirtualHidError> {
-    while let Ok(response) = responses.recv() {
-        write_json_line(&mut output, &response)?;
+    loop {
+        match responses.recv_timeout(WRITER_IDLE_POLL) {
+            Ok(response) => write_json_line(&mut output, &response)?,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            // A cancellation timeout deliberately leaks the registered IOKit
+            // callback owners, and with them their clones of this channel's
+            // sender, so a hangup is not guaranteed. The finished flag is the
+            // second exit, so the helper still terminates on its own instead
+            // of waiting to be killed. An idle timeout means the queue is
+            // already drained, so nothing is lost by returning here.
+            Err(mpsc::RecvTimeoutError::Timeout) if finished.load(Ordering::Acquire) => {
+                return Ok(())
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
     }
-    Ok(())
 }
 
 fn check_protocol(protocol: u16) -> Result<(), VirtualHidError> {

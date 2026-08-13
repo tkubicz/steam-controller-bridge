@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bridge_runtime::MAX_IDLE_SHUTDOWN_TIMEOUT;
 use clap::{Parser, ValueEnum};
-use macos_virtual_hid::parse_usb_id;
+use macos_virtual_hid::{parse_usb_id, VirtualHidOptions};
 
 /// Bridges a Steam Controller 2 to a protocol-compatible output device, or replays a recording.
 ///
@@ -251,21 +251,15 @@ impl Cli {
         if self.output() == OutputArg::File && self.output_file.is_none() {
             return Err("file output requires --output-file PATH".to_owned());
         }
-        match self.output() {
-            OutputArg::VirtualHid if self.virtual_hid_helper.is_none() => {
-                Err("virtual HID output requires --virtual-hid-helper PATH".to_owned())
-            }
-            OutputArg::VirtualHid => Ok(()),
-            _ if self.virtual_hid_helper.is_some() => {
-                Err("--virtual-hid-helper is only valid with --output virtual-hid".to_owned())
-            }
-            _ if self.virtual_hid_vendor_id.is_some() || self.virtual_hid_product_id.is_some() => {
-                Err(
-                    "virtual HID identity overrides are only valid with --output virtual-hid"
-                        .to_owned(),
-                )
-            }
-            _ => Ok(()),
+        self.virtual_hid()
+            .validate(self.output() == OutputArg::VirtualHid)
+    }
+
+    pub(crate) fn virtual_hid(&self) -> VirtualHidOptions {
+        VirtualHidOptions {
+            helper_path: self.virtual_hid_helper.clone(),
+            vendor_id: self.virtual_hid_vendor_id,
+            product_id: self.virtual_hid_product_id,
         }
     }
 

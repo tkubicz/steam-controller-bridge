@@ -212,14 +212,6 @@ impl OutputStatus {
             ..Self::default()
         }
     }
-
-    #[must_use]
-    pub fn ready_nonserial(selection: &OutputSelection) -> Self {
-        Self {
-            ready: true,
-            ..Self::configured(selection)
-        }
-    }
 }
 
 /// Deliberately lossy for the same reason as [`HidDeviceInfo`]'s: this reaches

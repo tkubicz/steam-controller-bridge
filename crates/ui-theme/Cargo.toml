@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+# Depends on eframe rather than egui directly so the egui version is whatever
+# eframe pulls in. A separate egui entry could drift and give the apps two
+# incompatible Color32 types.
 eframe.workspace = true
 
 [lints]

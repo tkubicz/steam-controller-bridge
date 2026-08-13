@@ -11,7 +11,7 @@ use bridge_output::{
 use clap::{Parser, ValueEnum};
 use gamepad_simulator::{apply_keyboard_command, automated_sequence};
 use gamepad_state::{Button, GamepadState};
-use macos_virtual_hid::{parse_usb_id, VirtualHidConfig, VirtualHidOutput};
+use macos_virtual_hid::{parse_usb_id, VirtualHidOptions};
 use recording::RecordingOutput;
 
 /// Drives any output backend with synthetic gamepad states.
@@ -146,18 +146,14 @@ fn automated_states(include_guide_button: bool) -> Vec<GamepadState> {
 }
 
 fn validate_cli(cli: &Cli) -> Result<(), String> {
-    match cli.output {
-        OutputArg::VirtualHid if cli.virtual_hid_helper.is_none() => {
-            Err("--output virtual-hid requires --virtual-hid-helper PATH".to_owned())
-        }
-        OutputArg::VirtualHid => Ok(()),
-        _ if cli.virtual_hid_helper.is_some() => {
-            Err("--virtual-hid-helper is only valid with --output virtual-hid".to_owned())
-        }
-        _ if cli.virtual_hid_vendor_id.is_some() || cli.virtual_hid_product_id.is_some() => Err(
-            "virtual HID identity overrides are only valid with --output virtual-hid".to_owned(),
-        ),
-        _ => Ok(()),
+    virtual_hid_options(cli).validate(cli.output == OutputArg::VirtualHid)
+}
+
+fn virtual_hid_options(cli: &Cli) -> VirtualHidOptions {
+    VirtualHidOptions {
+        helper_path: cli.virtual_hid_helper.clone(),
+        vendor_id: cli.virtual_hid_vendor_id,
+        product_id: cli.virtual_hid_product_id,
     }
 }
 
@@ -236,28 +232,7 @@ fn make_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
             )
             .map_err(|error| error.to_string())?,
         ),
-        OutputArg::VirtualHid => {
-            let mut config = VirtualHidConfig::new(
-                cli.virtual_hid_helper
-                    .clone()
-                    .ok_or("--output virtual-hid requires --virtual-hid-helper PATH")?,
-            );
-            if let (Some(vendor_id), Some(product_id)) =
-                (cli.virtual_hid_vendor_id, cli.virtual_hid_product_id)
-            {
-                config = config.with_identity(vendor_id, product_id);
-            }
-            let output = VirtualHidOutput::open(config).map_err(|error| error.to_string())?;
-            let metadata = output.helper_metadata();
-            eprintln!(
-                "level=info event=virtual_hid_ready vendor_id={:04x} product_id={:04x} protocol={} dry_run={}",
-                metadata.vendor_id,
-                metadata.product_id,
-                metadata.protocol_version,
-                metadata.dry_run
-            );
-            Box::new(output)
-        }
+        OutputArg::VirtualHid => Box::new(virtual_hid_options(cli).open()?),
     })
 }
 

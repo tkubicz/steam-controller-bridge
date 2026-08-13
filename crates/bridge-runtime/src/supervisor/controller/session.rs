@@ -197,6 +197,14 @@ impl ActiveExit {
                 | Self::OutputChange(_, _)
         )
     }
+
+    /// Whether the output must accept a neutral state before the session is
+    /// released. False only where the exit itself means the output is already
+    /// unusable: demanding neutral there would replace the real diagnosis with
+    /// a neutralization failure that says nothing new.
+    pub(crate) const fn requires_neutral_before_release(&self) -> bool {
+        !matches!(self, Self::OutputLost(_) | Self::OutputBlocked(_))
+    }
 }
 
 /// Enforces the public command contract: no acknowledgement can become
@@ -452,8 +460,12 @@ pub(crate) fn is_output_error(message: &str) -> bool {
     message.contains("output failed") || message.contains("serial") || message.contains("transport")
 }
 
+/// Recovers the permanent/transient split from an error that
+/// [`process_report`] has already flattened to a string. Anchored to
+/// [`bridge_output::CONFIGURATION_FAILURE_PREFIX`] so it tracks the rendering
+/// of [`OutputError::Configuration`].
 pub(crate) fn is_permanent_output_error(message: &str) -> bool {
-    message.contains("output configuration failed")
+    message.contains(bridge_output::CONFIGURATION_FAILURE_PREFIX)
 }
 
 pub(crate) fn valid_battery_percent(percent: u8) -> Option<u8> {

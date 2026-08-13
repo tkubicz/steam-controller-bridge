@@ -85,6 +85,78 @@ impl VirtualHidConfig {
     }
 }
 
+/// The virtual-HID knobs the development command-line tools expose. The rules
+/// binding them together are identical in every tool, so they live next to the
+/// backend instead of being restated in each argument parser. Tools still
+/// declare their own flags; only the meaning is shared.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VirtualHidOptions {
+    pub helper_path: Option<PathBuf>,
+    pub vendor_id: Option<u16>,
+    pub product_id: Option<u16>,
+}
+
+impl VirtualHidOptions {
+    /// Checks the options against whether virtual HID is the selected backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message for a selected backend without a helper path, or for
+    /// any virtual-HID option supplied to a different backend.
+    pub fn validate(&self, selected: bool) -> Result<(), String> {
+        if selected {
+            return if self.helper_path.is_some() {
+                Ok(())
+            } else {
+                Err(MISSING_HELPER_PATH.to_owned())
+            };
+        }
+        if self.helper_path.is_some() {
+            return Err("--virtual-hid-helper is only valid with --output virtual-hid".to_owned());
+        }
+        if self.vendor_id.is_some() || self.product_id.is_some() {
+            return Err(
+                "virtual HID identity overrides are only valid with --output virtual-hid"
+                    .to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Builds the backend configuration, applying an identity override only
+    /// when both halves are present.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when no helper path was supplied.
+    pub fn config(&self) -> Result<VirtualHidConfig, String> {
+        let config = VirtualHidConfig::new(self.helper_path.clone().ok_or(MISSING_HELPER_PATH)?);
+        Ok(match (self.vendor_id, self.product_id) {
+            (Some(vendor_id), Some(product_id)) => config.with_identity(vendor_id, product_id),
+            _ => config,
+        })
+    }
+
+    /// Opens the configured helper and reports the negotiated identity, which
+    /// is the first thing to check when a virtual gamepad does not appear.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the configuration is incomplete or the helper
+    /// does not reach its ready handshake.
+    pub fn open(&self) -> Result<VirtualHidOutput, String> {
+        let output = VirtualHidOutput::open(self.config()?).map_err(|error| error.to_string())?;
+        let metadata = output.helper_metadata();
+        eprintln!(
+            "level=info event=virtual_hid_ready vendor_id={:04x} product_id={:04x} protocol={} dry_run={}",
+            metadata.vendor_id, metadata.product_id, metadata.protocol_version, metadata.dry_run
+        );
+        Ok(output)
+    }
+}
+
+const MISSING_HELPER_PATH: &str = "--output virtual-hid requires --virtual-hid-helper PATH";
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VirtualHidHelperMetadata {
     pub protocol_version: u16,
@@ -208,6 +280,55 @@ mod tests {
         assert_eq!(config.product_id, 0x028e);
         let custom = config.with_identity(0xcafe, 0x4001);
         assert_eq!((custom.vendor_id, custom.product_id), (0xcafe, 0x4001));
+    }
+
+    #[test]
+    fn options_pair_the_helper_path_with_the_selected_backend() {
+        let helper = VirtualHidOptions {
+            helper_path: Some(PathBuf::from("helper")),
+            ..VirtualHidOptions::default()
+        };
+        helper.validate(true).unwrap();
+        assert!(helper.validate(false).is_err());
+        assert!(VirtualHidOptions::default().validate(true).is_err());
+        VirtualHidOptions::default().validate(false).unwrap();
+
+        let identity_only = VirtualHidOptions {
+            vendor_id: Some(0xcafe),
+            product_id: Some(0x4001),
+            ..VirtualHidOptions::default()
+        };
+        assert!(identity_only.validate(false).is_err());
+        assert!(identity_only.config().is_err());
+    }
+
+    #[test]
+    fn an_identity_override_applies_only_when_both_halves_are_present() {
+        let base = VirtualHidOptions {
+            helper_path: Some(PathBuf::from("helper")),
+            ..VirtualHidOptions::default()
+        };
+        let config = base.config().unwrap();
+        assert_eq!(
+            (config.vendor_id, config.product_id),
+            (DEFAULT_VENDOR_ID, DEFAULT_PRODUCT_ID)
+        );
+        let half = VirtualHidOptions {
+            vendor_id: Some(0xcafe),
+            ..base.clone()
+        };
+        let config = half.config().unwrap();
+        assert_eq!(
+            (config.vendor_id, config.product_id),
+            (DEFAULT_VENDOR_ID, DEFAULT_PRODUCT_ID)
+        );
+        let both = VirtualHidOptions {
+            vendor_id: Some(0xcafe),
+            product_id: Some(0x4001),
+            ..base
+        };
+        let config = both.config().unwrap();
+        assert_eq!((config.vendor_id, config.product_id), (0xcafe, 0x4001));
     }
 
     #[test]
