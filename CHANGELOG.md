@@ -5,6 +5,13 @@ Published history may be corrected directly when this file and the matching
 GitHub Release are updated together. Versions follow [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.8.0...v1.9.0) (2026-08-13)
+
+
+### Features
+
+* add an experimental macOS virtual gamepad output ([ffc6fd1](https://github.com/tkubicz/steam-controller-bridge/commit/ffc6fd17701665dbb61193e9d00d92f0b3d64e37))
+
 ## [1.8.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.7.0...v1.8.0) (2026-08-12)
 
 
