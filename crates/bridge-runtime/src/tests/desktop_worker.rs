@@ -483,6 +483,56 @@ fn runtime_defaults_to_zero_configuration_serial_bridge() {
 }
 
 #[test]
+fn output_capabilities_do_not_infer_liveness_from_a_serial_device() {
+    assert_eq!(
+        OutputCapabilities::SERIAL,
+        OutputCapabilities {
+            live: true,
+            controller_shutdown: true,
+            firmware: true,
+        }
+    );
+    assert_eq!(
+        OutputCapabilities::VIRTUAL_HID,
+        OutputCapabilities {
+            live: true,
+            controller_shutdown: true,
+            firmware: false,
+        }
+    );
+    assert_eq!(OutputCapabilities::PASSIVE, OutputCapabilities::default());
+}
+
+struct ConfigurationFailureOutput;
+
+impl GamepadOutput for ConfigurationFailureOutput {
+    fn send_state(
+        &mut self,
+        _state: &gamepad_state::GamepadState,
+    ) -> Result<(), OutputError> {
+        Ok(())
+    }
+
+    fn service(&mut self) -> Result<(), OutputError> {
+        Err(OutputError::Configuration("permanent".to_owned()))
+    }
+}
+
+#[test]
+fn waiting_output_service_preserves_permanent_failure_classification() {
+    let mut output = OutputSession {
+        output: Box::new(ConfigurationFailureOutput),
+        serial_device: None,
+        capabilities: OutputCapabilities::VIRTUAL_HID,
+        first_observed_receipt: FirstObservedReceiptState::Idle,
+    };
+    assert!(matches!(
+        service_waiting_output(Some(&mut output)),
+        Err(OutputError::Configuration(_))
+    ));
+}
+
+#[test]
 fn runtime_timeout_updates_enforce_the_documented_minimum_and_maximum() {
     assert!(validate_idle_shutdown_timeout(None).is_ok());
     assert!(validate_idle_shutdown_timeout(Some(Duration::from_secs(59))).is_err());

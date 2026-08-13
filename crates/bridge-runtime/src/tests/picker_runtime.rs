@@ -523,7 +523,15 @@ fn pending_manual_firmware_gets_one_first_observed_receipt() {
             recorded: Arc::clone(&recorded),
             pending_response: None,
         }),
-        device: None,
+        serial_device: Some(SerialDeviceInfo {
+            path: "/dev/cu.test".to_owned(),
+            vendor_id: None,
+            product_id: None,
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+        }),
+        capabilities: OutputCapabilities::SERIAL,
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
 
@@ -603,7 +611,15 @@ fn a_lost_receipt_ack_retries_the_same_receipt_after_backoff() {
         output: Box::new(DroppedReceiptAckOutput {
             attempts: Arc::clone(&attempts),
         }),
-        device: None,
+        serial_device: Some(SerialDeviceInfo {
+            path: "/dev/cu.test".to_owned(),
+            vendor_id: None,
+            product_id: None,
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+        }),
+        capabilities: OutputCapabilities::SERIAL,
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
 
@@ -634,7 +650,8 @@ fn hardware_release_finishes_before_command_acknowledgement() {
     let order = Arc::new(Mutex::new(Vec::new()));
     let output = OutputSession {
         output: Box::new(DropOrderOutput(Arc::clone(&order))),
-        device: None,
+        serial_device: None,
+        capabilities: OutputCapabilities::PASSIVE,
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     let release_order = Arc::clone(&order);
@@ -664,7 +681,8 @@ fn a_slow_desktop_operation_is_preceded_by_neutral_on_the_wire() {
     let states = Arc::new(Mutex::new(Vec::new()));
     let mut session = OutputSession {
         output: Box::new(SharedOutput(Arc::clone(&states))),
-        device: None,
+        serial_device: None,
+        capabilities: OutputCapabilities::PASSIVE,
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
     let mut engine = BridgeEngine::new(BridgeConfig::default(), MapperConfig::default()).unwrap();

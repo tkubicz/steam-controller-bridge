@@ -1,5 +1,8 @@
 # Steam Controller Bridge - Technical Guide
 
+The opt-in Rust virtual-gamepad backend, restricted-entitlement limitation, and
+disposable VM procedure are documented in [Experimental virtual HID](VIRTUAL_HID.md).
+
 Use a Steam Controller 2 as a standard USB Xbox gamepad on macOS - without Steam
 running - in browsers, games, and cloud gaming services. A protocol-compatible
 bridge device does the gamepad translation; the project currently provides and

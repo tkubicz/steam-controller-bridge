@@ -5,6 +5,7 @@ use bridge_core::{BridgeConfig, BridgeMetrics};
 use bridge_output::{DumpFormat, FirmwareInfo, OutputDiagnostics, SerialConfig};
 use controller_mapper::MapperConfig;
 use desktop_bindings::BindingProfile;
+use macos_virtual_hid::{VirtualHidConfig, VirtualHidHelperMetadata};
 use profile_picker::{PickerConfig, PickerRoster};
 use steam_controller_device::{masked_serial, ControllerTransport, HidDeviceInfo};
 
@@ -63,6 +64,7 @@ impl ControllerChargeState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputSelection {
     Serial,
+    VirtualHid(VirtualHidConfig),
     Dump(DumpFormat),
     File(PathBuf),
     Mock,
@@ -72,6 +74,7 @@ pub enum OutputSelection {
 pub enum OutputBackend {
     #[default]
     SerialBridge,
+    VirtualHid,
     Dump,
     File,
     Mock,
@@ -81,6 +84,7 @@ impl From<&OutputSelection> for OutputBackend {
     fn from(selection: &OutputSelection) -> Self {
         match selection {
             OutputSelection::Serial => Self::SerialBridge,
+            OutputSelection::VirtualHid(_) => Self::VirtualHid,
             OutputSelection::Dump(_) => Self::Dump,
             OutputSelection::File(_) => Self::File,
             OutputSelection::Mock => Self::Mock,
@@ -165,6 +169,32 @@ pub struct OutputStatus {
     pub stable_id: Option<String>,
     pub ready: bool,
     pub firmware: Option<FirmwareInfo>,
+    pub virtual_hid: Option<VirtualHidStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VirtualHidStatus {
+    pub protocol_version: u16,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub bundle_identifier: Option<String>,
+    pub signing_identifier: Option<String>,
+    pub entitlement_present: Option<bool>,
+    pub dry_run: bool,
+}
+
+impl From<VirtualHidHelperMetadata> for VirtualHidStatus {
+    fn from(metadata: VirtualHidHelperMetadata) -> Self {
+        Self {
+            protocol_version: metadata.protocol_version,
+            vendor_id: metadata.vendor_id,
+            product_id: metadata.product_id,
+            bundle_identifier: metadata.bundle_identifier,
+            signing_identifier: metadata.signing_identifier,
+            entitlement_present: metadata.entitlement_present,
+            dry_run: metadata.dry_run,
+        }
+    }
 }
 
 impl OutputStatus {
@@ -173,6 +203,7 @@ impl OutputStatus {
         let endpoint = match selection {
             OutputSelection::Dump(_) => Some("stdout".to_owned()),
             OutputSelection::File(path) => Some(path.display().to_string()),
+            OutputSelection::VirtualHid(_) => Some("macOS virtual gamepad".to_owned()),
             OutputSelection::Serial | OutputSelection::Mock => None,
         };
         Self {
@@ -202,6 +233,7 @@ impl std::fmt::Debug for OutputStatus {
             .field("stable_id", &masked_serial(self.stable_id.as_deref()))
             .field("ready", &self.ready)
             .field("firmware", &self.firmware)
+            .field("virtual_hid", &self.virtual_hid)
             .finish()
     }
 }

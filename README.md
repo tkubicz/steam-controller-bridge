@@ -15,8 +15,8 @@
 
 Steam Controller Bridge turns a **Steam Controller 2** into a standard
 Xbox-layout USB gamepad for macOS. It works in browsers, native games, and cloud
-gaming services - with no Steam client, kernel extension, or restricted virtual
-HID entitlement in the path.
+gaming services without Steam or a kernel extension. The proven default uses a
+small USB bridge; an entitlement-gated virtual-gamepad backend is experimental.
 
 The controller connects through its official Puck or directly over Bluetooth.
 A small protocol-compatible bridge device handles the gamepad-facing USB
@@ -146,6 +146,7 @@ and [third-party notices](THIRD-PARTY-NOTICES.md) before distributing a build.
 | [Updates](docs/UPDATES.md)                         | Signed catalogs, application replacement, and firmware flashing   |
 | [Architecture](docs/ARCHITECTURE.md)               | Workspace boundaries and runtime design                           |
 | [Testing](docs/TESTING.md)                         | Automated, packaging, hardware, and manual acceptance gates       |
+| [Experimental virtual HID](docs/VIRTUAL_HID.md)    | Rust IOHIDUserDevice design, limitations, commands, and VM proof  |
 | [Firmware guide](firmware/xiao-nrf52840/README.md) | Native tests, automatic UF2 updates, receipts, recovery, and LED states |
 
 Protocol and diagnostic references live in [`docs/`](docs/), including the

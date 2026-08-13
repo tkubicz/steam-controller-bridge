@@ -8,9 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bridge_runtime::{
-    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, PendingUpdateResume,
-    PickerConfig, PickerEvent, PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord,
-    StatusLogTracker, UpdateResumePoll,
+    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, OutputBackend,
+    OutputChangePoll, OutputSelection, PendingOutputChange, PendingUpdateResume, PickerConfig,
+    PickerEvent, PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord, StatusLogTracker,
+    UpdateResumePoll, VirtualHidConfig,
 };
 use desktop_bindings::{
     default_store_path, input_monitoring_access, load_or_create_store, parse_store,
@@ -52,10 +53,12 @@ mod tray;
 
 use icons::{template_icon, NativeTrayIcons};
 use logging::{copy_diagnostics, StatusLogger};
+#[cfg(test)]
+use support::bundled_virtual_hid_helper_path_from;
 use support::{
     bindings_file_fingerprint, load_settings, permission_stage, picker_roster,
     resolve_picker_commit, save_settings, settings_path, AppSettings, BindingsFileFingerprint,
-    PermissionStage, PickerEventMailbox, OVERLAY_HOLD_CHOICES,
+    OutputPreference, PermissionStage, PickerEventMailbox, OVERLAY_HOLD_CHOICES,
 };
 pub(crate) use system::open_path;
 #[cfg(feature = "updater")]
@@ -110,6 +113,8 @@ const IDLE_10_ID: &str = "idle-10";
 const IDLE_15_ID: &str = "idle-15";
 const IDLE_30_ID: &str = "idle-30";
 const PUCK_DOCK_ID: &str = "puck-dock-power-off";
+const OUTPUT_XIAO_ID: &str = "output-xiao";
+const OUTPUT_VIRTUAL_HID_ID: &str = "output-virtual-hid";
 const OVERLAY_ENABLED_ID: &str = "profile-overlay-enabled";
 const OVERLAY_HOLD_PREFIX: &str = "profile-overlay-hold:";
 const PICKER_EVENT_MAILBOX_CAPACITY: usize = 32;
@@ -157,6 +162,8 @@ struct MenuItems {
     updates: MenuItem,
     idle_shutdown: Vec<(Option<u64>, CheckMenuItem)>,
     puck_dock: CheckMenuItem,
+    output_xiao: CheckMenuItem,
+    output_virtual_hid: CheckMenuItem,
     bindings_submenu: Submenu,
     binding_profiles: Vec<(String, CheckMenuItem)>,
     overlay_submenu: Submenu,
@@ -252,6 +259,9 @@ struct MenuApp {
     /// host also owns the updater's safety-ordered bridge lifecycle requests.
     app_center_host: AppCenterHost,
     app_center_recovery: AppCenterRecovery,
+    output_change: Option<PendingOutputChange>,
+    pending_output_preference: Option<OutputPreference>,
+    output_change_problem: Option<String>,
     #[cfg(feature = "updater")]
     update_checker: UpdateChecker,
     #[cfg(feature = "updater")]
@@ -299,6 +309,7 @@ impl MenuApp {
         save_settings(&settings_path, &settings)?;
         let bindings_file_fingerprint = bindings_file_fingerprint(&bindings_path)?;
         let config = RuntimeConfig {
+            output: settings.output.runtime_selection()?,
             idle_shutdown_timeout: settings
                 .idle_shutdown_minutes
                 .map(|minutes| Duration::from_secs(minutes * 60)),
@@ -357,6 +368,9 @@ impl MenuApp {
             editor_children: Vec::new(),
             app_center_host: AppCenterHost::new(),
             app_center_recovery: AppCenterRecovery::Idle,
+            output_change: None,
+            pending_output_preference: None,
+            output_change_problem: None,
             #[cfg(feature = "updater")]
             update_checker: UpdateChecker::new(),
             #[cfg(feature = "updater")]
@@ -398,6 +412,7 @@ impl ApplicationHandler for MenuApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.recover_app_center_suspension();
+        self.poll_output_change();
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             self.handle_menu_event(event.id.as_ref(), event_loop);
         }

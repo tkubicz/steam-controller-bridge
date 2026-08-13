@@ -137,6 +137,7 @@ fn menu_settings_round_trip_and_invalid_data_falls_back() {
         version: SETTINGS_VERSION,
         idle_shutdown_minutes: None,
         power_off_on_puck: true,
+        output: OutputPreference::VirtualHid,
         active_binding_profile: "gaming".to_owned(),
         profile_overlay_enabled: true,
         profile_overlay_hold_ms: 3_000,
@@ -164,6 +165,41 @@ fn menu_settings_round_trip_and_invalid_data_falls_back() {
     assert_eq!(fallback, AppSettings::default());
     assert!(warning.is_some());
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn version_three_settings_migrate_to_xiao_and_version_four_preserves_virtual_hid() {
+    let path = temporary_settings_path("output-migration");
+    fs::write(
+        &path,
+        br#"{"version":3,"idle_shutdown_minutes":15,"power_off_on_puck":false}"#,
+    )
+    .unwrap();
+    let (migrated, warning) = load_settings(&path);
+    assert!(warning.is_none());
+    assert_eq!(migrated.version, SETTINGS_VERSION);
+    assert_eq!(migrated.output, OutputPreference::XiaoUsbBridge);
+
+    let virtual_hid = AppSettings {
+        output: OutputPreference::VirtualHid,
+        ..AppSettings::default()
+    };
+    save_settings(&path, &virtual_hid).unwrap();
+    assert_eq!(load_settings(&path), (virtual_hid, None));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn bundled_helper_resolution_never_searches_path() {
+    let executable =
+        Path::new("/Applications/Steam Controller Bridge.app/Contents/MacOS/sc-bridge-menu");
+    assert_eq!(
+        bundled_virtual_hid_helper_path_from(executable).unwrap(),
+        PathBuf::from(
+            "/Applications/Steam Controller Bridge.app/Contents/Helpers/Steam Controller Bridge Virtual HID Helper.app/Contents/MacOS/sc-virtual-hid-helper"
+        )
+    );
+    assert!(bundled_virtual_hid_helper_path_from(Path::new("/tmp/sc-bridge-menu")).is_err());
 }
 
 #[test]
@@ -532,6 +568,7 @@ fn diagnostics_never_expose_a_whole_device_serial() {
                 version: bridge_runtime::FirmwareVersion::Reported(1),
                 ..bridge_runtime::FirmwareInfo::default()
             }),
+            virtual_hid: None,
         },
         ..BridgeStatus::default()
     });

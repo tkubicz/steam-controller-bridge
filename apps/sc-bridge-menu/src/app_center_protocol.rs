@@ -15,9 +15,9 @@ use bridge_runtime::FirmwareCapabilities;
 use crate::line_protocol::read_bounded_line;
 
 pub const MAX_IPC_LINE_BYTES: usize = 4 * 1024;
-// Version 3: firmware details carry the target identity used for fail-closed
-// update association, so a replaced-on-disk binary fails cleanly.
-const IPC_PROTOCOL_VERSION: u32 = 3;
+// Version 4: firmware details explicitly distinguish a selected non-firmware
+// output from a XIAO whose firmware report is not available yet.
+const IPC_PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize)]
 struct Envelope<T> {
@@ -118,17 +118,31 @@ pub enum FirmwareInstallStatus {
     Invalid,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirmwareDetails {
+    pub available: bool,
     pub target: FirmwareTargetStatus,
     pub version: FirmwareStatus,
     pub capabilities: u32,
     pub install: FirmwareInstallStatus,
 }
 
+impl Default for FirmwareDetails {
+    fn default() -> Self {
+        Self {
+            available: true,
+            target: FirmwareTargetStatus::default(),
+            version: FirmwareStatus::default(),
+            capabilities: 0,
+            install: FirmwareInstallStatus::default(),
+        }
+    }
+}
+
 impl From<FirmwareInfo> for FirmwareDetails {
     fn from(value: FirmwareInfo) -> Self {
         Self {
+            available: true,
             target: match value.target {
                 FirmwareTarget::Unreported => FirmwareTargetStatus::Unreported,
                 FirmwareTarget::Reported(identifier) => {
@@ -156,6 +170,18 @@ impl From<FirmwareInfo> for FirmwareDetails {
                 }
             },
         }
+    }
+}
+
+impl FirmwareDetails {
+    pub fn from_output(available: bool, firmware: Option<FirmwareInfo>) -> Self {
+        if !available {
+            return Self {
+                available: false,
+                ..Self::default()
+            };
+        }
+        firmware.map_or_else(Self::default, Self::from)
     }
 }
 
@@ -353,7 +379,9 @@ mod tests {
     fn every_firmware_detail_survives_a_launch_argument() {
         for details in [
             FirmwareDetails::default(),
+            FirmwareDetails::from_output(false, None),
             FirmwareDetails {
+                available: true,
                 target: FirmwareTargetStatus::Reported("seeed-xiao-nrf52840".to_owned()),
                 version: FirmwareStatus::Reported(7),
                 capabilities: (FirmwareCapabilities::ENTER_UF2_BOOTLOADER
@@ -362,6 +390,7 @@ mod tests {
                 install: FirmwareInstallStatus::Pending,
             },
             FirmwareDetails {
+                available: true,
                 target: FirmwareTargetStatus::Malformed,
                 version: FirmwareStatus::Reported(2),
                 capabilities: (FirmwareCapabilities::ENTER_UF2_BOOTLOADER
@@ -376,11 +405,13 @@ mod tests {
         ] {
             assert_eq!(details.to_string().parse(), Ok(details));
         }
+        assert!(!FirmwareDetails::from_output(false, None).available);
+        assert!(FirmwareDetails::from_output(true, None).available);
     }
 
     #[test]
     fn malformed_reported_target_is_normalized_during_ipc_decode() {
-        let encoded = r#"{"target":{"state":"reported","value":"NOT VALID"},"version":{"state":"reported","value":3},"capabilities":0,"install":{"state":"unsupported"}}"#;
+        let encoded = r#"{"available":true,"target":{"state":"reported","value":"NOT VALID"},"version":{"state":"reported","value":3},"capabilities":0,"install":{"state":"unsupported"}}"#;
         let details: FirmwareDetails = encoded.parse().unwrap();
         assert_eq!(details.target, FirmwareTargetStatus::Malformed);
         assert_eq!(details.target_id(), None);

@@ -18,7 +18,7 @@ pub use api::{
     ControllerSelection, ControllerSourceStatus, ControllerStatus, DesktopBindingsState,
     DesktopBindingsStatus, HapticsState, HapticsStatus, LizardMode, LizardStatus, OutputBackend,
     OutputSelection, OutputStatus, ProfilePickerStatus, PuckDockAction, RuntimeConfig,
-    RuntimeError, RuntimeState, SerialSelection, ShutdownTrigger,
+    RuntimeError, RuntimeState, SerialSelection, ShutdownTrigger, VirtualHidStatus,
 };
 pub(crate) use automatic_shutdown::{
     automatic_shutdown_phase, binding_status_for_profile, validate_idle_shutdown_timeout,
@@ -33,7 +33,8 @@ pub(crate) use desktop::{
 pub(crate) use picker::PickerRuntime;
 pub(crate) use runtime::{picker_status, CommandAck, RuntimeCommand};
 pub use runtime::{
-    BridgeHandle, BridgeRuntime, PendingUpdateResume, PickerEventSink, UpdateResumePoll,
+    BridgeHandle, BridgeRuntime, OutputChangePoll, PendingOutputChange, PendingUpdateResume,
+    PickerEventSink, UpdateResumePoll,
 };
 // Re-exported so frontends can render firmware status without depending on
 // bridge-output directly.
@@ -58,8 +59,8 @@ use std::time::{Duration, Instant};
 
 use bridge_core::{BridgeEngine, ProcessOutcome};
 use bridge_output::{
-    available_serial_devices, DumpOutput, FileOutput, GamepadOutput, MockOutput, OutputFeedback,
-    SerialDeviceInfo, SerialOutput,
+    available_serial_devices, DumpOutput, FileOutput, GamepadOutput, MockOutput, OutputError,
+    OutputFeedback, SerialDeviceInfo, SerialOutput,
 };
 #[cfg(test)]
 use desktop_bindings::PadSample;
@@ -70,6 +71,7 @@ use desktop_bindings::{
 use gamepad_state::OutputSuppression;
 #[cfg(target_os = "macos")]
 use macos_power_monitor::{PowerEvent, PowerMonitor};
+pub use macos_virtual_hid::VirtualHidConfig;
 use profile_picker::{Picker, PickerEvents, PickerInput};
 // Frontends drive the wheel and render it, so its vocabulary is part of the
 // runtime's public surface.
@@ -112,6 +114,8 @@ pub use status_log::{
 use idle_shutdown::IdleActivityTracker;
 
 const DISCOVERY_INTERVAL: Duration = Duration::from_millis(500);
+const OUTPUT_RETRY_INITIAL: Duration = Duration::from_secs(1);
+const OUTPUT_RETRY_MAX: Duration = Duration::from_secs(30);
 /// The longest a `WillSleep` callback waits for the hardware teardown before
 /// acknowledging the sleep anyway. Far above every bounded teardown step, and
 /// safely under macOS's ~30-second forced-sleep cap.

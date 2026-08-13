@@ -51,8 +51,10 @@ impl AppCenter {
         let catalog = self.catalog.take();
         if let Some(manifest) = catalog.as_ref() {
             self.application_card(ui, manifest);
-            ui.add_space(14.0);
-            self.firmware_card(ui, manifest);
+            if self.firmware.available {
+                ui.add_space(14.0);
+                self.firmware_card(ui, manifest);
+            }
         }
         self.catalog = catalog;
     }

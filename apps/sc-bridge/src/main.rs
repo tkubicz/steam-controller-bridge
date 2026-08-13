@@ -15,6 +15,7 @@ use bridge_runtime::{
 };
 use clap::Parser;
 use desktop_bindings::load_store;
+use macos_virtual_hid::{VirtualHidConfig, VirtualHidOutput};
 use recording::{ReplayOptions, ReplaySession, ReplayTiming};
 
 mod cli;
@@ -118,6 +119,7 @@ fn live_config(cli: &Cli) -> Result<RuntimeConfig, String> {
 fn live_output(cli: &Cli) -> Result<OutputSelection, String> {
     Ok(match cli.output() {
         OutputArg::Serial => OutputSelection::Serial,
+        OutputArg::VirtualHid => OutputSelection::VirtualHid(virtual_hid_config(cli)?),
         OutputArg::Dump => OutputSelection::Dump(DumpFormat::Compact),
         OutputArg::Pretty => OutputSelection::Dump(DumpFormat::Pretty),
         OutputArg::Json => OutputSelection::Dump(DumpFormat::Json),
@@ -129,6 +131,20 @@ fn live_output(cli: &Cli) -> Result<OutputSelection, String> {
                 .ok_or("file output requires --output-file PATH")?,
         ),
     })
+}
+
+fn virtual_hid_config(cli: &Cli) -> Result<VirtualHidConfig, String> {
+    let mut config = VirtualHidConfig::new(
+        cli.virtual_hid_helper
+            .clone()
+            .ok_or("virtual HID output requires --virtual-hid-helper PATH")?,
+    );
+    if let (Some(vendor_id), Some(product_id)) =
+        (cli.virtual_hid_vendor_id, cli.virtual_hid_product_id)
+    {
+        config = config.with_identity(vendor_id, product_id);
+    }
+    Ok(config)
 }
 
 fn run_replay(cli: &Cli) -> Result<(), String> {
@@ -214,6 +230,9 @@ fn make_replay_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
                 .map_err(|error| error.to_string())?,
             )
         }
+        OutputArg::VirtualHid => Box::new(
+            VirtualHidOutput::open(virtual_hid_config(cli)?).map_err(|error| error.to_string())?,
+        ),
     })
 }
 

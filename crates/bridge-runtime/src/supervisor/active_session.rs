@@ -73,12 +73,16 @@ impl Supervisor {
         self.refresh_output_firmware(&mut output);
         eprintln!(
             "level=info event=bridge_running input_transport={:?} input_interface={} \
-             input_product={:?} input_serial={} output_endpoint={:?} lizard_mode={:?}",
+             input_product={:?} input_serial={} output_endpoint={:?} output_live={} lizard_mode={:?}",
             worker.device_info().controller_transport(),
             worker.device_info().interface_number,
             worker.device_info().product,
             masked_serial(worker.device_info().serial_number.as_deref()),
-            output.device.as_ref().map(|info| info.path.as_str()),
+            output
+                .serial_device
+                .as_ref()
+                .map(|info| info.path.as_str()),
+            output.capabilities.live,
             self.config.lizard_mode
         );
         record_device_event(
@@ -246,9 +250,12 @@ impl Supervisor {
                     }
                     Ok(ReportEffect::None) => {}
                     Err(error) if is_output_error(&error) => {
-                        break 'active ActiveExit::OutputLost(format!(
-                            "bridge-device output failed; waiting for reconnect: {error}"
-                        ));
+                        let message = format!("gamepad output failed: {error}");
+                        break 'active if is_permanent_output_error(&error) {
+                            ActiveExit::OutputBlocked(message)
+                        } else {
+                            ActiveExit::OutputLost(message)
+                        };
                     }
                     Err(error) => {
                         eprintln!("level=warn event=report_processing_failed error={error:?}");
@@ -277,9 +284,12 @@ impl Supervisor {
                     .map_err(bridge_core::BridgeError::Output)
             };
             if let Err(error) = service_result {
-                break ActiveExit::OutputLost(format!(
-                    "bridge-device service failed; waiting for reconnect: {error}"
-                ));
+                let message = format!("gamepad output service failed: {error}");
+                break if is_permanent_output_error(&error.to_string()) {
+                    ActiveExit::OutputBlocked(message)
+                } else {
+                    ActiveExit::OutputLost(message)
+                };
             }
             iteration_timer.enter("output_feedback");
             while let Some(feedback) = output.output.take_feedback() {
@@ -309,7 +319,7 @@ impl Supervisor {
                 .or_else(|| dock_retry_due.then_some(ShutdownTrigger::PuckDock))
                 .or_else(|| idle_shutdown_due.then_some(ShutdownTrigger::IdleTimeout));
             if let Some(trigger) = automatic_trigger {
-                if output.device.is_none() {
+                if !output.capabilities.controller_shutdown {
                     eprintln!(
                         "level=warn event=automatic_shutdown_skipped trigger={trigger:?} reason=output_not_ready"
                     );
@@ -376,9 +386,11 @@ impl Supervisor {
                     Instant::now(),
                 );
                 let binding_status = self.desktop_bindings.status();
+                let mut output_diagnostics = output.output.diagnostics();
+                output_diagnostics.virtual_helper_restarts = self.virtual_helper_restarts;
                 self.update_status(|status| {
                     status.bridge_metrics = engine.metrics();
-                    status.output_diagnostics = output.output.diagnostics();
+                    status.output_diagnostics = output_diagnostics;
                     status.lizard = worker.lizard_diagnostics();
                     status.haptics = worker.haptics_diagnostics();
                     status.bindings = binding_status;
@@ -394,7 +406,9 @@ impl Supervisor {
                 // Internal serial reconnects restart firmware reporting at
                 // Pending without the supervisor noticing; this re-resolves
                 // the report on the same cadence.
-                self.refresh_output_firmware(&mut output);
+                if output.capabilities.firmware {
+                    self.refresh_output_firmware(&mut output);
+                }
                 last_status = Instant::now();
             }
         };
@@ -409,9 +423,11 @@ impl Supervisor {
             .automatic_shutdown
             .status(&self.config, None, Instant::now());
         let binding_status = self.desktop_bindings.status();
+        let mut output_diagnostics = output.output.diagnostics();
+        output_diagnostics.virtual_helper_restarts = self.virtual_helper_restarts;
         self.update_status(|status| {
             status.bridge_metrics = engine.metrics();
-            status.output_diagnostics = output.output.diagnostics();
+            status.output_diagnostics = output_diagnostics;
             status.lizard = worker.lizard_diagnostics();
             status.haptics = worker.haptics_diagnostics();
             status.bindings = binding_status;

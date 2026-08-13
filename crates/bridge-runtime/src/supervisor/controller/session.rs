@@ -76,7 +76,12 @@ pub(crate) enum Discovery<T> {
         detail: String,
         error: Option<String>,
     },
+    Retry {
+        detail: String,
+        error: String,
+    },
     Error(String),
+    Blocked(String),
 }
 
 pub(crate) struct ActiveControllerSource {
@@ -87,8 +92,34 @@ pub(crate) struct ActiveControllerSource {
 
 pub(crate) struct OutputSession {
     pub(crate) output: Box<dyn GamepadOutput>,
-    pub(crate) device: Option<SerialDeviceInfo>,
+    pub(crate) serial_device: Option<SerialDeviceInfo>,
+    pub(crate) capabilities: OutputCapabilities,
     pub(crate) first_observed_receipt: FirstObservedReceiptState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct OutputCapabilities {
+    pub(crate) live: bool,
+    pub(crate) controller_shutdown: bool,
+    pub(crate) firmware: bool,
+}
+
+impl OutputCapabilities {
+    pub(crate) const SERIAL: Self = Self {
+        live: true,
+        controller_shutdown: true,
+        firmware: true,
+    };
+    pub(crate) const VIRTUAL_HID: Self = Self {
+        live: true,
+        controller_shutdown: true,
+        firmware: false,
+    };
+    pub(crate) const PASSIVE: Self = Self {
+        live: false,
+        controller_shutdown: false,
+        firmware: false,
+    };
 }
 
 #[derive(Clone, Copy)]
@@ -131,22 +162,22 @@ pub(crate) fn neutralize_before_desktop_work(
     }
 }
 
-pub(crate) fn service_waiting_output(output: Option<&mut OutputSession>) -> bool {
-    output.is_some_and(|output| match output.output.service() {
-        Ok(()) => {
-            while output.output.take_feedback().is_some() {}
-            true
-        }
-        Err(error) => {
-            eprintln!("level=warn event=output_device_lost phase=waiting error={error:?} action=rediscover");
-            false
-        }
-    })
+pub(crate) fn service_waiting_output(
+    output: Option<&mut OutputSession>,
+) -> Result<(), OutputError> {
+    let Some(output) = output else {
+        return Ok(());
+    };
+    output.output.service()?;
+    while output.output.take_feedback().is_some() {}
+    Ok(())
 }
 
 pub(crate) enum ActiveExit {
     SourceLost,
     OutputLost(String),
+    OutputBlocked(String),
+    OutputChange(OutputSelection, CommandAck),
     AutomaticShutdown {
         info: HidDeviceInfo,
         trigger: ShutdownTrigger,
@@ -160,7 +191,10 @@ impl ActiveExit {
     pub(crate) const fn has_acknowledgement(&self) -> bool {
         matches!(
             self,
-            Self::StoppedWithAck(_) | Self::ShutdownWithAck(_) | Self::SuspendedWithAck(_)
+            Self::StoppedWithAck(_)
+                | Self::ShutdownWithAck(_)
+                | Self::SuspendedWithAck(_)
+                | Self::OutputChange(_, _)
         )
     }
 }
@@ -179,16 +213,57 @@ pub(crate) fn acknowledge_after_hardware_release(
     let _ = acknowledgement.send(result);
 }
 
+pub(crate) struct OpenedNonserialOutput {
+    pub(crate) output: Box<dyn GamepadOutput>,
+    pub(crate) capabilities: OutputCapabilities,
+    pub(crate) virtual_hid: Option<crate::VirtualHidStatus>,
+}
+
+pub(crate) enum OutputOpenError {
+    Transient(String),
+    Permanent(String),
+}
+
 pub(crate) fn make_nonserial_output(
     selection: &OutputSelection,
-) -> Result<Box<dyn GamepadOutput>, String> {
+) -> Result<OpenedNonserialOutput, OutputOpenError> {
     match selection {
-        OutputSelection::Serial => Err("serial output requires bridge-device discovery".to_owned()),
-        OutputSelection::Dump(format) => Ok(Box::new(DumpOutput::new(io::stdout(), *format))),
+        OutputSelection::Serial => Err(OutputOpenError::Permanent(
+            "serial output requires bridge-device discovery".to_owned(),
+        )),
+        OutputSelection::VirtualHid(config) => VirtualHidOutput::open(config.clone())
+            .map(|output| {
+                let virtual_hid = Some(output.helper_metadata().into());
+                OpenedNonserialOutput {
+                    output: Box::new(output),
+                    capabilities: OutputCapabilities::VIRTUAL_HID,
+                    virtual_hid,
+                }
+            })
+            .map_err(|error| {
+                if error.is_permanent_configuration_failure() {
+                    OutputOpenError::Permanent(error.to_string())
+                } else {
+                    OutputOpenError::Transient(error.to_string())
+                }
+            }),
+        OutputSelection::Dump(format) => Ok(OpenedNonserialOutput {
+            output: Box::new(DumpOutput::new(io::stdout(), *format)),
+            capabilities: OutputCapabilities::PASSIVE,
+            virtual_hid: None,
+        }),
         OutputSelection::File(path) => FileOutput::create(path)
-            .map(|output| Box::new(output) as Box<dyn GamepadOutput>)
-            .map_err(|error| error.to_string()),
-        OutputSelection::Mock => Ok(Box::new(MockOutput::default())),
+            .map(|output| OpenedNonserialOutput {
+                output: Box::new(output),
+                capabilities: OutputCapabilities::PASSIVE,
+                virtual_hid: None,
+            })
+            .map_err(|error| OutputOpenError::Permanent(error.to_string())),
+        OutputSelection::Mock => Ok(OpenedNonserialOutput {
+            output: Box::new(MockOutput::default()),
+            capabilities: OutputCapabilities::PASSIVE,
+            virtual_hid: None,
+        }),
     }
 }
 
@@ -375,6 +450,10 @@ pub(crate) fn process_report(
 
 pub(crate) fn is_output_error(message: &str) -> bool {
     message.contains("output failed") || message.contains("serial") || message.contains("transport")
+}
+
+pub(crate) fn is_permanent_output_error(message: &str) -> bool {
+    message.contains("output configuration failed")
 }
 
 pub(crate) fn valid_battery_percent(percent: u8) -> Option<u8> {

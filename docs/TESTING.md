@@ -1,5 +1,8 @@
 # Testing
 
+Virtual-gamepad automated proof and the separate entitlement-blocked VM/live
+gates are tracked in [the feasibility matrix](VIRTUAL_HID_FEASIBILITY.md).
+
 Automated gates prove portable logic, lifecycle ordering, packaging structure,
 and signed-update policy. They do not prove physical controls, permissions,
 USB re-enumeration, browser behavior, or visual acceptance.

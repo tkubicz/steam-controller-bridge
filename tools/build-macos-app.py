@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import plistlib
 import shutil
 import subprocess
@@ -15,6 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DIST_DIR = ROOT / "dist"
 APP_DIR = DIST_DIR / "Steam Controller Bridge.app"
+HELPER_NAME = "Steam Controller Bridge Virtual HID Helper.app"
+DEFAULT_HELPER_IDENTIFIER = "com.lynxware.steam-controller-bridge.virtual-hid-helper"
 
 
 def run(command: list[str], *, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
@@ -51,13 +54,15 @@ def remove_bundle(bundle: Path, expected_parent: Path) -> None:
         shutil.rmtree(bundle)
 
 
-def stamp_plist(path: Path, version: str) -> None:
+def stamp_plist(path: Path, version: str, identifier: str | None = None) -> None:
     with path.open("rb") as source:
         contents = plistlib.load(source)
     if not isinstance(contents, dict):
         raise ValueError(f"application plist is not a dictionary: {path}")
     contents["CFBundleShortVersionString"] = version
     contents["CFBundleVersion"] = version
+    if identifier is not None:
+        contents["CFBundleIdentifier"] = identifier
     with path.open("wb") as destination:
         plistlib.dump(contents, destination, sort_keys=False)
 
@@ -85,6 +90,57 @@ def assemble_bundle(version: str) -> None:
         ROOT / "packaging/macos/AppIcon.icns",
         resources_dir / "AppIcon.icns",
     )
+    helper = contents / "Helpers" / HELPER_NAME
+    helper_executable_dir = helper / "Contents" / "MacOS"
+    helper_executable_dir.mkdir(parents=True)
+    shutil.copy2(
+        ROOT / "target/release/sc-virtual-hid-helper",
+        helper_executable_dir / "sc-virtual-hid-helper",
+    )
+    helper_plist = helper / "Contents" / "Info.plist"
+    shutil.copy2(ROOT / "packaging/macos/VirtualHidHelper.Info.plist", helper_plist)
+    stamp_plist(
+        helper_plist,
+        version,
+        os.environ.get("SC_BRIDGE_VIRTUAL_HID_HELPER_IDENTIFIER", DEFAULT_HELPER_IDENTIFIER),
+    )
+    profile = os.environ.get("SC_BRIDGE_VIRTUAL_HID_PROVISIONING_PROFILE")
+    if profile:
+        shutil.copy2(profile, helper / "Contents" / "embedded.provisionprofile")
+
+
+def signing_commands(identity: str, app: Path) -> tuple[list[str], list[str], list[str]]:
+    helper = app / "Contents" / "Helpers" / HELPER_NAME
+    helper_sign = [
+        "/usr/bin/codesign",
+        "--force",
+        "--sign",
+        identity,
+        "--entitlements",
+        str(ROOT / "packaging/macos/VirtualHidHelper.entitlements"),
+        str(helper),
+    ]
+    outer_sign = ["/usr/bin/codesign", "--force", "--sign", identity, str(app)]
+    verify = ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)]
+    return helper_sign, outer_sign, verify
+
+
+def inspect_signed_entitlements(app: Path) -> None:
+    helper = app / "Contents" / "Helpers" / HELPER_NAME
+    helper_result = run(
+        ["/usr/bin/codesign", "-d", "--entitlements", ":-", str(helper)],
+        capture_output=True,
+    )
+    helper_entitlements = helper_result.stdout + helper_result.stderr
+    if "com.apple.developer.hid.virtual.device" not in helper_entitlements:
+        raise ValueError("signed helper is missing the virtual HID entitlement")
+    outer_result = run(
+        ["/usr/bin/codesign", "-d", "--entitlements", ":-", str(app / "Contents/MacOS/sc-bridge-menu")],
+        capture_output=True,
+    )
+    outer_entitlements = outer_result.stdout + outer_result.stderr
+    if "com.apple.developer.hid.virtual.device" in outer_entitlements:
+        raise ValueError("outer menu executable must not receive the virtual HID entitlement")
 
 
 def self_test() -> None:
@@ -124,6 +180,21 @@ def self_test() -> None:
         assert stamped["CFBundleVersion"] == "1.6.0"
         assert stamped["CFBundleShortVersionString"] == "1.6.0"
 
+        helper_plist = root / "Helper.plist"
+        shutil.copy2(ROOT / "packaging/macos/VirtualHidHelper.Info.plist", helper_plist)
+        stamp_plist(helper_plist, "1.6.0", "test.helper")
+        with helper_plist.open("rb") as source:
+            helper_stamped = plistlib.load(source)
+        assert helper_stamped["CFBundleIdentifier"] == "test.helper"
+        assert helper_stamped["LSMinimumSystemVersion"] == "13.0"
+
+        helper_sign, outer_sign, verify = signing_commands("-", bundle)
+        assert "--entitlements" in helper_sign
+        assert "--deep" not in helper_sign
+        assert "--deep" not in outer_sign
+        assert "--deep" in verify and "--strict" in verify
+        assert helper_sign[-1].endswith(HELPER_NAME)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -134,10 +205,23 @@ def main() -> int:
         return 0
 
     version = workspace_version()
-    run(["cargo", "build", "--release", "-p", "sc-bridge-menu"])
+    run([
+        "cargo",
+        "build",
+        "--release",
+        "-p",
+        "sc-bridge-menu",
+        "-p",
+        "macos-virtual-hid",
+        "--bins",
+    ])
     assemble_bundle(version)
-    run(["/usr/bin/codesign", "--force", "--deep", "--sign", "-", str(APP_DIR)])
-    run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(APP_DIR)])
+    identity = os.environ.get("SC_BRIDGE_CODESIGN_IDENTITY", "-")
+    helper_sign, outer_sign, verify = signing_commands(identity, APP_DIR)
+    run(helper_sign)
+    run(outer_sign)
+    run(verify)
+    inspect_signed_entitlements(APP_DIR)
     print(APP_DIR)
     return 0
 

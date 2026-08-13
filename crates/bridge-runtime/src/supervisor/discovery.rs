@@ -7,19 +7,28 @@ use super::*;
 impl Supervisor {
     pub(super) fn discover_output(&mut self) -> Discovery<OutputSession> {
         if self.config.output != OutputSelection::Serial {
-            return make_nonserial_output(&self.config.output).map_or_else(
-                Discovery::Error,
-                |output| {
+            return match make_nonserial_output(&self.config.output) {
+                Ok(opened) => {
                     self.update_status(|status| {
-                        status.output = OutputStatus::ready_nonserial(&self.config.output);
+                        status.output = OutputStatus {
+                            ready: true,
+                            virtual_hid: opened.virtual_hid.clone(),
+                            ..OutputStatus::configured(&self.config.output)
+                        };
                     });
                     Discovery::Ready(OutputSession {
-                        output,
-                        device: None,
+                        output: opened.output,
+                        serial_device: None,
+                        capabilities: opened.capabilities,
                         first_observed_receipt: FirstObservedReceiptState::Idle,
                     })
+                }
+                Err(OutputOpenError::Transient(message)) => Discovery::Retry {
+                    detail: "Waiting to restart the virtual HID helper".to_owned(),
+                    error: message,
                 },
-            );
+                Err(OutputOpenError::Permanent(message)) => Discovery::Blocked(message),
+            };
         }
 
         let devices = match available_serial_devices() {
@@ -86,6 +95,7 @@ impl Supervisor {
                 stable_id: info.serial_number.clone(),
                 ready: true,
                 firmware: Some(firmware),
+                virtual_hid: None,
             };
         });
         eprintln!(
@@ -95,7 +105,8 @@ impl Supervisor {
         );
         Discovery::Ready(OutputSession {
             output: Box::new(output),
-            device: Some(info),
+            serial_device: Some(info),
+            capabilities: OutputCapabilities::SERIAL,
             first_observed_receipt: FirstObservedReceiptState::Idle,
         })
     }

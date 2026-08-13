@@ -138,6 +138,29 @@ impl MenuApp {
             ],
         )
         .map_err(|error| error.to_string())?;
+        let output_xiao = CheckMenuItem::with_id(
+            OUTPUT_XIAO_ID,
+            "XIAO USB Bridge",
+            true,
+            self.settings.output == OutputPreference::XiaoUsbBridge,
+            None,
+        );
+        let output_virtual_hid = CheckMenuItem::with_id(
+            OUTPUT_VIRTUAL_HID_ID,
+            "Virtual Gamepad — Experimental",
+            true,
+            self.settings.output == OutputPreference::VirtualHid,
+            None,
+        );
+        let output_submenu = Submenu::with_items(
+            "Output",
+            true,
+            &[
+                &output_xiao as &dyn tray_icon::menu::IsMenuItem,
+                &output_virtual_hid,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
         let overlay_enabled = CheckMenuItem::with_id(
             OVERLAY_ENABLED_ID,
             "Hold Quick Access for Profile Wheel",
@@ -241,6 +264,7 @@ impl MenuApp {
             &separators[2],
             &automatic_shutdown,
             &shutdown_submenu,
+            &output_submenu,
             &separators[3],
             &current_profile,
             &bindings_submenu,
@@ -281,6 +305,8 @@ impl MenuApp {
             updates,
             idle_shutdown,
             puck_dock,
+            output_xiao,
+            output_virtual_hid,
             bindings_submenu,
             binding_profiles,
             overlay_submenu,
@@ -293,13 +319,21 @@ impl MenuApp {
         Ok(())
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one pass keeps all menu items synchronized to the same runtime snapshot"
+    )]
     pub(super) fn refresh_status(&mut self) {
         let status = self.runtime.status();
-        let recovery_problem = self.app_center_recovery.problem().map(str::to_owned);
-        if let Err(error) = self
-            .app_center_host
-            .update_firmware(status.output.firmware.unwrap_or_default())
-        {
+        let recovery_problem = self
+            .app_center_recovery
+            .problem()
+            .map(str::to_owned)
+            .or_else(|| self.output_change_problem.clone());
+        if let Err(error) = self.app_center_host.update_firmware(
+            status.output.backend == OutputBackend::SerialBridge,
+            status.output.firmware,
+        ) {
             eprintln!("cannot update app window firmware status: {error}");
         }
         #[cfg(feature = "updater")]
@@ -394,8 +428,12 @@ impl MenuApp {
     }
 
     pub(super) fn show_app_center(&mut self, page: AppCenterPage) {
-        let firmware = self.runtime.status().output.firmware.unwrap_or_default();
-        match self.app_center_host.launch(page, firmware) {
+        let output = self.runtime.status().output;
+        match self.app_center_host.launch(
+            page,
+            output.backend == OutputBackend::SerialBridge,
+            output.firmware,
+        ) {
             Ok(reused) => {
                 if reused
                     && self
@@ -465,9 +503,14 @@ impl MenuApp {
                 }
                 self.update_setting_checkmarks();
             }
+            OUTPUT_XIAO_ID => self.begin_output_change(OutputPreference::XiaoUsbBridge),
+            OUTPUT_VIRTUAL_HID_ID => self.begin_output_change(OutputPreference::VirtualHid),
             COPY_ERROR_ID => {
                 let recovery_error = self.app_center_recovery.problem().map(str::to_owned);
-                if let Some(error) = recovery_error.or_else(|| self.runtime.status().last_error) {
+                if let Some(error) = recovery_error
+                    .or_else(|| self.output_change_problem.clone())
+                    .or_else(|| self.runtime.status().last_error)
+                {
                     if let Err(copy_error) = copy_text(&error) {
                         eprintln!("cannot copy full error: {copy_error}");
                     }
@@ -551,6 +594,79 @@ impl MenuApp {
             eprintln!("bridge shutdown failed: {error}");
         }
         true
+    }
+
+    fn begin_output_change(&mut self, preference: OutputPreference) {
+        if preference == self.settings.output || self.output_change.is_some() {
+            self.update_setting_checkmarks();
+            return;
+        }
+        let selection = match preference.runtime_selection() {
+            Ok(selection) => selection,
+            Err(error) => {
+                self.output_change_problem = Some(error);
+                self.update_setting_checkmarks();
+                return;
+            }
+        };
+        match self.runtime.begin_set_output(selection) {
+            Ok(request) => {
+                self.output_change = Some(request);
+                self.pending_output_preference = Some(preference);
+                self.output_change_problem = None;
+                self.set_output_items_enabled(false);
+            }
+            Err(error) => {
+                self.output_change_problem = Some(format!("Output change failed: {error}"));
+                self.update_setting_checkmarks();
+            }
+        }
+    }
+
+    pub(super) fn poll_output_change(&mut self) {
+        let Some(request) = self.output_change.as_mut() else {
+            return;
+        };
+        match request.poll() {
+            OutputChangePoll::Pending => {}
+            OutputChangePoll::TimedOut => {
+                self.output_change_problem = Some(
+                    "Output change is taking longer than expected; cleanup is still pending."
+                        .to_owned(),
+                );
+            }
+            OutputChangePoll::Complete(result) => {
+                self.output_change = None;
+                let preference = self.pending_output_preference.take();
+                match (result, preference) {
+                    (Ok(()), Some(preference)) => {
+                        self.settings.output = preference;
+                        self.output_change_problem = None;
+                        if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+                            self.output_change_problem = Some(format!(
+                                "Output changed but settings could not be saved: {error}"
+                            ));
+                        }
+                    }
+                    (Err(error), _) => {
+                        self.output_change_problem = Some(format!("Output change failed: {error}"));
+                    }
+                    (Ok(()), None) => {
+                        self.output_change_problem =
+                            Some("Output changed without a pending menu selection".to_owned());
+                    }
+                }
+                self.set_output_items_enabled(true);
+                self.update_setting_checkmarks();
+            }
+        }
+    }
+
+    fn set_output_items_enabled(&self, enabled: bool) {
+        if let Some(items) = &self.items {
+            items.output_xiao.set_enabled(enabled);
+            items.output_virtual_hid.set_enabled(enabled);
+        }
     }
 
     pub(super) fn handle_update_requests(&mut self, event_loop: &ActiveEventLoop) {

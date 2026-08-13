@@ -81,12 +81,17 @@ impl AppCenterHost {
         }
     }
 
-    pub fn launch(&mut self, page: AppCenterPage, firmware: FirmwareInfo) -> Result<bool, String> {
+    pub fn launch(
+        &mut self,
+        page: AppCenterPage,
+        firmware_available: bool,
+        firmware: Option<FirmwareInfo>,
+    ) -> Result<bool, String> {
         self.reap();
         if self.suspension_owner.is_some() && self.child.is_none() {
             return Err("recovering the bridge after the previous app window exited".to_owned());
         }
-        let firmware = FirmwareDetails::from(firmware);
+        let firmware = FirmwareDetails::from_output(firmware_available, firmware);
         if self.child.is_some() {
             match self.send_command(&AppCenterCommand::Navigate {
                 page,
@@ -221,11 +226,15 @@ impl AppCenterHost {
         self.send_command(&AppCenterCommand::UpdateResponse(response.clone()))
     }
 
-    pub fn update_firmware(&mut self, firmware: FirmwareInfo) -> Result<(), String> {
+    pub fn update_firmware(
+        &mut self,
+        firmware_available: bool,
+        firmware: Option<FirmwareInfo>,
+    ) -> Result<(), String> {
         if self.child.is_none() {
             return Ok(());
         }
-        let firmware = FirmwareDetails::from(firmware);
+        let firmware = FirmwareDetails::from_output(firmware_available, firmware);
         if self.last_firmware.as_ref() == Some(&firmware) {
             return Ok(());
         }

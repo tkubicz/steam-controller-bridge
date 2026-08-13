@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use bridge_runtime::MAX_IDLE_SHUTDOWN_TIMEOUT;
 use clap::{Parser, ValueEnum};
+use macos_virtual_hid::parse_usb_id;
 
 /// Bridges a Steam Controller 2 to a protocol-compatible output device, or replays a recording.
 ///
@@ -68,6 +69,28 @@ pub(crate) struct Cli {
     /// Binary frame output path, required by `--output file`.
     #[arg(long, value_name = "PATH")]
     pub(crate) output_file: Option<PathBuf>,
+
+    /// Rust `IOHIDUserDevice` helper executable; required by `--output virtual-hid`.
+    #[arg(long, value_name = "PATH")]
+    pub(crate) virtual_hid_helper: Option<PathBuf>,
+
+    /// Override the virtual controller vendor ID (decimal or 0x-prefixed hex).
+    #[arg(
+        long,
+        value_name = "VID",
+        value_parser = parse_usb_id,
+        requires = "virtual_hid_product_id"
+    )]
+    pub(crate) virtual_hid_vendor_id: Option<u16>,
+
+    /// Override the virtual controller product ID (decimal or 0x-prefixed hex).
+    #[arg(
+        long,
+        value_name = "PID",
+        value_parser = parse_usb_id,
+        requires = "virtual_hid_vendor_id"
+    )]
+    pub(crate) virtual_hid_product_id: Option<u16>,
 
     /// Serial baud rate.
     #[arg(long, value_name = "N", default_value_t = 115_200)]
@@ -134,6 +157,7 @@ pub(crate) enum PuckDockArg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum OutputArg {
     Serial,
+    VirtualHid,
     /// `compact` has always been accepted as a synonym and stays accepted, but
     /// it is hidden so the help text keeps offering one name per behaviour.
     #[value(alias = "compact")]
@@ -190,11 +214,11 @@ impl Cli {
     }
 
     fn validate_live(&self) -> Result<(), String> {
-        if self.output() != OutputArg::Serial
+        if !matches!(self.output(), OutputArg::Serial | OutputArg::VirtualHid)
             && (self.idle_shutdown.is_some() || self.puck_dock_action.is_some())
         {
             return Err(
-                "automatic controller shutdown requires live serial output to a ready bridge device"
+                "automatic controller shutdown requires live serial or virtual HID output"
                     .to_owned(),
             );
         }
@@ -227,7 +251,22 @@ impl Cli {
         if self.output() == OutputArg::File && self.output_file.is_none() {
             return Err("file output requires --output-file PATH".to_owned());
         }
-        Ok(())
+        match self.output() {
+            OutputArg::VirtualHid if self.virtual_hid_helper.is_none() => {
+                Err("virtual HID output requires --virtual-hid-helper PATH".to_owned())
+            }
+            OutputArg::VirtualHid => Ok(()),
+            _ if self.virtual_hid_helper.is_some() => {
+                Err("--virtual-hid-helper is only valid with --output virtual-hid".to_owned())
+            }
+            _ if self.virtual_hid_vendor_id.is_some() || self.virtual_hid_product_id.is_some() => {
+                Err(
+                    "virtual HID identity overrides are only valid with --output virtual-hid"
+                        .to_owned(),
+                )
+            }
+            _ => Ok(()),
+        }
     }
 
     /// The backend, defaulting by mode: serial for live, dump for replay.
@@ -298,6 +337,7 @@ mod tests {
     fn every_output_backend_still_parses() {
         for (value, expected) in [
             ("serial", OutputArg::Serial),
+            ("virtual-hid", OutputArg::VirtualHid),
             ("dump", OutputArg::Dump),
             ("pretty", OutputArg::Pretty),
             ("json", OutputArg::Json),
@@ -307,6 +347,34 @@ mod tests {
         ] {
             assert_eq!(parse(&["--output", value]).output(), expected, "{value}");
         }
+    }
+
+    #[test]
+    fn identity_override_is_paired_and_requires_virtual_hid_output() {
+        let message = reject(&[
+            "--virtual-hid-vendor-id",
+            "0xcafe",
+            "--virtual-hid-product-id",
+            "0x4001",
+        ]);
+        assert!(message.contains("only valid with --output virtual-hid"));
+
+        let message = reject(&["--virtual-hid-vendor-id", "0xcafe"]);
+        assert!(message.contains("virtual-hid-product-id"));
+
+        let cli = parse(&[
+            "--output",
+            "virtual-hid",
+            "--virtual-hid-helper",
+            "/tmp/helper",
+            "--virtual-hid-vendor-id",
+            "0xcafe",
+            "--virtual-hid-product-id",
+            "16385",
+        ]);
+        assert_eq!(cli.virtual_hid_vendor_id, Some(0xcafe));
+        assert_eq!(cli.virtual_hid_product_id, Some(0x4001));
+        cli.validate().unwrap();
     }
 
     #[test]
@@ -325,15 +393,31 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_options_still_require_serial_output() {
+    fn shutdown_options_require_a_live_output() {
         let message = reject(&["--output", "dump", "--idle-shutdown", "5"]);
-        assert!(message.contains("requires live serial output"), "{message}");
+        assert!(
+            message.contains("requires live serial or virtual HID output"),
+            "{message}"
+        );
         let message = reject(&["--output", "mock", "--puck-dock-action", "power-off"]);
-        assert!(message.contains("requires live serial output"), "{message}");
-        // And they are fine with the default serial output.
+        assert!(
+            message.contains("requires live serial or virtual HID output"),
+            "{message}"
+        );
+        // Both live backends support controller shutdown.
         parse(&["--idle-shutdown", "5"])
             .validate()
             .expect("serial is the live default");
+        parse(&[
+            "--output",
+            "virtual-hid",
+            "--virtual-hid-helper",
+            "/tmp/sc-virtual-hid-helper",
+            "--idle-shutdown",
+            "5",
+        ])
+        .validate()
+        .expect("virtual HID is also a live output");
     }
 
     #[test]

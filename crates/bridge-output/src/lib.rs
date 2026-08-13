@@ -23,6 +23,7 @@ pub enum OutputError {
     InvalidState(gamepad_state::InvalidState),
     Protocol(bridge_protocol::ProtocolError),
     Transport(String),
+    Configuration(String),
 }
 
 impl std::fmt::Display for OutputError {
@@ -32,6 +33,7 @@ impl std::fmt::Display for OutputError {
             Self::InvalidState(error) => write!(f, "invalid gamepad state: {error}"),
             Self::Protocol(error) => write!(f, "protocol encoding failed: {error}"),
             Self::Transport(error) => write!(f, "output transport failed: {error}"),
+            Self::Configuration(error) => write!(f, "output configuration failed: {error}"),
         }
     }
 }
@@ -145,6 +147,13 @@ pub struct OutputDiagnostics {
     pub state_refreshes: u64,
     pub rumble_commands_received: u64,
     pub rumble_commands_coalesced: u64,
+    pub virtual_reports_dispatched: u64,
+    pub virtual_reports_coalesced: u64,
+    pub virtual_helper_restarts: u64,
+    pub virtual_protocol_failures: u64,
+    pub virtual_set_reports_received: u64,
+    pub virtual_get_reports_received: u64,
+    pub virtual_fatal_errors: u64,
 }
 
 #[derive(Debug, Default)]
