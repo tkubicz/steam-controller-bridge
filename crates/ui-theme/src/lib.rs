@@ -69,12 +69,18 @@ pub const DANGER: egui::Color32 = egui::Color32::from_rgb(255, 115, 115);
 
 /// Apply the shared fonts, text rasterization, and palette to an egui context.
 ///
-/// Call once per surface during setup. On macOS, SF Pro and SF Mono take
+/// Call once per surface during setup. The current application palette is
+/// dark-only, so setup also pins egui and the native window to dark mode rather
+/// than following the system appearance. On macOS, SF Pro and SF Mono take
 /// precedence while egui's bundled fonts remain as missing-glyph fallbacks.
 /// Other platforms keep the bundled families. Anything drawn with an explicit
 /// colour still needs the constants above; the palette only covers what egui
 /// paints itself.
 pub fn configure_ui(ctx: &egui::Context) {
+    // The application currently has one authored palette. Pin the egui and
+    // native window themes so a macOS appearance change cannot select the
+    // unconfigured light style halfway through the process lifetime.
+    ctx.set_theme(egui::Theme::Dark);
     ctx.set_fonts(configured_font_definitions());
 
     let mut visuals = egui::Visuals::dark();
@@ -152,13 +158,13 @@ mod tests {
     use eframe::egui;
 
     #[test]
-    fn configure_ui_applies_the_palette_and_text_rasterization() {
+    fn configure_ui_pins_and_applies_the_dark_palette() {
         let ctx = egui::Context::default();
+        ctx.set_theme(egui::Theme::Light);
         configure_ui(&ctx);
 
-        // `set_visuals` writes into the style for the *active* theme, so the
-        // read-back has to select the same one rather than assume dark.
-        let visuals = ctx.style_of(ctx.theme()).visuals.clone();
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        let visuals = ctx.style_of(egui::Theme::Dark).visuals.clone();
         assert!(visuals.dark_mode);
         assert_eq!(visuals.panel_fill, PANEL);
         assert_eq!(visuals.window_fill, SURFACE);
