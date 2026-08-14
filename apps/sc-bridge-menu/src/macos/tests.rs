@@ -20,10 +20,10 @@ fn app_center_menu_actions_follow_build_capability() {
 
 #[test]
 fn firmware_update_menu_labels_preserve_the_visible_ampersand() {
-    let item = MenuItem::new(MANAGE_UPDATES_LABEL, true, None);
-    assert_eq!(item.text(), "Manage Firmware & Updates");
+    let item = MenuItem::new(FIRMWARE_UPDATES_LABEL, true, None);
+    assert_eq!(item.text(), "Firmware & Updates");
     item.set_text(UPDATE_AVAILABLE_LABEL);
-    assert_eq!(item.text(), "Manage Firmware & Updates — Update Available");
+    assert_eq!(item.text(), "Update Available");
 }
 
 #[test]

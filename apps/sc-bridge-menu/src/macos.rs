@@ -89,9 +89,9 @@ const ABOUT_ID: &str = "about";
 const UPDATES_ID: &str = "updates";
 // `muda` treats a single ampersand as a mnemonic marker on every platform.
 // Doubling it preserves one visible ampersand in the native macOS menu.
-const MANAGE_UPDATES_LABEL: &str = "Manage Firmware && Updates";
+const FIRMWARE_UPDATES_LABEL: &str = "Firmware && Updates";
 #[cfg(any(feature = "updater", test))]
-const UPDATE_AVAILABLE_LABEL: &str = "Manage Firmware && Updates — Update Available";
+const UPDATE_AVAILABLE_LABEL: &str = "Update Available";
 
 const fn app_center_available() -> bool {
     cfg!(feature = "updater")

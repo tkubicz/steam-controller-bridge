@@ -55,7 +55,7 @@ impl MenuApp {
         let logs = MenuItem::with_id(LOGS_ID, "Open Log Folder", true, None);
         let updates = MenuItem::with_id(
             UPDATES_ID,
-            MANAGE_UPDATES_LABEL,
+            FIRMWARE_UPDATES_LABEL,
             app_center_available(),
             None,
         );
@@ -349,7 +349,7 @@ impl MenuApp {
                     items.updates.set_text(if available {
                         UPDATE_AVAILABLE_LABEL
                     } else {
-                        MANAGE_UPDATES_LABEL
+                        FIRMWARE_UPDATES_LABEL
                     });
                 }
             }
