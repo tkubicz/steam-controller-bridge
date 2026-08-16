@@ -152,12 +152,12 @@ impl PadMotionMode {
     }
 }
 
-/// One addressable area of a pad, as an annular sector.
+/// One addressable area of a pad, as a bearing sector crossed with an extent band.
 ///
 /// Angles follow the same convention as the profile wheel's
 /// `profile_picker::sector_for`: zero degrees points at twelve o'clock and they
-/// increase clockwise, with pad Y positive upwards. Radii are a percentage of
-/// the pad's full-scale radius.
+/// increase clockwise, with pad Y positive upwards. Extents are a percentage
+/// of the distance from the centre to the square pad edge along either axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PadRegionShape {
@@ -217,7 +217,6 @@ impl PadTrigger {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PadRegion {
-    pub id: String,
     pub name: String,
     pub shape: PadRegionShape,
     #[serde(default)]
@@ -228,9 +227,8 @@ pub struct PadRegion {
 
 impl PadRegion {
     #[must_use]
-    pub fn new(id: impl Into<String>, name: impl Into<String>, shape: PadRegionShape) -> Self {
+    pub fn new(name: impl Into<String>, shape: PadRegionShape) -> Self {
         Self {
-            id: id.into(),
             name: name.into(),
             shape,
             click: None,
@@ -262,7 +260,7 @@ impl PadRegion {
     /// binding migrates into.
     #[must_use]
     pub fn whole() -> Vec<Self> {
-        vec![Self::new("region-1", "Whole Pad", PadRegionShape::WHOLE)]
+        vec![Self::new("Whole Pad", PadRegionShape::WHOLE)]
     }
 
     #[must_use]
@@ -285,31 +283,8 @@ impl PadRegion {
         Self::compass(8, DEFAULT_CENTER_PERCENT)
     }
 
-    pub const PRESETS: [PadRegionPreset; 5] = [
-        PadRegionPreset {
-            label: "Whole pad",
-            build: Self::whole,
-        },
-        PadRegionPreset {
-            label: "Four way",
-            build: Self::four_way,
-        },
-        PadRegionPreset {
-            label: "Four way + center",
-            build: Self::four_way_with_center,
-        },
-        PadRegionPreset {
-            label: "Eight way",
-            build: Self::eight_way,
-        },
-        PadRegionPreset {
-            label: "Eight way + center",
-            build: Self::eight_way_with_center,
-        },
-    ];
-
     /// Equal sectors centred on their compass direction, optionally around a
-    /// centre disc. The centre is listed first so first-match-wins resolution
+    /// centre area. The centre is listed first so first-match-wins resolution
     /// lets it shadow the sectors it sits inside.
     #[must_use]
     fn compass(sectors: u16, center_percent: u8) -> Vec<Self> {
@@ -331,7 +306,6 @@ impl PadRegion {
         let mut regions = Vec::with_capacity(names.len() + usize::from(center_percent > 0));
         if center_percent > 0 {
             regions.push(Self::new(
-                "region-1",
                 "Center",
                 PadRegionShape {
                     inner_percent: 0,
@@ -343,7 +317,6 @@ impl PadRegion {
         for (index, name) in names.iter().enumerate() {
             let index = u16::try_from(index).unwrap_or(0);
             regions.push(Self::new(
-                format!("region-{}", regions.len() + 1),
                 *name,
                 PadRegionShape {
                     // Sectors are centred on their direction, so the first one
@@ -360,13 +333,6 @@ impl PadRegion {
 }
 
 pub const DEFAULT_CENTER_PERCENT: u8 = 30;
-
-/// A named starting layout the editor can drop onto a pad.
-#[derive(Debug, Clone, Copy)]
-pub struct PadRegionPreset {
-    pub label: &'static str,
-    pub build: fn() -> Vec<PadRegion>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -392,13 +358,23 @@ impl Default for PadConfig {
 
 impl PadConfig {
     #[must_use]
+    pub fn bound_region_count(&self) -> usize {
+        self.regions
+            .iter()
+            .filter(|region| region.is_bound())
+            .count()
+    }
+
+    #[must_use]
     pub fn configured_count(&self) -> usize {
         usize::from(self.motion != PadMotionMode::None)
             + self
                 .regions
                 .iter()
-                .filter(|region| region.is_bound())
-                .count()
+                .map(|region| {
+                    usize::from(region.click.is_some()) + usize::from(region.touch.is_some())
+                })
+                .sum::<usize>()
     }
 }
 

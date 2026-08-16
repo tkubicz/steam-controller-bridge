@@ -128,18 +128,14 @@ pub(super) fn draw_pad_labels(
     pads: &PadBindings,
     selected: EditorSelection,
 ) {
-    for side in [PadSide::Left, PadSide::Right] {
+    for side in PadSide::ALL {
         let pad = pads.get(binding_side(side));
         let motion = match pad.motion {
             PadMotionMode::None => "NO MOTION",
             PadMotionMode::Pointer => "POINTER",
             PadMotionMode::Scroll => "SCROLL",
         };
-        let bound = pad
-            .regions
-            .iter()
-            .filter(|region| region.is_bound())
-            .count();
+        let bound = pad.bound_region_count();
         let rect = trackpad_rect(view, side);
         let color = if matches!(
             selected,

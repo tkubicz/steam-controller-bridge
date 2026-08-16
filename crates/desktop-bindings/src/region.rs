@@ -37,28 +37,47 @@ impl RegionMargin {
     };
 }
 
-/// Where a coordinate sits on the pad: its extent as a percentage of the way
-/// from the centre to the square edge, and a bearing in `[0, 360)` measured
-/// clockwise from twelve o'clock.
-///
-/// The `atan2(x, y)` argument order matches `profile_picker::sector_for`, so the
-/// profile wheel and the pads agree on which way is up.
-fn extent_and_bearing(x: i16, y: i16) -> (f32, f32) {
-    let extent =
-        (f32::from(x).abs().max(f32::from(y).abs()) / f32::from(i16::MAX) * 100.0).min(100.0);
-    let mut degrees = f32::from(x).atan2(f32::from(y)).to_degrees();
-    if degrees < 0.0 {
-        degrees += 360.0;
-    }
-    (extent, degrees)
+/// One coordinate prepared for repeated region checks. Resolution may inspect
+/// every region on a pad, so extent and bearing belong to the coordinate rather
+/// than to each candidate. Bearing stays lazy because whole-pad shapes need
+/// only the much cheaper extent check.
+struct RegionPoint {
+    x: f32,
+    y: f32,
+    extent: f32,
+    degrees: Option<f32>,
 }
 
-/// Reports whether a coordinate falls inside a shape grown by `margin`.
-pub(crate) fn shape_contains(shape: PadRegionShape, x: i16, y: i16, margin: RegionMargin) -> bool {
-    let (extent, degrees) = extent_and_bearing(x, y);
+impl RegionPoint {
+    fn new(x: i16, y: i16) -> Self {
+        let x = f32::from(x);
+        let y = f32::from(y);
+        Self {
+            x,
+            y,
+            extent: (x.abs().max(y.abs()) / f32::from(i16::MAX) * 100.0).min(100.0),
+            degrees: None,
+        }
+    }
+
+    /// Bearing in `[0, 360)`, clockwise from twelve o'clock. The `atan2(x, y)`
+    /// argument order matches `profile_picker::sector_for`.
+    fn degrees(&mut self) -> f32 {
+        *self.degrees.get_or_insert_with(|| {
+            let degrees = self.x.atan2(self.y).to_degrees();
+            if degrees < 0.0 {
+                degrees + 360.0
+            } else {
+                degrees
+            }
+        })
+    }
+}
+
+fn point_in_shape(shape: PadRegionShape, point: &mut RegionPoint, margin: RegionMargin) -> bool {
     let inner = f32::from(shape.inner_percent) - margin.percent;
     let outer = f32::from(shape.outer_percent) + margin.percent;
-    if extent < inner || extent > outer {
+    if point.extent < inner || point.extent > outer {
         return false;
     }
     let sweep = f32::from(shape.sweep_degrees) + margin.degrees * 2.0;
@@ -69,8 +88,14 @@ pub(crate) fn shape_contains(shape: PadRegionShape, x: i16, y: i16, margin: Regi
     // needs no special case: a sector starting at 350 and one starting at 10
     // are the same test on a shifted angle.
     let start = f32::from(shape.start_degrees) - margin.degrees;
-    let offset = (degrees - start).rem_euclid(360.0);
+    let offset = (point.degrees() - start).rem_euclid(360.0);
     offset < sweep
+}
+
+/// Reports whether a coordinate falls inside a shape grown by `margin`.
+#[cfg(test)]
+pub(crate) fn shape_contains(shape: PadRegionShape, x: i16, y: i16, margin: RegionMargin) -> bool {
+    point_in_shape(shape, &mut RegionPoint::new(x, y), margin)
 }
 
 /// Returns the index of the first region containing the coordinate, preferring
@@ -81,17 +106,18 @@ pub(crate) fn resolve_region(
     (x, y): (i16, i16),
     held: Option<usize>,
 ) -> Option<usize> {
+    let mut point = RegionPoint::new(x, y);
     if let Some(index) = held {
         if regions
             .get(index)
-            .is_some_and(|region| shape_contains(region.shape, x, y, RegionMargin::HELD))
+            .is_some_and(|region| point_in_shape(region.shape, &mut point, RegionMargin::HELD))
         {
             return Some(index);
         }
     }
     regions
         .iter()
-        .position(|region| shape_contains(region.shape, x, y, RegionMargin::NONE))
+        .position(|region| point_in_shape(region.shape, &mut point, RegionMargin::NONE))
 }
 
 #[cfg(test)]
@@ -119,8 +145,7 @@ mod tests {
     fn regions(shapes: &[PadRegionShape]) -> Vec<PadRegion> {
         shapes
             .iter()
-            .enumerate()
-            .map(|(index, shape)| PadRegion::new(format!("region-{index}"), "R", *shape))
+            .map(|shape| PadRegion::new("R", *shape))
             .collect()
     }
 

@@ -4,6 +4,48 @@
 )]
 use super::*;
 
+/// Lets an unconfigured profile run the binding engine's pad-feedback state
+/// machine without constructing a platform input sink or prompting for desktop
+/// control permissions. The configured count is checked before this is used,
+/// so reaching any output method indicates an internal accounting bug.
+struct FeedbackOnlySink;
+
+impl FeedbackOnlySink {
+    fn unexpected_output() -> Result<(), String> {
+        Err("unconfigured profile attempted desktop output".to_owned())
+    }
+}
+
+impl DesktopInputSink for FeedbackOnlySink {
+    fn key(&mut self, _key: desktop_bindings::KeyboardKey, _pressed: bool) -> Result<(), String> {
+        Self::unexpected_output()
+    }
+
+    fn modifier(
+        &mut self,
+        _modifier: desktop_bindings::Modifier,
+        _pressed: bool,
+    ) -> Result<(), String> {
+        Self::unexpected_output()
+    }
+
+    fn mouse_button(
+        &mut self,
+        _button: desktop_bindings::MouseButton,
+        _pressed: bool,
+    ) -> Result<(), String> {
+        Self::unexpected_output()
+    }
+
+    fn mouse_move(&mut self, _x: i32, _y: i32) -> Result<(), String> {
+        Self::unexpected_output()
+    }
+
+    fn scroll(&mut self, _x: i32, _y: i32) -> Result<(), String> {
+        Self::unexpected_output()
+    }
+}
+
 pub(crate) struct DesktopBindingsRuntime {
     pub(crate) engine: Option<BindingEngine>,
     // Once authorized, the sink belongs to the active runtime session. Profile
@@ -77,12 +119,19 @@ impl DesktopBindingsRuntime {
     ) -> PadFeedbackRequest {
         self.last_snapshot = Some(snapshot);
         let held_before = self.held_output_count();
-        let (Some(engine), Some(sink)) = (self.engine.as_mut(), self.sink.as_mut()) else {
+        let Some(engine) = self.engine.as_mut() else {
             return PadFeedbackRequest::NONE;
         };
-        let feedback = match engine.observe_snapshot(snapshot, now, sink.as_mut()) {
+        let result = if let Some(sink) = self.sink.as_mut() {
+            engine.observe_snapshot(snapshot, now, sink.as_mut())
+        } else if self.status.configured_binding_count == 0 {
+            engine.observe_snapshot(snapshot, now, &mut FeedbackOnlySink)
+        } else {
+            return PadFeedbackRequest::NONE;
+        };
+        let feedback = match result {
             Ok(feedback) => {
-                if self.status.state == DesktopBindingsState::Degraded {
+                if self.sink.is_some() && self.status.state == DesktopBindingsState::Degraded {
                     self.status.state = DesktopBindingsState::Ready;
                     self.status.last_error = None;
                     self.status_dirty = true;

@@ -122,18 +122,40 @@ fn pad_selections_describe_the_pad_rather_than_a_fixed_role() {
 }
 
 #[test]
-fn adding_regions_generates_unique_ids_and_names_the_store_accepts() {
+fn adding_regions_generates_unique_names_the_store_accepts() {
     let mut editor = BindingsEditor::new(std::path::PathBuf::new(), BindingStore::default());
     editor.pad(PadSide::Left).regions = PadRegion::four_way();
     for _ in 0..3 {
         editor.add_region(PadSide::Left);
     }
-    let regions = &editor.pad(PadSide::Left).regions;
-    assert_eq!(regions.len(), 7);
     // Each add selects what it created, so the shape editor opens on it.
     assert_eq!(
         editor.selection,
         EditorSelection::PadRegion(PadSide::Left, 6)
+    );
+    let regions = &editor.store.profiles[0].pads.left.regions;
+    assert_eq!(regions.len(), 7);
+    let names = regions
+        .iter()
+        .map(|region| region.name.to_lowercase())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(names.len(), regions.len());
+    editor.store.validate().unwrap();
+}
+
+#[test]
+fn save_normalization_trims_profile_and_region_names() {
+    let mut editor = BindingsEditor::new(std::path::PathBuf::new(), BindingStore::default());
+    editor.store.profiles[0].name = "  Default  ".to_owned();
+    editor.store.profiles[0].pads.left.regions = PadRegion::whole();
+    editor.store.profiles[0].pads.left.regions[0].name = "  Whole Pad  ".to_owned();
+
+    editor.normalize_names();
+
+    assert_eq!(editor.store.profiles[0].name, "Default");
+    assert_eq!(
+        editor.store.profiles[0].pads.left.regions[0].name,
+        "Whole Pad"
     );
     editor.store.validate().unwrap();
 }

@@ -207,12 +207,8 @@ fn validate_pad(profile: &str, side: PadSide, pad: &PadConfig) -> Result<(), Str
             "profile {profile:?} {label} supports at most {MAX_PAD_REGIONS} regions"
         ));
     }
-    let mut ids = BTreeSet::new();
     let mut names = BTreeSet::new();
     for region in &pad.regions {
-        if !valid_identifier(&region.id) {
-            return Err(format!("invalid {label} region ID {:?}", region.id));
-        }
         let trimmed = region.name.trim();
         if trimmed.is_empty()
             || trimmed.chars().count() > MAX_REGION_NAME_CHARS
@@ -220,15 +216,12 @@ fn validate_pad(profile: &str, side: PadSide, pad: &PadConfig) -> Result<(), Str
         {
             return Err(format!("invalid {label} region name {:?}", region.name));
         }
-        if !ids.insert(region.id.to_ascii_lowercase()) {
-            return Err(format!("duplicate {label} region ID {:?}", region.id));
-        }
         if !names.insert(region.name.to_lowercase()) {
             return Err(format!("duplicate {label} region name {:?}", region.name));
         }
         if !region.shape.is_valid() {
             return Err(format!(
-                "{label} region {:?} needs a 1-360 degree sweep inside a 0-100% radius band",
+                "{label} region {:?} needs a 1-360 degree sweep inside a 0-100% extent band",
                 region.name
             ));
         }

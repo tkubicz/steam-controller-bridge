@@ -259,11 +259,9 @@ fn runtime_pad_observation_emits_mouse_and_feedback_without_changing_gamepad_out
 
 #[test]
 fn runtime_emits_one_feedback_tick_for_a_physical_pad_click() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let mut bindings = DesktopBindingsRuntime::with_sink(
-        BindingProfile::default(),
-        Box::new(SharedDesktopSink(Arc::clone(&events))),
-    );
+    // The default profile has no desktop outputs and must not create a platform
+    // sink or prompt for permissions just to provide controller-native haptics.
+    let mut bindings = DesktopBindingsRuntime::new(Some(BindingProfile::default()));
     let snapshot = |pressed| DesktopInputSnapshot {
         buttons: steam_controller_protocol::SteamButtons(if pressed {
             1_u32 << SteamButton::RightPadClick as u8
@@ -291,7 +289,7 @@ fn runtime_emits_one_feedback_tick_for_a_physical_pad_click() {
         Some(desktop_bindings::PadFeedbackStrength::Medium)
     );
     assert_eq!(hold, PadFeedbackRequest::NONE);
-    assert!(events.lock().unwrap().is_empty());
+    assert_eq!(bindings.status().state, DesktopBindingsState::Disabled);
 }
 
 #[test]

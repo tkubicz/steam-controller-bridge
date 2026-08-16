@@ -35,6 +35,14 @@ const MIN_WINDOW_SIZE: [f32; 2] = [1080.0, 660.0];
 const INSPECTOR_WIDTH: f32 = 300.0;
 const COLUMN_GAP: f32 = 16.0;
 const CANVAS_MIN_WIDTH: f32 = 620.0;
+type RegionPreset = (&'static str, fn() -> Vec<PadRegion>);
+const REGION_PRESETS: [RegionPreset; 5] = [
+    ("Whole pad", PadRegion::whole),
+    ("Four way", PadRegion::four_way),
+    ("Four way + center", PadRegion::four_way_with_center),
+    ("Eight way", PadRegion::eight_way),
+    ("Eight way + center", PadRegion::eight_way_with_center),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControllerView {
@@ -643,14 +651,14 @@ impl BindingsEditor {
             .width(ui.available_width())
             .selected_text("Apply a layout…")
             .show_ui(ui, |ui| {
-                for candidate in PadRegion::PRESETS {
-                    if ui.selectable_label(false, candidate.label).clicked() {
-                        preset = Some(candidate);
+                for (label, build) in REGION_PRESETS {
+                    if ui.selectable_label(false, label).clicked() {
+                        preset = Some(build);
                     }
                 }
             });
-        if let Some(preset) = preset {
-            self.pad(side).regions = (preset.build)();
+        if let Some(build) = preset {
+            self.pad(side).regions = build();
             self.selection = EditorSelection::Pad(side);
             self.capturing = None;
         }
@@ -666,10 +674,7 @@ impl BindingsEditor {
         self.region_shape_editor(ui, side, index);
         for trigger in PadTrigger::ALL {
             ui.add_space(16.0);
-            ui.label(match trigger {
-                PadTrigger::Click => "Click action",
-                PadTrigger::Touch => "Touch action",
-            });
+            ui.label(format!("{} action", trigger.label()));
             ui.label(
                 egui::RichText::new(match trigger {
                     PadTrigger::Click => {
@@ -793,24 +798,19 @@ impl BindingsEditor {
         }
     }
 
-    /// Adds a region with an unused ID and name, and selects it.
+    /// Adds a region with an unused name and selects it.
     fn add_region(&mut self, side: PadSide) {
         let pad = self.pad(side);
-        let taken = |field: fn(&PadRegion) -> &String, candidate: &str, pad: &PadConfig| {
-            pad.regions
-                .iter()
-                .any(|region| field(region).eq_ignore_ascii_case(candidate))
-        };
-        let id = (1..=MAX_PAD_REGIONS + 1)
-            .map(|number| format!("region-{number}"))
-            .find(|candidate| !taken(|region| &region.id, candidate, pad))
-            .expect("a bounded region list always leaves an ID free");
         let name = (1..=MAX_PAD_REGIONS + 1)
             .map(|number| format!("Region {number}"))
-            .find(|candidate| !taken(|region| &region.name, candidate, pad))
+            .find(|candidate| {
+                !pad.regions
+                    .iter()
+                    .any(|region| region.name.eq_ignore_ascii_case(candidate))
+            })
             .expect("a bounded region list always leaves a name free");
         pad.regions
-            .push(PadRegion::new(id, name, PadRegionShape::WHOLE));
+            .push(PadRegion::new(name, PadRegionShape::WHOLE));
         self.selection = EditorSelection::PadRegion(side, self.pad(side).regions.len() - 1);
         self.capturing = None;
     }
@@ -955,10 +955,19 @@ impl BindingsEditor {
         }
     }
 
-    fn save_and_close(&mut self, ctx: &egui::Context) {
+    fn normalize_names(&mut self) {
         for profile in &mut self.store.profiles {
             profile.name = profile.name.trim().to_owned();
+            for pad in [&mut profile.pads.left, &mut profile.pads.right] {
+                for region in &mut pad.regions {
+                    region.name = region.name.trim().to_owned();
+                }
+            }
         }
+    }
+
+    fn save_and_close(&mut self, ctx: &egui::Context) {
+        self.normalize_names();
         match save_store(&self.path, &self.store) {
             Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Err(error) => self.message = Some(error),

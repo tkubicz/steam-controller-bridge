@@ -414,7 +414,7 @@ fn region_bindings_round_trip_and_count() {
     let mut store = BindingStore::default();
     let mut regions = PadRegion::four_way();
     regions[3].click = Some(chord(KeyboardKey::ArrowLeft, &[]));
-    regions[1].touch = Some(BindingAction::MouseButton {
+    regions[3].touch = Some(BindingAction::MouseButton {
         button: MouseButton::Middle,
     });
     store.profiles[0].pads.left.regions = regions;
@@ -430,7 +430,7 @@ fn region_bindings_round_trip_and_count() {
     assert_eq!(left["motion"], "none");
     assert_eq!(left["regions"][3]["name"], "Left");
     assert_eq!(left["regions"][3]["click"]["key"], "ArrowLeft");
-    assert_eq!(left["regions"][1]["touch"]["button"], "middle");
+    assert_eq!(left["regions"][3]["touch"]["button"], "middle");
     assert_eq!(value["profiles"][0]["pads"]["right"]["motion"], "pointer");
 }
 
@@ -487,15 +487,9 @@ fn store_rejects_malformed_regions() {
     /// One way to break an otherwise valid pad, and the word its rejection must
     /// contain so the message points at the actual problem.
     type Case = (&'static str, fn(&mut PadConfig));
-    let cases: [Case; 7] = [
-        ("region ID", |pad| {
-            pad.regions[0].id = "not a slug".to_owned();
-        }),
+    let cases: [Case; 5] = [
         ("region name", |pad| {
             pad.regions[0].name = " Top".to_owned();
-        }),
-        ("duplicate", |pad| {
-            pad.regions[1].id = pad.regions[0].id.clone();
         }),
         ("duplicate", |pad| {
             pad.regions[1].name = pad.regions[0].name.clone();
@@ -523,13 +517,7 @@ fn store_rejects_malformed_regions() {
 
     let mut store = BindingStore::default();
     store.profiles[0].pads.left.regions = (0..=MAX_PAD_REGIONS)
-        .map(|index| {
-            PadRegion::new(
-                format!("region-{index}"),
-                format!("R{index}"),
-                PadRegionShape::WHOLE,
-            )
-        })
+        .map(|index| PadRegion::new(format!("R{index}"), PadRegionShape::WHOLE))
         .collect();
     assert!(store.validate().unwrap_err().contains("at most"));
 }
@@ -2158,6 +2146,33 @@ fn a_touch_hands_off_between_regions_and_releases_on_lift() {
             "key:ArrowRight:false"
         ]
     );
+    assert_eq!(engine.held_pad_action_count(), 0);
+}
+
+#[test]
+fn a_touch_crossing_between_regions_with_the_same_action_does_not_retrigger_it() {
+    let mut profile = BindingProfile::default();
+    profile.pads.right.regions = PadRegion::four_way();
+    for region in &mut profile.pads.right.regions {
+        region.touch = Some(chord(KeyboardKey::F9, &[]));
+    }
+    profile.pads.right.feedback.enabled = false;
+    let mut engine = BindingEngine::new(profile);
+    let mut sink = MockSink::default();
+    let top = bearing(0.0, 70.0);
+    let right = bearing(90.0, 70.0);
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Right,
+        &[
+            (0, PadSample::NEUTRAL),
+            (10, touching(top.0, top.1)),
+            (20, touching(right.0, right.1)),
+            (30, PadSample::NEUTRAL),
+        ],
+    );
+    assert_eq!(sink.events, ["key:F9:true", "key:F9:false"]);
     assert_eq!(engine.held_pad_action_count(), 0);
 }
 

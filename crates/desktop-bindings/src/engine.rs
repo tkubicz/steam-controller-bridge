@@ -294,7 +294,7 @@ impl BindingEngine {
     ///
     /// Callers may sleep indefinitely while this is false because button and
     /// direct pad output are entirely snapshot-driven. It becomes true only
-    /// while released left-pad scroll momentum still needs periodic ticks.
+    /// while released pad scroll momentum still needs periodic ticks.
     #[must_use]
     pub fn needs_tick(&self) -> bool {
         self.previous_mask.is_some()
@@ -398,8 +398,9 @@ impl BindingEngine {
     }
 
     /// Turns one report's region transitions into reference-counted output,
-    /// releasing before pressing so a hand-off between two regions never holds
-    /// both actions at once.
+    /// releasing before pressing so a hand-off between two different actions
+    /// never holds both at once. Crossing between regions with the same action
+    /// leaves that output alone instead of injecting a false release/press pair.
     fn dispatch_pad_events(
         &mut self,
         side: PadSide,
@@ -413,6 +414,13 @@ impl BindingEngine {
             let Some(latch) = latch else {
                 continue;
             };
+            if matches!(
+                &latch,
+                PadLatch::Hold(action)
+                    if self.pad_latch(side).get_mut(trigger).as_ref() == Some(action)
+            ) {
+                continue;
+            }
             if let Some(action) = self.pad_latch(side).get_mut(trigger).take() {
                 self.release_action(&action, sink)?;
             }
@@ -438,7 +446,7 @@ impl BindingEngine {
         self.right_latch = PadLatchState::default();
     }
 
-    /// Advances time-based desktop output such as left-pad scroll momentum.
+    /// Advances time-based desktop output such as pad scroll momentum.
     ///
     /// This is intentionally independent of controller reports so inertia can
     /// finish even when the HID transport becomes quiet after touch release.

@@ -184,7 +184,6 @@ settings, its feedback, and its ordered region list:
     "feedback": { "enabled": true, "strength": "medium" },
     "regions": [
       {
-        "id": "region-1",
         "name": "Left",
         "shape": {
           "start_degrees": 248,
@@ -201,10 +200,10 @@ settings, its feedback, and its ordered region list:
 ```
 
 Validation rejects a version other than the current one, a pad speed outside
-25%-300%, more than 16 regions on a pad, a region ID that is not an ASCII slug,
-an untrimmed, empty, or over-32-character region name, a duplicate region ID or
-name within a pad, a sweep outside 1-360 degrees, a start bearing of 360 or more,
-and an extent band whose inner edge is not below its outer edge.
+25%-300%, more than 16 regions on a pad, an untrimmed, empty, or
+over-32-character region name, a duplicate region name within a pad, a sweep
+outside 1-360 degrees, a start bearing of 360 or more, and an extent band whose
+inner edge is not below its outer edge.
 
 ## Migration
 

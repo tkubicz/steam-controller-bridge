@@ -51,15 +51,20 @@ pub(super) fn draw_region_map(
         } else {
             egui::Color32::TRANSPARENT
         };
+        let bearings = region_bearings(region.shape);
         // A region with a hole in it is concave, so it is filled as a strip of
-        // convex quads rather than handed to `convex_polygon` whole.
+        // mesh quads rather than handed to `convex_polygon` whole.
         if fill != egui::Color32::TRANSPARENT {
-            for quad in region_quads(surface, side, region.shape) {
-                painter.add(egui::Shape::convex_polygon(quad, fill, egui::Stroke::NONE));
-            }
+            painter.add(egui::Shape::mesh(region_mesh(
+                surface,
+                side,
+                region.shape,
+                &bearings,
+                fill,
+            )));
         }
         painter.add(egui::Shape::closed_line(
-            region_outline(surface, side, region.shape),
+            region_outline(surface, side, region.shape, &bearings),
             egui::Stroke::new(
                 if chosen { 1.8 } else { 1.0 },
                 if chosen { ACCENT } else { DETAIL },
@@ -101,22 +106,42 @@ fn pad_point(surface: egui::Rect, side: PadSide, degrees: f32, extent: f32) -> e
 
 /// The bearings a region's outline needs: its two ends, plus every pad corner
 /// strictly between them.
-fn region_bearings(shape: PadRegionShape) -> Vec<f32> {
+#[derive(Debug, Clone, Copy)]
+struct RegionBearings {
+    values: [f32; 6],
+    len: usize,
+}
+
+impl std::ops::Deref for RegionBearings {
+    type Target = [f32];
+
+    fn deref(&self) -> &Self::Target {
+        &self.values[..self.len]
+    }
+}
+
+fn region_bearings(shape: PadRegionShape) -> RegionBearings {
     let start = f32::from(shape.start_degrees);
     let end = start + f32::from(shape.sweep_degrees);
-    let mut bearings = vec![start];
+    let mut bearings = RegionBearings {
+        values: [0.0; 6],
+        len: 1,
+    };
+    bearings.values[0] = start;
     // A sweep can run past 360, so each corner is offered in both turns the
     // range can reach.
     for corner in CORNER_BEARINGS {
         for turn in [0.0, 360.0] {
             let candidate = corner + turn;
             if candidate > start && candidate < end {
-                bearings.push(candidate);
+                bearings.values[bearings.len] = candidate;
+                bearings.len += 1;
             }
         }
     }
-    bearings.sort_by(f32::total_cmp);
-    bearings.push(end);
+    bearings.values[..bearings.len].sort_by(f32::total_cmp);
+    bearings.values[bearings.len] = end;
+    bearings.len += 1;
     bearings
 }
 
@@ -127,34 +152,45 @@ fn extents(shape: PadRegionShape) -> (f32, f32) {
     )
 }
 
-/// One region as a strip of convex quads, so the tessellator never has to fill
-/// a concave outline.
-fn region_quads(surface: egui::Rect, side: PadSide, shape: PadRegionShape) -> Vec<Vec<egui::Pos2>> {
+/// One region as a strip of triangles, so the tessellator never has to fill a
+/// concave outline and repainting does not allocate a short-lived polygon per
+/// strip segment.
+fn region_mesh(
+    surface: egui::Rect,
+    side: PadSide,
+    shape: PadRegionShape,
+    bearings: &[f32],
+    fill: egui::Color32,
+) -> egui::Mesh {
     let (inner, outer) = extents(shape);
-    region_bearings(shape)
-        .windows(2)
-        .map(|pair| {
-            let mut quad = vec![
-                pad_point(surface, side, pair[0], outer),
-                pad_point(surface, side, pair[1], outer),
-            ];
-            if inner > 0.0 {
-                quad.push(pad_point(surface, side, pair[1], inner));
-                quad.push(pad_point(surface, side, pair[0], inner));
-            } else {
-                quad.push(surface.center());
-            }
-            quad
-        })
-        .collect()
+    let mut mesh = egui::Mesh::default();
+    for pair in bearings.windows(2) {
+        let base = u32::try_from(mesh.vertices.len()).expect("region mesh fits in u32 indices");
+        mesh.colored_vertex(pad_point(surface, side, pair[0], outer), fill);
+        mesh.colored_vertex(pad_point(surface, side, pair[1], outer), fill);
+        if inner > 0.0 {
+            mesh.colored_vertex(pad_point(surface, side, pair[1], inner), fill);
+            mesh.colored_vertex(pad_point(surface, side, pair[0], inner), fill);
+            mesh.add_triangle(base, base + 1, base + 2);
+            mesh.add_triangle(base, base + 2, base + 3);
+        } else {
+            mesh.colored_vertex(surface.center(), fill);
+            mesh.add_triangle(base, base + 1, base + 2);
+        }
+    }
+    mesh
 }
 
 /// The outline of one region: outer edge forwards, inner edge back. A region
 /// with no hole closes through the middle instead, and a full-sweep one closes
 /// on itself.
-fn region_outline(surface: egui::Rect, side: PadSide, shape: PadRegionShape) -> Vec<egui::Pos2> {
+fn region_outline(
+    surface: egui::Rect,
+    side: PadSide,
+    shape: PadRegionShape,
+    bearings: &[f32],
+) -> Vec<egui::Pos2> {
     let (inner, outer) = extents(shape);
-    let bearings = region_bearings(shape);
     let mut points: Vec<_> = bearings
         .iter()
         .map(|degrees| pad_point(surface, side, *degrees, outer))
