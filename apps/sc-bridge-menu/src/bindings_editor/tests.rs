@@ -2,19 +2,15 @@ use super::*;
 
 #[test]
 fn callouts_cover_each_bindable_control_once() {
-    // Pad clicks are the only bindable controls without a callout: they are
-    // edited through the pad hotspots' inspector instead.
+    // Pads are reached through their own hotspots, so every remaining bindable
+    // control needs exactly one callout.
     let controls = CONTROL_CALLOUTS
         .iter()
         .map(|callout| callout.control)
         .collect::<BTreeSet<_>>();
     assert_eq!(controls.len(), CONTROL_CALLOUTS.len());
     for control in BindableControl::ALL {
-        let pad_click = matches!(
-            control,
-            BindableControl::LeftPadClick | BindableControl::RightPadClick
-        );
-        assert_eq!(controls.contains(&control), !pad_click);
+        assert!(controls.contains(&control), "{control:?} has no callout");
     }
 }
 
@@ -67,11 +63,12 @@ fn duplicating_a_maximum_length_profile_keeps_a_valid_name() {
 #[test]
 fn duplicated_profiles_preserve_independent_pad_settings() {
     let mut store = BindingStore::default();
-    store.profiles[0].pads.right_mouse.enabled = true;
-    store.profiles[0].pads.right_mouse.feedback.enabled = false;
-    store.profiles[0].pads.left_scroll.feedback.strength = PadFeedbackStrength::High;
-    store.profiles[0].pads.left_scroll.speed_percent = 175;
-    store.profiles[0].pads.left_scroll.momentum = false;
+    store.profiles[0].pads.right.motion = PadMotionMode::Pointer;
+    store.profiles[0].pads.right.feedback.enabled = false;
+    store.profiles[0].pads.left.feedback.strength = PadFeedbackStrength::High;
+    store.profiles[0].pads.left.speed_percent = 175;
+    store.profiles[0].pads.left.momentum = false;
+    store.profiles[0].pads.left.regions = PadRegion::four_way();
     let mut editor = BindingsEditor::new(std::path::PathBuf::new(), store);
 
     editor.duplicate_profile();
@@ -87,32 +84,84 @@ fn duplicated_profiles_preserve_independent_pad_settings() {
 fn pad_edits_participate_in_dirty_state_detection() {
     let mut editor = BindingsEditor::new(std::path::PathBuf::new(), BindingStore::default());
     assert!(!editor.is_dirty());
-    editor.store.profiles[0].pads.right_mouse.enabled = true;
+    editor.store.profiles[0].pads.right.motion = PadMotionMode::Pointer;
     assert!(editor.is_dirty());
-    editor.store.profiles[0].pads.right_mouse.enabled = false;
+    editor.store.profiles[0].pads.right.motion = PadMotionMode::None;
     assert!(!editor.is_dirty());
+    editor.store.profiles[0].pads.left.regions = PadRegion::four_way();
+    assert!(editor.is_dirty());
 }
 
 #[test]
-fn pad_selections_have_fixed_roles_and_default_feedback() {
+fn pad_selections_describe_the_pad_rather_than_a_fixed_role() {
+    // Neither pad owns a behavior any more, so neither description may name one.
+    for side in [PadSide::Left, PadSide::Right] {
+        for selection in [
+            EditorSelection::Pad(side),
+            EditorSelection::PadRegion(side, 0),
+        ] {
+            assert_eq!(
+                selection_description(selection),
+                selection_description(EditorSelection::Pad(side))
+            );
+        }
+    }
     assert_eq!(
         selection_description(EditorSelection::Pad(PadSide::Left)),
-        "Two-axis smooth desktop scrolling, bindable click"
-    );
-    assert_eq!(
-        selection_description(EditorSelection::Pad(PadSide::Right)),
-        "Relative desktop pointer movement, bindable click"
+        "Left trackpad motion and regions"
     );
     let pads = desktop_bindings::PadBindings::default();
-    assert!(!pads.left_scroll.enabled);
-    assert!(!pads.right_mouse.enabled);
-    assert!(pads.left_scroll.feedback.enabled);
-    assert_eq!(pads.left_scroll.speed_percent, 100);
-    assert!(pads.left_scroll.momentum);
+    for pad in [&pads.left, &pads.right] {
+        assert_eq!(pad.motion, PadMotionMode::None);
+        assert!(pad.regions.is_empty());
+        assert!(pad.feedback.enabled);
+        assert_eq!(pad.feedback.strength, PadFeedbackStrength::Medium);
+        assert_eq!(pad.speed_percent, 100);
+        assert!(pad.momentum);
+    }
+}
+
+#[test]
+fn adding_regions_generates_unique_ids_and_names_the_store_accepts() {
+    let mut editor = BindingsEditor::new(std::path::PathBuf::new(), BindingStore::default());
+    editor.pad(PadSide::Left).regions = PadRegion::four_way();
+    for _ in 0..3 {
+        editor.add_region(PadSide::Left);
+    }
+    let regions = &editor.pad(PadSide::Left).regions;
+    assert_eq!(regions.len(), 7);
+    // Each add selects what it created, so the shape editor opens on it.
     assert_eq!(
-        pads.right_mouse.feedback.strength,
-        PadFeedbackStrength::Medium
+        editor.selection,
+        EditorSelection::PadRegion(PadSide::Left, 6)
     );
+    editor.store.validate().unwrap();
+}
+
+#[test]
+fn deleting_a_region_drops_the_stale_selection_instead_of_indexing_past_the_list() {
+    let mut editor = BindingsEditor::new(std::path::PathBuf::new(), BindingStore::default());
+    editor.pad(PadSide::Left).regions = PadRegion::four_way();
+    editor.selection = EditorSelection::PadRegion(PadSide::Left, 3);
+    assert_eq!(editor.selected_region(PadSide::Left), Some(3));
+    editor.pad(PadSide::Left).regions.truncate(2);
+    assert_eq!(editor.selected_region(PadSide::Left), None);
+    // A region selected on one pad is not a region selected on the other.
+    editor.selection = EditorSelection::PadRegion(PadSide::Left, 0);
+    assert_eq!(editor.selected_region(PadSide::Right), None);
+}
+
+#[test]
+fn an_action_slot_survives_a_target_that_names_a_deleted_region() {
+    let mut editor = BindingsEditor::new(std::path::PathBuf::new(), BindingStore::default());
+    editor.pad(PadSide::Left).regions = PadRegion::four_way();
+    let target = ActionTarget::Region(PadSide::Left, 3, PadTrigger::Click);
+    *editor.action_slot(target).unwrap() = Some(BindingAction::MouseButton {
+        button: MouseButton::Middle,
+    });
+    assert!(editor.pad(PadSide::Left).regions[3].click.is_some());
+    editor.pad(PadSide::Left).regions.clear();
+    assert!(editor.action_slot(target).is_none());
 }
 
 #[test]

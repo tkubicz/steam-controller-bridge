@@ -1,7 +1,7 @@
 #[test]
 fn blocked_desktop_sink_does_not_block_the_supervisor_facing_publisher() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
+    profile.pads.right.motion = PadMotionMode::Pointer;
     let status = Arc::new(Mutex::new(BridgeStatus::default()));
     let events = Arc::new(Mutex::new(Vec::new()));
     let worker_events = Arc::clone(&events);
@@ -66,7 +66,7 @@ fn blocked_desktop_sink_does_not_block_the_supervisor_facing_publisher() {
 #[test]
 fn blocked_desktop_sink_cannot_defeat_the_shutdown_timeout() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
+    profile.pads.right.motion = PadMotionMode::Pointer;
     let status = Arc::new(Mutex::new(BridgeStatus::default()));
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let worker_gate = Arc::clone(&gate);

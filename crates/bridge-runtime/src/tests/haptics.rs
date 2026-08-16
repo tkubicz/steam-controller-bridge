@@ -205,7 +205,7 @@ fn runtime_pad_observation_emits_mouse_and_feedback_without_changing_gamepad_out
         report(3, true, 3_968),
     ];
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
+    profile.pads.right.motion = PadMotionMode::Pointer;
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut bindings = DesktopBindingsRuntime::with_sink(
         profile,
@@ -297,8 +297,8 @@ fn runtime_emits_one_feedback_tick_for_a_physical_pad_click() {
 #[test]
 fn runtime_tick_advances_scroll_momentum_without_more_hid_reports() {
     let mut profile = BindingProfile::default();
-    profile.pads.left_scroll.enabled = true;
-    profile.pads.left_scroll.feedback.enabled = false;
+    profile.pads.left.motion = PadMotionMode::Scroll;
+    profile.pads.left.feedback.enabled = false;
     let events = Arc::new(Mutex::new(Vec::new()));
     let mut bindings = DesktopBindingsRuntime::with_sink(
         profile,
@@ -331,7 +331,7 @@ fn runtime_tick_advances_scroll_momentum_without_more_hid_reports() {
 #[test]
 fn desktop_motion_failure_requests_pending_feedback_discard() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
+    profile.pads.right.motion = PadMotionMode::Pointer;
     let mut bindings = DesktopBindingsRuntime::with_sink(profile, Box::new(FailingMotionSink));
     let snapshot = |x, touched| DesktopInputSnapshot {
         right_pad: PadSample {

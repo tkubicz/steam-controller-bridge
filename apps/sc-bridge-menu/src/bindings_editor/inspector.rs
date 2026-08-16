@@ -1,15 +1,15 @@
 use super::{
-    egui, BindableControl, BindingAction, EditorSelection, KeyboardKey, Modifier, MouseButton,
-    PadFeedbackConfig, PadFeedbackStrength, PadSide, MUTED_TEXT,
+    egui, ActionTarget, BindableControl, BindingAction, EditorSelection, KeyboardKey, Modifier,
+    MouseButton, PadFeedbackConfig, PadFeedbackStrength, PadSide, MUTED_TEXT,
 };
 
 pub(super) fn mouse_button_editor(
     ui: &mut egui::Ui,
-    control: BindableControl,
+    target: ActionTarget,
     button: &mut MouseButton,
 ) {
     ui.label("Mouse button");
-    egui::ComboBox::from_id_salt(("mouse", control))
+    egui::ComboBox::from_id_salt(("mouse", target))
         .width(ui.available_width())
         .selected_text(button.label())
         .show_ui(ui, |ui| {
@@ -32,10 +32,12 @@ pub(super) fn selection_description(selection: EditorSelection) -> &'static str 
         EditorSelection::Button(BindableControl::R4) => "Upper right rear grip",
         EditorSelection::Button(BindableControl::R5) => "Lower right rear grip",
         EditorSelection::Button(BindableControl::QuickAccess) => "Front Quick Access button",
-        EditorSelection::Button(BindableControl::LeftPadClick) => "Left trackpad click",
-        EditorSelection::Button(BindableControl::RightPadClick) => "Right trackpad click",
-        EditorSelection::Pad(PadSide::Left) => "Two-axis smooth desktop scrolling, bindable click",
-        EditorSelection::Pad(PadSide::Right) => "Relative desktop pointer movement, bindable click",
+        EditorSelection::Pad(PadSide::Left) | EditorSelection::PadRegion(PadSide::Left, _) => {
+            "Left trackpad motion and regions"
+        }
+        EditorSelection::Pad(PadSide::Right) | EditorSelection::PadRegion(PadSide::Right, _) => {
+            "Right trackpad motion and regions"
+        }
     }
 }
 

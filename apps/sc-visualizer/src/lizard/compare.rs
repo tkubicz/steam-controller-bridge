@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use desktop_bindings::{
     load_store, BindingEngine, BindingProfile, ControlBindings, DesktopInputSink,
-    DesktopInputSnapshot, KeyboardKey, Modifier, MouseButton,
+    DesktopInputSnapshot, KeyboardKey, Modifier, MouseButton, PadMotionMode,
 };
 use serde::Serialize;
 
@@ -132,10 +132,10 @@ pub(crate) fn load_profile(
 
 pub(crate) fn mouse_only_profile(mut profile: BindingProfile) -> BindingProfile {
     profile.bindings = ControlBindings::default();
-    profile.pads.left_scroll.enabled = false;
-    profile.pads.right_mouse.enabled = true;
-    profile.pads.left_scroll.feedback.enabled = false;
-    profile.pads.right_mouse.feedback.enabled = false;
+    profile.pads.left.motion = PadMotionMode::None;
+    profile.pads.right.motion = PadMotionMode::Pointer;
+    profile.pads.left.feedback.enabled = false;
+    profile.pads.right.feedback.enabled = false;
     profile
 }
 
