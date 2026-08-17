@@ -523,6 +523,69 @@ fn store_rejects_malformed_regions() {
 }
 
 #[test]
+fn resetting_an_unreadable_store_keeps_the_original_beside_a_fresh_default() {
+    let directory =
+        std::env::temp_dir().join(format!("desktop-bindings-reset-{}", std::process::id()));
+    let path = directory.join("bindings.json");
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(&path, b"{ this is not a binding store }").unwrap();
+    assert!(load_or_create_store(&path).is_err());
+
+    let kept = reset_store(&path).unwrap();
+
+    // The default is usable and the user's file survives under a name they can
+    // rename back.
+    assert_eq!(
+        load_or_create_store(&path).unwrap(),
+        BindingStore::default()
+    );
+    assert_eq!(kept, directory.join("bindings-invalid.json"));
+    assert_eq!(fs::read(&kept).unwrap(), b"{ this is not a binding store }");
+
+    // A second reset does not clobber the first rescue.
+    fs::write(&path, b"broken again").unwrap();
+    let second = reset_store(&path).unwrap();
+    assert_eq!(second, directory.join("bindings-invalid-1.json"));
+    assert_eq!(fs::read(&kept).unwrap(), b"{ this is not a binding store }");
+    assert_eq!(fs::read(&second).unwrap(), b"broken again");
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn resetting_a_store_that_cannot_be_moved_leaves_it_alone() {
+    let directory = std::env::temp_dir().join(format!(
+        "desktop-bindings-reset-fail-{}",
+        std::process::id()
+    ));
+    let path = directory.join("bindings.json");
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(&path, b"broken").unwrap();
+
+    let mut permissions = fs::metadata(&directory).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&directory, permissions).unwrap();
+    // Root ignores the directory's write bit, so there is nothing to assert
+    // about a failure that cannot be produced.
+    let read_only = fs::write(directory.join("probe"), b"").is_err();
+
+    if read_only {
+        assert!(reset_store(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"broken");
+    }
+
+    let mut permissions = fs::metadata(&directory).unwrap().permissions();
+    #[allow(
+        clippy::permissions_set_readonly_false,
+        reason = "restoring the temporary directory so the test can clean up after itself"
+    )]
+    permissions.set_readonly(false);
+    fs::set_permissions(&directory, permissions).unwrap();
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
 fn failed_atomic_rename_cleans_up_the_temporary_file() {
     let directory = std::env::temp_dir().join(format!(
         "desktop-bindings-rename-failure-{}",

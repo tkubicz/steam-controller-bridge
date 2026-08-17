@@ -5,10 +5,10 @@ use controller_art::{
     trackpad_surface_point, Control, ControlState, PadSide,
 };
 use desktop_bindings::{
-    default_store_path, load_or_create_store, save_store, BindableControl, BindingAction,
-    BindingStore, KeyboardKey, Modifier, MouseButton, PadBindings, PadConfig, PadFeedbackConfig,
-    PadFeedbackStrength, PadMotionMode, PadRegion, PadRegionShape, PadTrigger, MAX_PAD_REGIONS,
-    MAX_PAD_SPEED_PERCENT, MAX_PROFILE_NAME_CHARS, MAX_REGION_NAME_CHARS, MIN_PAD_SPEED_PERCENT,
+    default_store_path, save_store, BindableControl, BindingAction, BindingStore, KeyboardKey,
+    Modifier, MouseButton, PadBindings, PadConfig, PadFeedbackConfig, PadFeedbackStrength,
+    PadMotionMode, PadRegion, PadRegionShape, PadTrigger, MAX_PAD_REGIONS, MAX_PAD_SPEED_PERCENT,
+    MAX_PROFILE_NAME_CHARS, MAX_REGION_NAME_CHARS, MIN_PAD_SPEED_PERCENT,
 };
 use eframe::egui;
 
@@ -186,7 +186,12 @@ const CONTROL_CALLOUTS: [ControlCallout; 5] = [
 
 pub fn run() -> Result<(), String> {
     let path = default_store_path()?;
-    let store = load_or_create_store(&path)?;
+    // The editor is launched with its output discarded, so an unreadable store
+    // has to be presented here too; returning an error would simply close the
+    // window the user just asked for with nothing shown.
+    let Some(store) = crate::bindings_recovery::load_store_or_recover(&path)? else {
+        return Ok(());
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(WINDOW_SIZE)

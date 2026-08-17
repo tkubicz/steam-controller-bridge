@@ -69,8 +69,10 @@ objc2 = "0.6.4"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["CFRunLoop"] }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGEvent"] }
 objc2-io-kit = { version = "0.3.2", default-features = false, features = ["std", "hidsystem", "libc", "pwr_mgt"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
+    "NSAlert",
     "NSApplication",
     "NSButton",
     "NSControl",

@@ -106,9 +106,12 @@ fn pad_point(surface: egui::Rect, side: PadSide, degrees: f32, extent: f32) -> e
 
 /// The bearings a region's outline needs: its two ends, plus every pad corner
 /// strictly between them.
+///
+/// A validated sweep is at most one full turn, so each corner falls inside it at
+/// most once and six is an exact fit rather than a guess.
 #[derive(Debug, Clone, Copy)]
 struct RegionBearings {
-    values: [f32; 6],
+    values: [f32; 2 + CORNER_BEARINGS.len()],
     len: usize,
 }
 
@@ -124,16 +127,19 @@ fn region_bearings(shape: PadRegionShape) -> RegionBearings {
     let start = f32::from(shape.start_degrees);
     let end = start + f32::from(shape.sweep_degrees);
     let mut bearings = RegionBearings {
-        values: [0.0; 6],
+        values: [0.0; 2 + CORNER_BEARINGS.len()],
         len: 1,
     };
     bearings.values[0] = start;
     // A sweep can run past 360, so each corner is offered in both turns the
-    // range can reach.
+    // range can reach. The length guard is unreachable for a validated shape;
+    // it is here so that a sweep wider than one turn - which the planned
+    // gesture work could well introduce - draws a clipped region instead of
+    // panicking the editor.
     for corner in CORNER_BEARINGS {
         for turn in [0.0, 360.0] {
             let candidate = corner + turn;
-            if candidate > start && candidate < end {
+            if candidate > start && candidate < end && bearings.len + 1 < bearings.values.len() {
                 bearings.values[bearings.len] = candidate;
                 bearings.len += 1;
             }
@@ -255,6 +261,28 @@ mod tests {
             .find(|region| region.name == "Top")
             .expect("preset has a top sector");
         assert_eq!(region_bearings(top.shape).len(), 2);
+    }
+
+    #[test]
+    fn an_over_wide_sweep_is_clipped_rather_than_overrunning_the_bearing_buffer() {
+        // Validation caps a sweep at one full turn, so this shape cannot reach
+        // the drawing today. It is exercised anyway because the buffer is an
+        // exact fit for that cap, and a future wider sweep must not panic.
+        let bearings = region_bearings(PadRegionShape {
+            start_degrees: 0,
+            sweep_degrees: 360,
+            inner_percent: 0,
+            outer_percent: 100,
+        });
+        assert_eq!(bearings.len(), 6);
+        let wider = region_bearings(PadRegionShape {
+            start_degrees: 0,
+            sweep_degrees: u16::MAX,
+            inner_percent: 0,
+            outer_percent: 100,
+        });
+        assert!(wider.len() <= 6);
+        assert!(wider.windows(2).all(|pair| pair[0] <= pair[1]));
     }
 
     #[test]

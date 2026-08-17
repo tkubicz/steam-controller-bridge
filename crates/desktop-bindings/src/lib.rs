@@ -25,7 +25,8 @@ pub use platform::{
 };
 pub use sink::DesktopInputSink;
 pub use store::{
-    default_store_path, load_or_create_store, load_store, parse_store, save_store, BindingStore,
+    default_store_path, load_or_create_store, load_store, parse_store, reset_store, save_store,
+    BindingStore,
 };
 
 #[cfg(test)]

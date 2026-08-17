@@ -107,6 +107,31 @@ Profiles live at:
 ~/Library/Application Support/Steam Controller Bridge/bindings.json
 ```
 
+## When the store cannot be read
+
+The store is a plain JSON file the user is invited to hand-edit, so a typo in it
+is an ordinary mistake. A menu-bar app has no console and the editor is launched
+with its output discarded, so failing startup on a stderr line would leave the
+user with an app that simply never appears. Both the menu app and the editor
+therefore present the failure in an alert naming the file, the parse error, and
+two choices:
+
+- **Quit** changes nothing, so the file can be backed up or repaired by hand.
+  It is the second button and so also the one Escape picks: doing nothing to an
+  unreadable file is always safe, and the destructive choice must never be the
+  accidental one. The process exits successfully, because the user's request
+  was carried out.
+- **Reset Profiles** renames the unreadable file to `bindings-invalid.json`
+  beside itself - `bindings-invalid-1.json` and so on if that name is taken -
+  and writes a fresh store holding one empty `Default` profile. Nothing is
+  deleted, so the choice is undoable by renaming the file back. If the rename or
+  the write fails, the original is left exactly where it was.
+
+Only a store that exists and cannot be read reaches this. A missing file is
+created as the default without asking, and a store that fails while the app is
+already running keeps the previous one in memory instead (see the reload
+behavior above).
+
 Fresh stores contain one all-unbound `Default` profile. Both pads default to no
 motion mode and no regions. Pad feedback defaults to Medium and produces one
 finite tick on each physical click even when the pad has no motion mode; it can
