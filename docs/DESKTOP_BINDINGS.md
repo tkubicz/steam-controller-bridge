@@ -1,14 +1,62 @@
 # Desktop bindings
 
-The macOS bridge can map L4, L5, R4, R5, Quick Access, and the left and right
-pad clicks to held keyboard chords or left/right/middle/back/forward mouse
-buttons. It can also use the right pad for relative pointer movement and the
-left pad for two-axis smooth scrolling; a pad's click binding fires
-independently of whether that pad function is enabled. While a pad is held
-clicked its motion is frozen (see below), so the click action lands without
-disturbing the pointer or scroll position. Stick clicks remain ordinary
-Xbox controls; trigger clicks, pressure actions, and gestures are not mapped.
-The feature is host-side and requires no protocol-v1 or bridge-device firmware change.
+The macOS bridge can map L4, L5, R4, R5, and Quick Access to held keyboard
+chords or left/right/middle/back/forward mouse buttons.
+
+Each trackpad is configured independently and owns no fixed behavior. A pad has
+a **motion mode** - none, relative pointer, or two-axis smooth scrolling - and a
+list of **regions**, areas of its surface that carry their own click and touch
+actions. Either pad can take either motion mode, and region actions fire whether
+or not that pad drives motion. While a pad is held clicked its motion is frozen
+(see below), so the click action lands without disturbing the pointer or scroll
+position. Stick clicks remain ordinary Xbox controls; trigger clicks and
+pressure actions are not mapped. The feature is host-side and requires no
+protocol-v1 or bridge-device firmware change.
+
+## Regions and triggers
+
+A region is a bearing sweep crossed with an extent band: a start bearing, a
+sweep, and an inner/outer extent. Zero degrees points at twelve o'clock and
+bearings increase clockwise, the same convention `profile_picker::sector_for`
+uses for the profile wheel. Four integers therefore express a whole pad, a half,
+a quadrant, a corner, a centre square, or an edge frame; the editor ships presets
+for the common compass layouts.
+
+**Extent is measured to the pad's square edge, not as a circle.** The pads are
+rounded squares and each axis reaches full scale independently, so extent is the
+Chebyshev distance `max(|x|, |y|)` - the same metric the motion filter's
+`position_aware_threshold` already uses to grow its dead zones toward the rim.
+100% is therefore the pad boundary in every direction, corners included; a centre
+region is a square; and an edge band is a frame rather than a ring. A Euclidean
+radius would describe the disc inscribed in the pad instead, putting the corners
+at about 141% and leaving an "edge" band that bulges into the middle along the
+diagonals while missing the edge midpoints entirely.
+
+Regions are an **ordered list, resolved first-match-wins**. Overlap is legal and
+is how a centre region listed ahead of a whole-pad region shadows it, so a layout
+the user draws is never rejected for overlapping itself. A pad supports up to 16
+regions and starts with none.
+
+Each region binds two triggers, which differ deliberately:
+
+- **Click** resolves its region once, at the press, and holds that action until
+  the pad is physically released. Sliding during a held click cannot swap the
+  action. The region is read from the pressure-freeze anchor rather than the
+  click bit, because pressure crosses its threshold tens of milliseconds earlier
+  and so precedes most of the fingertip roll.
+- **Touch** follows the finger: crossing into a different region releases the old
+  action and presses the new one, and lifting off releases. Boundaries carry a
+  4%/6-degree hysteresis margin around the region currently occupied, so a finger
+  resting on a seam holds one action instead of alternating between two.
+
+Region tracking freezes while the pad is effectively pressed and through the
+release guard, because a flattening or un-flattening fingertip's reported
+centroid wanders far enough to cross seams on its own.
+
+Gesture support - swipe, rotate, tap - is not implemented. When it lands it
+becomes further `PadTrigger` variants and further `PadEvent` arms in
+`desktop-bindings`, dispatched through the same reference-counted press/release
+path as everything above, rather than a second binding mechanism.
 
 ## Menu app
 
@@ -17,6 +65,13 @@ profiles. Profile IDs never change when a display name is renamed. Save writes
 the validated store atomically; Cancel discards the editor copy. The running
 menu app reloads a valid replacement and keeps the previous store if a partial
 or invalid file appears.
+
+Selecting a pad opens its motion mode, speed, momentum, and feedback, then its
+regions: a layout preset that replaces the list, a map of the current regions
+drawn on that pad's own shape and cant, and the ordered list itself. Selecting a
+region opens its name, its four shape numbers, and its click and touch actions,
+which use the same action picker as the buttons. The list order is the resolution
+order, so a region can be raised above the ones it overlaps.
 
 Selecting a profile applies it without restarting HID or serial. A switch
 releases every old held output and ignores physical controls already held until
@@ -52,17 +107,46 @@ Profiles live at:
 ~/Library/Application Support/Steam Controller Bridge/bindings.json
 ```
 
-Fresh stores contain one all-unbound `Default` profile. Both pad functions are
-off by default. Pad feedback defaults to Medium and produces one finite tick
-on each physical click even when the pointer or scroll function is disabled;
-it can be disabled or set to Low (-36 dB), Medium (-30 dB), or High (-24 dB)
-independently for each side. Right-pad pointer motion uses the captured lizard
-mode's larger anchored stationary envelope: 2,560 counts at pad center, growing
-to 3,584 at the rim, and re-parks after a 100 ms window without 384-768 counts
-of position-aware net progress. Left-pad scrolling retains its more responsive 192-count center
-envelope, growing to 2,048 counts at the edge, and its 150 ms stop window. A
-resting finger's bounded wander around its anchor emits nothing; intentional
-travel forwards only the excess beyond the current envelope.
+## When the store cannot be read
+
+The store is a plain JSON file the user is invited to hand-edit, so a typo in it
+is an ordinary mistake. A menu-bar app has no console and the editor is launched
+with its output discarded, so failing startup on a stderr line would leave the
+user with an app that simply never appears. Both the menu app and the editor
+therefore present the failure in an alert naming the file, the parse error, and
+two choices:
+
+- **Quit** changes nothing, so the file can be backed up or repaired by hand.
+  It is the second button and so also the one Escape picks: doing nothing to an
+  unreadable file is always safe, and the destructive choice must never be the
+  accidental one. The process exits successfully, because the user's request
+  was carried out.
+- **Reset Profiles** renames the unreadable file to `bindings-invalid.json`
+  beside itself - `bindings-invalid-1.json` and so on if that name is taken -
+  and writes a fresh store holding one empty `Default` profile. Nothing is
+  deleted, so the choice is undoable by renaming the file back. If the rename or
+  the write fails, the original is left exactly where it was.
+
+Only a store that exists and cannot be read reaches this. A missing file is
+created as the default without asking, and a store that fails while the app is
+already running keeps the previous one in memory instead (see the reload
+behavior above).
+
+Fresh stores contain one all-unbound `Default` profile. Both pads default to no
+motion mode and no regions. Pad feedback defaults to Medium and produces one
+finite tick on each physical click even when the pad has no motion mode; it can
+be disabled or set to Low (-36 dB), Medium (-30 dB), or High (-24 dB)
+independently for each side. A touch crossing into a region that binds a touch
+action also ticks, rate-limited to the movement texture's fastest 80 ms interval
+so boundary traffic cannot flood the actuator.
+
+Motion thresholds follow the mode, not the side. Pointer motion uses the
+captured lizard mode's larger anchored stationary envelope: 2,560 counts at pad
+center, growing to 3,584 at the rim, and re-parks after a 100 ms window without
+384-768 counts of position-aware net progress. Scrolling retains its more
+responsive 192-count center envelope, growing to 2,048 counts at the edge, and
+its 150 ms stop window. A resting finger's bounded wander around its anchor emits
+nothing; intentional travel forwards only the excess beyond the current envelope.
 
 A pad press freezes that pad's motion. The supplied raw capture shows the
 reported centroid wandering hundreds to thousands of counts as a fingertip
@@ -89,13 +173,13 @@ texture without allowing a stationary finger to tick. Parked or press-frozen
 coordinate noise is discarded before feedback accounting, and rate-limited
 ticks are discarded rather than delayed.
 
-Left-pad scrolling uses pixel-level smooth scroll events. Swipe velocity adds
-up to 3x acceleration, the profile's 25%-300% speed setting scales the result,
-and optional momentum decays after touch release. Speed defaults to 100% and
-momentum defaults on; neither setting has any effect until left-pad scrolling
-itself is enabled.
+Scrolling uses pixel-level smooth scroll events. Swipe velocity adds up to 3x
+acceleration, the profile's 25%-300% speed setting scales the result, and
+optional momentum decays after touch release. Speed defaults to 100% and momentum
+defaults on; both are kept while a pad's motion mode is `none`, so turning a mode
+back on restores the tuning rather than the defaults.
 
-The version-4 schema
+The version-5 schema
 supports 1-32 profiles, trimmed unique names, letters, digits, F1-F24,
 navigation/editing keys, punctuation, numpad keys, common media keys, the four
 standard modifiers, and five mouse buttons. Modifier-only and raw-keycode
@@ -104,37 +188,64 @@ keys but no F21-F24 or play/previous/next media identities; using those portable
 entries reports a binding-only degraded error rather than substituting another
 key. A physical pad-click rising edge emits exactly one tick at that pad's
 configured feedback strength. Holding or releasing it emits no additional
-tick, and disabling pad feedback suppresses both click and movement ticks.
+tick, and disabling pad feedback suppresses click, touch, and movement ticks.
 
-Version-1 through version-3 stores are migrated atomically without changing
-profile IDs, names, button bindings, or existing pad enablement and feedback;
-pad clicks start unbound. Pad click bindings live beside the button bindings as
-`left_pad_click` and `right_pad_click` and use the same action shapes:
-
-```json
-"bindings": {
-  "left_pad_click": { "kind": "key_chord", "key": "F5", "modifiers": ["command"] },
-  "right_pad_click": { "kind": "mouse_button", "button": "middle" }
-}
-```
-
-The pad section is:
+Each pad is one object with its motion mode, its shared speed and momentum
+settings, its feedback, and its ordered region list:
 
 ```json
 "pads": {
-  "right_mouse": {
-    "enabled": false,
-    "feedback": { "enabled": true, "strength": "medium" },
-    "speed_percent": 100
-  },
-  "left_scroll": {
-    "enabled": false,
-    "feedback": { "enabled": true, "strength": "medium" },
+  "left": {
+    "motion": "scroll",
     "speed_percent": 100,
-    "momentum": true
+    "momentum": true,
+    "feedback": { "enabled": true, "strength": "medium" },
+    "regions": []
+  },
+  "right": {
+    "motion": "pointer",
+    "speed_percent": 100,
+    "momentum": true,
+    "feedback": { "enabled": true, "strength": "medium" },
+    "regions": [
+      {
+        "name": "Left",
+        "shape": {
+          "start_degrees": 248,
+          "sweep_degrees": 45,
+          "inner_percent": 0,
+          "outer_percent": 100
+        },
+        "click": { "kind": "key_chord", "key": "ArrowLeft", "modifiers": [] },
+        "touch": null
+      }
+    ]
   }
 }
 ```
+
+Validation rejects a version other than the current one, a pad speed outside
+25%-300%, more than 16 regions on a pad, an untrimmed, empty, or
+over-32-character region name, a duplicate region name within a pad, a sweep
+outside 1-360 degrees, a start bearing of 360 or more, and an extent band whose
+inner edge is not below its outer edge.
+
+## Migration
+
+Version 1 through version 4 stores are read through a frozen mirror of the old
+schema and converted in place; the rewrite is atomic and changes no profile ID,
+name, or button binding. Because the store denies unknown fields, a document that
+predates regions cannot deserialize into the current shape at all, so this is a
+real conversion rather than a version-number bump.
+
+| Version 4 | Version 5 |
+| --- | --- |
+| `pads.right_mouse.enabled` | `pads.right.motion` becomes `pointer`, else `none` |
+| `pads.left_scroll.enabled` | `pads.left.motion` becomes `scroll`, else `none` |
+| `speed_percent`, `momentum`, `feedback` | carried onto the matching pad verbatim |
+| `bindings.left_pad_click` | one whole-pad region on the left pad, bound on click |
+| `bindings.right_pad_click` | the same on the right pad |
+| an unbound pad click | no regions on that pad |
 
 ## CLI
 
@@ -153,10 +264,18 @@ option before opening a recording, so replay cannot inject desktop input.
 
 Physical press emits output-down once and physical release emits output-up.
 Keys, modifiers, and mouse buttons are reference-counted across overlapping or
-duplicate bindings. Startup and reconnect establish a non-emitting baseline.
-Stop, disconnect, shutdown, output failure, permission loss, profile change,
-and transition-mailbox overflow perform best-effort release of every held
-desktop output.
+duplicate bindings, which is also what lets a pad's click and touch actions, or
+two pads' actions, hold the same key at once without one release cancelling the
+other. Startup and reconnect establish a non-emitting baseline. Stop, disconnect,
+shutdown, output failure, permission loss, profile change, and
+transition-mailbox overflow perform best-effort release of every held desktop
+output, including both region latches on each pad. A pad touched or clicked
+across a profile switch or a sink failure stays inert until it is physically
+released.
+
+A pad holds at most one click action and at most one touch action at a time. A
+touch hand-off releases the region it is leaving before it presses the one it is
+entering, so the two are never held together.
 
 Desktop-output failures increment separate status counters and disable only the
 binding sink. Standard Xbox output, rumble, lizard suppression, recording,

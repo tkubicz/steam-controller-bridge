@@ -78,23 +78,73 @@ fn pad_snapshot(
     }
 }
 
+fn touching(x: i16, y: i16) -> PadSample {
+    PadSample {
+        x,
+        y,
+        touched: true,
+        ..PadSample::NEUTRAL
+    }
+}
+
+fn clicking(x: i16, y: i16) -> PadSample {
+    PadSample {
+        pressed: true,
+        ..touching(x, y)
+    }
+}
+
+fn side_snapshot(side: PadSide, sample: PadSample) -> DesktopInputSnapshot {
+    let mut snapshot = DesktopInputSnapshot::buttons_only(SteamButtons::default());
+    *match side {
+        PadSide::Left => &mut snapshot.left_pad,
+        PadSide::Right => &mut snapshot.right_pad,
+    } = sample;
+    snapshot
+}
+
+/// One region covering the whole pad, binding `action` to `trigger`. This is
+/// what a pre-region pad-click binding becomes.
+fn whole_pad(trigger: PadTrigger, action: BindingAction) -> Vec<PadRegion> {
+    let mut regions = PadRegion::whole();
+    *regions[0].action_mut(trigger) = Some(action);
+    regions
+}
+
+/// Feeds a pad one timed sample per entry and returns the last feedback request.
+fn drive_pad(
+    engine: &mut BindingEngine,
+    sink: &mut MockSink,
+    side: PadSide,
+    steps: &[(u64, PadSample)],
+) -> PadFeedbackRequest {
+    let mut last = PadFeedbackRequest::NONE;
+    for (millis, sample) in steps {
+        last = engine
+            .observe_snapshot(
+                side_snapshot(side, *sample),
+                Duration::from_millis(*millis),
+                sink,
+            )
+            .unwrap();
+    }
+    last
+}
+
 #[test]
 fn store_round_trips_and_defaults_are_unbound() {
     let store = BindingStore::default();
     assert_eq!(store.profiles[0].bindings.configured_count(), 0);
     assert_eq!(store.profiles[0].configured_output_count(), 0);
-    assert!(!store.profiles[0].pads.left_scroll.enabled);
-    assert!(!store.profiles[0].pads.right_mouse.enabled);
-    assert!(store.profiles[0].pads.left_scroll.feedback.enabled);
-    assert_eq!(
-        store.profiles[0].pads.left_scroll.speed_percent,
-        DEFAULT_PAD_SPEED_PERCENT
-    );
-    assert!(store.profiles[0].pads.left_scroll.momentum);
-    assert_eq!(
-        store.profiles[0].pads.right_mouse.feedback.strength,
-        PadFeedbackStrength::Medium
-    );
+    for side in PadSide::ALL {
+        let pad = store.profiles[0].pads.get(side);
+        assert_eq!(pad.motion, PadMotionMode::None);
+        assert!(pad.regions.is_empty());
+        assert!(pad.feedback.enabled);
+        assert_eq!(pad.feedback.strength, PadFeedbackStrength::Medium);
+        assert_eq!(pad.speed_percent, DEFAULT_PAD_SPEED_PERCENT);
+        assert!(pad.momentum);
+    }
     let bytes = serde_json::to_vec(&store).unwrap();
     let decoded: BindingStore = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(decoded, store);
@@ -265,8 +315,6 @@ fn loading_version_one_atomically_migrates_to_the_current_version() {
         "F5"
     );
     assert_eq!(store.profiles[0].pads, PadBindings::default());
-    assert!(store.profiles[0].bindings.left_pad_click.is_none());
-    assert!(store.profiles[0].bindings.right_pad_click.is_none());
     let persisted: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(persisted["version"], BINDINGS_VERSION);
     assert!(persisted["profiles"][0]["pads"].is_object());
@@ -275,7 +323,7 @@ fn loading_version_one_atomically_migrates_to_the_current_version() {
 }
 
 #[test]
-fn loading_version_three_migrates_with_pad_clicks_unbound() {
+fn loading_version_three_migrates_scroll_settings_and_leaves_the_pad_unregioned() {
     let json = br#"{
           "version": 3,
           "profiles": [{
@@ -296,32 +344,94 @@ fn loading_version_three_migrates_with_pad_clicks_unbound() {
         }"#;
     let store = parse_store(json).unwrap();
     assert_eq!(store.version, BINDINGS_VERSION);
-    assert!(store.profiles[0].bindings.left_pad_click.is_none());
-    assert!(store.profiles[0].bindings.right_pad_click.is_none());
     assert_eq!(store.profiles[0].bindings.configured_count(), 1);
-    assert_eq!(store.profiles[0].pads.left_scroll.speed_percent, 150);
+    let left = &store.profiles[0].pads.left;
+    assert_eq!(left.motion, PadMotionMode::Scroll);
+    assert_eq!(left.speed_percent, 150);
+    assert!(!left.momentum);
+    assert!(left.regions.is_empty());
+    assert_eq!(store.profiles[0].pads.right.motion, PadMotionMode::None);
 }
 
 #[test]
-fn pad_click_bindings_round_trip_and_count() {
+fn a_version_four_pad_click_migrates_onto_a_whole_pad_region() {
+    let json = br#"{
+          "version": 4,
+          "profiles": [{
+            "id": "default",
+            "name": "Default",
+            "bindings": {
+              "r4": {"kind": "key_chord", "key": "F5", "modifiers": []},
+              "left_pad_click": {"kind": "key_chord", "key": "F9", "modifiers": ["shift"]},
+              "right_pad_click": {"kind": "mouse_button", "button": "middle"}
+            },
+            "pads": {
+              "right_mouse": {
+                "enabled": true,
+                "feedback": {"enabled": false, "strength": "low"},
+                "speed_percent": 200
+              },
+              "left_scroll": {"enabled": false, "speed_percent": 175, "momentum": false}
+            }
+          }]
+        }"#;
+    let store = parse_store(json).unwrap();
+    assert_eq!(store.version, BINDINGS_VERSION);
+    // Button bindings, IDs, and names are untouched by the migration.
+    assert_eq!(store.profiles[0].id, "default");
+    assert_eq!(store.profiles[0].bindings.configured_count(), 1);
+
+    let left = &store.profiles[0].pads.left;
+    assert_eq!(left.motion, PadMotionMode::None);
+    // A disabled pad keeps the settings it had, so re-enabling it in the editor
+    // restores the user's tuning rather than the defaults.
+    assert_eq!(left.speed_percent, 175);
+    assert!(!left.momentum);
+    assert_eq!(left.regions.len(), 1);
+    assert_eq!(left.regions[0].shape, PadRegionShape::WHOLE);
+    assert_eq!(
+        left.regions[0].click,
+        Some(chord(KeyboardKey::F9, &[Modifier::Shift]))
+    );
+    assert!(left.regions[0].touch.is_none());
+
+    let right = &store.profiles[0].pads.right;
+    assert_eq!(right.motion, PadMotionMode::Pointer);
+    assert_eq!(right.speed_percent, 200);
+    assert!(!right.feedback.enabled);
+    assert_eq!(right.feedback.strength, PadFeedbackStrength::Low);
+    assert_eq!(
+        right.regions[0].click,
+        Some(BindingAction::MouseButton {
+            button: MouseButton::Middle
+        })
+    );
+    store.validate().unwrap();
+}
+
+#[test]
+fn region_bindings_round_trip_and_count() {
     let mut store = BindingStore::default();
-    store.profiles[0].bindings.left_pad_click = Some(chord(KeyboardKey::F5, &[Modifier::Shift]));
-    store.profiles[0].bindings.right_pad_click = Some(BindingAction::MouseButton {
+    let mut regions = PadRegion::four_way();
+    regions[3].click = Some(chord(KeyboardKey::ArrowLeft, &[]));
+    regions[3].touch = Some(BindingAction::MouseButton {
         button: MouseButton::Middle,
     });
-    assert_eq!(store.profiles[0].bindings.configured_count(), 2);
+    store.profiles[0].pads.left.regions = regions;
+    store.profiles[0].pads.right.motion = PadMotionMode::Pointer;
+    assert_eq!(store.profiles[0].configured_output_count(), 3);
+    store.validate().unwrap();
+
     let bytes = serde_json::to_vec(&store).unwrap();
     let decoded: BindingStore = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(decoded, store);
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(
-        value["profiles"][0]["bindings"]["left_pad_click"]["kind"],
-        "key_chord"
-    );
-    assert_eq!(
-        value["profiles"][0]["bindings"]["right_pad_click"]["button"],
-        "middle"
-    );
+    let left = &value["profiles"][0]["pads"]["left"];
+    assert_eq!(left["motion"], "none");
+    assert_eq!(left["regions"][3]["name"], "Left");
+    assert_eq!(left["regions"][3]["click"]["key"], "ArrowLeft");
+    assert_eq!(left["regions"][3]["touch"]["button"], "middle");
+    assert_eq!(value["profiles"][0]["pads"]["right"]["motion"], "pointer");
 }
 
 #[test]
@@ -346,62 +456,133 @@ fn loading_version_two_preserves_pads_and_adds_scroll_defaults() {
         }"#;
     let store = parse_store(json).unwrap();
     assert_eq!(store.version, BINDINGS_VERSION);
-    assert!(store.profiles[0].pads.right_mouse.enabled);
-    assert!(!store.profiles[0].pads.right_mouse.feedback.enabled);
-    let scroll = store.profiles[0].pads.left_scroll;
-    assert!(scroll.enabled);
+    assert_eq!(store.profiles[0].pads.right.motion, PadMotionMode::Pointer);
+    assert!(!store.profiles[0].pads.right.feedback.enabled);
+    let scroll = &store.profiles[0].pads.left;
+    assert_eq!(scroll.motion, PadMotionMode::Scroll);
     assert_eq!(scroll.feedback.strength, PadFeedbackStrength::High);
     assert_eq!(scroll.speed_percent, DEFAULT_PAD_SPEED_PERCENT);
     assert!(scroll.momentum);
 }
 
 #[test]
-fn store_rejects_scroll_speed_outside_supported_range() {
-    let mut store = BindingStore::default();
-    store.profiles[0].pads.left_scroll.speed_percent = MIN_PAD_SPEED_PERCENT - 1;
-    assert!(store.validate().is_err());
-    store.profiles[0].pads.left_scroll.speed_percent = MAX_PAD_SPEED_PERCENT + 1;
-    assert!(store.validate().is_err());
+fn store_rejects_pad_speed_outside_supported_range() {
+    for side in PadSide::ALL {
+        let mut store = BindingStore::default();
+        assert_eq!(
+            store.profiles[0].pads.get(side).speed_percent,
+            DEFAULT_PAD_SPEED_PERCENT
+        );
+        store.profiles[0].pads.get_mut(side).speed_percent = MIN_PAD_SPEED_PERCENT - 1;
+        assert!(store.validate().unwrap_err().contains(side.label()));
+        store.profiles[0].pads.get_mut(side).speed_percent = MAX_PAD_SPEED_PERCENT + 1;
+        assert!(store.validate().is_err());
+        store.profiles[0].pads.get_mut(side).speed_percent = 150;
+        store.validate().unwrap();
+    }
 }
 
 #[test]
-fn store_rejects_pointer_speed_outside_supported_range_and_defaults_it() {
-    let mut store = BindingStore::default();
-    assert_eq!(
-        store.profiles[0].pads.right_mouse.speed_percent,
-        DEFAULT_PAD_SPEED_PERCENT
-    );
-    store.profiles[0].pads.right_mouse.speed_percent = MIN_PAD_SPEED_PERCENT - 1;
-    assert!(store.validate().unwrap_err().contains("pointer speed"));
-    store.profiles[0].pads.right_mouse.speed_percent = MAX_PAD_SPEED_PERCENT + 1;
-    assert!(store.validate().is_err());
-    store.profiles[0].pads.right_mouse.speed_percent = 150;
-    store.validate().unwrap();
-    let bytes = serde_json::to_vec(&store).unwrap();
-    let decoded: BindingStore = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(decoded, store);
+fn store_rejects_malformed_regions() {
+    /// One way to break an otherwise valid pad, and the word its rejection must
+    /// contain so the message points at the actual problem.
+    type Case = (&'static str, fn(&mut PadConfig));
+    let cases: [Case; 5] = [
+        ("region name", |pad| {
+            pad.regions[0].name = " Top".to_owned();
+        }),
+        ("duplicate", |pad| {
+            pad.regions[1].name = pad.regions[0].name.clone();
+        }),
+        ("degree sweep", |pad| {
+            pad.regions[0].shape.sweep_degrees = 0;
+        }),
+        ("degree sweep", |pad| {
+            pad.regions[0].shape.start_degrees = 360;
+        }),
+        ("degree sweep", |pad| {
+            pad.regions[0].shape.inner_percent = pad.regions[0].shape.outer_percent;
+        }),
+    ];
+    for (expected, break_it) in cases {
+        let mut store = BindingStore::default();
+        store.profiles[0].pads.left.regions = PadRegion::four_way();
+        break_it(&mut store.profiles[0].pads.left);
+        let error = store.validate().unwrap_err();
+        assert!(
+            error.contains(expected),
+            "{error:?} should mention {expected}"
+        );
+    }
 
-    // A v4 document written before the pointer-speed field existed still
-    // parses, with the speed defaulted.
-    let json = br#"{
-          "version": 4,
-          "profiles": [{
-            "id": "default",
-            "name": "Default",
-            "bindings": {},
-            "pads": {
-              "right_mouse": {
-                "enabled": true,
-                "feedback": {"enabled": true, "strength": "medium"}
-              }
-            }
-          }]
-        }"#;
-    let parsed = parse_store(json).unwrap();
+    let mut store = BindingStore::default();
+    store.profiles[0].pads.left.regions = (0..=MAX_PAD_REGIONS)
+        .map(|index| PadRegion::new(format!("R{index}"), PadRegionShape::WHOLE))
+        .collect();
+    assert!(store.validate().unwrap_err().contains("at most"));
+}
+
+#[test]
+fn resetting_an_unreadable_store_keeps_the_original_beside_a_fresh_default() {
+    let directory =
+        std::env::temp_dir().join(format!("desktop-bindings-reset-{}", std::process::id()));
+    let path = directory.join("bindings.json");
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(&path, b"{ this is not a binding store }").unwrap();
+    assert!(load_or_create_store(&path).is_err());
+
+    let kept = reset_store(&path).unwrap();
+
+    // The default is usable and the user's file survives under a name they can
+    // rename back.
     assert_eq!(
-        parsed.profiles[0].pads.right_mouse.speed_percent,
-        DEFAULT_PAD_SPEED_PERCENT
+        load_or_create_store(&path).unwrap(),
+        BindingStore::default()
     );
+    assert_eq!(kept, directory.join("bindings-invalid.json"));
+    assert_eq!(fs::read(&kept).unwrap(), b"{ this is not a binding store }");
+
+    // A second reset does not clobber the first rescue.
+    fs::write(&path, b"broken again").unwrap();
+    let second = reset_store(&path).unwrap();
+    assert_eq!(second, directory.join("bindings-invalid-1.json"));
+    assert_eq!(fs::read(&kept).unwrap(), b"{ this is not a binding store }");
+    assert_eq!(fs::read(&second).unwrap(), b"broken again");
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn resetting_a_store_that_cannot_be_moved_leaves_it_alone() {
+    let directory = std::env::temp_dir().join(format!(
+        "desktop-bindings-reset-fail-{}",
+        std::process::id()
+    ));
+    let path = directory.join("bindings.json");
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(&path, b"broken").unwrap();
+
+    let mut permissions = fs::metadata(&directory).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&directory, permissions).unwrap();
+    // Root ignores the directory's write bit, so there is nothing to assert
+    // about a failure that cannot be produced.
+    let read_only = fs::write(directory.join("probe"), b"").is_err();
+
+    if read_only {
+        assert!(reset_store(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"broken");
+    }
+
+    let mut permissions = fs::metadata(&directory).unwrap().permissions();
+    #[allow(
+        clippy::permissions_set_readonly_false,
+        reason = "restoring the temporary directory so the test can clean up after itself"
+    )]
+    permissions.set_readonly(false);
+    fs::set_permissions(&directory, permissions).unwrap();
+    let _ = fs::remove_dir_all(directory);
 }
 
 #[test]
@@ -575,16 +756,25 @@ fn sink_failure_releases_existing_outputs_and_rebaselines() {
 }
 
 #[test]
-fn pad_click_press_release_mirrors_binding() {
+fn pad_click_press_release_mirrors_its_regions_binding() {
     let mut profile = BindingProfile::default();
-    profile.bindings.left_pad_click = Some(chord(KeyboardKey::F5, &[Modifier::Command]));
+    profile.pads.left.regions = whole_pad(
+        PadTrigger::Click,
+        chord(KeyboardKey::F5, &[Modifier::Command]),
+    );
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
-    engine.observe(buttons(&[]), &mut sink).unwrap();
-    engine
-        .observe(buttons(&[BindableControl::LeftPadClick]), &mut sink)
-        .unwrap();
-    engine.observe(buttons(&[]), &mut sink).unwrap();
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Left,
+        &[
+            (0, PadSample::NEUTRAL),
+            (10, touching(0, 0)),
+            (20, clicking(0, 0)),
+            (30, touching(0, 0)),
+        ],
+    );
     assert_eq!(
         sink.events,
         [
@@ -597,59 +787,47 @@ fn pad_click_press_release_mirrors_binding() {
 }
 
 #[test]
-fn pad_click_fires_regardless_of_pad_function_and_alongside_motion() {
-    // With the pad function disabled, the click is still a live binding.
-    let mut disabled = BindingProfile::default();
-    disabled.bindings.right_pad_click = Some(BindingAction::MouseButton {
+fn pad_click_fires_regardless_of_pad_motion_and_alongside_it() {
+    let action = BindingAction::MouseButton {
         button: MouseButton::Left,
-    });
+    };
+    // With the pad's motion mode off, the click is still a live binding.
+    let mut disabled = BindingProfile::default();
+    disabled.pads.right.regions = whole_pad(PadTrigger::Click, action.clone());
     let mut engine = BindingEngine::new(disabled.clone());
     let mut sink = MockSink::default();
-    engine.observe(buttons(&[]), &mut sink).unwrap();
-    engine
-        .observe(buttons(&[BindableControl::RightPadClick]), &mut sink)
-        .unwrap();
-    engine.observe(buttons(&[]), &mut sink).unwrap();
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Right,
+        &[
+            (0, PadSample::NEUTRAL),
+            (10, touching(0, 0)),
+            (20, clicking(0, 0)),
+            (30, touching(0, 0)),
+        ],
+    );
     assert_eq!(sink.events, ["mouse:Left:true", "mouse:Left:false"]);
 
-    // With the pad function enabled, pointer motion and a click both reach the
-    // sink during one continuous touch.
+    // With pointer motion on, motion and the click both reach the sink during
+    // one continuous touch.
     let mut profile = disabled;
-    profile.pads.right_mouse.enabled = true;
-    profile.pads.right_mouse.feedback.enabled = false;
+    profile.pads.right.motion = PadMotionMode::Pointer;
+    profile.pads.right.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
-    let neutral = SteamButtons::default();
-    engine
-        .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
-        .unwrap();
-    engine
-        .observe_snapshot(
-            pad_snapshot(neutral, None, Some((100, 100))),
-            Duration::from_millis(1),
-            &mut sink,
-        )
-        .unwrap();
-    engine
-        .observe_snapshot(
-            pad_snapshot(neutral, None, Some((3_044, 292))),
-            Duration::from_millis(20),
-            &mut sink,
-        )
-        .unwrap();
-    let clicked = buttons(&[BindableControl::RightPadClick]);
-    let mut snapshot = pad_snapshot(clicked, None, Some((3_044, 292)));
-    snapshot.right_pad.pressed = true;
-    engine
-        .observe_snapshot(snapshot, Duration::from_millis(40), &mut sink)
-        .unwrap();
-    engine
-        .observe_snapshot(
-            pad_snapshot(neutral, None, Some((3_044, 292))),
-            Duration::from_millis(60),
-            &mut sink,
-        )
-        .unwrap();
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Right,
+        &[
+            (0, PadSample::NEUTRAL),
+            (1, touching(100, 100)),
+            (20, touching(3_044, 292)),
+            (40, clicking(3_044, 292)),
+            (60, touching(3_044, 292)),
+        ],
+    );
     assert!(sink.events.contains(&"mouse:Left:true".to_owned()));
     assert!(sink.events.contains(&"mouse:Left:false".to_owned()));
     assert!(sink.events.iter().any(|event| event.starts_with("move:")));
@@ -661,8 +839,8 @@ fn press_hold_freezes_wander_for_entire_hold() {
     // is physically pressed. None of it may reach the pointer, no matter how
     // long the click is held.
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
-    profile.pads.right_mouse.feedback.enabled = false;
+    profile.pads.right.motion = PadMotionMode::Pointer;
+    profile.pads.right.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -699,8 +877,8 @@ fn pressure_freeze_engages_before_the_click_bit() {
     // click bit sets (and sometimes without ever setting it). The freeze must
     // key on pressure so that wander cannot reach the pointer.
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
-    profile.pads.right_mouse.feedback.enabled = false;
+    profile.pads.right.motion = PadMotionMode::Pointer;
+    profile.pads.right.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -753,37 +931,28 @@ fn pressure_freeze_engages_before_the_click_bit() {
 }
 
 #[test]
-fn pad_click_feedback_is_edge_triggered_when_the_pad_function_is_disabled() {
+fn pad_click_feedback_is_edge_triggered_when_the_pad_has_no_motion_mode() {
     let profile = BindingProfile::default();
-    assert!(!profile.pads.right_mouse.enabled);
+    assert_eq!(profile.pads.right.motion, PadMotionMode::None);
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
-    let neutral = SteamButtons::default();
-    let clicked = buttons(&[BindableControl::RightPadClick]);
-    let pressed_at = |pressed| {
-        let mut snapshot =
-            pad_snapshot(if pressed { clicked } else { neutral }, None, Some((0, 0)));
-        snapshot.right_pad.pressed = pressed;
-        snapshot
+    let step = |engine: &mut BindingEngine, sink: &mut MockSink, millis, sample| {
+        engine
+            .observe_snapshot(
+                side_snapshot(PadSide::Right, sample),
+                Duration::from_millis(millis),
+                sink,
+            )
+            .unwrap()
     };
 
-    engine
-        .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
-        .unwrap();
-    engine
-        .observe_snapshot(pressed_at(false), Duration::from_millis(1), &mut sink)
-        .unwrap();
-    let press = engine
-        .observe_snapshot(pressed_at(true), Duration::from_millis(10), &mut sink)
-        .unwrap();
+    step(&mut engine, &mut sink, 0, PadSample::NEUTRAL);
+    step(&mut engine, &mut sink, 1, touching(0, 0));
+    let press = step(&mut engine, &mut sink, 10, clicking(0, 0));
     assert_eq!(press.right, Some(PadFeedbackStrength::Medium));
-    let hold = engine
-        .observe_snapshot(pressed_at(true), Duration::from_millis(40), &mut sink)
-        .unwrap();
+    let hold = step(&mut engine, &mut sink, 40, clicking(0, 0));
     assert_eq!(hold, PadFeedbackRequest::NONE);
-    let release = engine
-        .observe_snapshot(pressed_at(false), Duration::from_millis(60), &mut sink)
-        .unwrap();
+    let release = step(&mut engine, &mut sink, 60, touching(0, 0));
     assert_eq!(release, PadFeedbackRequest::NONE);
     assert!(sink.events.is_empty());
 }
@@ -791,65 +960,46 @@ fn pad_click_feedback_is_edge_triggered_when_the_pad_function_is_disabled() {
 #[test]
 fn pad_click_feedback_respects_each_pads_feedback_setting() {
     let mut profile = BindingProfile::default();
-    profile.pads.left_scroll.feedback.enabled = false;
-    profile.pads.right_mouse.feedback.strength = PadFeedbackStrength::High;
+    profile.pads.left.feedback.enabled = false;
+    profile.pads.right.feedback.strength = PadFeedbackStrength::High;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
-    let neutral = SteamButtons::default();
 
-    engine
-        .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
-        .unwrap();
-    let left = engine
-        .observe_snapshot(
-            pad_snapshot(
-                buttons(&[BindableControl::LeftPadClick]),
-                Some((0, 0)),
-                None,
-            ),
-            Duration::from_millis(1),
-            &mut sink,
-        )
-        .unwrap();
+    let left = drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Left,
+        &[
+            (0, PadSample::NEUTRAL),
+            (1, touching(0, 0)),
+            (10, clicking(0, 0)),
+        ],
+    );
     assert_eq!(left, PadFeedbackRequest::NONE);
-    engine
-        .observe_snapshot(
-            pad_snapshot(neutral, None, None),
-            Duration::from_millis(2),
-            &mut sink,
-        )
-        .unwrap();
-    let right = engine
-        .observe_snapshot(
-            pad_snapshot(
-                buttons(&[BindableControl::RightPadClick]),
-                None,
-                Some((0, 0)),
-            ),
-            Duration::from_millis(3),
-            &mut sink,
-        )
-        .unwrap();
+    let right = drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Right,
+        &[(20, touching(0, 0)), (30, clicking(0, 0))],
+    );
     assert_eq!(right.right, Some(PadFeedbackStrength::High));
 }
 
 #[test]
 fn click_freeze_swallows_press_wander_but_drag_escapes() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
-    profile.pads.right_mouse.feedback.enabled = false;
-    profile.bindings.right_pad_click = Some(BindingAction::MouseButton {
-        button: MouseButton::Left,
-    });
+    profile.pads.right.motion = PadMotionMode::Pointer;
+    profile.pads.right.feedback.enabled = false;
+    profile.pads.right.regions = whole_pad(
+        PadTrigger::Click,
+        BindingAction::MouseButton {
+            button: MouseButton::Left,
+        },
+    );
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
-    let clicked = buttons(&[BindableControl::RightPadClick]);
-    let pressed_at = |x, y| {
-        let mut snapshot = pad_snapshot(clicked, None, Some((x, y)));
-        snapshot.right_pad.pressed = true;
-        snapshot
-    };
+    let pressed_at = |x, y| side_snapshot(PadSide::Right, clicking(x, y));
 
     engine
         .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
@@ -913,8 +1063,8 @@ fn oscillating_noise_reparks_after_a_stop_window() {
     // Alternating jitter has near-zero net displacement per stop window, so
     // pass-through motion must re-park instead of leaking jitter forever.
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
-    profile.pads.right_mouse.feedback.enabled = false;
+    profile.pads.right.motion = PadMotionMode::Pointer;
+    profile.pads.right.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -971,54 +1121,76 @@ fn oscillating_noise_reparks_after_a_stop_window() {
 }
 
 #[test]
-fn pad_click_held_at_baseline_is_blocked_until_released() {
+fn a_pad_clicked_at_baseline_is_blocked_until_it_is_released() {
     let mut profile = BindingProfile::default();
-    profile.bindings.left_pad_click = Some(chord(KeyboardKey::F5, &[]));
+    profile.pads.left.regions = whole_pad(PadTrigger::Click, chord(KeyboardKey::F5, &[]));
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
-    engine
-        .observe(buttons(&[BindableControl::LeftPadClick]), &mut sink)
-        .unwrap();
+    // The baseline snapshot already has the pad held down.
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Left,
+        &[(0, clicking(0, 0)), (10, clicking(0, 0))],
+    );
     assert!(sink.events.is_empty());
-    engine.observe(buttons(&[]), &mut sink).unwrap();
-    assert!(sink.events.is_empty());
-    engine
-        .observe(buttons(&[BindableControl::LeftPadClick]), &mut sink)
-        .unwrap();
+    // Lifting off clears the block; the next press is a live binding again.
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Left,
+        &[
+            (20, PadSample::NEUTRAL),
+            (30, touching(0, 0)),
+            (40, clicking(0, 0)),
+        ],
+    );
     assert_eq!(sink.events, ["key:F5:true"]);
 }
 
 #[test]
 fn profile_switch_releases_and_blocks_a_held_pad_click() {
     let mut first = BindingProfile::default();
-    first.bindings.right_pad_click = Some(chord(KeyboardKey::F5, &[]));
+    first.pads.right.regions = whole_pad(PadTrigger::Click, chord(KeyboardKey::F5, &[]));
     let mut second = BindingProfile {
         id: "second".to_owned(),
         name: "Second".to_owned(),
         ..BindingProfile::default()
     };
-    second.bindings.right_pad_click = Some(chord(KeyboardKey::F9, &[]));
+    second.pads.right.regions = whole_pad(PadTrigger::Click, chord(KeyboardKey::F9, &[]));
     let mut engine = BindingEngine::new(first);
     let mut sink = MockSink::default();
-    engine.observe(buttons(&[]), &mut sink).unwrap();
-    engine
-        .observe(buttons(&[BindableControl::RightPadClick]), &mut sink)
-        .unwrap();
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Right,
+        &[
+            (0, PadSample::NEUTRAL),
+            (10, touching(0, 0)),
+            (20, clicking(0, 0)),
+        ],
+    );
     engine.replace_profile(second, &mut sink).unwrap();
-    engine
-        .observe(buttons(&[BindableControl::RightPadClick]), &mut sink)
-        .unwrap();
-    engine.observe(buttons(&[]), &mut sink).unwrap();
-    engine
-        .observe(buttons(&[BindableControl::RightPadClick]), &mut sink)
-        .unwrap();
+    assert_eq!(engine.held_pad_action_count(), 0);
+    // The still-held pad stays inert until it is physically released.
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Right,
+        &[
+            (30, clicking(0, 0)),
+            (40, PadSample::NEUTRAL),
+            (50, touching(0, 0)),
+            (60, clicking(0, 0)),
+        ],
+    );
     assert_eq!(sink.events, ["key:F5:true", "key:F5:false", "key:F9:true"]);
 }
 
 #[test]
 fn right_pad_feedback_cadence_increases_with_motion_speed_without_a_backlog() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
+    profile.pads.right.motion = PadMotionMode::Pointer;
     assert_eq!(profile.configured_output_count(), 1);
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
@@ -1104,7 +1276,7 @@ fn right_pad_feedback_cadence_increases_with_motion_speed_without_a_backlog() {
 #[test]
 fn stationary_pressed_pad_noise_does_not_emit_feedback() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
+    profile.pads.right.motion = PadMotionMode::Pointer;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -1112,8 +1284,17 @@ fn stationary_pressed_pad_noise_does_not_emit_feedback() {
     engine
         .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
         .unwrap();
+    // The press edge itself is a deliberate act and earns its one tick; every
+    // report after it is the same stationary finger's noise and must be silent.
+    let press = engine
+        .observe_snapshot(
+            side_snapshot(PadSide::Right, clicking(0, 0)),
+            Duration::ZERO,
+            &mut sink,
+        )
+        .unwrap();
+    assert_eq!(press.right, Some(PadFeedbackStrength::Medium));
     for (index, (x, y)) in [
-        (0, 0),
         (0, 160),
         (0, -160),
         (96, 128),
@@ -1126,12 +1307,10 @@ fn stationary_pressed_pad_noise_does_not_emit_feedback() {
     .into_iter()
     .enumerate()
     {
-        let mut snapshot = pad_snapshot(neutral, None, Some((x, y)));
-        snapshot.right_pad.pressed = true;
         let feedback = engine
             .observe_snapshot(
-                snapshot,
-                Duration::from_millis(u64::try_from(index * 250).unwrap()),
+                side_snapshot(PadSide::Right, clicking(x, y)),
+                Duration::from_millis(u64::try_from((index + 1) * 250).unwrap()),
                 &mut sink,
             )
             .unwrap();
@@ -1143,8 +1322,8 @@ fn stationary_pressed_pad_noise_does_not_emit_feedback() {
 #[test]
 fn left_pad_scrolls_both_axes_and_can_disable_feedback() {
     let mut profile = BindingProfile::default();
-    profile.pads.left_scroll.enabled = true;
-    profile.pads.left_scroll.feedback.enabled = false;
+    profile.pads.left.motion = PadMotionMode::Scroll;
+    profile.pads.left.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -1175,9 +1354,9 @@ fn left_pad_scrolls_both_axes_and_can_disable_feedback() {
 fn left_pad_scroll_acceleration_and_profile_speed_scale_output() {
     fn scroll_once(duration_ms: u64, speed_percent: u16) -> Vec<String> {
         let mut profile = BindingProfile::default();
-        profile.pads.left_scroll.enabled = true;
-        profile.pads.left_scroll.feedback.enabled = false;
-        profile.pads.left_scroll.speed_percent = speed_percent;
+        profile.pads.left.motion = PadMotionMode::Scroll;
+        profile.pads.left.feedback.enabled = false;
+        profile.pads.left.speed_percent = speed_percent;
         let mut engine = BindingEngine::new(profile);
         let mut sink = MockSink::default();
         let neutral = SteamButtons::default();
@@ -1212,9 +1391,9 @@ fn left_pad_scroll_acceleration_and_profile_speed_scale_output() {
 fn left_pad_momentum_decays_after_release_and_can_be_disabled() {
     fn run(momentum: bool) -> Vec<String> {
         let mut profile = BindingProfile::default();
-        profile.pads.left_scroll.enabled = true;
-        profile.pads.left_scroll.feedback.enabled = false;
-        profile.pads.left_scroll.momentum = momentum;
+        profile.pads.left.motion = PadMotionMode::Scroll;
+        profile.pads.left.feedback.enabled = false;
+        profile.pads.left.momentum = momentum;
         let mut engine = BindingEngine::new(profile);
         let mut sink = MockSink::default();
         let neutral = SteamButtons::default();
@@ -1264,8 +1443,8 @@ fn left_pad_momentum_decays_after_release_and_can_be_disabled() {
 #[test]
 fn ticks_are_needed_only_while_released_scroll_momentum_is_pending() {
     let mut profile = BindingProfile::default();
-    profile.pads.left_scroll.enabled = true;
-    profile.pads.left_scroll.feedback.enabled = false;
+    profile.pads.left.motion = PadMotionMode::Scroll;
+    profile.pads.left.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -1339,8 +1518,8 @@ fn ticks_are_needed_only_while_released_scroll_momentum_is_pending() {
 #[test]
 fn stationary_scroll_touch_and_release_never_schedule_a_tick() {
     let mut profile = BindingProfile::default();
-    profile.pads.left_scroll.enabled = true;
-    profile.pads.left_scroll.feedback.enabled = false;
+    profile.pads.left.motion = PadMotionMode::Scroll;
+    profile.pads.left.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -1372,8 +1551,8 @@ fn stationary_scroll_touch_and_release_never_schedule_a_tick() {
 #[test]
 fn stalled_scroll_motion_cannot_launch_stale_momentum_on_lift() {
     let mut profile = BindingProfile::default();
-    profile.pads.left_scroll.enabled = true;
-    profile.pads.left_scroll.feedback.enabled = false;
+    profile.pads.left.motion = PadMotionMode::Scroll;
+    profile.pads.left.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -1423,8 +1602,8 @@ fn stalled_scroll_motion_cannot_launch_stale_momentum_on_lift() {
 #[test]
 fn pad_motion_deadzone_rejects_noise_and_recenters_after_large_jumps() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
-    profile.pads.right_mouse.feedback.enabled = false;
+    profile.pads.right.motion = PadMotionMode::Pointer;
+    profile.pads.right.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -1495,9 +1674,9 @@ fn pad_motion_deadzone_rejects_noise_and_recenters_after_large_jumps() {
 fn pointer_transfer_is_linear_in_displacement_not_report_speed() {
     fn swipe(elapsed_ms: u64, speed_percent: u16) -> Vec<String> {
         let mut profile = BindingProfile::default();
-        profile.pads.right_mouse.enabled = true;
-        profile.pads.right_mouse.feedback.enabled = false;
-        profile.pads.right_mouse.speed_percent = speed_percent;
+        profile.pads.right.motion = PadMotionMode::Pointer;
+        profile.pads.right.feedback.enabled = false;
+        profile.pads.right.speed_percent = speed_percent;
         let mut engine = BindingEngine::new(profile);
         let mut sink = MockSink::default();
         let neutral = SteamButtons::default();
@@ -1529,8 +1708,8 @@ fn pointer_transfer_is_linear_in_displacement_not_report_speed() {
 #[test]
 fn recorded_center_hold_wander_stays_parked() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
-    profile.pads.right_mouse.feedback.enabled = false;
+    profile.pads.right.motion = PadMotionMode::Pointer;
+    profile.pads.right.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -1564,7 +1743,7 @@ fn recorded_center_hold_wander_stays_parked() {
 #[test]
 fn recorded_bottom_edge_wander_stays_parked() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
+    profile.pads.right.motion = PadMotionMode::Pointer;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -1595,8 +1774,8 @@ fn recorded_bottom_edge_wander_stays_parked() {
 #[test]
 fn deliberate_slow_edge_motion_stays_unparked_across_stop_windows() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
-    profile.pads.right_mouse.feedback.enabled = false;
+    profile.pads.right.motion = PadMotionMode::Pointer;
+    profile.pads.right.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -1638,34 +1817,40 @@ fn deliberate_slow_edge_motion_stays_unparked_across_stop_windows() {
 #[test]
 fn recorded_post_click_pressure_tail_cannot_become_a_drag() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
-    profile.pads.right_mouse.feedback.enabled = false;
-    profile.bindings.right_pad_click = Some(BindingAction::MouseButton {
-        button: MouseButton::Left,
-    });
+    profile.pads.right.motion = PadMotionMode::Pointer;
+    profile.pads.right.feedback.enabled = false;
+    profile.pads.right.regions = whole_pad(
+        PadTrigger::Click,
+        BindingAction::MouseButton {
+            button: MouseButton::Left,
+        },
+    );
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
-    let clicked = buttons(&[BindableControl::RightPadClick]);
-    let sample = |buttons, x, y, pressure, pressed| {
-        let mut snapshot = pad_snapshot(buttons, None, Some((x, y)));
-        snapshot.right_pad.pressure = pressure;
-        snapshot.right_pad.pressed = pressed;
-        snapshot
+    let sample = |x, y, pressure, pressed| {
+        side_snapshot(
+            PadSide::Right,
+            PadSample {
+                pressure,
+                pressed,
+                ..touching(x, y)
+            },
+        )
     };
 
     engine
         .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
         .unwrap();
     for (time_ms, snapshot) in [
-        (1, sample(neutral, -23_322, 6_434, 1_532, false)),
-        (12, sample(neutral, -23_216, 6_420, 1_649, false)),
-        (64, sample(clicked, -22_946, 6_324, 3_988, true)),
-        (212, sample(clicked, -22_076, 8_346, 3_696, true)),
-        (244, sample(neutral, -22_298, 8_620, 2_370, false)),
-        (266, sample(neutral, -22_714, 9_210, 1_201, false)),
-        (287, sample(neutral, -22_848, 9_426, 928, false)),
-        (470, sample(neutral, -22_946, 9_772, 421, false)),
+        (1, sample(-23_322, 6_434, 1_532, false)),
+        (12, sample(-23_216, 6_420, 1_649, false)),
+        (64, sample(-22_946, 6_324, 3_988, true)),
+        (212, sample(-22_076, 8_346, 3_696, true)),
+        (244, sample(-22_298, 8_620, 2_370, false)),
+        (266, sample(-22_714, 9_210, 1_201, false)),
+        (287, sample(-22_848, 9_426, 928, false)),
+        (470, sample(-22_946, 9_772, 421, false)),
     ] {
         engine
             .observe_snapshot(snapshot, Duration::from_millis(time_ms), &mut sink)
@@ -1677,30 +1862,33 @@ fn recorded_post_click_pressure_tail_cannot_become_a_drag() {
 #[test]
 fn recorded_left_pad_release_tail_cannot_start_scroll_momentum() {
     let mut profile = BindingProfile::default();
-    profile.pads.left_scroll.enabled = true;
-    profile.pads.left_scroll.feedback.enabled = false;
+    profile.pads.left.motion = PadMotionMode::Scroll;
+    profile.pads.left.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
-    let clicked = buttons(&[BindableControl::LeftPadClick]);
-    let sample = |buttons, x, y, pressure, pressed| {
-        let mut snapshot = pad_snapshot(buttons, Some((x, y)), None);
-        snapshot.left_pad.pressure = pressure;
-        snapshot.left_pad.pressed = pressed;
-        snapshot
+    let sample = |x, y, pressure, pressed| {
+        side_snapshot(
+            PadSide::Left,
+            PadSample {
+                pressure,
+                pressed,
+                ..touching(x, y)
+            },
+        )
     };
 
     engine
         .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
         .unwrap();
     for (time_ms, snapshot) in [
-        (1, sample(neutral, 11_476, -2_014, 1_590, false)),
-        (12, sample(neutral, 11_454, -2_060, 1_619, false)),
-        (72, sample(clicked, 11_384, -2_176, 4_234, true)),
-        (238, sample(neutral, 12_506, -2_504, 2_437, false)),
-        (310, sample(neutral, 12_150, -3_092, 1_371, false)),
-        (377, sample(neutral, 11_032, -3_058, 1_444, false)),
-        (448, sample(neutral, 8_804, -4_220, 1_356, false)),
+        (1, sample(11_476, -2_014, 1_590, false)),
+        (12, sample(11_454, -2_060, 1_619, false)),
+        (72, sample(11_384, -2_176, 4_234, true)),
+        (238, sample(12_506, -2_504, 2_437, false)),
+        (310, sample(12_150, -3_092, 1_371, false)),
+        (377, sample(11_032, -3_058, 1_444, false)),
+        (448, sample(8_804, -4_220, 1_356, false)),
     ] {
         engine
             .observe_snapshot(snapshot, Duration::from_millis(time_ms), &mut sink)
@@ -1713,17 +1901,12 @@ fn recorded_left_pad_release_tail_cannot_start_scroll_momentum() {
 #[test]
 fn paused_drag_resumes_without_crossing_the_full_drag_threshold_again() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
-    profile.pads.right_mouse.feedback.enabled = false;
+    profile.pads.right.motion = PadMotionMode::Pointer;
+    profile.pads.right.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
-    let clicked = buttons(&[BindableControl::RightPadClick]);
-    let pressed_at = |x| {
-        let mut snapshot = pad_snapshot(clicked, None, Some((x, 0)));
-        snapshot.right_pad.pressed = true;
-        snapshot
-    };
+    let pressed_at = |x| side_snapshot(PadSide::Right, clicking(x, 0));
 
     engine
         .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
@@ -1755,8 +1938,8 @@ fn paused_drag_resumes_without_crossing_the_full_drag_threshold_again() {
 #[test]
 fn parked_pad_never_banks_bounded_wander_and_reparks_after_a_stall() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
-    profile.pads.right_mouse.feedback.enabled = false;
+    profile.pads.right.motion = PadMotionMode::Pointer;
+    profile.pads.right.feedback.enabled = false;
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -1825,7 +2008,7 @@ fn parked_pad_never_banks_bounded_wander_and_reparks_after_a_stall() {
 #[test]
 fn pad_touched_during_startup_or_profile_switch_waits_for_release() {
     let mut profile = BindingProfile::default();
-    profile.pads.right_mouse.enabled = true;
+    profile.pads.right.motion = PadMotionMode::Pointer;
     let mut engine = BindingEngine::new(profile.clone());
     let mut sink = MockSink::default();
     let neutral = SteamButtons::default();
@@ -1859,7 +2042,7 @@ fn pad_touched_during_startup_or_profile_switch_waits_for_release() {
         )
         .unwrap();
     let mut replacement = profile;
-    replacement.pads.right_mouse.feedback.strength = PadFeedbackStrength::High;
+    replacement.pads.right.feedback.strength = PadFeedbackStrength::High;
     engine.replace_profile(replacement, &mut sink).unwrap();
     engine
         .observe_snapshot(
@@ -1895,4 +2078,314 @@ fn rapid_mouse_transitions_and_disconnect_never_leave_output_held() {
         sink.events.last().map(String::as_str),
         Some("mouse:Forward:false")
     );
+}
+
+/// A coordinate at `degrees` clockwise from twelve o'clock, at `percent` of the
+/// pad's full-scale radius, matching the region geometry's own convention.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "test bearings stay far inside i16"
+)]
+fn bearing(degrees: f32, percent: f32) -> (i16, i16) {
+    let radians = degrees.to_radians();
+    let scale = f32::from(i16::MAX) * percent / 100.0;
+    (
+        (radians.sin() * scale) as i16,
+        (radians.cos() * scale) as i16,
+    )
+}
+
+/// Left and right sectors of an eight-way layout bound to the arrow keys, the
+/// motivating example for regions.
+fn arrow_regions(trigger: PadTrigger) -> Vec<PadRegion> {
+    let mut regions = PadRegion::eight_way();
+    for region in &mut regions {
+        let key = match region.name.as_str() {
+            "Left" => KeyboardKey::ArrowLeft,
+            "Right" => KeyboardKey::ArrowRight,
+            _ => continue,
+        };
+        *region.action_mut(trigger) = Some(chord(key, &[]));
+    }
+    regions
+}
+
+#[test]
+fn clicking_opposite_sectors_of_one_pad_fires_their_own_bindings() {
+    let mut profile = BindingProfile::default();
+    profile.pads.left.regions = arrow_regions(PadTrigger::Click);
+    let mut engine = BindingEngine::new(profile);
+    let mut sink = MockSink::default();
+    let (west_x, west_y) = bearing(270.0, 70.0);
+    let (east_x, east_y) = bearing(90.0, 70.0);
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Left,
+        &[
+            (0, PadSample::NEUTRAL),
+            (10, touching(west_x, west_y)),
+            (20, clicking(west_x, west_y)),
+            (30, touching(west_x, west_y)),
+            (400, PadSample::NEUTRAL),
+            (410, touching(east_x, east_y)),
+            (420, clicking(east_x, east_y)),
+            (430, touching(east_x, east_y)),
+        ],
+    );
+    assert_eq!(
+        sink.events,
+        [
+            "key:ArrowLeft:true",
+            "key:ArrowLeft:false",
+            "key:ArrowRight:true",
+            "key:ArrowRight:false"
+        ]
+    );
+    assert_eq!(engine.held_pad_action_count(), 0);
+}
+
+#[test]
+fn a_click_holds_the_region_it_was_pressed_in_even_if_the_finger_slides_away() {
+    let mut profile = BindingProfile::default();
+    profile.pads.left.regions = arrow_regions(PadTrigger::Click);
+    let mut engine = BindingEngine::new(profile);
+    let mut sink = MockSink::default();
+    let (west_x, west_y) = bearing(270.0, 70.0);
+    let (east_x, east_y) = bearing(90.0, 70.0);
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Left,
+        &[
+            (0, PadSample::NEUTRAL),
+            (10, touching(west_x, west_y)),
+            (20, clicking(west_x, west_y)),
+            // Dragging clear across the pad while still held must not swap the
+            // action to the opposite sector's binding.
+            (30, clicking(0, 0)),
+            (40, clicking(east_x, east_y)),
+        ],
+    );
+    assert_eq!(sink.events, ["key:ArrowLeft:true"]);
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Left,
+        &[(50, touching(east_x, east_y))],
+    );
+    assert_eq!(sink.events, ["key:ArrowLeft:true", "key:ArrowLeft:false"]);
+}
+
+#[test]
+fn a_touch_hands_off_between_regions_and_releases_on_lift() {
+    let mut profile = BindingProfile::default();
+    profile.pads.right.regions = arrow_regions(PadTrigger::Touch);
+    profile.pads.right.feedback.enabled = false;
+    let mut engine = BindingEngine::new(profile);
+    let mut sink = MockSink::default();
+    let (west_x, west_y) = bearing(270.0, 70.0);
+    let (east_x, east_y) = bearing(90.0, 70.0);
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Right,
+        &[
+            (0, PadSample::NEUTRAL),
+            (10, touching(west_x, west_y)),
+            // Sliding through the unbound top sector releases, and arriving in
+            // the opposite sector presses its own binding.
+            (20, touching(bearing(0.0, 70.0).0, bearing(0.0, 70.0).1)),
+            (30, touching(east_x, east_y)),
+            (40, PadSample::NEUTRAL),
+        ],
+    );
+    assert_eq!(
+        sink.events,
+        [
+            "key:ArrowLeft:true",
+            "key:ArrowLeft:false",
+            "key:ArrowRight:true",
+            "key:ArrowRight:false"
+        ]
+    );
+    assert_eq!(engine.held_pad_action_count(), 0);
+}
+
+#[test]
+fn a_touch_crossing_between_regions_with_the_same_action_does_not_retrigger_it() {
+    let mut profile = BindingProfile::default();
+    profile.pads.right.regions = PadRegion::four_way();
+    for region in &mut profile.pads.right.regions {
+        region.touch = Some(chord(KeyboardKey::F9, &[]));
+    }
+    profile.pads.right.feedback.enabled = false;
+    let mut engine = BindingEngine::new(profile);
+    let mut sink = MockSink::default();
+    let top = bearing(0.0, 70.0);
+    let right = bearing(90.0, 70.0);
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Right,
+        &[
+            (0, PadSample::NEUTRAL),
+            (10, touching(top.0, top.1)),
+            (20, touching(right.0, right.1)),
+            (30, PadSample::NEUTRAL),
+        ],
+    );
+    assert_eq!(sink.events, ["key:F9:true", "key:F9:false"]);
+    assert_eq!(engine.held_pad_action_count(), 0);
+}
+
+#[test]
+fn a_finger_resting_on_a_region_seam_does_not_alternate_between_bindings() {
+    let mut profile = BindingProfile::default();
+    profile.pads.right.regions = arrow_regions(PadTrigger::Touch);
+    profile.pads.right.feedback.enabled = false;
+    let mut engine = BindingEngine::new(profile);
+    let mut sink = MockSink::default();
+    let mut steps = vec![
+        (0, PadSample::NEUTRAL),
+        (10, touching(bearing(270.0, 70.0).0, bearing(270.0, 70.0).1)),
+    ];
+    // The Left/Bottom Left seam of an eight-way layout sits at 292.5 degrees;
+    // wander a couple of degrees either side of it, repeatedly.
+    for (index, degrees) in [291.0, 294.0, 291.5, 293.5, 292.0, 294.0]
+        .into_iter()
+        .enumerate()
+    {
+        let (x, y) = bearing(degrees, 70.0);
+        steps.push((20 + index as u64 * 10, touching(x, y)));
+    }
+    drive_pad(&mut engine, &mut sink, PadSide::Right, &steps);
+    assert_eq!(sink.events, ["key:ArrowLeft:true"]);
+    assert_eq!(engine.held_pad_action_count(), 1);
+}
+
+#[test]
+fn a_touch_region_action_is_released_by_disconnect_and_by_a_sink_failure() {
+    let mut profile = BindingProfile::default();
+    profile.pads.right.regions = arrow_regions(PadTrigger::Touch);
+    profile.pads.right.feedback.enabled = false;
+    let (west_x, west_y) = bearing(270.0, 70.0);
+
+    let mut engine = BindingEngine::new(profile.clone());
+    let mut sink = MockSink::default();
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Right,
+        &[(0, PadSample::NEUTRAL), (10, touching(west_x, west_y))],
+    );
+    assert_eq!(engine.held_pad_action_count(), 1);
+    engine.disconnect(&mut sink).unwrap();
+    assert_eq!(engine.held_output_count(), 0);
+    assert_eq!(engine.held_pad_action_count(), 0);
+    assert_eq!(sink.events, ["key:ArrowLeft:true", "key:ArrowLeft:false"]);
+
+    // A failing sink releases what it can and leaves nothing latched.
+    let mut engine = BindingEngine::new(profile);
+    let mut sink = MockSink::default();
+    drive_pad(
+        &mut engine,
+        &mut sink,
+        PadSide::Right,
+        &[(0, PadSample::NEUTRAL), (10, touching(west_x, west_y))],
+    );
+    sink.fail_next = true;
+    assert!(engine
+        .observe_snapshot(
+            side_snapshot(
+                PadSide::Right,
+                touching(bearing(90.0, 70.0).0, bearing(90.0, 70.0).1)
+            ),
+            Duration::from_millis(20),
+            &mut sink
+        )
+        .is_err());
+    assert_eq!(engine.held_output_count(), 0);
+    assert_eq!(engine.held_pad_action_count(), 0);
+}
+
+#[test]
+fn both_pads_can_scroll_with_momentum_at_the_same_time() {
+    let mut profile = BindingProfile::default();
+    for side in PadSide::ALL {
+        let pad = profile.pads.get_mut(side);
+        pad.motion = PadMotionMode::Scroll;
+        pad.feedback.enabled = false;
+    }
+    let mut engine = BindingEngine::new(profile);
+    let mut sink = MockSink::default();
+    // A pad already touched at the baseline is deliberately inert, so the swipe
+    // has to start from lifted.
+    engine
+        .observe_snapshot(
+            DesktopInputSnapshot::buttons_only(SteamButtons::default()),
+            Duration::ZERO,
+            &mut sink,
+        )
+        .unwrap();
+    for step in 0..8_i16 {
+        engine
+            .observe_snapshot(
+                DesktopInputSnapshot {
+                    buttons: SteamButtons::default(),
+                    left_pad: touching(0, step * 3_000),
+                    right_pad: touching(0, step * 3_000),
+                },
+                Duration::from_millis(1 + u64::try_from(step).unwrap() * 8),
+                &mut sink,
+            )
+            .unwrap();
+    }
+    engine
+        .observe_snapshot(
+            DesktopInputSnapshot::buttons_only(SteamButtons::default()),
+            Duration::from_millis(70),
+            &mut sink,
+        )
+        .unwrap();
+    assert!(engine.needs_tick());
+    let before = sink.events.len();
+    engine.tick(Duration::from_millis(80), &mut sink).unwrap();
+    // Both pads owe momentum, so one tick emits for each of them.
+    assert_eq!(sink.events.len(), before + 2);
+}
+
+#[test]
+fn either_pad_can_take_either_motion_mode() {
+    let mut profile = BindingProfile::default();
+    profile.pads.left.motion = PadMotionMode::Pointer;
+    profile.pads.left.feedback.enabled = false;
+    profile.pads.right.motion = PadMotionMode::Scroll;
+    profile.pads.right.feedback.enabled = false;
+    let mut engine = BindingEngine::new(profile);
+    let mut sink = MockSink::default();
+    engine
+        .observe_snapshot(
+            DesktopInputSnapshot::buttons_only(SteamButtons::default()),
+            Duration::ZERO,
+            &mut sink,
+        )
+        .unwrap();
+    for (millis, position) in [(1_u64, 100_i16), (20, 6_000), (30, 12_000)] {
+        engine
+            .observe_snapshot(
+                DesktopInputSnapshot {
+                    buttons: SteamButtons::default(),
+                    left_pad: touching(position, 0),
+                    right_pad: touching(0, position),
+                },
+                Duration::from_millis(millis),
+                &mut sink,
+            )
+            .unwrap();
+    }
+    // The swap of today's hardcoded assignment: pointer on the left pad and
+    // scrolling on the right.
+    assert!(sink.events.iter().any(|event| event.starts_with("move:")));
+    assert!(sink.events.iter().any(|event| event.starts_with("scroll:")));
 }

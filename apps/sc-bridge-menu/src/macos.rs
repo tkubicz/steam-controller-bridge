@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::bindings_recovery::load_store_or_recover;
 use bridge_runtime::{
     format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, OutputChangePoll,
     OutputSelection, PendingOutputChange, PendingUpdateResume, PickerConfig, PickerEvent,
@@ -14,9 +15,9 @@ use bridge_runtime::{
     UpdateResumePoll, VirtualHidConfig,
 };
 use desktop_bindings::{
-    default_store_path, input_monitoring_access, load_or_create_store, parse_store,
-    preflight_accessibility_access, preflight_post_event_access, request_accessibility_access,
-    request_input_monitoring_access, request_post_event_access, BindingStore, PermissionState,
+    default_store_path, input_monitoring_access, parse_store, preflight_accessibility_access,
+    preflight_post_event_access, request_accessibility_access, request_input_monitoring_access,
+    request_post_event_access, BindingStore, PermissionState,
 };
 use macos_virtual_hid::ENABLE_VIRTUAL_HID_ENV;
 use objc2::{rc::Retained, MainThreadMarker};
@@ -132,7 +133,11 @@ pub fn run(virtual_hid_enabled: bool) -> Result<(), String> {
         .with_activate_ignoring_other_apps(false)
         .build()
         .map_err(|error| error.to_string())?;
-    let mut app = MenuApp::new(event_loop.create_proxy(), virtual_hid_enabled)?;
+    let Some(mut app) = MenuApp::new(event_loop.create_proxy(), virtual_hid_enabled)? else {
+        // The user was shown an unreadable profile store and chose to quit so
+        // they could repair it. That is a completed request, not a failure.
+        return Ok(());
+    };
     event_loop
         .run_app(&mut app)
         .map_err(|error| error.to_string())
@@ -292,14 +297,18 @@ impl AppCenterRecovery {
 }
 
 impl MenuApp {
-    fn new(proxy: EventLoopProxy<()>, virtual_hid_enabled: bool) -> Result<Self, String> {
+    /// Builds the menu app, or reports `None` when an unreadable profile store
+    /// was presented to the user and they chose to quit rather than reset it.
+    fn new(proxy: EventLoopProxy<()>, virtual_hid_enabled: bool) -> Result<Option<Self>, String> {
         let settings_path = settings_path()?;
         let (settings, warning) = load_settings(&settings_path);
         if let Some(warning) = warning {
             eprintln!("level=warn event=settings_load_failed message={warning:?} action=defaults");
         }
         let bindings_path = default_store_path()?;
-        let binding_store = load_or_create_store(&bindings_path)?;
+        let Some(binding_store) = load_store_or_recover(&bindings_path)? else {
+            return Ok(None);
+        };
         let active_profile = binding_store
             .profile_by_id(&settings.active_binding_profile)
             .or_else(|| binding_store.profiles.first())
@@ -355,7 +364,7 @@ impl MenuApp {
                 }
             }),
         );
-        Ok(Self {
+        Ok(Some(Self {
             runtime,
             tray: None,
             tray_icons: None,
@@ -389,7 +398,7 @@ impl MenuApp {
             update_checker: UpdateChecker::new(),
             #[cfg(feature = "updater")]
             last_update_available: None,
-        })
+        }))
     }
 }
 

@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use steam_controller_protocol::{PadHapticGain, SteamButton, SteamButtons, SteamControllerState};
 
-pub const BINDINGS_VERSION: u32 = 4;
+pub const BINDINGS_VERSION: u32 = 5;
 pub const MAX_PROFILES: usize = 32;
 pub const MAX_PROFILE_NAME_CHARS: usize = 48;
 pub const DEFAULT_PROFILE_ID: &str = "default";
@@ -12,6 +12,8 @@ pub const DEFAULT_PROFILE_NAME: &str = "Default";
 pub const MIN_PAD_SPEED_PERCENT: u16 = 25;
 pub const MAX_PAD_SPEED_PERCENT: u16 = 300;
 pub const DEFAULT_PAD_SPEED_PERCENT: u16 = 100;
+pub const MAX_PAD_REGIONS: usize = 16;
+pub const MAX_REGION_NAME_CHARS: usize = 32;
 
 pub(super) const PAD_MOTION_DEADZONE_COUNTS: i32 = 192;
 pub(super) const PAD_EDGE_DEADZONE_START_COUNTS: i32 = 16_384;
@@ -50,6 +52,12 @@ pub(super) const SCROLL_VELOCITY_BLEND: f64 = 0.35;
 pub(super) const SCROLL_MOMENTUM_DECAY_PER_SECOND: f64 = 7.0;
 pub(super) const SCROLL_MOMENTUM_STOP_PIXELS_PER_SECOND: f64 = 5.0;
 pub(super) const SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND: f64 = 2_400.0;
+// A fingertip resting on a region boundary wanders by the same capacitive
+// centroid noise the motion filter already compensates for. The currently
+// occupied region is therefore tested with its shape grown by these margins, so
+// resting on a seam holds one action instead of alternating between two.
+pub(super) const REGION_HYSTERESIS_PERCENT: f32 = 4.0;
+pub(super) const REGION_HYSTERESIS_DEGREES: f32 = 6.0;
 pub(super) const MOTION_DEFAULT_SECONDS: f64 = 1.0 / 120.0;
 pub(super) const MOTION_MIN_SECONDS: f64 = 1.0 / 240.0;
 pub(super) const MOTION_SPEED_MAX_SECONDS: f64 = 0.5;
@@ -101,55 +109,301 @@ impl Default for PadFeedbackConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct PadFunctionConfig {
-    pub enabled: bool,
-    pub feedback: PadFeedbackConfig,
-    pub speed_percent: u16,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PadSide {
+    Left,
+    Right,
 }
 
-impl Default for PadFunctionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            feedback: PadFeedbackConfig::default(),
-            speed_percent: DEFAULT_PAD_SPEED_PERCENT,
+impl PadSide {
+    pub const ALL: [Self; 2] = [Self::Left, Self::Right];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Left Pad",
+            Self::Right => "Right Pad",
         }
     }
 }
 
+/// What a pad's continuous finger travel drives. Neither behavior is tied to a
+/// side any more: either pad can take either mode, or none at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PadMotionMode {
+    #[default]
+    None,
+    Pointer,
+    Scroll,
+}
+
+impl PadMotionMode {
+    pub const ALL: [Self; 3] = [Self::None, Self::Pointer, Self::Scroll];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Pointer => "Relative pointer",
+            Self::Scroll => "Accelerated smooth scroll",
+        }
+    }
+}
+
+/// One addressable area of a pad, as a bearing sector crossed with an extent band.
+///
+/// Angles follow the same convention as the profile wheel's
+/// `profile_picker::sector_for`: zero degrees points at twelve o'clock and they
+/// increase clockwise, with pad Y positive upwards. Extents are a percentage
+/// of the distance from the centre to the square pad edge along either axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PadRegionShape {
+    pub start_degrees: u16,
+    pub sweep_degrees: u16,
+    pub inner_percent: u8,
+    pub outer_percent: u8,
+}
+
+impl PadRegionShape {
+    pub const WHOLE: Self = Self {
+        start_degrees: 0,
+        sweep_degrees: 360,
+        inner_percent: 0,
+        outer_percent: 100,
+    };
+
+    #[must_use]
+    pub fn is_valid(self) -> bool {
+        self.start_degrees < 360
+            && (1..=360).contains(&self.sweep_degrees)
+            && (1..=100).contains(&self.outer_percent)
+            && self.inner_percent < self.outer_percent
+    }
+}
+
+impl Default for PadRegionShape {
+    fn default() -> Self {
+        Self::WHOLE
+    }
+}
+
+/// What, within a region, fires its action.
+///
+/// Gesture support is not implemented, but this is the enum it attaches to: a
+/// swipe or rotation becomes another variant here and another arm in the
+/// engine's `PadEvent` dispatch, rather than a second binding mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PadTrigger {
+    Click,
+    Touch,
+}
+
+impl PadTrigger {
+    pub const ALL: [Self; 2] = [Self::Click, Self::Touch];
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Click => "Click",
+            Self::Touch => "Touch",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PadRegion {
+    pub name: String,
+    pub shape: PadRegionShape,
+    #[serde(default)]
+    pub click: Option<BindingAction>,
+    #[serde(default)]
+    pub touch: Option<BindingAction>,
+}
+
+impl PadRegion {
+    #[must_use]
+    pub fn new(name: impl Into<String>, shape: PadRegionShape) -> Self {
+        Self {
+            name: name.into(),
+            shape,
+            click: None,
+            touch: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_bound(&self) -> bool {
+        self.click.is_some() || self.touch.is_some()
+    }
+
+    #[must_use]
+    pub const fn action(&self, trigger: PadTrigger) -> Option<&BindingAction> {
+        match trigger {
+            PadTrigger::Click => self.click.as_ref(),
+            PadTrigger::Touch => self.touch.as_ref(),
+        }
+    }
+
+    pub fn action_mut(&mut self, trigger: PadTrigger) -> &mut Option<BindingAction> {
+        match trigger {
+            PadTrigger::Click => &mut self.click,
+            PadTrigger::Touch => &mut self.touch,
+        }
+    }
+
+    /// One region covering the entire pad. This is what a pre-region pad-click
+    /// binding migrates into.
+    #[must_use]
+    pub fn whole() -> Vec<Self> {
+        vec![Self::new("Whole Pad", PadRegionShape::WHOLE)]
+    }
+
+    #[must_use]
+    pub fn four_way() -> Vec<Self> {
+        Self::compass(4, 0)
+    }
+
+    #[must_use]
+    pub fn eight_way() -> Vec<Self> {
+        Self::compass(8, 0)
+    }
+
+    #[must_use]
+    pub fn four_way_with_center() -> Vec<Self> {
+        Self::compass(4, DEFAULT_CENTER_PERCENT)
+    }
+
+    #[must_use]
+    pub fn eight_way_with_center() -> Vec<Self> {
+        Self::compass(8, DEFAULT_CENTER_PERCENT)
+    }
+
+    /// Equal sectors centred on their compass direction, optionally around a
+    /// centre area. The centre is listed first so first-match-wins resolution
+    /// lets it shadow the sectors it sits inside.
+    #[must_use]
+    fn compass(sectors: u16, center_percent: u8) -> Vec<Self> {
+        let names: &[&str] = if sectors == 4 {
+            &["Top", "Right", "Bottom", "Left"]
+        } else {
+            &[
+                "Top",
+                "Top Right",
+                "Right",
+                "Bottom Right",
+                "Bottom",
+                "Bottom Left",
+                "Left",
+                "Top Left",
+            ]
+        };
+        let sweep = 360 / sectors;
+        let mut regions = Vec::with_capacity(names.len() + usize::from(center_percent > 0));
+        if center_percent > 0 {
+            regions.push(Self::new(
+                "Center",
+                PadRegionShape {
+                    inner_percent: 0,
+                    outer_percent: center_percent,
+                    ..PadRegionShape::WHOLE
+                },
+            ));
+        }
+        for (index, name) in names.iter().enumerate() {
+            let index = u16::try_from(index).unwrap_or(0);
+            regions.push(Self::new(
+                *name,
+                PadRegionShape {
+                    // Sectors are centred on their direction, so the first one
+                    // starts half an arc before twelve o'clock.
+                    start_degrees: (index * sweep + 360 - sweep / 2) % 360,
+                    sweep_degrees: sweep,
+                    inner_percent: center_percent,
+                    outer_percent: 100,
+                },
+            ));
+        }
+        regions
+    }
+}
+
+pub const DEFAULT_CENTER_PERCENT: u8 = 30;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct ScrollPadConfig {
-    pub enabled: bool,
-    pub feedback: PadFeedbackConfig,
+pub struct PadConfig {
+    pub motion: PadMotionMode,
     pub speed_percent: u16,
     pub momentum: bool,
+    pub feedback: PadFeedbackConfig,
+    pub regions: Vec<PadRegion>,
 }
 
-impl Default for ScrollPadConfig {
+impl Default for PadConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            feedback: PadFeedbackConfig::default(),
+            motion: PadMotionMode::None,
             speed_percent: DEFAULT_PAD_SPEED_PERCENT,
             momentum: true,
+            feedback: PadFeedbackConfig::default(),
+            regions: Vec::new(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+impl PadConfig {
+    #[must_use]
+    pub fn bound_region_count(&self) -> usize {
+        self.regions
+            .iter()
+            .filter(|region| region.is_bound())
+            .count()
+    }
+
+    #[must_use]
+    pub fn configured_count(&self) -> usize {
+        usize::from(self.motion != PadMotionMode::None)
+            + self
+                .regions
+                .iter()
+                .map(|region| {
+                    usize::from(region.click.is_some()) + usize::from(region.touch.is_some())
+                })
+                .sum::<usize>()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PadBindings {
-    pub right_mouse: PadFunctionConfig,
-    pub left_scroll: ScrollPadConfig,
+    pub left: PadConfig,
+    pub right: PadConfig,
 }
 
 impl PadBindings {
     #[must_use]
-    pub const fn configured_count(self) -> usize {
-        self.right_mouse.enabled as usize + self.left_scroll.enabled as usize
+    pub const fn get(&self, side: PadSide) -> &PadConfig {
+        match side {
+            PadSide::Left => &self.left,
+            PadSide::Right => &self.right,
+        }
+    }
+
+    pub fn get_mut(&mut self, side: PadSide) -> &mut PadConfig {
+        match side {
+            PadSide::Left => &mut self.left,
+            PadSide::Right => &mut self.right,
+        }
+    }
+
+    #[must_use]
+    pub fn configured_count(&self) -> usize {
+        self.left.configured_count() + self.right.configured_count()
     }
 }
 
@@ -233,20 +487,10 @@ pub enum BindableControl {
     R4,
     R5,
     QuickAccess,
-    LeftPadClick,
-    RightPadClick,
 }
 
 impl BindableControl {
-    pub const ALL: [Self; 7] = [
-        Self::L4,
-        Self::L5,
-        Self::R4,
-        Self::R5,
-        Self::QuickAccess,
-        Self::LeftPadClick,
-        Self::RightPadClick,
-    ];
+    pub const ALL: [Self; 5] = [Self::L4, Self::L5, Self::R4, Self::R5, Self::QuickAccess];
 
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -256,8 +500,6 @@ impl BindableControl {
             Self::R4 => "R4",
             Self::R5 => "R5",
             Self::QuickAccess => "Quick Access",
-            Self::LeftPadClick => "Left Pad Click",
-            Self::RightPadClick => "Right Pad Click",
         }
     }
 
@@ -269,8 +511,6 @@ impl BindableControl {
             Self::R4 => SteamButton::RightGrip4,
             Self::R5 => SteamButton::RightGrip5,
             Self::QuickAccess => SteamButton::QuickAccess,
-            Self::LeftPadClick => SteamButton::LeftPadClick,
-            Self::RightPadClick => SteamButton::RightPadClick,
         }
     }
 
@@ -604,8 +844,6 @@ pub struct ControlBindings {
     pub r4: Option<BindingAction>,
     pub r5: Option<BindingAction>,
     pub quick_access: Option<BindingAction>,
-    pub left_pad_click: Option<BindingAction>,
-    pub right_pad_click: Option<BindingAction>,
 }
 
 impl ControlBindings {
@@ -617,8 +855,6 @@ impl ControlBindings {
             BindableControl::R4 => self.r4.as_ref(),
             BindableControl::R5 => self.r5.as_ref(),
             BindableControl::QuickAccess => self.quick_access.as_ref(),
-            BindableControl::LeftPadClick => self.left_pad_click.as_ref(),
-            BindableControl::RightPadClick => self.right_pad_click.as_ref(),
         }
     }
 
@@ -629,8 +865,6 @@ impl ControlBindings {
             BindableControl::R4 => &mut self.r4,
             BindableControl::R5 => &mut self.r5,
             BindableControl::QuickAccess => &mut self.quick_access,
-            BindableControl::LeftPadClick => &mut self.left_pad_click,
-            BindableControl::RightPadClick => &mut self.right_pad_click,
         }
     }
 

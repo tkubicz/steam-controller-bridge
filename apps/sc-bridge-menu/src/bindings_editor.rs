@@ -1,12 +1,14 @@
 use std::collections::BTreeSet;
 
 use controller_art::{
-    body_bounds, control_rect, normalized_point, trackpad_rect, Control, ControlState, PadSide,
+    body_bounds, control_rect, draw_trackpad_surface, normalized_point, trackpad_rect,
+    trackpad_surface_point, Control, ControlState, PadSide,
 };
 use desktop_bindings::{
-    default_store_path, load_or_create_store, save_store, BindableControl, BindingAction,
-    BindingStore, KeyboardKey, Modifier, MouseButton, PadFeedbackConfig, PadFeedbackStrength,
-    MAX_PAD_SPEED_PERCENT, MAX_PROFILE_NAME_CHARS, MIN_PAD_SPEED_PERCENT,
+    default_store_path, save_store, BindableControl, BindingAction, BindingStore, KeyboardKey,
+    Modifier, MouseButton, PadBindings, PadConfig, PadFeedbackConfig, PadFeedbackStrength,
+    PadMotionMode, PadRegion, PadRegionShape, PadTrigger, MAX_PAD_REGIONS, MAX_PAD_SPEED_PERCENT,
+    MAX_PROFILE_NAME_CHARS, MAX_REGION_NAME_CHARS, MIN_PAD_SPEED_PERCENT,
 };
 use eframe::egui;
 
@@ -17,11 +19,13 @@ use ui_theme::{
 
 mod canvas;
 mod inspector;
+mod regions;
 
 use canvas::{draw_pad_labels, rect_edge_towards, CanvasLayout};
 use inspector::{
     binding_summary, keyboard_key, mouse_button_editor, pad_feedback_editor, selection_description,
 };
+use regions::draw_region_map;
 
 #[cfg(test)]
 mod tests;
@@ -31,6 +35,14 @@ const MIN_WINDOW_SIZE: [f32; 2] = [1080.0, 660.0];
 const INSPECTOR_WIDTH: f32 = 300.0;
 const COLUMN_GAP: f32 = 16.0;
 const CANVAS_MIN_WIDTH: f32 = 620.0;
+type RegionPreset = (&'static str, fn() -> Vec<PadRegion>);
+const REGION_PRESETS: [RegionPreset; 5] = [
+    ("Whole pad", PadRegion::whole),
+    ("Four way", PadRegion::four_way),
+    ("Four way + center", PadRegion::four_way_with_center),
+    ("Eight way", PadRegion::eight_way),
+    ("Eight way + center", PadRegion::eight_way_with_center),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControllerView {
@@ -42,15 +54,26 @@ enum ControllerView {
 enum EditorSelection {
     Button(BindableControl),
     Pad(PadSide),
+    /// A region of a pad, by its position in that pad's ordered list.
+    PadRegion(PadSide, usize),
 }
 
 impl EditorSelection {
     const fn label(self) -> &'static str {
         match self {
             Self::Button(control) => control.label(),
-            Self::Pad(side) => side.label(),
+            Self::Pad(side) | Self::PadRegion(side, _) => side.label(),
         }
     }
+}
+
+/// Which action slot the inspector is editing. Buttons and both region triggers
+/// share one action picker, so they share one way of naming a slot; it doubles
+/// as the egui ID salt that keeps their widgets distinct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ActionTarget {
+    Button(BindableControl),
+    Region(PadSide, usize, PadTrigger),
 }
 
 // The editor's vocabulary translated into the art crate's. These are plain
@@ -65,16 +88,25 @@ const fn art_control(control: BindableControl) -> Control {
         BindableControl::R4 => Control::R4,
         BindableControl::R5 => Control::R5,
         BindableControl::QuickAccess => Control::QuickAccess,
-        BindableControl::LeftPadClick => Control::LeftPad,
-        BindableControl::RightPadClick => Control::RightPad,
+    }
+}
+
+const fn binding_side(side: PadSide) -> desktop_bindings::PadSide {
+    match side {
+        PadSide::Left => desktop_bindings::PadSide::Left,
+        PadSide::Right => desktop_bindings::PadSide::Right,
     }
 }
 
 const fn art_selection(selection: EditorSelection) -> Control {
     match selection {
         EditorSelection::Button(control) => art_control(control),
-        EditorSelection::Pad(PadSide::Left) => Control::LeftPad,
-        EditorSelection::Pad(PadSide::Right) => Control::RightPad,
+        EditorSelection::Pad(PadSide::Left) | EditorSelection::PadRegion(PadSide::Left, _) => {
+            Control::LeftPad
+        }
+        EditorSelection::Pad(PadSide::Right) | EditorSelection::PadRegion(PadSide::Right, _) => {
+            Control::RightPad
+        }
     }
 }
 
@@ -154,7 +186,12 @@ const CONTROL_CALLOUTS: [ControlCallout; 5] = [
 
 pub fn run() -> Result<(), String> {
     let path = default_store_path()?;
-    let store = load_or_create_store(&path)?;
+    // The editor is launched with its output discarded, so an unreadable store
+    // has to be presented here too; returning an error would simply close the
+    // window the user just asked for with nothing shown.
+    let Some(store) = crate::bindings_recovery::load_store_or_recover(&path)? else {
+        return Ok(());
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(WINDOW_SIZE)
@@ -178,7 +215,7 @@ struct BindingsEditor {
     store: BindingStore,
     selected: usize,
     selection: EditorSelection,
-    capturing: Option<BindableControl>,
+    capturing: Option<ActionTarget>,
     message: Option<String>,
 }
 
@@ -279,7 +316,7 @@ impl BindingsEditor {
     }
 
     fn capture_key(&mut self, ctx: &egui::Context) {
-        let Some(control) = self.capturing else {
+        let Some(target) = self.capturing else {
             return;
         };
         let captured = ctx.input(|input| {
@@ -310,11 +347,12 @@ impl BindingsEditor {
         if modifiers.shift {
             binding_modifiers.insert(Modifier::Shift);
         }
-        *self.store.profiles[self.selected].bindings.get_mut(control) =
-            Some(BindingAction::KeyChord {
+        if let Some(slot) = self.action_slot(target) {
+            *slot = Some(BindingAction::KeyChord {
                 key,
                 modifiers: binding_modifiers,
             });
+        }
         self.capturing = None;
     }
 
@@ -395,8 +433,7 @@ impl BindingsEditor {
         draw_pad_labels(
             &painter,
             layout.front,
-            self.store.profiles[self.selected].pads.left_scroll.enabled,
-            self.store.profiles[self.selected].pads.right_mouse.enabled,
+            &self.store.profiles[self.selected].pads,
             self.selection,
         );
         self.draw_labels(ui, &layout);
@@ -455,7 +492,9 @@ impl BindingsEditor {
         if let Some(selection) = clicked {
             match selection {
                 EditorSelection::Button(control) => self.select_control(control),
-                EditorSelection::Pad(side) => self.select_pad(side),
+                EditorSelection::Pad(side) | EditorSelection::PadRegion(side, _) => {
+                    self.select_pad(side);
+                }
             }
         }
         hovered
@@ -539,110 +578,285 @@ impl BindingsEditor {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, true])
                         .show(ui, |ui| match selection {
-                            EditorSelection::Button(control) => self.binding_editor(ui, control),
-                            EditorSelection::Pad(side) => self.pad_editor(ui, side),
+                            EditorSelection::Button(control) => {
+                                self.binding_editor(ui, ActionTarget::Button(control));
+                            }
+                            EditorSelection::Pad(side) | EditorSelection::PadRegion(side, _) => {
+                                self.pad_editor(ui, side);
+                            }
                         });
                 });
             });
     }
 
+    fn pad(&mut self, side: PadSide) -> &mut PadConfig {
+        self.store.profiles[self.selected]
+            .pads
+            .get_mut(binding_side(side))
+    }
+
     fn pad_editor(&mut self, ui: &mut egui::Ui, side: PadSide) {
-        ui.label("Desktop action");
-        ui.label(
-            egui::RichText::new(match side {
-                PadSide::Left => "Accelerated smooth scroll",
-                PadSide::Right => "Relative mouse",
-            })
-            .strong(),
-        );
-        ui.add_space(12.0);
-        match side {
-            PadSide::Left => {
-                let config = &mut self.store.profiles[self.selected].pads.left_scroll;
-                ui.checkbox(&mut config.enabled, "Enable this pad");
-                ui.add_space(16.0);
-                ui.add_enabled_ui(config.enabled, |ui| {
-                    ui.label("Scroll speed");
-                    ui.add(
-                        egui::Slider::new(
-                            &mut config.speed_percent,
-                            MIN_PAD_SPEED_PERCENT..=MAX_PAD_SPEED_PERCENT,
-                        )
-                        .suffix("%"),
-                    );
-                    ui.label(
-                        egui::RichText::new("Faster swipes accelerate above this base speed.")
-                            .small()
-                            .color(MUTED_TEXT),
-                    );
-                    ui.add_space(12.0);
-                    ui.checkbox(&mut config.momentum, "Momentum after release");
-                });
+        ui.label("Motion");
+        let config = self.pad(side);
+        ui.horizontal_wrapped(|ui| {
+            for mode in PadMotionMode::ALL {
+                ui.selectable_value(&mut config.motion, mode, mode.label());
             }
-            PadSide::Right => {
-                let config = &mut self.store.profiles[self.selected].pads.right_mouse;
-                ui.checkbox(&mut config.enabled, "Enable this pad");
-                ui.add_space(16.0);
-                ui.add_enabled_ui(config.enabled, |ui| {
-                    ui.label("Pointer speed");
-                    ui.add(
-                        egui::Slider::new(
-                            &mut config.speed_percent,
-                            MIN_PAD_SPEED_PERCENT..=MAX_PAD_SPEED_PERCENT,
-                        )
-                        .suffix("%"),
-                    );
-                    ui.label(
-                        egui::RichText::new(
-                            "100% matches the measured lizard-mode response; this setting scales it linearly.",
-                        )
-                        .small()
-                        .color(MUTED_TEXT),
-                    );
-                });
-            }
-        }
+        });
         ui.add_space(16.0);
-        match side {
-            PadSide::Left => pad_feedback_editor(
-                ui,
-                &mut self.store.profiles[self.selected].pads.left_scroll.feedback,
-            ),
-            PadSide::Right => pad_feedback_editor(
-                ui,
-                &mut self.store.profiles[self.selected].pads.right_mouse.feedback,
-            ),
-        }
+        ui.add_enabled_ui(config.motion != PadMotionMode::None, |ui| {
+            ui.label(match config.motion {
+                PadMotionMode::Scroll => "Scroll speed",
+                _ => "Pointer speed",
+            });
+            ui.add(
+                egui::Slider::new(
+                    &mut config.speed_percent,
+                    MIN_PAD_SPEED_PERCENT..=MAX_PAD_SPEED_PERCENT,
+                )
+                .suffix("%"),
+            );
+            ui.label(
+                egui::RichText::new(match config.motion {
+                    PadMotionMode::Scroll => "Faster swipes accelerate above this base speed.",
+                    _ => "100% matches the measured lizard-mode response; this setting scales it linearly.",
+                })
+                .small()
+                .color(MUTED_TEXT),
+            );
+            if config.motion == PadMotionMode::Scroll {
+                ui.add_space(12.0);
+                ui.checkbox(&mut config.momentum, "Momentum after release");
+            }
+        });
+        ui.add_space(16.0);
+        pad_feedback_editor(ui, &mut self.pad(side).feedback);
         ui.add_space(16.0);
         ui.separator();
         ui.add_space(12.0);
-        ui.label("Pad click");
-        ui.label(
-            egui::RichText::new("Fires even when the pad function above is disabled.")
-                .small()
-                .color(MUTED_TEXT),
-        );
-        ui.add_space(12.0);
-        self.binding_editor(
-            ui,
-            match side {
-                PadSide::Left => BindableControl::LeftPadClick,
-                PadSide::Right => BindableControl::RightPadClick,
-            },
-        );
-        ui.add_space(16.0);
-        ui.label(
-            egui::RichText::new("Pressure actions and gestures are not used.")
-                .small()
-                .color(MUTED_TEXT),
-        );
+        self.region_editor(ui, side);
     }
 
-    fn binding_editor(&mut self, ui: &mut egui::Ui, control: BindableControl) {
-        let current = self.store.profiles[self.selected]
-            .bindings
-            .get(control)
-            .cloned();
+    /// The region list, its map, and the selected region's two action slots.
+    fn region_editor(&mut self, ui: &mut egui::Ui, side: PadSide) {
+        ui.label("Regions");
+        ui.label(
+            egui::RichText::new(
+                "Areas of the pad with their own actions. Regions may overlap; the first one in \
+                 this list that contains the finger wins. Clicks and touches fire whether or not \
+                 the pad drives motion.",
+            )
+            .small()
+            .color(MUTED_TEXT),
+        );
+        ui.add_space(12.0);
+
+        let mut preset = None;
+        egui::ComboBox::from_id_salt(("region-preset", side))
+            .width(ui.available_width())
+            .selected_text("Apply a layout…")
+            .show_ui(ui, |ui| {
+                for (label, build) in REGION_PRESETS {
+                    if ui.selectable_label(false, label).clicked() {
+                        preset = Some(build);
+                    }
+                }
+            });
+        if let Some(build) = preset {
+            self.pad(side).regions = build();
+            self.selection = EditorSelection::Pad(side);
+            self.capturing = None;
+        }
+        ui.add_space(12.0);
+        self.region_list(ui, side);
+
+        let Some(index) = self.selected_region(side) else {
+            return;
+        };
+        ui.add_space(16.0);
+        ui.separator();
+        ui.add_space(12.0);
+        self.region_shape_editor(ui, side, index);
+        for trigger in PadTrigger::ALL {
+            ui.add_space(16.0);
+            ui.label(format!("{} action", trigger.label()));
+            ui.label(
+                egui::RichText::new(match trigger {
+                    PadTrigger::Click => {
+                        "Held from the press until the pad is released, even if the finger slides \
+                         into another region."
+                    }
+                    PadTrigger::Touch => {
+                        "Held while the finger is inside this region, and handed over when it \
+                         crosses into another."
+                    }
+                })
+                .small()
+                .color(MUTED_TEXT),
+            );
+            ui.add_space(8.0);
+            self.binding_editor(ui, ActionTarget::Region(side, index, trigger));
+        }
+    }
+
+    /// The map of this pad's regions and the ordered list beneath it.
+    fn region_list(&mut self, ui: &mut egui::Ui, side: PadSide) {
+        let selected = self.selected_region(side);
+        let (map_rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ui.available_width().min(190.0)),
+            egui::Sense::hover(),
+        );
+        draw_region_map(
+            &ui.painter_at(map_rect),
+            map_rect,
+            side,
+            &self.pad(side).regions,
+            selected,
+        );
+        ui.add_space(12.0);
+
+        let mut clicked = None;
+        let mut remove = None;
+        let mut raise = None;
+        for (index, region) in self.pad(side).regions.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let chosen = selected == Some(index);
+                let label = format!(
+                    "{}  ·  {} / {}",
+                    region.name,
+                    binding_summary(region.click.as_ref()),
+                    binding_summary(region.touch.as_ref())
+                );
+                if ui.selectable_label(chosen, label).clicked() {
+                    clicked = Some(index);
+                }
+                if ui
+                    .add_enabled(index > 0, egui::Button::new("↑"))
+                    .on_hover_text("Resolve this region before the one above it")
+                    .clicked()
+                {
+                    raise = Some(index);
+                }
+                if ui.button("✕").on_hover_text("Delete this region").clicked() {
+                    remove = Some(index);
+                }
+            });
+        }
+        if let Some(index) = clicked {
+            self.selection = EditorSelection::PadRegion(side, index);
+            self.capturing = None;
+        }
+        if let Some(index) = raise {
+            self.pad(side).regions.swap(index - 1, index);
+            self.selection = EditorSelection::PadRegion(side, index - 1);
+            self.capturing = None;
+        }
+        if let Some(index) = remove {
+            self.pad(side).regions.remove(index);
+            self.selection = EditorSelection::Pad(side);
+            self.capturing = None;
+        }
+
+        ui.add_space(8.0);
+        let room = self.pad(side).regions.len() < MAX_PAD_REGIONS;
+        if ui
+            .add_enabled(room, egui::Button::new("Add region"))
+            .clicked()
+        {
+            self.add_region(side);
+        }
+        if !room {
+            ui.label(
+                egui::RichText::new(format!("At most {MAX_PAD_REGIONS} regions per pad."))
+                    .small()
+                    .color(MUTED_TEXT),
+            );
+        }
+    }
+
+    fn region_shape_editor(&mut self, ui: &mut egui::Ui, side: PadSide, index: usize) {
+        let Some(region) = self.pad(side).regions.get_mut(index) else {
+            return;
+        };
+        ui.label("Region name");
+        ui.add(
+            egui::TextEdit::singleline(&mut region.name)
+                .char_limit(MAX_REGION_NAME_CHARS)
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(12.0);
+        ui.label("Shape");
+        ui.label(
+            egui::RichText::new("Zero degrees points up; angles increase clockwise.")
+                .small()
+                .color(MUTED_TEXT),
+        );
+        let shape = &mut region.shape;
+        ui.add(egui::Slider::new(&mut shape.start_degrees, 0..=359).text("Start"));
+        ui.add(egui::Slider::new(&mut shape.sweep_degrees, 1..=360).text("Sweep"));
+        ui.add(egui::Slider::new(&mut shape.inner_percent, 0..=99).text("Inner %"));
+        ui.add(egui::Slider::new(&mut shape.outer_percent, 1..=100).text("Outer %"));
+        // The store rejects an inverted band, so keep the two ends from crossing
+        // instead of letting the user build something Save would refuse.
+        if shape.inner_percent >= shape.outer_percent {
+            shape.inner_percent = shape.outer_percent - 1;
+        }
+    }
+
+    /// Adds a region with an unused name and selects it.
+    fn add_region(&mut self, side: PadSide) {
+        let pad = self.pad(side);
+        let name = (1..=MAX_PAD_REGIONS + 1)
+            .map(|number| format!("Region {number}"))
+            .find(|candidate| {
+                !pad.regions
+                    .iter()
+                    .any(|region| region.name.eq_ignore_ascii_case(candidate))
+            })
+            .expect("a bounded region list always leaves a name free");
+        pad.regions
+            .push(PadRegion::new(name, PadRegionShape::WHOLE));
+        self.selection = EditorSelection::PadRegion(side, self.pad(side).regions.len() - 1);
+        self.capturing = None;
+    }
+
+    /// The selected region index, if the selection names one on this pad and it
+    /// still exists.
+    fn selected_region(&self, side: PadSide) -> Option<usize> {
+        match self.selection {
+            EditorSelection::PadRegion(selected, index)
+                if selected == side
+                    && index
+                        < self.store.profiles[self.selected]
+                            .pads
+                            .get(binding_side(side))
+                            .regions
+                            .len() =>
+            {
+                Some(index)
+            }
+            _ => None,
+        }
+    }
+
+    /// The action slot a target names, or `None` if it names a region that has
+    /// since been deleted.
+    fn action_slot(&mut self, target: ActionTarget) -> Option<&mut Option<BindingAction>> {
+        match target {
+            ActionTarget::Button(control) => {
+                Some(self.store.profiles[self.selected].bindings.get_mut(control))
+            }
+            ActionTarget::Region(side, index, trigger) => {
+                Some(self.pad(side).regions.get_mut(index)?.action_mut(trigger))
+            }
+        }
+    }
+
+    /// The one action picker, shared by the buttons and by both region triggers.
+    fn binding_editor(&mut self, ui: &mut egui::Ui, target: ActionTarget) {
+        let Some(current) = self.action_slot(target).map(|slot| slot.clone()) else {
+            return;
+        };
         let mut kind = match current {
             None => 0,
             Some(BindingAction::KeyChord { .. }) => 1,
@@ -671,10 +885,10 @@ impl BindingsEditor {
 
         match replacement.as_mut() {
             Some(BindingAction::KeyChord { key, modifiers }) => {
-                self.key_chord_editor(ui, control, key, modifiers);
+                self.key_chord_editor(ui, target, key, modifiers);
             }
             Some(BindingAction::MouseButton { button }) => {
-                mouse_button_editor(ui, control, button);
+                mouse_button_editor(ui, target, button);
             }
             None => {
                 ui.label(
@@ -685,18 +899,20 @@ impl BindingsEditor {
                 );
             }
         }
-        *self.store.profiles[self.selected].bindings.get_mut(control) = replacement;
+        if let Some(slot) = self.action_slot(target) {
+            *slot = replacement;
+        }
     }
 
     fn key_chord_editor(
         &mut self,
         ui: &mut egui::Ui,
-        control: BindableControl,
+        target: ActionTarget,
         key: &mut KeyboardKey,
         modifiers: &mut BTreeSet<Modifier>,
     ) {
         ui.label("Key");
-        egui::ComboBox::from_id_salt(("key", control))
+        egui::ComboBox::from_id_salt(("key", target))
             .width(ui.available_width())
             .selected_text(key.label())
             .show_ui(ui, |ui| {
@@ -706,7 +922,7 @@ impl BindingsEditor {
             });
         ui.add_space(12.0);
         ui.label("Modifiers");
-        egui::Grid::new(("modifiers", control))
+        egui::Grid::new(("modifiers", target))
             .num_columns(2)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
@@ -725,7 +941,7 @@ impl BindingsEditor {
                 }
             });
         ui.add_space(16.0);
-        let capture_label = if self.capturing == Some(control) {
+        let capture_label = if self.capturing == Some(target) {
             "Press any supported key…"
         } else {
             "Capture key chord"
@@ -733,9 +949,9 @@ impl BindingsEditor {
         let capture =
             egui::Button::new(capture_label).min_size(egui::vec2(ui.available_width(), 34.0));
         if ui.add(capture).clicked() {
-            self.capturing = Some(control);
+            self.capturing = Some(target);
         }
-        if self.capturing == Some(control) {
+        if self.capturing == Some(target) {
             ui.label(
                 egui::RichText::new("Press a key with any modifiers you want to include.")
                     .small()
@@ -744,10 +960,19 @@ impl BindingsEditor {
         }
     }
 
-    fn save_and_close(&mut self, ctx: &egui::Context) {
+    fn normalize_names(&mut self) {
         for profile in &mut self.store.profiles {
             profile.name = profile.name.trim().to_owned();
+            for pad in [&mut profile.pads.left, &mut profile.pads.right] {
+                for region in &mut pad.regions {
+                    region.name = region.name.trim().to_owned();
+                }
+            }
         }
+    }
+
+    fn save_and_close(&mut self, ctx: &egui::Context) {
+        self.normalize_names();
         match save_store(&self.path, &self.store) {
             Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Err(error) => self.message = Some(error),

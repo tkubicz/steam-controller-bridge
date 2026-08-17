@@ -42,7 +42,7 @@ dependency graph.
 | Mapper and bridge core | Control mapping, filter reset, timeout/disconnect neutralization, changed-state policy, and reconnect accounting. |
 | Serial and wire protocol | Negotiation, framing/CRC recovery, bounded queues, ping/pong health, sequence handling, and unchanged-state refresh. |
 | Runtime | Discovery, transition retention, neutral-before-release, sleep/update suspension, automatic shutdown, feedback leasing, and command acknowledgement. |
-| Desktop profiles | Schema migration, validation, atomic persistence, edge/reference counts, pad motion, feedback cadence, and sink-failure cleanup. |
+| Desktop profiles | Schema migration, validation, atomic persistence, unreadable-store recovery, edge/reference counts, pad motion modes, region geometry and hysteresis, click/touch latching, feedback cadence, and sink-failure cleanup. |
 | Recording and replay | Typed round trips, ordering, unknown events, seeking, malformed input, and deterministic replay. |
 | Updater | Signature-before-parse, rollback prevention, exact artifact verification, retry/cache semantics, concurrent temporaries, UF2 validation, automatic entry, cancellation, and receipt verification. |
 | Menu and child processes | Settings migration, status rendering, bounded IPC, request correlation, stale-generation rejection, process reaping, diagnostics, and feature gates. |
@@ -73,13 +73,24 @@ Run these on the exact packaged candidate; automated results are not substitutes
 
 - Verify clean-state Input Monitoring and Accessibility prompts, grant
   detection, Stop/Quit cleanup, and log/diagnostic redaction.
+- Corrupt `bindings.json` by hand and confirm both the menu app and `Edit
+  Profiles…` show the recovery alert rather than failing to appear. Confirm Quit
+  leaves the file untouched, that Escape picks Quit, and that Reset Profiles
+  keeps the original as `bindings-invalid.json` and starts with one empty
+  `Default`. The alert is presented by AppKit and is not covered by automation.
 - Test Puck and direct Bluetooth discovery, every control and axis direction,
   battery/charge reports, reconnect, lizard restoration, and ownership
   contention. Direct USB-C input remains unsupported.
 - Verify left/right actuator orientation, unequal magnitudes, continuous and
   rapid effects, and zero after effect stop, process exit, or either disconnect.
-- Verify pad pointer/scroll behavior, click edges, feedback strength and side,
-  stationary noise, profile changes, and permission revocation.
+- Verify pad pointer/scroll behavior on either pad, click edges, feedback
+  strength and side, stationary noise, profile changes, and permission
+  revocation.
+- Verify pad regions: clicks landing in the intended region near seams and near
+  the rim, a finger resting on a seam producing no chatter, a slide during a held
+  click keeping the pressed region's action, touch actions handing over between
+  regions and releasing on lift, and every held action released on profile
+  switch, Stop, and disconnect.
 - Exercise idle and fresh-Puck-dock power-off, charging behavior, wake, one-shot
   latching, and injected failure recovery.
 - Install revision 3 once through manual reset-button recovery. Save its

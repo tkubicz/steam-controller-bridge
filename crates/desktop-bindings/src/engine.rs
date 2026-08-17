@@ -5,9 +5,9 @@ use steam_controller_protocol::SteamButtons;
 
 use crate::model::{
     BindableControl, BindingAction, BindingProfile, DesktopInputSnapshot, Modifier, MouseButton,
-    PadFeedbackConfig, PadFeedbackRequest, PadFeedbackStrength, PadFunctionConfig, PadSample,
-    ScrollPadConfig, FEEDBACK_DISPLACEMENT_COUNTS, FEEDBACK_FAST_INTERVAL, FEEDBACK_SLOW_INTERVAL,
-    MOMENTUM_FRAME_MAX_SECONDS, MOTION_DEFAULT_SECONDS, MOTION_MIN_SECONDS,
+    PadConfig, PadFeedbackConfig, PadFeedbackRequest, PadFeedbackStrength, PadMotionMode,
+    PadSample, PadSide, PadTrigger, FEEDBACK_DISPLACEMENT_COUNTS, FEEDBACK_FAST_INTERVAL,
+    FEEDBACK_SLOW_INTERVAL, MOMENTUM_FRAME_MAX_SECONDS, MOTION_DEFAULT_SECONDS, MOTION_MIN_SECONDS,
     MOTION_SPEED_FULL_COUNTS_PER_SECOND, MOTION_SPEED_MAX_SECONDS,
     MOTION_SPEED_START_COUNTS_PER_SECOND, MOUSE_COUNTS_PER_PIXEL, MOUSE_EDGE_DEADZONE_COUNTS,
     MOUSE_EDGE_STOP_PROGRESS_COUNTS, MOUSE_MOTION_DEADZONE_COUNTS, MOUSE_STOP_PROGRESS_COUNTS,
@@ -19,6 +19,7 @@ use crate::model::{
     SCROLL_MOMENTUM_DECAY_PER_SECOND, SCROLL_MOMENTUM_STOP_PIXELS_PER_SECOND,
     SCROLL_VELOCITY_BLEND,
 };
+use crate::region::resolve_region;
 use crate::sink::{DesktopInputSink, OutputKey};
 
 /// The pad motion filter's states. Raw captures show the reported centroid
@@ -112,6 +113,36 @@ impl Default for MotionFilter {
     }
 }
 
+/// A change to what one trigger holds down. Absent from [`PadEvents`] means the
+/// trigger is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PadLatch {
+    /// Release anything the trigger holds, then hold this action.
+    Hold(BindingAction),
+    /// Release whatever the trigger holds.
+    Clear,
+}
+
+/// Region-trigger transitions produced by one report, for the engine to turn
+/// into reference-counted desktop output.
+///
+/// Gestures are not implemented; when they are, they become further fields here
+/// and further arms in [`BindingEngine::dispatch_pad_events`], rather than a
+/// second dispatch path alongside this one.
+#[derive(Debug, Default, Clone)]
+struct PadEvents {
+    click: Option<PadLatch>,
+    touch: Option<PadLatch>,
+}
+
+/// The physical click-bit edges observed in one report, reported separately from
+/// motion so region actions still fire when the pad drives no motion at all.
+#[derive(Debug, Default, Clone, Copy)]
+struct PadClickEdges {
+    pressed: bool,
+    released: bool,
+}
+
 // Five genuinely independent latches: contact, safety block, effective press,
 // physical click, and post-click pressure suppression. Packing them into enums
 // would obscure that each is set and cleared on its own schedule.
@@ -142,6 +173,17 @@ struct PadMotionState {
     scroll_velocity_x: f64,
     scroll_velocity_y: f64,
     scroll_last_update: Option<Duration>,
+    /// Coordinates at the effective-press edge. Pressure crosses its freeze
+    /// threshold tens of milliseconds before the click bit, so anchoring here
+    /// resolves the click's region before most of the fingertip roll.
+    press_anchor: Option<(i16, i16)>,
+    /// Region whose click action is held, latched at the press edge so sliding
+    /// during a held click cannot swap the action.
+    click_region: Option<usize>,
+    /// Region the finger currently occupies. Tracked whether or not that region
+    /// binds anything, so boundary hysteresis works at every seam.
+    touch_region: Option<usize>,
+    last_touch_feedback: Option<Duration>,
 }
 
 impl PadMotionState {
@@ -164,9 +206,20 @@ impl PadMotionState {
         clear_scroll_momentum(self);
     }
 
+    // Region latches are deliberately untouched by `reset_motion_tracking`: the
+    // release guard rebaselines every report through that path, and a held
+    // click must survive it.
+    fn clear_regions(&mut self) {
+        self.press_anchor = None;
+        self.click_region = None;
+        self.touch_region = None;
+        self.last_touch_feedback = None;
+    }
+
     fn block_if_touched(&mut self) {
         self.blocked = self.touched;
         self.reset_motion();
+        self.clear_regions();
     }
 
     fn end_contact(&mut self, sample: PadSample) {
@@ -176,6 +229,24 @@ impl PadMotionState {
         self.clicked = sample.pressed;
         self.pressure_blocked = false;
         self.guard_until = None;
+        self.clear_regions();
+    }
+}
+
+/// The desktop actions one pad currently holds down. At most one per trigger,
+/// which is the truth of the hardware: a pad has one finger and one switch.
+#[derive(Debug, Default)]
+struct PadLatchState {
+    click: Option<BindingAction>,
+    touch: Option<BindingAction>,
+}
+
+impl PadLatchState {
+    fn get_mut(&mut self, trigger: PadTrigger) -> &mut Option<BindingAction> {
+        match trigger {
+            PadTrigger::Click => &mut self.click,
+            PadTrigger::Touch => &mut self.touch,
+        }
     }
 }
 
@@ -188,6 +259,8 @@ pub struct BindingEngine {
     mouse_counts: BTreeMap<MouseButton, u16>,
     left_pad: PadMotionState,
     right_pad: PadMotionState,
+    left_latch: PadLatchState,
+    right_latch: PadLatchState,
 }
 
 impl BindingEngine {
@@ -202,6 +275,8 @@ impl BindingEngine {
             mouse_counts: BTreeMap::new(),
             left_pad: PadMotionState::default(),
             right_pad: PadMotionState::default(),
+            left_latch: PadLatchState::default(),
+            right_latch: PadLatchState::default(),
         }
     }
 
@@ -219,15 +294,20 @@ impl BindingEngine {
     ///
     /// Callers may sleep indefinitely while this is false because button and
     /// direct pad output are entirely snapshot-driven. It becomes true only
-    /// while released left-pad scroll momentum still needs periodic ticks.
+    /// while released pad scroll momentum still needs periodic ticks.
     #[must_use]
     pub fn needs_tick(&self) -> bool {
         self.previous_mask.is_some()
-            && !self.left_pad.touched
-            && !self.left_pad.blocked
-            && self.profile.pads.left_scroll.enabled
-            && self.profile.pads.left_scroll.momentum
-            && self.left_pad.scroll_last_update.is_some()
+            && PadSide::ALL
+                .into_iter()
+                .any(|side| pad_momentum_pending(self.pad_state(side), self.profile.pads.get(side)))
+    }
+
+    const fn pad_state(&self, side: PadSide) -> &PadMotionState {
+        match side {
+            PadSide::Left => &self.left_pad,
+            PadSide::Right => &self.right_pad,
+        }
     }
 
     /// Observes a button-only snapshot and emits its binding edges.
@@ -274,41 +354,9 @@ impl BindingEngine {
         };
         self.blocked_mask &= mask;
         let changed = previous ^ mask;
-        let pads = self.profile.pads;
-        let left_click_feedback = pad_click_feedback(
-            changed,
-            mask,
-            self.blocked_mask,
-            BindableControl::LeftPadClick,
-            pads.left_scroll.feedback,
-        );
-        let right_click_feedback = pad_click_feedback(
-            changed,
-            mask,
-            self.blocked_mask,
-            BindableControl::RightPadClick,
-            pads.right_mouse.feedback,
-        );
-        let result = self.apply_changes(changed, mask, sink).and_then(|()| {
-            let left = process_scroll_pad(
-                &mut self.left_pad,
-                snapshot.left_pad,
-                pads.left_scroll,
-                now,
-                sink,
-            )?;
-            let right = process_mouse_pad(
-                &mut self.right_pad,
-                snapshot.right_pad,
-                pads.right_mouse,
-                now,
-                sink,
-            )?;
-            Ok(PadFeedbackRequest {
-                left: left.or(left_click_feedback),
-                right: right.or(right_click_feedback),
-            })
-        });
+        let result = self
+            .apply_changes(changed, mask, sink)
+            .and_then(|()| self.process_pads(snapshot, now, sink));
         self.previous_mask = Some(mask);
         match result {
             Ok(feedback) => Ok(feedback),
@@ -322,7 +370,83 @@ impl BindingEngine {
         }
     }
 
-    /// Advances time-based desktop output such as left-pad scroll momentum.
+    /// Runs both pads' motion and region processing, emitting their desktop
+    /// output and collecting any feedback ticks they earned.
+    fn process_pads(
+        &mut self,
+        snapshot: DesktopInputSnapshot,
+        now: Duration,
+        sink: &mut dyn DesktopInputSink,
+    ) -> Result<PadFeedbackRequest, String> {
+        let (left, left_events) = process_pad(
+            &mut self.left_pad,
+            snapshot.left_pad,
+            &self.profile.pads.left,
+            now,
+            sink,
+        )?;
+        self.dispatch_pad_events(PadSide::Left, left_events, sink)?;
+        let (right, right_events) = process_pad(
+            &mut self.right_pad,
+            snapshot.right_pad,
+            &self.profile.pads.right,
+            now,
+            sink,
+        )?;
+        self.dispatch_pad_events(PadSide::Right, right_events, sink)?;
+        Ok(PadFeedbackRequest { left, right })
+    }
+
+    /// Turns one report's region transitions into reference-counted output,
+    /// releasing before pressing so a hand-off between two different actions
+    /// never holds both at once. Crossing between regions with the same action
+    /// leaves that output alone instead of injecting a false release/press pair.
+    fn dispatch_pad_events(
+        &mut self,
+        side: PadSide,
+        events: PadEvents,
+        sink: &mut dyn DesktopInputSink,
+    ) -> Result<(), String> {
+        for (trigger, latch) in [
+            (PadTrigger::Click, events.click),
+            (PadTrigger::Touch, events.touch),
+        ] {
+            let Some(latch) = latch else {
+                continue;
+            };
+            if matches!(
+                &latch,
+                PadLatch::Hold(action)
+                    if self.pad_latch(side).get_mut(trigger).as_ref() == Some(action)
+            ) {
+                continue;
+            }
+            if let Some(action) = self.pad_latch(side).get_mut(trigger).take() {
+                self.release_action(&action, sink)?;
+            }
+            if let PadLatch::Hold(action) = latch {
+                self.press_action(&action, sink)?;
+                *self.pad_latch(side).get_mut(trigger) = Some(action);
+            }
+        }
+        Ok(())
+    }
+
+    fn pad_latch(&mut self, side: PadSide) -> &mut PadLatchState {
+        match side {
+            PadSide::Left => &mut self.left_latch,
+            PadSide::Right => &mut self.right_latch,
+        }
+    }
+
+    /// Drops every pad region latch without emitting releases. Only safe beside
+    /// a `release_all`, which unwinds the reference counts those latches hold.
+    fn forget_pad_latches(&mut self) {
+        self.left_latch = PadLatchState::default();
+        self.right_latch = PadLatchState::default();
+    }
+
+    /// Advances time-based desktop output such as pad scroll momentum.
     ///
     /// This is intentionally independent of controller reports so inertia can
     /// finish even when the HID transport becomes quiet after touch release.
@@ -333,11 +457,23 @@ impl BindingEngine {
         if !self.needs_tick() {
             return Ok(());
         }
-        if let Err(error) = advance_scroll_momentum(&mut self.left_pad, now, sink) {
-            let _ = self.release_all(sink);
-            self.left_pad.reset_motion();
-            self.right_pad.block_if_touched();
-            return Err(error);
+        for side in PadSide::ALL {
+            if !pad_momentum_pending(self.pad_state(side), self.profile.pads.get(side)) {
+                continue;
+            }
+            let state = match side {
+                PadSide::Left => &mut self.left_pad,
+                PadSide::Right => &mut self.right_pad,
+            };
+            if let Err(error) = advance_scroll_momentum(state, now, sink) {
+                let _ = self.release_all(sink);
+                // A pad running momentum is by definition untouched, so this
+                // clears its motion without blocking it; a pad the user is
+                // holding stays inert until they let go.
+                self.left_pad.block_if_touched();
+                self.right_pad.block_if_touched();
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -379,6 +515,15 @@ impl BindingEngine {
         self.left_pad = PadMotionState::default();
         self.right_pad = PadMotionState::default();
         result
+    }
+
+    /// Reports whether a pad currently holds a region action down.
+    #[must_use]
+    pub fn held_pad_action_count(&self) -> usize {
+        [&self.left_latch, &self.right_latch]
+            .into_iter()
+            .map(|latch| usize::from(latch.click.is_some()) + usize::from(latch.touch.is_some()))
+            .sum()
     }
 
     fn apply_changes(
@@ -518,8 +663,18 @@ impl BindingEngine {
             }
         }
         self.active.clear();
+        self.forget_pad_latches();
         first_error.map_or(Ok(()), Err)
     }
+}
+
+/// Reports whether released scroll momentum on this pad still owes ticks.
+fn pad_momentum_pending(state: &PadMotionState, config: &PadConfig) -> bool {
+    !state.touched
+        && !state.blocked
+        && config.motion == PadMotionMode::Scroll
+        && config.momentum
+        && state.scroll_last_update.is_some()
 }
 
 fn baseline_pad(state: &mut PadMotionState, sample: PadSample) {
@@ -530,6 +685,7 @@ fn baseline_pad(state: &mut PadMotionState, sample: PadSample) {
     state.pressure_blocked = false;
     state.guard_until = None;
     state.reset_motion();
+    state.clear_regions();
 }
 
 /// Effective press: the physical click bit OR the analog pressure crossing
@@ -551,7 +707,14 @@ fn effectively_pressed(previously_held: bool, pressure_blocked: bool, sample: Pa
 /// freezes the approach, the physical click edge establishes a fresh drag
 /// anchor, and the falling edge immediately guards the un-flattening tail even
 /// while analog pressure remains high.
-fn apply_click_transitions(state: &mut PadMotionState, sample: PadSample, now: Duration) -> bool {
+///
+/// Returns the physical click edges alongside whether the release guard is
+/// active, so region actions can fire even for a pad that drives no motion.
+fn apply_click_transitions(
+    state: &mut PadMotionState,
+    sample: PadSample,
+    now: Duration,
+) -> (PadClickEdges, bool) {
     if state.pressure_blocked && sample.pressure < PAD_PRESSURE_FREEZE_EXIT {
         state.pressure_blocked = false;
     }
@@ -579,50 +742,198 @@ fn apply_click_transitions(state: &mut PadMotionState, sample: PadSample, now: D
         rebaseline_placement(state, sample);
         state.guard_until = Some(now + PAD_RELEASE_GUARD);
     }
-    match state.guard_until {
+    // The anchor is claimed by whichever press edge arrives first, which is
+    // normally the pressure freeze; the later click bit keeps it rather than
+    // re-reading a coordinate the fingertip has already rolled away from.
+    if state.held {
+        state.press_anchor.get_or_insert((sample.x, sample.y));
+    } else {
+        state.press_anchor = None;
+    }
+    let guard_active = match state.guard_until {
         Some(until) if now < until => true,
         Some(_) => {
             state.guard_until = None;
             false
         }
         None => false,
-    }
+    };
+    (
+        PadClickEdges {
+            pressed: pressed_edge,
+            released: released_edge,
+        },
+        guard_active,
+    )
 }
 
-fn pad_click_feedback(
-    changed: u8,
-    current: u8,
-    blocked: u8,
-    control: BindableControl,
-    config: PadFeedbackConfig,
-) -> Option<PadFeedbackStrength> {
-    let control = control.mask();
-    (config.enabled && changed & control != 0 && current & control != 0 && blocked & control == 0)
-        .then_some(config.strength)
-}
-
-/// Runs the touch/press/release state machine shared by pointer and scroll
-/// pads, leaving only their output conversion in the callers.
-fn process_touched_pad(
+/// Runs one pad's touch/press/release machine, emitting whichever motion its
+/// configured mode calls for and reporting the region transitions the caller
+/// must turn into desktop output.
+fn process_pad(
     state: &mut PadMotionState,
     sample: PadSample,
-    enabled: bool,
-    thresholds: MotionThresholds,
+    config: &PadConfig,
     now: Duration,
-) -> Option<PadMotion> {
+    sink: &mut dyn DesktopInputSink,
+) -> Result<(Option<PadFeedbackStrength>, PadEvents), String> {
+    let was_touched = state.touched;
+    if !sample.touched {
+        // Every latched region is released by lifting off, whatever the pad's
+        // motion mode is doing.
+        let events = PadEvents {
+            click: state.click_region.is_some().then_some(PadLatch::Clear),
+            touch: state.touch_region.is_some().then_some(PadLatch::Clear),
+        };
+        state.end_contact(sample);
+        match config.motion {
+            PadMotionMode::Scroll => {
+                if was_touched {
+                    state.reset_motion_tracking();
+                    if config.momentum && scroll_velocity_pending(state) {
+                        state.scroll_last_update = Some(now);
+                    } else {
+                        clear_scroll_momentum(state);
+                    }
+                } else if config.momentum {
+                    advance_scroll_momentum(state, now, sink)?;
+                } else {
+                    clear_scroll_momentum(state);
+                }
+            }
+            PadMotionMode::None | PadMotionMode::Pointer => state.reset_motion(),
+        }
+        return Ok((None, events));
+    }
+
     state.touched = true;
     if state.blocked {
         state.held = effectively_pressed(state.held, state.pressure_blocked, sample);
         state.clicked = sample.pressed;
         state.pressure_blocked = false;
         state.reset_motion();
+        return Ok((None, PadEvents::default()));
+    }
+    if config.motion == PadMotionMode::Scroll && !was_touched {
+        clear_scroll_momentum(state);
+    }
+
+    let (edges, guard_active) = apply_click_transitions(state, sample, now);
+    let events = track_regions(state, sample, config, edges, guard_active);
+    let click_feedback =
+        (edges.pressed && config.feedback.enabled).then_some(config.feedback.strength);
+    let touch_feedback = touch_region_feedback(state, config, &events, now);
+
+    let motion_feedback = if let Some(motion) = pad_motion(state, sample, config, guard_active, now)
+    {
+        match config.motion {
+            PadMotionMode::Pointer => emit_pointer_motion(state, config, &motion, sink)?,
+            PadMotionMode::Scroll => emit_scroll_motion(state, config, &motion, now, sink)?,
+            // `pad_motion` yields nothing for an unbound pad, so this arm is
+            // unreachable rather than a silently dropped behavior.
+            PadMotionMode::None => {}
+        }
+        process_motion_feedback(state, config.feedback, &motion, now)
+    } else {
+        // Seed velocity timing from contact rather than assuming the default
+        // frame interval for the first accepted scroll sample. This timestamp
+        // alone cannot schedule momentum: release also requires real velocity.
+        if config.motion == PadMotionMode::Scroll && state.scroll_last_update.is_none() {
+            state.scroll_last_update = Some(now);
+        }
+        None
+    };
+
+    Ok((
+        motion_feedback.or(click_feedback).or(touch_feedback),
+        events,
+    ))
+}
+
+/// Resolves which region the finger and the click belong to.
+///
+/// Tracking freezes while the pad is effectively pressed or inside the release
+/// guard: a flattening or un-flattening fingertip's reported centroid wanders by
+/// hundreds to thousands of counts, which would otherwise walk across seams and
+/// fire actions the user never aimed at.
+fn track_regions(
+    state: &mut PadMotionState,
+    sample: PadSample,
+    config: &PadConfig,
+    edges: PadClickEdges,
+    guard_active: bool,
+) -> PadEvents {
+    let mut events = PadEvents::default();
+    if edges.released && state.click_region.take().is_some() {
+        events.click = Some(PadLatch::Clear);
+    }
+    if !state.held && !guard_active {
+        let region = resolve_region(&config.regions, (sample.x, sample.y), state.touch_region);
+        if region != state.touch_region {
+            state.touch_region = region;
+            events.touch = Some(latch_for(config, region, PadTrigger::Touch));
+        }
+    }
+    if edges.pressed {
+        // The press anchor is where pressure first crossed the freeze threshold,
+        // which precedes the click bit and therefore most of the roll.
+        let anchor = state.press_anchor.unwrap_or((sample.x, sample.y));
+        let region = resolve_region(&config.regions, anchor, state.touch_region);
+        state.click_region = region;
+        events.click = Some(latch_for(config, region, PadTrigger::Click));
+    }
+    events
+}
+
+/// A region index becomes the action it binds for that trigger, or a release
+/// when it is unbound or there is no region under the finger at all.
+fn latch_for(config: &PadConfig, region: Option<usize>, trigger: PadTrigger) -> PadLatch {
+    region
+        .and_then(|index| config.regions.get(index))
+        .and_then(|region| region.action(trigger))
+        .cloned()
+        .map_or(PadLatch::Clear, PadLatch::Hold)
+}
+
+/// One tick when the finger crosses into a region that binds a touch action.
+/// Unlike a click, which the user commits to deliberately, boundary traffic can
+/// be dense, so this shares the motion texture's fastest interval as a floor.
+fn touch_region_feedback(
+    state: &mut PadMotionState,
+    config: &PadConfig,
+    events: &PadEvents,
+    now: Duration,
+) -> Option<PadFeedbackStrength> {
+    if !config.feedback.enabled || !matches!(events.touch, Some(PadLatch::Hold(_))) {
         return None;
     }
-    let guard_active = apply_click_transitions(state, sample, now);
-    if !enabled {
-        state.reset_motion();
+    if state
+        .last_touch_feedback
+        .is_some_and(|last| now.saturating_sub(last) < FEEDBACK_FAST_INTERVAL)
+    {
         return None;
     }
+    state.last_touch_feedback = Some(now);
+    Some(config.feedback.strength)
+}
+
+/// The accepted per-report travel for the pad's mode, or `None` when the mode
+/// consumes no motion or the filter is currently swallowing it.
+fn pad_motion(
+    state: &mut PadMotionState,
+    sample: PadSample,
+    config: &PadConfig,
+    guard_active: bool,
+    now: Duration,
+) -> Option<PadMotion> {
+    let thresholds = match config.motion {
+        PadMotionMode::None => {
+            state.reset_motion();
+            return None;
+        }
+        PadMotionMode::Pointer => POINTER_THRESHOLDS,
+        PadMotionMode::Scroll => SCROLL_THRESHOLDS,
+    };
     if guard_active {
         rebaseline_placement(state, sample);
         return None;
@@ -649,117 +960,62 @@ fn process_touched_pad(
     })
 }
 
-fn process_mouse_pad(
+fn emit_pointer_motion(
     state: &mut PadMotionState,
-    sample: PadSample,
-    config: PadFunctionConfig,
-    now: Duration,
+    config: &PadConfig,
+    motion: &PadMotion,
     sink: &mut dyn DesktopInputSink,
-) -> Result<Option<PadFeedbackStrength>, String> {
-    if !sample.touched {
-        state.end_contact(sample);
-        state.reset_motion();
-        return Ok(None);
-    }
-    let Some(motion) = process_touched_pad(state, sample, config.enabled, POINTER_THRESHOLDS, now)
-    else {
-        return Ok(None);
+) -> Result<(), String> {
+    let Some((delta_x, delta_y)) = motion.filtered else {
+        return Ok(());
     };
-    if let Some((delta_x, delta_y)) = motion.filtered {
-        let gain = mouse_gain(config.speed_percent);
-        state.x_residual += scale_counts(delta_x, gain);
-        state.y_residual -= scale_counts(delta_y, gain);
-        let pixels_x = take_pixels(&mut state.x_residual, MOUSE_COUNTS_PER_PIXEL);
-        let pixels_y = take_pixels(&mut state.y_residual, MOUSE_COUNTS_PER_PIXEL);
-        if pixels_x != 0 || pixels_y != 0 {
-            sink.mouse_move(pixels_x, pixels_y)?;
-        }
+    let gain = mouse_gain(config.speed_percent);
+    state.x_residual += scale_counts(delta_x, gain);
+    state.y_residual -= scale_counts(delta_y, gain);
+    let pixels_x = take_pixels(&mut state.x_residual, MOUSE_COUNTS_PER_PIXEL);
+    let pixels_y = take_pixels(&mut state.y_residual, MOUSE_COUNTS_PER_PIXEL);
+    if pixels_x != 0 || pixels_y != 0 {
+        sink.mouse_move(pixels_x, pixels_y)?;
     }
-
-    Ok(process_motion_feedback(
-        state,
-        config.feedback,
-        &motion,
-        now,
-    ))
+    Ok(())
 }
 
-fn process_scroll_pad(
+fn emit_scroll_motion(
     state: &mut PadMotionState,
-    sample: PadSample,
-    config: ScrollPadConfig,
+    config: &PadConfig,
+    motion: &PadMotion,
     now: Duration,
     sink: &mut dyn DesktopInputSink,
-) -> Result<Option<PadFeedbackStrength>, String> {
-    let was_touched = state.touched;
-    if !sample.touched {
-        state.end_contact(sample);
-        if !config.enabled {
-            state.reset_motion();
-            return Ok(None);
-        }
-        if was_touched {
-            state.reset_motion_tracking();
-            if config.momentum && scroll_velocity_pending(state) {
-                state.scroll_last_update = Some(now);
-            } else {
-                clear_scroll_momentum(state);
-            }
-            return Ok(None);
-        }
-        if config.momentum {
-            advance_scroll_momentum(state, now, sink)?;
-        } else {
+) -> Result<(), String> {
+    let Some((delta_x, delta_y)) = motion.filtered else {
+        if matches!(
+            state.filter,
+            MotionFilter::Parked { .. } | MotionFilter::DragParked { .. }
+        ) {
             clear_scroll_momentum(state);
         }
-        return Ok(None);
-    }
-    if !was_touched {
-        clear_scroll_momentum(state);
-    }
-    let Some(motion) = process_touched_pad(state, sample, config.enabled, SCROLL_THRESHOLDS, now)
-    else {
-        // Seed velocity timing from contact rather than assuming the default
-        // frame interval for the first accepted scroll sample. This timestamp
-        // alone cannot schedule momentum: release also requires real velocity.
-        if config.enabled && state.touched && state.scroll_last_update.is_none() {
-            state.scroll_last_update = Some(now);
-        }
-        return Ok(None);
+        return Ok(());
     };
-    if let Some((delta_x, delta_y)) = motion.filtered {
-        let acceleration = scroll_acceleration(motion.speed);
-        let profile_scale = f64::from(config.speed_percent) / 100.0;
-        let scale = profile_scale * acceleration / f64::from(SCROLL_COUNTS_PER_PIXEL);
-        let scroll_x = f64::from(delta_x) * scale;
-        let scroll_y = -f64::from(delta_y) * scale;
-        emit_fractional_scroll(state, scroll_x, scroll_y, sink)?;
+    let acceleration = scroll_acceleration(motion.speed);
+    let profile_scale = f64::from(config.speed_percent) / 100.0;
+    let scale = profile_scale * acceleration / f64::from(SCROLL_COUNTS_PER_PIXEL);
+    let scroll_x = f64::from(delta_x) * scale;
+    let scroll_y = -f64::from(delta_y) * scale;
+    emit_fractional_scroll(state, scroll_x, scroll_y, sink)?;
 
-        let seconds = motion_seconds(state.scroll_last_update, now);
-        state.scroll_last_update = Some(now);
-        let instantaneous_x = (scroll_x / seconds).clamp(
-            -SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
-            SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
-        );
-        let instantaneous_y = (scroll_y / seconds).clamp(
-            -SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
-            SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
-        );
-        state.scroll_velocity_x = blend_velocity(state.scroll_velocity_x, instantaneous_x);
-        state.scroll_velocity_y = blend_velocity(state.scroll_velocity_y, instantaneous_y);
-    } else if matches!(
-        state.filter,
-        MotionFilter::Parked { .. } | MotionFilter::DragParked { .. }
-    ) {
-        clear_scroll_momentum(state);
-    }
-
-    Ok(process_motion_feedback(
-        state,
-        config.feedback,
-        &motion,
-        now,
-    ))
+    let seconds = motion_seconds(state.scroll_last_update, now);
+    state.scroll_last_update = Some(now);
+    let instantaneous_x = (scroll_x / seconds).clamp(
+        -SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+        SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+    );
+    let instantaneous_y = (scroll_y / seconds).clamp(
+        -SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+        SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND,
+    );
+    state.scroll_velocity_x = blend_velocity(state.scroll_velocity_x, instantaneous_x);
+    state.scroll_velocity_y = blend_velocity(state.scroll_velocity_y, instantaneous_y);
+    Ok(())
 }
 
 fn update_motion_speed(

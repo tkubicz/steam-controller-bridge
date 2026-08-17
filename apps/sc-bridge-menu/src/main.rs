@@ -9,6 +9,8 @@ mod app_center_protocol;
 #[cfg(all(target_os = "macos", feature = "editor"))]
 mod bindings_editor;
 #[cfg(target_os = "macos")]
+mod bindings_recovery;
+#[cfg(target_os = "macos")]
 mod cli;
 #[cfg(target_os = "macos")]
 mod line_protocol;

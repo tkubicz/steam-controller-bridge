@@ -37,6 +37,7 @@ tray-icon.workspace = true
 winit.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
 release-updater = { path = "../../crates/release-updater", optional = true }
 semver = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }

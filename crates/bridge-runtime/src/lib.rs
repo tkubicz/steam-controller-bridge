@@ -62,12 +62,12 @@ use bridge_output::{
     available_serial_devices, DumpOutput, FileOutput, GamepadOutput, MockOutput, OutputError,
     OutputFeedback, SerialDeviceInfo, SerialOutput,
 };
-#[cfg(test)]
-use desktop_bindings::PadSample;
 use desktop_bindings::{
     bindable_mask, BindingEngine, BindingProfile, DesktopInputSink, DesktopInputSnapshot,
     PadFeedbackRequest,
 };
+#[cfg(test)]
+use desktop_bindings::{PadMotionMode, PadSample};
 use gamepad_state::OutputSuppression;
 #[cfg(target_os = "macos")]
 use macos_power_monitor::{PowerEvent, PowerMonitor};

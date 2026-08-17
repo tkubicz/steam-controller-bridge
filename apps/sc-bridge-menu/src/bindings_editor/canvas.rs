@@ -1,6 +1,7 @@
 use super::{
-    body_bounds, egui, normalized_point, trackpad_rect, ControlCallout, ControllerView,
-    EditorSelection, LabelSide, PadSide, ACCENT, MUTED_TEXT,
+    binding_side, body_bounds, egui, normalized_point, trackpad_rect, ControlCallout,
+    ControllerView, EditorSelection, LabelSide, PadBindings, PadMotionMode, PadSide, ACCENT,
+    MUTED_TEXT,
 };
 
 const LABEL_SIZE: [f32; 2] = [86.0, 40.0];
@@ -118,20 +119,28 @@ pub(super) fn rect_edge_towards(rect: egui::Rect, toward: egui::Pos2) -> egui::P
     }
 }
 
+/// Summarizes each pad on the artwork: what its motion does, and how many
+/// regions carry an action. Neither is fixed to a side any more, so the label
+/// has to be read off the profile rather than baked into the drawing.
 pub(super) fn draw_pad_labels(
     painter: &egui::Painter,
     view: egui::Rect,
-    left_enabled: bool,
-    right_enabled: bool,
+    pads: &PadBindings,
     selected: EditorSelection,
 ) {
-    for (side, title, enabled) in [
-        (PadSide::Left, "SCROLL", left_enabled),
-        (PadSide::Right, "MOUSE", right_enabled),
-    ] {
-        let selection = EditorSelection::Pad(side);
+    for side in PadSide::ALL {
+        let pad = pads.get(binding_side(side));
+        let motion = match pad.motion {
+            PadMotionMode::None => "NO MOTION",
+            PadMotionMode::Pointer => "POINTER",
+            PadMotionMode::Scroll => "SCROLL",
+        };
+        let bound = pad.bound_region_count();
         let rect = trackpad_rect(view, side);
-        let color = if selected == selection {
+        let color = if matches!(
+            selected,
+            EditorSelection::Pad(chosen) | EditorSelection::PadRegion(chosen, _) if chosen == side
+        ) {
             ACCENT
         } else {
             MUTED_TEXT
@@ -139,7 +148,7 @@ pub(super) fn draw_pad_labels(
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            format!("{title}\n{}", if enabled { "ON" } else { "OFF" }),
+            format!("{motion}\n{bound} bound"),
             egui::FontId::proportional(9.5),
             color,
         );

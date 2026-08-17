@@ -47,7 +47,7 @@ devices can implement the bridge contract without inheriting XIAO identity.
       <img src="docs/images/profile-editor.png" alt="Steam Controller Bridge profile and binding editor" width="100%" />
       <br />
       <strong>Make the extra controls yours</strong><br />
-      <sub>Bind L4/L5/R4/R5, Quick Access, and pad clicks; configure right-pad pointer and left-pad scrolling per profile.</sub>
+      <sub>Bind L4/L5/R4/R5 and Quick Access; give either pad pointer or scroll motion, and split it into regions with their own click and touch actions.</sub>
     </td>
   </tr>
 </table>
@@ -119,6 +119,7 @@ cannot complete.
 - Xbox-layout USB gamepad output
 - Dual-actuator rumble and pad feedback
 - Per-profile keyboard, mouse, pointer, and scrolling bindings
+- User-defined trackpad regions with their own click and touch actions
 - In-game radial profile switcher
 - Automatic idle and Puck-dock shutdown options
 - Signed application and firmware update metadata
