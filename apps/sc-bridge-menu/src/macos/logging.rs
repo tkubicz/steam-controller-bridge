@@ -10,17 +10,16 @@ pub(super) struct StatusLogger {
 
 impl StatusLogger {
     pub(super) fn new() -> Result<Self, String> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or("HOME is not set; cannot locate the user log directory")?;
-        let directory = home.join("Library/Logs/Steam Controller Bridge");
+        let paths = app_paths::current()
+            .map_err(|error| format!("cannot locate the user log directory: {error}"))?;
+        let path = paths.status_log_file();
+        let directory = paths.log_dir;
         fs::create_dir_all(&directory).map_err(|error| {
             format!(
                 "cannot create log directory '{}': {error}",
                 directory.display()
             )
         })?;
-        let path = directory.join("sc-bridge.log");
         Ok(Self {
             directory,
             path,

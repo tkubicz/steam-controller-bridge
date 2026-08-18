@@ -52,10 +52,8 @@ pub(super) const SCROLL_VELOCITY_BLEND: f64 = 0.35;
 pub(super) const SCROLL_MOMENTUM_DECAY_PER_SECOND: f64 = 7.0;
 pub(super) const SCROLL_MOMENTUM_STOP_PIXELS_PER_SECOND: f64 = 5.0;
 pub(super) const SCROLL_MAX_MOMENTUM_PIXELS_PER_SECOND: f64 = 2_400.0;
-// A fingertip resting on a region boundary wanders by the same capacitive
-// centroid noise the motion filter already compensates for. The currently
-// occupied region is therefore tested with its shape grown by these margins, so
-// resting on a seam holds one action instead of alternating between two.
+// The occupied region is tested with its shape grown by these, so centroid
+// noise at a seam cannot alternate between two actions.
 pub(super) const REGION_HYSTERESIS_PERCENT: f32 = 4.0;
 pub(super) const REGION_HYSTERESIS_DEGREES: f32 = 6.0;
 pub(super) const MOTION_DEFAULT_SECONDS: f64 = 1.0 / 120.0;
@@ -128,8 +126,7 @@ impl PadSide {
     }
 }
 
-/// What a pad's continuous finger travel drives. Neither behavior is tied to a
-/// side any more: either pad can take either mode, or none at all.
+/// What a pad's continuous finger travel drives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PadMotionMode {
@@ -152,12 +149,11 @@ impl PadMotionMode {
     }
 }
 
-/// One addressable area of a pad, as a bearing sector crossed with an extent band.
+/// A bearing sector crossed with an extent band.
 ///
-/// Angles follow the same convention as the profile wheel's
-/// `profile_picker::sector_for`: zero degrees points at twelve o'clock and they
-/// increase clockwise, with pad Y positive upwards. Extents are a percentage
-/// of the distance from the centre to the square pad edge along either axis.
+/// Zero degrees is twelve o'clock, increasing clockwise, pad Y positive upwards,
+/// matching `profile_picker::sector_for`. Extent is a percentage of the distance
+/// from the centre to the square pad edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PadRegionShape {
@@ -190,11 +186,8 @@ impl Default for PadRegionShape {
     }
 }
 
-/// What, within a region, fires its action.
-///
-/// Gesture support is not implemented, but this is the enum it attaches to: a
-/// swipe or rotation becomes another variant here and another arm in the
-/// engine's `PadEvent` dispatch, rather than a second binding mechanism.
+/// What, within a region, fires its action. Gestures would be further variants
+/// here and further arms in the engine's `PadEvent` dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PadTrigger {
@@ -256,8 +249,7 @@ impl PadRegion {
         }
     }
 
-    /// One region covering the entire pad. This is what a pre-region pad-click
-    /// binding migrates into.
+    /// One region covering the entire pad.
     #[must_use]
     pub fn whole() -> Vec<Self> {
         vec![Self::new("Whole Pad", PadRegionShape::WHOLE)]
@@ -283,9 +275,8 @@ impl PadRegion {
         Self::compass(8, DEFAULT_CENTER_PERCENT)
     }
 
-    /// Equal sectors centred on their compass direction, optionally around a
-    /// centre area. The centre is listed first so first-match-wins resolution
-    /// lets it shadow the sectors it sits inside.
+    /// Equal sectors centred on their compass direction. Any centre area is
+    /// listed first so first-match-wins lets it shadow the sectors it sits in.
     #[must_use]
     fn compass(sectors: u16, center_percent: u8) -> Vec<Self> {
         let names: &[&str] = if sectors == 4 {

@@ -223,10 +223,9 @@ impl AppSettings {
 }
 
 pub(super) fn settings_path() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("HOME is not set; cannot locate the application settings directory")?;
-    Ok(home.join("Library/Application Support/Steam Controller Bridge/settings.json"))
+    app_paths::current()
+        .map(|paths| paths.settings_file())
+        .map_err(|error| format!("cannot locate the application settings directory: {error}"))
 }
 
 pub(super) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {

@@ -54,7 +54,6 @@ enum ControllerView {
 enum EditorSelection {
     Button(BindableControl),
     Pad(PadSide),
-    /// A region of a pad, by its position in that pad's ordered list.
     PadRegion(PadSide, usize),
 }
 
@@ -67,9 +66,8 @@ impl EditorSelection {
     }
 }
 
-/// Which action slot the inspector is editing. Buttons and both region triggers
-/// share one action picker, so they share one way of naming a slot; it doubles
-/// as the egui ID salt that keeps their widgets distinct.
+/// Which action slot the inspector is editing. Doubles as the egui ID salt that
+/// keeps the shared picker's widgets distinct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ActionTarget {
     Button(BindableControl),
@@ -186,9 +184,8 @@ const CONTROL_CALLOUTS: [ControlCallout; 5] = [
 
 pub fn run() -> Result<(), String> {
     let path = default_store_path()?;
-    // The editor is launched with its output discarded, so an unreadable store
-    // has to be presented here too; returning an error would simply close the
-    // window the user just asked for with nothing shown.
+    // Launched with output discarded, so an error here would just close the
+    // window the user asked for, showing nothing.
     let Some(store) = crate::bindings_recovery::load_store_or_recover(&path)? else {
         return Ok(());
     };
@@ -796,8 +793,7 @@ impl BindingsEditor {
         ui.add(egui::Slider::new(&mut shape.sweep_degrees, 1..=360).text("Sweep"));
         ui.add(egui::Slider::new(&mut shape.inner_percent, 0..=99).text("Inner %"));
         ui.add(egui::Slider::new(&mut shape.outer_percent, 1..=100).text("Outer %"));
-        // The store rejects an inverted band, so keep the two ends from crossing
-        // instead of letting the user build something Save would refuse.
+        // The store rejects an inverted band.
         if shape.inner_percent >= shape.outer_percent {
             shape.inner_percent = shape.outer_percent - 1;
         }
@@ -820,8 +816,7 @@ impl BindingsEditor {
         self.capturing = None;
     }
 
-    /// The selected region index, if the selection names one on this pad and it
-    /// still exists.
+    /// The selected region index, if it names one on this pad that still exists.
     fn selected_region(&self, side: PadSide) -> Option<usize> {
         match self.selection {
             EditorSelection::PadRegion(selected, index)
@@ -839,8 +834,7 @@ impl BindingsEditor {
         }
     }
 
-    /// The action slot a target names, or `None` if it names a region that has
-    /// since been deleted.
+    /// `None` if the target names a region that has since been deleted.
     fn action_slot(&mut self, target: ActionTarget) -> Option<&mut Option<BindingAction>> {
         match target {
             ActionTarget::Button(control) => {
@@ -852,7 +846,7 @@ impl BindingsEditor {
         }
     }
 
-    /// The one action picker, shared by the buttons and by both region triggers.
+    /// Shared by the buttons and by both region triggers.
     fn binding_editor(&mut self, ui: &mut egui::Ui, target: ActionTarget) {
         let Some(current) = self.action_slot(target).map(|slot| slot.clone()) else {
             return;

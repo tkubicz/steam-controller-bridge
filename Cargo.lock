@@ -817,6 +817,7 @@ dependencies = [
 name = "desktop-bindings"
 version = "1.9.0"
 dependencies = [
+ "app-paths",
  "enigo",
  "objc2-core-graphics",
  "objc2-io-kit",
@@ -3354,6 +3355,7 @@ dependencies = [
 name = "release-updater"
 version = "1.9.0"
 dependencies = [
+ "app-paths",
  "base64 0.23.1",
  "bridge-output",
  "clap",
@@ -3607,6 +3609,7 @@ dependencies = [
 name = "sc-bridge-menu"
 version = "1.9.0"
 dependencies = [
+ "app-paths",
  "bridge-runtime",
  "chrono",
  "clap",

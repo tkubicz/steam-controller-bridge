@@ -15,6 +15,7 @@ overlay = ["dep:eframe", "dep:ui-theme"]
 updater = ["dep:chrono", "dep:eframe", "dep:ui-theme", "dep:release-updater", "dep:semver"]
 
 [dependencies]
+app-paths = { path = "../../crates/app-paths" }
 bridge-runtime = { path = "../../crates/bridge-runtime" }
 desktop-bindings = { path = "../../crates/desktop-bindings" }
 profile-picker = { path = "../../crates/profile-picker" }

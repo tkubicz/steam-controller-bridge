@@ -11,8 +11,6 @@ use crate::model::{
     MAX_REGION_NAME_CHARS, MIN_PAD_SPEED_PERCENT,
 };
 
-/// An identifier is an ASCII slug so it can be a stable key in a hand-edited
-/// document without quoting or case surprises.
 fn valid_identifier(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
@@ -232,12 +230,11 @@ fn validate_pad(profile: &str, side: PadSide, pad: &PadConfig) -> Result<(), Str
 /// Returns the standard per-user bindings file location.
 ///
 /// # Errors
-/// Returns an error if `HOME` is unavailable.
+/// Returns an error if the current platform's path inputs are unavailable.
 pub fn default_store_path() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("HOME is not set; cannot locate the bindings directory")?;
-    Ok(home.join("Library/Application Support/Steam Controller Bridge/bindings.json"))
+    app_paths::current()
+        .map(|paths| paths.bindings_file())
+        .map_err(|error| format!("cannot locate the bindings directory: {error}"))
 }
 
 /// Loads and validates a binding store.
@@ -258,11 +255,8 @@ pub fn parse_store(bytes: &[u8]) -> Result<BindingStore, String> {
     parse_store_with_migration(bytes).map(|(store, _)| store)
 }
 
-/// Version 5 moved pad behavior out of the type system and into per-pad
-/// configuration, so older documents no longer deserialize into the current
-/// shape at all: they are read through a frozen mirror of the old schema and
-/// converted. The `deny_unknown_fields` guarantee is what makes that necessary,
-/// and also what makes it safe.
+/// `deny_unknown_fields` stops an older document deserializing into the current
+/// shape, so the version is probed before a decoder is chosen.
 #[derive(Deserialize)]
 struct VersionProbe {
     version: u32,
@@ -297,14 +291,8 @@ pub fn load_or_create_store(path: &Path) -> Result<BindingStore, String> {
     }
 }
 
-/// Moves a store that cannot be loaded aside and writes a fresh default in its
-/// place, returning the path the original was kept at.
-///
-/// Nothing is deleted. A store that fails to parse is still the user's own
-/// configuration - most likely a hand edit with a typo in it - so the only
-/// honest recovery is one they can undo by renaming a file back. The kept name
-/// sits beside the original so it is visible in the same folder the frontend
-/// names when it offers this.
+/// Moves an unloadable store aside and writes a fresh default, returning the
+/// path the original was kept at. Nothing is deleted, so this is undoable.
 ///
 /// # Errors
 /// Returns an error if the original cannot be moved or the default cannot be
@@ -319,8 +307,7 @@ pub fn reset_store(path: &Path) -> Result<PathBuf, String> {
         )
     })?;
     if let Err(error) = save_store(path, &BindingStore::default()) {
-        // Put the user's file back rather than leaving them with neither it nor
-        // a usable default.
+        // Leave neither a missing file nor an unusable default behind.
         let _ = fs::rename(&kept, path);
         return Err(error);
     }

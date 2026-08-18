@@ -54,11 +54,9 @@ impl ReleaseCache {
     }
 
     pub fn for_current_user() -> Result<Self, CacheError> {
-        let home =
-            std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is unavailable"))?;
-        Ok(Self::new(PathBuf::from(home).join(
-            "Library/Application Support/Steam Controller Bridge/Updates",
-        )))
+        let paths = app_paths::current()
+            .map_err(|error| io::Error::other(format!("cannot locate update cache: {error}")))?;
+        Ok(Self::new(paths.cache_dir))
     }
 
     #[cfg(debug_assertions)]
@@ -189,6 +187,12 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::test_support::{signed_metadata, temporary_directory};
+
+    #[test]
+    fn current_user_cache_uses_app_path_policy() {
+        let expected = app_paths::current().unwrap().cache_dir;
+        assert_eq!(ReleaseCache::for_current_user().unwrap().root(), expected);
+    }
 
     #[test]
     fn due_when_missing_and_not_immediately_after_write() {

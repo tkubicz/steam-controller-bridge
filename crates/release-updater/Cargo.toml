@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+app-paths = { path = "../app-paths" }
 base64.workspace = true
 bridge-output = { path = "../bridge-output" }
 clap.workspace = true

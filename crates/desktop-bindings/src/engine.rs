@@ -117,26 +117,20 @@ impl Default for MotionFilter {
 /// trigger is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PadLatch {
-    /// Release anything the trigger holds, then hold this action.
     Hold(BindingAction),
-    /// Release whatever the trigger holds.
     Clear,
 }
 
-/// Region-trigger transitions produced by one report, for the engine to turn
-/// into reference-counted desktop output.
-///
-/// Gestures are not implemented; when they are, they become further fields here
-/// and further arms in [`BindingEngine::dispatch_pad_events`], rather than a
-/// second dispatch path alongside this one.
+/// Region-trigger transitions from one report. Gestures would be further fields
+/// here and further arms in [`BindingEngine::dispatch_pad_events`].
 #[derive(Debug, Default, Clone)]
 struct PadEvents {
     click: Option<PadLatch>,
     touch: Option<PadLatch>,
 }
 
-/// The physical click-bit edges observed in one report, reported separately from
-/// motion so region actions still fire when the pad drives no motion at all.
+/// Reported separately from motion so region actions fire for a pad with no
+/// motion mode.
 #[derive(Debug, Default, Clone, Copy)]
 struct PadClickEdges {
     pressed: bool,
@@ -173,15 +167,12 @@ struct PadMotionState {
     scroll_velocity_x: f64,
     scroll_velocity_y: f64,
     scroll_last_update: Option<Duration>,
-    /// Coordinates at the effective-press edge. Pressure crosses its freeze
-    /// threshold tens of milliseconds before the click bit, so anchoring here
-    /// resolves the click's region before most of the fingertip roll.
+    /// Coordinates at the effective-press edge, which leads the click bit by
+    /// tens of milliseconds and so precedes most fingertip roll.
     press_anchor: Option<(i16, i16)>,
-    /// Region whose click action is held, latched at the press edge so sliding
-    /// during a held click cannot swap the action.
     click_region: Option<usize>,
-    /// Region the finger currently occupies. Tracked whether or not that region
-    /// binds anything, so boundary hysteresis works at every seam.
+    /// Tracked whether or not the region binds anything, so hysteresis works at
+    /// every seam.
     touch_region: Option<usize>,
     last_touch_feedback: Option<Duration>,
 }
@@ -206,9 +197,8 @@ impl PadMotionState {
         clear_scroll_momentum(self);
     }
 
-    // Region latches are deliberately untouched by `reset_motion_tracking`: the
-    // release guard rebaselines every report through that path, and a held
-    // click must survive it.
+    // Not called from `reset_motion_tracking`: the release guard rebaselines
+    // through that path every report, and a held click must survive it.
     fn clear_regions(&mut self) {
         self.press_anchor = None;
         self.click_region = None;
@@ -233,8 +223,7 @@ impl PadMotionState {
     }
 }
 
-/// The desktop actions one pad currently holds down. At most one per trigger,
-/// which is the truth of the hardware: a pad has one finger and one switch.
+/// At most one action per trigger: a pad has one finger and one switch.
 #[derive(Debug, Default)]
 struct PadLatchState {
     click: Option<BindingAction>,
@@ -370,8 +359,7 @@ impl BindingEngine {
         }
     }
 
-    /// Runs both pads' motion and region processing, emitting their desktop
-    /// output and collecting any feedback ticks they earned.
+    /// Runs both pads, emitting their output and collecting feedback ticks.
     fn process_pads(
         &mut self,
         snapshot: DesktopInputSnapshot,
@@ -397,10 +385,9 @@ impl BindingEngine {
         Ok(PadFeedbackRequest { left, right })
     }
 
-    /// Turns one report's region transitions into reference-counted output,
-    /// releasing before pressing so a hand-off between two different actions
-    /// never holds both at once. Crossing between regions with the same action
-    /// leaves that output alone instead of injecting a false release/press pair.
+    /// Releases before pressing, so a hand-off never holds both actions at
+    /// once. Crossing between regions bound to the same action is left alone
+    /// rather than emitting a false release/press pair.
     fn dispatch_pad_events(
         &mut self,
         side: PadSide,
@@ -439,8 +426,8 @@ impl BindingEngine {
         }
     }
 
-    /// Drops every pad region latch without emitting releases. Only safe beside
-    /// a `release_all`, which unwinds the reference counts those latches hold.
+    /// Drops latches without emitting releases. Only safe beside `release_all`,
+    /// which unwinds the reference counts they hold.
     fn forget_pad_latches(&mut self) {
         self.left_latch = PadLatchState::default();
         self.right_latch = PadLatchState::default();
@@ -835,9 +822,8 @@ fn process_pad(
         }
         process_motion_feedback(state, config.feedback, &motion, now)
     } else {
-        // Seed velocity timing from contact rather than assuming the default
-        // frame interval for the first accepted scroll sample. This timestamp
-        // alone cannot schedule momentum: release also requires real velocity.
+        // Seed from contact rather than assuming the default frame interval.
+        // This alone cannot schedule momentum; release needs real velocity.
         if config.motion == PadMotionMode::Scroll && state.scroll_last_update.is_none() {
             state.scroll_last_update = Some(now);
         }

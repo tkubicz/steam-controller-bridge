@@ -1,23 +1,15 @@
-//! Resolving a pad coordinate to one of a profile's user-defined regions.
+//! Resolving a pad coordinate to one of a profile's regions.
 //!
-//! A region is a bearing sweep crossed with an extent band. Regions are ordered
-//! and resolved first-match-wins, which is what makes overlap legal rather than
-//! an error: a centre region listed ahead of a whole-pad region simply shadows
-//! it, so the editor never has to reject a layout the user drew.
-//!
-//! The pad is a rounded square, not a disc, and each axis reaches full scale
-//! independently. Extent is therefore the Chebyshev distance `max(|x|, |y|)`,
-//! which reaches 100% along every edge including the corners - the same metric
-//! `engine::position_aware_threshold` already uses to grow its dead zones toward
-//! the rim. A Euclidean radius would instead describe the disc inscribed in the
-//! pad, putting the corners at about 141% and leaving an "edge" band that bulges
-//! into the middle along the diagonals while missing the actual edge midpoints.
+//! The pad is a rounded square with each axis independently full-scale, so
+//! extent is the Chebyshev distance `max(|x|, |y|)` - the metric
+//! `engine::position_aware_threshold` also uses. A Euclidean radius would
+//! describe the inscribed disc instead, putting the corners at ~141%.
 
 use crate::model::{
     PadRegion, PadRegionShape, REGION_HYSTERESIS_DEGREES, REGION_HYSTERESIS_PERCENT,
 };
 
-/// How far outside its own bounds a region is still treated as occupied.
+/// How far outside its bounds a region is still treated as occupied.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RegionMargin {
     percent: f32,
@@ -25,7 +17,6 @@ pub(crate) struct RegionMargin {
 }
 
 impl RegionMargin {
-    /// Exact bounds, for a region the finger is not already inside.
     pub(crate) const NONE: Self = Self {
         percent: 0.0,
         degrees: 0.0,
@@ -37,10 +28,8 @@ impl RegionMargin {
     };
 }
 
-/// One coordinate prepared for repeated region checks. Resolution may inspect
-/// every region on a pad, so extent and bearing belong to the coordinate rather
-/// than to each candidate. Bearing stays lazy because whole-pad shapes need
-/// only the much cheaper extent check.
+/// One coordinate prepared for checks against every region on a pad. Bearing is
+/// lazy because a whole-pad shape needs only the cheaper extent check.
 struct RegionPoint {
     x: f32,
     y: f32,
@@ -84,9 +73,7 @@ fn point_in_shape(shape: PadRegionShape, point: &mut RegionPoint, margin: Region
     if sweep >= 360.0 {
         return true;
     }
-    // Rotate the bearing into the sector's own frame so the 360-degree wrap
-    // needs no special case: a sector starting at 350 and one starting at 10
-    // are the same test on a shifted angle.
+    // Rotating into the sector's own frame removes the 360-degree wrap case.
     let start = f32::from(shape.start_degrees) - margin.degrees;
     let offset = (point.degrees() - start).rem_euclid(360.0);
     offset < sweep
@@ -98,9 +85,8 @@ pub(crate) fn shape_contains(shape: PadRegionShape, x: i16, y: i16, margin: Regi
     point_in_shape(shape, &mut RegionPoint::new(x, y), margin)
 }
 
-/// Returns the index of the first region containing the coordinate, preferring
-/// the region already occupied so a fingertip resting on a seam does not chatter
-/// between two bound actions.
+/// First region containing the coordinate, preferring the one already occupied
+/// so a fingertip resting on a seam does not chatter between two actions.
 pub(crate) fn resolve_region(
     regions: &[PadRegion],
     (x, y): (i16, i16),
@@ -126,11 +112,7 @@ mod tests {
     use crate::model::{PadRegion, PadRegionShape};
 
     /// A coordinate at `degrees` clockwise from twelve o'clock, `percent` of the
-    /// way from the centre to the pad's square edge along that bearing.
-    ///
-    /// Dividing by the larger direction component is what makes 100% land on
-    /// the edge in every direction, corners included, rather than on an
-    /// inscribed circle.
+    /// way from the centre to the pad's square edge.
     #[allow(
         clippy::cast_possible_truncation,
         reason = "float-to-int casts saturate, and full scale is exactly i16::MAX"
@@ -221,9 +203,8 @@ mod tests {
         ]);
         assert_eq!(resolve_region(&layout, at(0.0, 10.0), None), Some(0));
         assert_eq!(resolve_region(&layout, at(0.0, 80.0), None), Some(1));
-        // The centre region is a square, so its diagonal corner is inside it
-        // too. Under a Euclidean radius that point would read as 42% and fall
-        // through to the whole-pad region instead.
+        // A Euclidean radius would read this diagonal corner as 42% and fall
+        // through to the whole-pad region.
         assert_eq!(resolve_region(&layout, at(45.0, 29.0), None), Some(0));
     }
 
@@ -235,8 +216,8 @@ mod tests {
             ..PadRegionShape::WHOLE
         }]);
         assert_eq!(resolve_region(&layout, at(0.0, 20.0), None), None);
-        // An edge band is a frame around a square pad, not a ring inside a
-        // disc: it holds the edge midpoints and excludes the diagonal middle.
+        // An edge band is a frame, not a ring: it holds the edge midpoints and
+        // excludes the diagonal middle.
         assert_eq!(resolve_region(&layout, at(0.0, 90.0), None), Some(0));
         assert_eq!(resolve_region(&layout, at(45.0, 90.0), None), Some(0));
         assert_eq!(resolve_region(&layout, at(45.0, 50.0), None), None);
@@ -244,9 +225,8 @@ mod tests {
 
     #[test]
     fn the_pad_corner_is_full_extent_rather_than_beyond_the_pad() {
-        // Both axes are independently full scale at a corner, which is exactly
-        // 100% extent. A Euclidean radius would call it 141% and clamp, so no
-        // band short of the whole pad could ever contain it.
+        // A Euclidean radius would call a corner 141% and clamp, so no band
+        // short of the whole pad could contain it.
         for bearing in [45.0, 135.0, 225.0, 315.0] {
             let (x, y) = at(bearing, 100.0);
             // Both axes land on full scale, to within the helper's own f32
@@ -269,14 +249,13 @@ mod tests {
     #[test]
     fn a_finger_resting_just_past_a_seam_stays_in_the_region_it_already_holds() {
         let layout = PadRegion::four_way();
-        // The Top/Right seam sits at 45 degrees; a few degrees past it is inside
-        // the hysteresis margin.
+        // The Top/Right seam is at 45 degrees.
         let top = resolve_region(&layout, at(30.0, 70.0), None).expect("top sector");
         assert_eq!(layout[top].name, "Top");
         let just_past = at(47.0, 70.0);
         assert_eq!(resolve_region(&layout, just_past, Some(top)), Some(top));
-        // Without a held region, or once travel clears the margin, the neighbour
-        // wins normally.
+        // With no held region, or once travel clears the margin, the neighbour
+        // wins.
         let right = resolve_region(&layout, just_past, None).expect("right sector");
         assert_eq!(layout[right].name, "Right");
         assert_eq!(

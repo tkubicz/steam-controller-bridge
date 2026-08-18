@@ -56,6 +56,12 @@ fn chord(key: KeyboardKey, modifiers: &[Modifier]) -> BindingAction {
     }
 }
 
+#[test]
+fn default_store_path_uses_app_path_policy() {
+    let expected = app_paths::current().unwrap().bindings_file();
+    assert_eq!(default_store_path().unwrap(), expected);
+}
+
 fn pad_snapshot(
     buttons: SteamButtons,
     left: Option<(i16, i16)>,
@@ -377,14 +383,13 @@ fn a_version_four_pad_click_migrates_onto_a_whole_pad_region() {
         }"#;
     let store = parse_store(json).unwrap();
     assert_eq!(store.version, BINDINGS_VERSION);
-    // Button bindings, IDs, and names are untouched by the migration.
+    // Untouched by the migration.
     assert_eq!(store.profiles[0].id, "default");
     assert_eq!(store.profiles[0].bindings.configured_count(), 1);
 
     let left = &store.profiles[0].pads.left;
     assert_eq!(left.motion, PadMotionMode::None);
-    // A disabled pad keeps the settings it had, so re-enabling it in the editor
-    // restores the user's tuning rather than the defaults.
+    // A disabled pad keeps its settings, so re-enabling restores the tuning.
     assert_eq!(left.speed_percent, 175);
     assert!(!left.momentum);
     assert_eq!(left.regions.len(), 1);
@@ -484,8 +489,7 @@ fn store_rejects_pad_speed_outside_supported_range() {
 
 #[test]
 fn store_rejects_malformed_regions() {
-    /// One way to break an otherwise valid pad, and the word its rejection must
-    /// contain so the message points at the actual problem.
+    /// A way to break a valid pad, and the word its rejection must contain.
     type Case = (&'static str, fn(&mut PadConfig));
     let cases: [Case; 5] = [
         ("region name", |pad| {
@@ -534,8 +538,7 @@ fn resetting_an_unreadable_store_keeps_the_original_beside_a_fresh_default() {
 
     let kept = reset_store(&path).unwrap();
 
-    // The default is usable and the user's file survives under a name they can
-    // rename back.
+    // Usable default; the original survives under a renameable name.
     assert_eq!(
         load_or_create_store(&path).unwrap(),
         BindingStore::default()
@@ -543,7 +546,7 @@ fn resetting_an_unreadable_store_keeps_the_original_beside_a_fresh_default() {
     assert_eq!(kept, directory.join("bindings-invalid.json"));
     assert_eq!(fs::read(&kept).unwrap(), b"{ this is not a binding store }");
 
-    // A second reset does not clobber the first rescue.
+    // A second reset does not clobber the first.
     fs::write(&path, b"broken again").unwrap();
     let second = reset_store(&path).unwrap();
     assert_eq!(second, directory.join("bindings-invalid-1.json"));
@@ -566,8 +569,7 @@ fn resetting_a_store_that_cannot_be_moved_leaves_it_alone() {
     let mut permissions = fs::metadata(&directory).unwrap().permissions();
     permissions.set_readonly(true);
     fs::set_permissions(&directory, permissions).unwrap();
-    // Root ignores the directory's write bit, so there is nothing to assert
-    // about a failure that cannot be produced.
+    // Root ignores the write bit, so the failure cannot be produced.
     let read_only = fs::write(directory.join("probe"), b"").is_err();
 
     if read_only {
@@ -791,7 +793,7 @@ fn pad_click_fires_regardless_of_pad_motion_and_alongside_it() {
     let action = BindingAction::MouseButton {
         button: MouseButton::Left,
     };
-    // With the pad's motion mode off, the click is still a live binding.
+    // Motion off: the click is still live.
     let mut disabled = BindingProfile::default();
     disabled.pads.right.regions = whole_pad(PadTrigger::Click, action.clone());
     let mut engine = BindingEngine::new(disabled.clone());
@@ -809,8 +811,7 @@ fn pad_click_fires_regardless_of_pad_motion_and_alongside_it() {
     );
     assert_eq!(sink.events, ["mouse:Left:true", "mouse:Left:false"]);
 
-    // With pointer motion on, motion and the click both reach the sink during
-    // one continuous touch.
+    // Motion on: both reach the sink during one touch.
     let mut profile = disabled;
     profile.pads.right.motion = PadMotionMode::Pointer;
     profile.pads.right.feedback.enabled = false;
@@ -1134,7 +1135,7 @@ fn a_pad_clicked_at_baseline_is_blocked_until_it_is_released() {
         &[(0, clicking(0, 0)), (10, clicking(0, 0))],
     );
     assert!(sink.events.is_empty());
-    // Lifting off clears the block; the next press is a live binding again.
+    // Lifting off clears the block.
     drive_pad(
         &mut engine,
         &mut sink,
@@ -1172,7 +1173,7 @@ fn profile_switch_releases_and_blocks_a_held_pad_click() {
     );
     engine.replace_profile(second, &mut sink).unwrap();
     assert_eq!(engine.held_pad_action_count(), 0);
-    // The still-held pad stays inert until it is physically released.
+    // Still-held: inert until physically released.
     drive_pad(
         &mut engine,
         &mut sink,
@@ -1284,8 +1285,7 @@ fn stationary_pressed_pad_noise_does_not_emit_feedback() {
     engine
         .observe_snapshot(pad_snapshot(neutral, None, None), Duration::ZERO, &mut sink)
         .unwrap();
-    // The press edge itself is a deliberate act and earns its one tick; every
-    // report after it is the same stationary finger's noise and must be silent.
+    // The press edge earns one tick; the stationary noise after it must not.
     let press = engine
         .observe_snapshot(
             side_snapshot(PadSide::Right, clicking(0, 0)),
@@ -2161,8 +2161,7 @@ fn a_click_holds_the_region_it_was_pressed_in_even_if_the_finger_slides_away() {
             (0, PadSample::NEUTRAL),
             (10, touching(west_x, west_y)),
             (20, clicking(west_x, west_y)),
-            // Dragging clear across the pad while still held must not swap the
-            // action to the opposite sector's binding.
+            // A drag while held must not swap to the opposite sector.
             (30, clicking(0, 0)),
             (40, clicking(east_x, east_y)),
         ],
@@ -2193,8 +2192,7 @@ fn a_touch_hands_off_between_regions_and_releases_on_lift() {
         &[
             (0, PadSample::NEUTRAL),
             (10, touching(west_x, west_y)),
-            // Sliding through the unbound top sector releases, and arriving in
-            // the opposite sector presses its own binding.
+            // Through the unbound top sector, then into the opposite one.
             (20, touching(bearing(0.0, 70.0).0, bearing(0.0, 70.0).1)),
             (30, touching(east_x, east_y)),
             (40, PadSample::NEUTRAL),
@@ -2250,8 +2248,7 @@ fn a_finger_resting_on_a_region_seam_does_not_alternate_between_bindings() {
         (0, PadSample::NEUTRAL),
         (10, touching(bearing(270.0, 70.0).0, bearing(270.0, 70.0).1)),
     ];
-    // The Left/Bottom Left seam of an eight-way layout sits at 292.5 degrees;
-    // wander a couple of degrees either side of it, repeatedly.
+    // The Left/Bottom Left seam sits at 292.5 degrees.
     for (index, degrees) in [291.0, 294.0, 291.5, 293.5, 292.0, 294.0]
         .into_iter()
         .enumerate()
@@ -2319,8 +2316,7 @@ fn both_pads_can_scroll_with_momentum_at_the_same_time() {
     }
     let mut engine = BindingEngine::new(profile);
     let mut sink = MockSink::default();
-    // A pad already touched at the baseline is deliberately inert, so the swipe
-    // has to start from lifted.
+    // A pad touched at the baseline is inert, so start from lifted.
     engine
         .observe_snapshot(
             DesktopInputSnapshot::buttons_only(SteamButtons::default()),
@@ -2351,7 +2347,7 @@ fn both_pads_can_scroll_with_momentum_at_the_same_time() {
     assert!(engine.needs_tick());
     let before = sink.events.len();
     engine.tick(Duration::from_millis(80), &mut sink).unwrap();
-    // Both pads owe momentum, so one tick emits for each of them.
+    // One tick per pad.
     assert_eq!(sink.events.len(), before + 2);
 }
 
@@ -2384,8 +2380,7 @@ fn either_pad_can_take_either_motion_mode() {
             )
             .unwrap();
     }
-    // The swap of today's hardcoded assignment: pointer on the left pad and
-    // scrolling on the right.
+    // Pointer on the left pad, scrolling on the right.
     assert!(sink.events.iter().any(|event| event.starts_with("move:")));
     assert!(sink.events.iter().any(|event| event.starts_with("scroll:")));
 }
