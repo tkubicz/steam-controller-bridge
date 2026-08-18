@@ -131,6 +131,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-paths"
+version = "1.9.0"
+
+[[package]]
 name = "arboard"
 version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
