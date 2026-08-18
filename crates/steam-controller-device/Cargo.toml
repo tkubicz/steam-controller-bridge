@@ -6,12 +6,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
-app-paths = { path = "../app-paths" }
-fs4.workspace = true
 steam-controller-protocol = { path = "../steam-controller-protocol" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 hidapi.workspace = true
+rustix.workspace = true
 
 [lints]
 workspace = true

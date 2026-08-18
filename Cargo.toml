@@ -49,9 +49,9 @@ serde_json = "1.0.150"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "system-proxy"] }
 tokio = { version = "1.52.3", features = ["macros", "net", "rt", "time"] }
 tempfile = "3.27.0"
-fs4 = "1.1.0"
 thiserror = "2.0.19"
 hidapi = { version = "2.6.6", default-features = false, features = ["macos-shared-device"] }
+rustix = { version = "1.1.4", features = ["fs"] }
 rfd = "0.17.2"
 eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "glow"] }
 tray-icon = "0.24.2"

@@ -11,9 +11,9 @@ base64.workspace = true
 bridge-output = { path = "../bridge-output" }
 clap.workspace = true
 ed25519-dalek.workspace = true
-fs4.workspace = true
-reqwest.workspace = true
 semver.workspace = true
+rustix.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

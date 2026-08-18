@@ -53,7 +53,7 @@ pub enum CatalogRefreshError {
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error("cannot lock update catalog: {0}")]
-    Lock(#[source] io::Error),
+    Lock(#[source] rustix::io::Errno),
     #[error(transparent)]
     Download(#[from] DownloadError),
     #[error(transparent)]
@@ -431,7 +431,8 @@ pub fn refresh_catalog_cancellable(
         .write(true)
         .truncate(false)
         .open(cache.root().join("catalog-refresh.lock"))?;
-    fs4::FileExt::lock(&refresh_lock).map_err(CatalogRefreshError::Lock)?;
+    rustix::fs::flock(&refresh_lock, rustix::fs::FlockOperation::LockExclusive)
+        .map_err(CatalogRefreshError::Lock)?;
     if !refresh_due(cache, policy, running_application) {
         return Ok(CatalogRefresh::Current(cache.load_manifest(trusted_keys)?));
     }
