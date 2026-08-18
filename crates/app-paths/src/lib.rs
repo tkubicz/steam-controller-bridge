@@ -37,6 +37,26 @@ pub struct AppPaths {
     pub runtime_dir: PathBuf,
 }
 
+impl AppPaths {
+    /// Location of the persisted desktop-binding profiles.
+    #[must_use]
+    pub fn bindings_file(&self) -> PathBuf {
+        self.config_dir.join("bindings.json")
+    }
+
+    /// Location of the menu application's persisted settings.
+    #[must_use]
+    pub fn settings_file(&self) -> PathBuf {
+        self.config_dir.join("settings.json")
+    }
+
+    /// Location of the menu application's status log.
+    #[must_use]
+    pub fn status_log_file(&self) -> PathBuf {
+        self.log_dir.join("sc-bridge.log")
+    }
+}
+
 /// Environment inputs used by the pure resolver.
 pub trait Env {
     fn var_os(&self, key: &str) -> Option<OsString>;
@@ -348,7 +368,7 @@ mod tests {
             unix_path(&["private", "var", "folders", "test", "T"])
         );
         assert_eq!(
-            paths.config_dir.join("bindings.json"),
+            paths.bindings_file(),
             unix_path(&[
                 "Users",
                 "tester",
@@ -359,7 +379,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            paths.config_dir.join("settings.json"),
+            paths.settings_file(),
             unix_path(&[
                 "Users",
                 "tester",
@@ -370,7 +390,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            paths.log_dir.join("sc-bridge.log"),
+            paths.status_log_file(),
             unix_path(&[
                 "Users",
                 "tester",

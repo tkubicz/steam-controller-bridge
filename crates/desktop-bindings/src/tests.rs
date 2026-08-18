@@ -56,6 +56,12 @@ fn chord(key: KeyboardKey, modifiers: &[Modifier]) -> BindingAction {
     }
 }
 
+#[test]
+fn default_store_path_uses_app_path_policy() {
+    let expected = app_paths::current().unwrap().bindings_file();
+    assert_eq!(default_store_path().unwrap(), expected);
+}
+
 fn pad_snapshot(
     buttons: SteamButtons,
     left: Option<(i16, i16)>,

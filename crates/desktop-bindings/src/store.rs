@@ -232,12 +232,11 @@ fn validate_pad(profile: &str, side: PadSide, pad: &PadConfig) -> Result<(), Str
 /// Returns the standard per-user bindings file location.
 ///
 /// # Errors
-/// Returns an error if `HOME` is unavailable.
+/// Returns an error if the current platform's path inputs are unavailable.
 pub fn default_store_path() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("HOME is not set; cannot locate the bindings directory")?;
-    Ok(home.join("Library/Application Support/Steam Controller Bridge/bindings.json"))
+    app_paths::current()
+        .map(|paths| paths.bindings_file())
+        .map_err(|error| format!("cannot locate the bindings directory: {error}"))
 }
 
 /// Loads and validates a binding store.

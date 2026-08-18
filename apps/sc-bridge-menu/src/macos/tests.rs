@@ -6,6 +6,12 @@ use super::tray::{hardware_status_rows, HardwareStatusRow};
 use super::*;
 
 #[test]
+fn settings_path_uses_app_path_policy() {
+    let expected = app_paths::current().unwrap().settings_file();
+    assert_eq!(settings_path().unwrap(), expected);
+}
+
+#[test]
 fn app_center_menu_actions_follow_build_capability() {
     assert_eq!(
         app_center_page_for_menu(ABOUT_ID),
