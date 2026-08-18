@@ -14,6 +14,7 @@
     { "type": "toml", "path": "apps/sc-probe/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "apps/sc-replay/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "apps/sc-visualizer/Cargo.toml", "jsonpath": "$.package.version" },
+    { "type": "toml", "path": "crates/app-paths/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/bridge-core/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/bridge-output/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/bridge-protocol/Cargo.toml", "jsonpath": "$.package.version" },
