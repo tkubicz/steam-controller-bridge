@@ -119,9 +119,8 @@ pub(super) fn rect_edge_towards(rect: egui::Rect, toward: egui::Pos2) -> egui::P
     }
 }
 
-/// Summarizes each pad on the artwork: what its motion does, and how many
-/// regions carry an action. Neither is fixed to a side any more, so the label
-/// has to be read off the profile rather than baked into the drawing.
+/// Motion mode and bound-region count per pad, read off the profile because
+/// neither is fixed to a side.
 pub(super) fn draw_pad_labels(
     painter: &egui::Painter,
     view: egui::Rect,

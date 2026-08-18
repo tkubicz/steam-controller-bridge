@@ -3,18 +3,12 @@ use super::{
     ACCENT, DETAIL, MUTED_TEXT, ON_ACCENT,
 };
 
-/// The bearings at which the pad's square boundary turns a corner. Sector edges
-/// are straight between them, so sampling exactly these plus a sector's own two
-/// ends draws the outline with no approximation at all.
+/// Where the pad's square boundary turns a corner. Edges are straight between
+/// them, so these plus a sector's own two ends draw the outline exactly.
 const CORNER_BEARINGS: [f32; 4] = [45.0, 135.0, 225.0, 315.0];
 
-/// Paints a pad's regions onto a drawing of that pad, highlighting the selected
-/// one.
-///
-/// This is the only place the region geometry becomes visible before the user
-/// puts a finger on the hardware, so it uses the pad's real shape and the
-/// engine's own conventions: a rounded square rather than a disc, zero degrees
-/// at twelve o'clock, and bearings increasing clockwise.
+/// Paints a pad's regions onto a drawing of that pad, in the engine's own
+/// conventions: a rounded square, zero degrees up, bearings clockwise.
 pub(super) fn draw_region_map(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -22,8 +16,7 @@ pub(super) fn draw_region_map(
     regions: &[PadRegion],
     selected: Option<usize>,
 ) {
-    // The pad art is canted, so it needs room to rotate inside the rect it is
-    // given.
+    // The pad art is canted and needs room to rotate.
     let surface = egui::Rect::from_center_size(
         rect.center(),
         egui::Vec2::splat(rect.width().min(rect.height()) * 0.78),
@@ -40,8 +33,8 @@ pub(super) fn draw_region_map(
         return;
     }
 
-    // Painted back to front so that an earlier region, which also wins
-    // first-match-wins resolution at runtime, ends up drawn on top.
+    // Back to front, so an earlier region - which also wins resolution - is
+    // drawn on top.
     for (index, region) in regions.iter().enumerate().rev() {
         let chosen = selected == Some(index);
         let fill = if chosen {
@@ -52,8 +45,7 @@ pub(super) fn draw_region_map(
             egui::Color32::TRANSPARENT
         };
         let bearings = region_bearings(region.shape);
-        // A region with a hole in it is concave, so it is filled as a strip of
-        // mesh quads rather than handed to `convex_polygon` whole.
+        // A region with a hole is concave, so it cannot go to `convex_polygon`.
         if fill != egui::Color32::TRANSPARENT {
             painter.add(egui::Shape::mesh(region_mesh(
                 surface,
@@ -86,12 +78,9 @@ pub(super) fn draw_region_map(
     }
 }
 
-/// The pad-local position a bearing and an extent name, in the controller's
-/// `-1..=1` convention with positive Y upward.
-///
-/// Dividing by the larger direction component is the drawing counterpart of the
-/// engine's `max(|x|, |y|)` extent: it puts 100% on the pad edge in every
-/// direction, corners included, instead of on an inscribed circle.
+/// Pad-local position in the controller's `-1..=1` convention, Y upward.
+/// Dividing by the larger direction component mirrors the engine's
+/// `max(|x|, |y|)` extent, putting 100% on the edge in every direction.
 fn pad_locus(degrees: f32, extent: f32) -> [f32; 2] {
     let radians = degrees.to_radians();
     let (dx, dy) = (radians.sin(), radians.cos());
@@ -104,11 +93,8 @@ fn pad_point(surface: egui::Rect, side: PadSide, degrees: f32, extent: f32) -> e
     trackpad_surface_point(surface, side, pad_locus(degrees, extent))
 }
 
-/// The bearings a region's outline needs: its two ends, plus every pad corner
-/// strictly between them.
-///
-/// A validated sweep is at most one full turn, so each corner falls inside it at
-/// most once and six is an exact fit rather than a guess.
+/// A region's two ends plus every pad corner strictly between them. A validated
+/// sweep is at most one turn, so six is an exact fit.
 #[derive(Debug, Clone, Copy)]
 struct RegionBearings {
     values: [f32; 2 + CORNER_BEARINGS.len()],
@@ -131,11 +117,9 @@ fn region_bearings(shape: PadRegionShape) -> RegionBearings {
         len: 1,
     };
     bearings.values[0] = start;
-    // A sweep can run past 360, so each corner is offered in both turns the
-    // range can reach. The length guard is unreachable for a validated shape;
-    // it is here so that a sweep wider than one turn - which the planned
-    // gesture work could well introduce - draws a clipped region instead of
-    // panicking the editor.
+    // A sweep can run past 360, so each corner is offered in both turns. The
+    // length guard is unreachable for a validated shape; it stops a wider sweep
+    // panicking rather than clipping.
     for corner in CORNER_BEARINGS {
         for turn in [0.0, 360.0] {
             let candidate = corner + turn;
@@ -158,9 +142,8 @@ fn extents(shape: PadRegionShape) -> (f32, f32) {
     )
 }
 
-/// One region as a strip of triangles, so the tessellator never has to fill a
-/// concave outline and repainting does not allocate a short-lived polygon per
-/// strip segment.
+/// A strip of triangles: the tessellator never fills a concave outline, and
+/// repainting allocates no per-segment polygon.
 fn region_mesh(
     surface: egui::Rect,
     side: PadSide,
@@ -187,9 +170,8 @@ fn region_mesh(
     mesh
 }
 
-/// The outline of one region: outer edge forwards, inner edge back. A region
-/// with no hole closes through the middle instead, and a full-sweep one closes
-/// on itself.
+/// Outer edge forwards, inner edge back. With no hole it closes through the
+/// middle; a full sweep closes on itself.
 fn region_outline(
     surface: egui::Rect,
     side: PadSide,
@@ -224,10 +206,7 @@ fn region_label_anchor(surface: egui::Rect, side: PadSide, shape: PadRegionShape
 mod tests {
     use super::{pad_locus, region_bearings, PadRegion, PadRegionShape};
 
-    /// The drawing's extent must agree with the engine's, which measures
-    /// `max(|x|, |y|)`. Full extent therefore lands on the pad's square edge in
-    /// every direction; on a circle it would fall short everywhere but the four
-    /// axis directions.
+    /// The drawing's extent must agree with the engine's `max(|x|, |y|)`.
     #[test]
     fn full_extent_reaches_the_pad_edge_at_every_bearing() {
         for step in 0..72_u8 {
@@ -239,7 +218,7 @@ mod tests {
                 "{degrees} degrees reached {extent}"
             );
         }
-        // A corner is both axes at full scale, which a circle cannot express.
+        // A corner is both axes at full scale.
         let [x, y] = pad_locus(45.0, 1.0);
         assert!((x - 1.0).abs() < 1e-4 && (y - 1.0).abs() < 1e-4);
     }
@@ -253,8 +232,8 @@ mod tests {
             .expect("preset has a top-right sector");
         assert!(region_bearings(top_right.shape).contains(&45.0));
 
-        // A four-way sector runs corner to corner, so its outer edge is one
-        // straight pad edge and it needs no interior sample at all.
+        // A four-way sector runs corner to corner: one straight edge, no
+        // interior sample.
         let four = PadRegion::four_way();
         let top = four
             .iter()
@@ -265,9 +244,8 @@ mod tests {
 
     #[test]
     fn an_over_wide_sweep_is_clipped_rather_than_overrunning_the_bearing_buffer() {
-        // Validation caps a sweep at one full turn, so this shape cannot reach
-        // the drawing today. It is exercised anyway because the buffer is an
-        // exact fit for that cap, and a future wider sweep must not panic.
+        // Unreachable today; the buffer is an exact fit for the sweep cap, and
+        // a future wider sweep must not panic.
         let bearings = region_bearings(PadRegionShape {
             start_degrees: 0,
             sweep_degrees: 360,
@@ -294,7 +272,7 @@ mod tests {
                 "the whole-pad outline skipped {corner} degrees"
             );
         }
-        // Both ends plus four corners, and no duplicates from the second turn.
+        // Both ends plus four corners, no duplicates from the second turn.
         assert_eq!(bearings.len(), 6);
     }
 }

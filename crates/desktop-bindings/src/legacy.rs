@@ -1,15 +1,8 @@
 //! Reading binding stores written before pad regions existed.
 //!
-//! Schema versions 1 through 4 gave each pad a fixed behavior chosen by its
-//! field name - `right_mouse` was always the pointer and `left_scroll` was
-//! always the scroll wheel - and gave each pad a single whole-surface click
-//! binding that lived beside the button bindings. Version 5 replaced both with
-//! per-pad configuration, so those documents cannot deserialize into the current
-//! types at all.
-//!
-//! The structures here are a frozen mirror of the old schema. They exist only to
-//! be converted, and must not drift with the live model: a change to
-//! `crate::model` is a change to version 5, not to what version 4 meant.
+//! A frozen mirror of the version 1-4 schema. It must not drift with
+//! `crate::model`: a change there is a change to version 5, not to what version
+//! 4 meant.
 
 use serde::Deserialize;
 
@@ -99,10 +92,8 @@ impl Default for LegacyScrollPad {
     }
 }
 
-/// Decodes a version 1 to 4 document into the current store.
-///
-/// Profile IDs, names, and button bindings are carried across untouched; the
-/// caller validates the result and owes the file a rewrite.
+/// Decodes a version 1 to 4 document. The caller validates the result and owes
+/// the file a rewrite.
 ///
 /// # Errors
 /// Returns a descriptive error when the document cannot be decoded.
@@ -161,9 +152,8 @@ fn migrate_profile(profile: LegacyProfile) -> BindingProfile {
     }
 }
 
-/// A pre-region pad click applied to the entire surface, which is exactly one
-/// whole-pad region. An unbound pad click migrates to no regions at all rather
-/// than to an empty one, so the editor opens on a clean slate.
+/// A pre-region pad click is one whole-pad region; an unbound one is no
+/// regions at all.
 fn whole_pad_click(action: Option<BindingAction>) -> Vec<PadRegion> {
     let Some(action) = action else {
         return Vec::new();

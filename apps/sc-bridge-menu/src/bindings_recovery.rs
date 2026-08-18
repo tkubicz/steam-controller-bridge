@@ -1,37 +1,27 @@
-//! What to do when the profile store on disk cannot be read.
+//! Recovery prompt for a profile store that cannot be read.
 //!
-//! A binding store is a plain JSON file the user is invited to hand-edit, so a
-//! typo in it is an ordinary mistake rather than an exceptional one. Failing
-//! startup with a line on stderr hides that mistake completely: a menu-bar app
-//! has no console, and the editor is launched with its output discarded. So the
-//! failure is presented instead, with the only two answers that respect the
-//! user's data - keep the file and let them fix it, or set it aside and start
-//! fresh.
-//!
-//! Nothing here decides on the user's behalf. In particular the broken file is
-//! never deleted, only renamed, so "start fresh" stays undoable.
+//! Neither caller has a console: the menu app has no window and the editor is
+//! spawned with its output discarded.
 
 use std::path::Path;
 
 use desktop_bindings::{load_or_create_store, reset_store, BindingStore};
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication};
-use objc2_foundation::NSString;
+use objc2_app_kit::{
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
+    NSEvent, NSModalPanelWindowLevel, NSScreen, NSWindow,
+};
+use objc2_foundation::{NSPoint, NSString};
 
-/// What the user chose when told their profile store cannot be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecoveryChoice {
-    /// Set the unreadable file aside and continue with a default store.
     Reset,
-    /// Leave the file exactly as it is and quit, so it can be backed up or
-    /// repaired by hand.
     Quit,
 }
 
 /// Loads the profile store, offering recovery if it cannot be read.
 ///
-/// `Ok(None)` means the user chose to quit and nothing was changed; the caller
-/// should exit successfully rather than reporting a failure they already saw.
+/// `Ok(None)` means the user chose to quit; the caller should exit successfully.
 ///
 /// # Errors
 /// Returns an error only when recovery itself fails, which leaves the original
@@ -40,8 +30,7 @@ pub(crate) fn load_store_or_recover(path: &Path) -> Result<Option<BindingStore>,
     recover_with(path, ask)
 }
 
-/// The recovery flow with the question left open, so everything except the
-/// alert itself is exercised by tests rather than only by a human clicking.
+/// Split from [`load_store_or_recover`] so tests can answer without a human.
 fn recover_with(
     path: &Path,
     ask: impl FnOnce(&Path, &str) -> RecoveryChoice,
@@ -70,21 +59,19 @@ fn recover_with(
     }
 }
 
-/// Presents the failure and returns what the user chose.
-///
-/// Quit is the second button, which makes it the one Escape picks: doing
-/// nothing to an unreadable file is always the safe answer, and the destructive
-/// choice should never be the accidental one.
+/// Quit is the second button so that Escape picks it: the destructive choice
+/// must not be the accidental one.
 fn ask(path: &Path, error: &str) -> RecoveryChoice {
     let Some(mtm) = MainThreadMarker::new() else {
-        // Without the main thread there is no way to ask, and guessing "reset"
-        // would move a file the user never agreed to move.
+        // Cannot ask, so do not move a file the user never agreed to move.
         return RecoveryChoice::Quit;
     };
-    // The alert runs its own modal loop, which needs the shared application to
-    // exist. It already does when the menu app asks; the editor asks before
-    // eframe has started, and this is idempotent either way.
     let application = NSApplication::sharedApplication(mtm);
+    // An unbundled process is a background-only application until a policy is
+    // set, and cannot show a window at all: `runModal` would block forever on an
+    // invisible alert. Both callers ask before winit/eframe sets one.
+    let policy = application.activationPolicy();
+    let raised = application.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
     let alert = NSAlert::new(mtm);
     alert.setAlertStyle(NSAlertStyle::Critical);
@@ -95,17 +82,63 @@ fn ask(path: &Path, error: &str) -> RecoveryChoice {
     alert.addButtonWithTitle(&NSString::from_str("Reset Profiles"));
     alert.addButtonWithTitle(&NSString::from_str("Quit"));
 
-    // An accessory app puts up windows behind whatever is frontmost, and an
-    // alert nobody sees is the bug this module exists to fix.
+    // `activate` is best effort, and macOS 14 made the "ignore other apps"
+    // override a no-op, so focus cannot be taken. The window level is what
+    // actually puts the alert in front.
     application.activate();
-    if alert.runModal() == NSAlertFirstButtonReturn {
+    let window = alert.window();
+    window.setLevel(NSModalPanelWindowLevel);
+    // Lay out first so the frame used for centring is final.
+    alert.layout();
+    show_on_the_users_screen(&window, mtm);
+    window.orderFrontRegardless();
+    let response = alert.runModal();
+    if raised {
+        // Restore, so the menu app keeps its own policy and no Dock icon.
+        application.setActivationPolicy(policy);
+    }
+    if response == NSAlertFirstButtonReturn {
         RecoveryChoice::Reset
     } else {
         RecoveryChoice::Quit
     }
 }
 
-/// The body of the alert: what happened, where, and what each button does.
+/// With no key window `NSScreen::mainScreen` is the menu-bar screen by fallback,
+/// which strands the alert on a display the user may not be facing. The cursor
+/// is the only signal left; see `profile_overlay::window::target_screen`.
+fn show_on_the_users_screen(window: &NSWindow, mtm: MainThreadMarker) {
+    let cursor = NSEvent::mouseLocation();
+    let screens = NSScreen::screens(mtm);
+    let Some(screen) = screens
+        .iter()
+        .find(|screen| contains(screen.frame(), cursor))
+        .or_else(|| screens.iter().next())
+    else {
+        return;
+    };
+    window.setFrameOrigin(centered_origin(screen.visibleFrame(), window.frame()));
+}
+
+fn contains(frame: objc2_foundation::NSRect, point: NSPoint) -> bool {
+    point.x >= frame.origin.x
+        && point.x < frame.origin.x + frame.size.width
+        && point.y >= frame.origin.y
+        && point.y < frame.origin.y + frame.size.height
+}
+
+/// Centred horizontally, above the middle vertically, matching macOS alerts.
+fn centered_origin(screen: objc2_foundation::NSRect, window: objc2_foundation::NSRect) -> NSPoint {
+    NSPoint::new(
+        (screen.size.width - window.size.width)
+            .max(0.0)
+            .mul_add(0.5, screen.origin.x),
+        (screen.size.height - window.size.height)
+            .max(0.0)
+            .mul_add(0.6, screen.origin.y),
+    )
+}
+
 fn informative_text(path: &Path, error: &str) -> String {
     format!(
         "{error}\n\n\
@@ -119,10 +152,44 @@ fn informative_text(path: &Path, error: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{informative_text, recover_with, RecoveryChoice};
+    use super::{centered_origin, contains, informative_text, recover_with, RecoveryChoice};
     use desktop_bindings::{save_store, BindingStore};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
     use std::fs;
     use std::path::Path;
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
+        NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
+    }
+
+    #[test]
+    fn the_alert_lands_on_the_display_holding_the_cursor() {
+        let primary = rect(0.0, 0.0, 1920.0, 1080.0);
+        let secondary = rect(1920.0, 0.0, 2560.0, 1440.0);
+
+        assert!(contains(primary, NSPoint::new(10.0, 10.0)));
+        assert!(!contains(secondary, NSPoint::new(10.0, 10.0)));
+        assert!(contains(secondary, NSPoint::new(2000.0, 700.0)));
+        // The shared edge belongs to exactly one screen.
+        assert!(!contains(primary, NSPoint::new(1920.0, 500.0)));
+        assert!(contains(secondary, NSPoint::new(1920.0, 500.0)));
+    }
+
+    #[test]
+    fn the_alert_is_centred_above_the_middle_of_its_screen() {
+        let origin = centered_origin(
+            rect(1920.0, 0.0, 2560.0, 1440.0),
+            rect(0.0, 0.0, 400.0, 200.0),
+        );
+        assert!((origin.x - (1920.0 + (2560.0 - 400.0) / 2.0)).abs() < 0.5);
+        assert!(origin.y > (1440.0 - 200.0) / 2.0);
+        assert!(origin.y < 1440.0 - 200.0);
+
+        // Oversized: pinned to the origin, not pushed off-screen.
+        let oversized = centered_origin(rect(0.0, 0.0, 320.0, 240.0), rect(0.0, 0.0, 800.0, 600.0));
+        assert!((oversized.x - 0.0).abs() < f64::EPSILON);
+        assert!((oversized.y - 0.0).abs() < f64::EPSILON);
+    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let directory =
@@ -154,8 +221,6 @@ mod tests {
 
         let outcome = recover_with(&path, |_, _| RecoveryChoice::Quit).unwrap();
 
-        // The caller exits successfully, and the user still has their file to
-        // back up or repair.
         assert!(outcome.is_none());
         assert_eq!(fs::read(&path).unwrap(), b"not a binding store");
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
@@ -177,7 +242,6 @@ mod tests {
             fs::read(directory.join("bindings-invalid.json")).unwrap(),
             b"not a binding store"
         );
-        // The fresh file on disk is the one the app will use from now on.
         assert_eq!(
             desktop_bindings::load_store(&path).unwrap(),
             BindingStore::default()
@@ -191,8 +255,6 @@ mod tests {
             Path::new("/Users/someone/Library/Application Support/x/bindings.json"),
             "invalid bindings JSON: unknown field `id` at line 84 column 18",
         );
-        // Everything the user needs to act is in the alert itself, because a
-        // menu-bar app gives them nowhere else to look.
         assert!(text.contains("unknown field `id` at line 84 column 18"));
         assert!(text.contains("/Users/someone/Library/Application Support/x/bindings.json"));
         assert!(text.contains("renamed"));

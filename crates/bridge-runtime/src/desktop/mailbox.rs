@@ -318,12 +318,8 @@ pub(crate) fn desktop_snapshot_transition_mask(snapshot: DesktopInputSnapshot) -
 }
 
 /// Which bits, if they change, make a snapshot a transition that must not be
-/// coalesced away.
-///
-/// The pad click bits are added explicitly rather than inherited from
-/// `bindable_mask`: pad clicks are dispatched through the pad regions now, not
-/// through the button table, so nothing else in this mask would carry them and a
-/// fast click could be dropped under load.
+/// coalesced away. The pad click bits are explicit because `bindable_mask` no
+/// longer carries them: pad clicks dispatch through the regions.
 pub(crate) fn desktop_transition_mask(
     buttons: SteamButtons,
     left_touched: bool,

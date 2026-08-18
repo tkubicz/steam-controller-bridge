@@ -74,10 +74,15 @@ Run these on the exact packaged candidate; automated results are not substitutes
 - Verify clean-state Input Monitoring and Accessibility prompts, grant
   detection, Stop/Quit cleanup, and log/diagnostic redaction.
 - Corrupt `bindings.json` by hand and confirm both the menu app and `Edit
-  Profiles…` show the recovery alert rather than failing to appear. Confirm Quit
-  leaves the file untouched, that Escape picks Quit, and that Reset Profiles
-  keeps the original as `bindings-invalid.json` and starts with one empty
-  `Default`. The alert is presented by AppKit and is not covered by automation.
+  Profiles…` show the recovery alert rather than failing to appear. Check it from
+  a `cargo run` as well as the packaged app: an unbundled process is a
+  background-only application until a policy is set, and such a process cannot
+  put a window on screen at all. On a multi-display desk, confirm the alert
+  appears on the display holding the cursor and above other windows. Confirm Quit
+  leaves the file untouched, that Escape picks Quit, and that Reset Profiles keeps
+  the original as `bindings-invalid.json` and starts with one empty `Default`.
+  Confirm the app leaves no Dock icon behind afterwards. The alert is presented by
+  AppKit and is not covered by automation.
 - Test Puck and direct Bluetooth discovery, every control and axis direction,
   battery/charge reports, reconnect, lizard restoration, and ownership
   contention. Direct USB-C input remains unsupported.
