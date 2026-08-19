@@ -1,9 +1,347 @@
+use std::borrow::Cow;
+
 use bridge_runtime::{
     AutomaticShutdownPhase, BridgeStatus, DesktopBindingsState, FirmwareTarget, FirmwareVersion,
     OutputBackend, PuckDockAction, RuntimeState,
 };
+use desktop_bindings::BindingStore;
+use platform_capabilities::CapabilityId;
+
+use crate::app_center_protocol::{AppCenterPage, FirmwareDetails};
+use crate::app_state::{
+    AppSettings, AppState, IdleShutdownChoice, OutputPreference, OVERLAY_HOLD_CHOICES,
+};
 
 const MAX_PROBLEM_CHARS: usize = 48;
+const RUN_TOGGLE_ID: &str = "run-toggle";
+const COPY_ERROR_ID: &str = "copy-error";
+const COPY_DIAGNOSTICS_ID: &str = "copy-diagnostics";
+const INPUT_MONITORING_ID: &str = "input-monitoring";
+const ACCESSIBILITY_ID: &str = "accessibility";
+const CONTROLLER_HID_ACCESS_ID: &str = "capability-controller-hid-access";
+const SERIAL_PORT_ACCESS_ID: &str = "capability-serial-port-access";
+const VIRTUAL_GAMEPAD_ACCESS_ID: &str = "capability-virtual-gamepad-access";
+const DESKTOP_INPUT_ACCESS_ID: &str = "capability-desktop-input-access";
+const POST_EVENT_ID: &str = "capability-post-event";
+const ENABLE_BINDINGS_ID: &str = "enable-bindings";
+const EDIT_BINDINGS_ID: &str = "edit-bindings";
+const BINDING_PROFILE_PREFIX: &str = "binding-profile:";
+const OPEN_LOGS_ID: &str = "open-logs";
+const ABOUT_ID: &str = "about";
+const CHANGELOG_ID: &str = "changelog";
+const UPDATES_ID: &str = "updates";
+const QUIT_ID: &str = "quit";
+const IDLE_NEVER_ID: &str = "idle-never";
+const IDLE_5_ID: &str = "idle-5";
+const IDLE_10_ID: &str = "idle-10";
+const IDLE_15_ID: &str = "idle-15";
+const IDLE_30_ID: &str = "idle-30";
+const PUCK_DOCK_ID: &str = "puck-dock-power-off";
+const OUTPUT_BRIDGE_DEVICE_ID: &str = "output-bridge-device";
+const OUTPUT_VIRTUAL_HID_ID: &str = "output-virtual-hid";
+const OVERLAY_ENABLED_ID: &str = "profile-overlay-enabled";
+const OVERLAY_HOLD_PREFIX: &str = "profile-overlay-hold:";
+
+macro_rules! capability_action_mappings {
+    ($($capability:path => $action_id:ident),+ $(,)?) => {
+        fn capability_action_id(id: CapabilityId) -> &'static str {
+            match id {
+                $($capability => $action_id,)+
+            }
+        }
+
+        fn capability_action_from_id(id: &str) -> Option<CapabilityId> {
+            match id {
+                $($action_id => Some($capability),)+
+                _ => None,
+            }
+        }
+    };
+}
+
+capability_action_mappings! {
+    CapabilityId::ControllerHidAccess => CONTROLLER_HID_ACCESS_ID,
+    CapabilityId::SerialPortAccess => SERIAL_PORT_ACCESS_ID,
+    CapabilityId::VirtualGamepadAccess => VIRTUAL_GAMEPAD_ACCESS_ID,
+    CapabilityId::DesktopInputAccess => DESKTOP_INPUT_ACCESS_ID,
+    CapabilityId::InputMonitoring => INPUT_MONITORING_ID,
+    CapabilityId::PostEvent => POST_EVENT_ID,
+    CapabilityId::Accessibility => ACCESSIBILITY_ID,
+}
+
+impl IdleShutdownChoice {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Never => "Never",
+            Self::FiveMinutes => "5 minutes",
+            Self::TenMinutes => "10 minutes",
+            Self::FifteenMinutes => "15 minutes",
+            Self::ThirtyMinutes => "30 minutes",
+        }
+    }
+
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Never => IDLE_NEVER_ID,
+            Self::FiveMinutes => IDLE_5_ID,
+            Self::TenMinutes => IDLE_10_ID,
+            Self::FifteenMinutes => IDLE_15_ID,
+            Self::ThirtyMinutes => IDLE_30_ID,
+        }
+    }
+
+    fn from_id(id: &str) -> Option<Self> {
+        match id {
+            IDLE_NEVER_ID => Some(Self::Never),
+            IDLE_5_ID => Some(Self::FiveMinutes),
+            IDLE_10_ID => Some(Self::TenMinutes),
+            IDLE_15_ID => Some(Self::FifteenMinutes),
+            IDLE_30_ID => Some(Self::ThirtyMinutes),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProfileOverlayHoldChoice(u64);
+
+impl ProfileOverlayHoldChoice {
+    pub const ALL: [Self; 2] = [Self(OVERLAY_HOLD_CHOICES[0]), Self(OVERLAY_HOLD_CHOICES[1])];
+
+    #[must_use]
+    pub const fn milliseconds(self) -> u64 {
+        self.0
+    }
+
+    fn from_milliseconds(milliseconds: u64) -> Option<Self> {
+        OVERLAY_HOLD_CHOICES
+            .contains(&milliseconds)
+            .then_some(Self(milliseconds))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuAction {
+    ToggleRun,
+    SetIdleShutdown(IdleShutdownChoice),
+    TogglePuckDockPowerOff,
+    SelectOutput(OutputPreference),
+    CopyFullError,
+    CopyDiagnostics,
+    OpenCapabilitySettings(CapabilityId),
+    RequestDesktopPermissions,
+    EditBindingProfiles,
+    OpenLogs,
+    OpenWindow(AppCenterPage),
+    Quit,
+    ToggleProfileOverlay,
+    SelectBindingProfile(String),
+    SetProfileOverlayHold(ProfileOverlayHoldChoice),
+}
+
+impl MenuAction {
+    #[must_use]
+    pub fn id(&self) -> Cow<'_, str> {
+        let id = match self {
+            Self::ToggleRun => RUN_TOGGLE_ID,
+            Self::SetIdleShutdown(choice) => choice.id(),
+            Self::TogglePuckDockPowerOff => PUCK_DOCK_ID,
+            Self::SelectOutput(OutputPreference::BridgeDevice) => OUTPUT_BRIDGE_DEVICE_ID,
+            Self::SelectOutput(OutputPreference::VirtualHid) => OUTPUT_VIRTUAL_HID_ID,
+            Self::CopyFullError => COPY_ERROR_ID,
+            Self::CopyDiagnostics => COPY_DIAGNOSTICS_ID,
+            Self::OpenCapabilitySettings(id) => capability_action_id(*id),
+            Self::RequestDesktopPermissions => ENABLE_BINDINGS_ID,
+            Self::EditBindingProfiles => EDIT_BINDINGS_ID,
+            Self::OpenLogs => OPEN_LOGS_ID,
+            Self::OpenWindow(AppCenterPage::About) => ABOUT_ID,
+            Self::OpenWindow(AppCenterPage::Changelog) => CHANGELOG_ID,
+            Self::OpenWindow(AppCenterPage::Updates) => UPDATES_ID,
+            Self::Quit => QUIT_ID,
+            Self::ToggleProfileOverlay => OVERLAY_ENABLED_ID,
+            Self::SelectBindingProfile(profile_id) => {
+                return Cow::Owned(Self::id_for_binding_profile(profile_id));
+            }
+            Self::SetProfileOverlayHold(choice) => {
+                return Cow::Owned(format!("{OVERLAY_HOLD_PREFIX}{}", choice.milliseconds()));
+            }
+        };
+        Cow::Borrowed(id)
+    }
+
+    #[must_use]
+    pub fn id_for_binding_profile(profile_id: &str) -> String {
+        format!("{BINDING_PROFILE_PREFIX}{profile_id}")
+    }
+
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        if let Some(choice) = IdleShutdownChoice::from_id(id) {
+            return Some(Self::SetIdleShutdown(choice));
+        }
+        if let Some(capability) = capability_action_from_id(id) {
+            return Some(Self::OpenCapabilitySettings(capability));
+        }
+        match id {
+            RUN_TOGGLE_ID => Some(Self::ToggleRun),
+            PUCK_DOCK_ID => Some(Self::TogglePuckDockPowerOff),
+            OUTPUT_BRIDGE_DEVICE_ID => Some(Self::SelectOutput(OutputPreference::BridgeDevice)),
+            OUTPUT_VIRTUAL_HID_ID => Some(Self::SelectOutput(OutputPreference::VirtualHid)),
+            COPY_ERROR_ID => Some(Self::CopyFullError),
+            COPY_DIAGNOSTICS_ID => Some(Self::CopyDiagnostics),
+            ENABLE_BINDINGS_ID => Some(Self::RequestDesktopPermissions),
+            EDIT_BINDINGS_ID => Some(Self::EditBindingProfiles),
+            OPEN_LOGS_ID => Some(Self::OpenLogs),
+            ABOUT_ID if app_center_available() => Some(Self::OpenWindow(AppCenterPage::About)),
+            CHANGELOG_ID if app_center_available() => {
+                Some(Self::OpenWindow(AppCenterPage::Changelog))
+            }
+            UPDATES_ID if app_center_available() => Some(Self::OpenWindow(AppCenterPage::Updates)),
+            QUIT_ID => Some(Self::Quit),
+            OVERLAY_ENABLED_ID => Some(Self::ToggleProfileOverlay),
+            _ => id
+                .strip_prefix(BINDING_PROFILE_PREFIX)
+                .map(|profile_id| Self::SelectBindingProfile(profile_id.to_owned()))
+                .or_else(|| {
+                    let milliseconds = id.strip_prefix(OVERLAY_HOLD_PREFIX)?.parse().ok()?;
+                    ProfileOverlayHoldChoice::from_milliseconds(milliseconds)
+                        .map(Self::SetProfileOverlayHold)
+                }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BindingProfileChoice<'a> {
+    pub id: &'a str,
+    pub label: &'a str,
+    pub selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShutdownControlsModel {
+    pub idle_shutdown_minutes: Option<u64>,
+    pub power_off_on_puck: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputControlsModel {
+    pub selected: OutputPreference,
+    pub output_change_pending: bool,
+    pub virtual_hid_enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProfileControlsModel<'a> {
+    binding_store: &'a BindingStore,
+    selected_binding_profile_id: &'a str,
+    pub profile_overlay_enabled: bool,
+    pub profile_overlay_hold_ms: u64,
+}
+
+impl ProfileControlsModel<'_> {
+    pub fn binding_profiles(&self) -> impl ExactSizeIterator<Item = BindingProfileChoice<'_>> {
+        self.binding_store
+            .profiles
+            .iter()
+            .map(|profile| BindingProfileChoice {
+                id: &profile.id,
+                label: &profile.name,
+                selected: profile
+                    .id
+                    .eq_ignore_ascii_case(self.selected_binding_profile_id),
+            })
+    }
+
+    #[must_use]
+    pub const fn selected_binding_profile_id(&self) -> &str {
+        self.selected_binding_profile_id
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowControlsModel {
+    pub app_center_available: bool,
+    pub update_available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrayControlsModel<'a> {
+    pub shutdown: ShutdownControlsModel,
+    pub output: OutputControlsModel,
+    pub profiles: ProfileControlsModel<'a>,
+    pub window: WindowControlsModel,
+}
+
+impl<'a> TrayControlsModel<'a> {
+    #[must_use]
+    pub fn from_state(state: &'a AppState) -> Self {
+        #[cfg(feature = "updater")]
+        let update_available = state.last_update_available.unwrap_or(false);
+        #[cfg(not(feature = "updater"))]
+        let update_available = false;
+        Self::from_parts(
+            &state.settings,
+            &state.binding_store,
+            state.virtual_hid_enabled,
+            state.output_change.is_some(),
+            update_available,
+        )
+    }
+
+    fn from_parts(
+        settings: &'a AppSettings,
+        binding_store: &'a BindingStore,
+        virtual_hid_enabled: bool,
+        output_change_pending: bool,
+        update_available: bool,
+    ) -> Self {
+        Self {
+            shutdown: ShutdownControlsModel {
+                idle_shutdown_minutes: settings.idle_shutdown_minutes,
+                power_off_on_puck: settings.power_off_on_puck,
+            },
+            output: OutputControlsModel {
+                selected: settings.output,
+                output_change_pending,
+                virtual_hid_enabled,
+            },
+            profiles: ProfileControlsModel {
+                binding_store,
+                selected_binding_profile_id: &settings.active_binding_profile,
+                profile_overlay_enabled: settings.profile_overlay_enabled,
+                profile_overlay_hold_ms: settings.profile_overlay_hold_ms,
+            },
+            window: WindowControlsModel {
+                app_center_available: app_center_available(),
+                update_available: app_center_available() && update_available,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowModel {
+    pub firmware: FirmwareDetails,
+}
+
+impl WindowModel {
+    #[must_use]
+    pub fn from_status(status: &BridgeStatus) -> Self {
+        Self {
+            firmware: FirmwareDetails::from_output(
+                status.output.capabilities.firmware,
+                status.output.firmware,
+            ),
+        }
+    }
+}
+
+#[must_use]
+pub const fn app_center_available() -> bool {
+    cfg!(feature = "updater")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayState {
@@ -53,6 +391,32 @@ pub struct HardwareRowVisibility {
     pub section: bool,
     pub firmware: bool,
     pub controller_details: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardwareStatusRow {
+    Input,
+    Output,
+    Firmware,
+    Controller,
+    Battery,
+    Haptics,
+}
+
+#[must_use]
+pub fn hardware_status_rows(visibility: HardwareRowVisibility) -> Vec<HardwareStatusRow> {
+    if !visibility.section {
+        return Vec::new();
+    }
+    let mut rows = vec![HardwareStatusRow::Input, HardwareStatusRow::Output];
+    if visibility.firmware {
+        rows.push(HardwareStatusRow::Firmware);
+    }
+    rows.push(HardwareStatusRow::Controller);
+    if visibility.controller_details {
+        rows.extend([HardwareStatusRow::Battery, HardwareStatusRow::Haptics]);
+    }
+    rows
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -467,6 +831,153 @@ mod tests {
         assert_eq!(running.haptics, "Haptics: Active");
         assert_eq!(running.current_profile, "Current Profile: None · Disabled");
         assert_eq!(running.automatic_shutdown, "Auto shutdown: Off");
+    }
+
+    #[test]
+    fn menu_action_ids_round_trip_through_typed_actions() {
+        let mut actions = vec![
+            MenuAction::ToggleRun,
+            MenuAction::SetIdleShutdown(IdleShutdownChoice::Never),
+            MenuAction::SetIdleShutdown(IdleShutdownChoice::FifteenMinutes),
+            MenuAction::TogglePuckDockPowerOff,
+            MenuAction::SelectOutput(OutputPreference::BridgeDevice),
+            MenuAction::SelectOutput(OutputPreference::VirtualHid),
+            MenuAction::CopyFullError,
+            MenuAction::CopyDiagnostics,
+            MenuAction::RequestDesktopPermissions,
+            MenuAction::EditBindingProfiles,
+            MenuAction::OpenLogs,
+            MenuAction::Quit,
+            MenuAction::ToggleProfileOverlay,
+            MenuAction::SelectBindingProfile("gaming".to_owned()),
+            MenuAction::SetProfileOverlayHold(ProfileOverlayHoldChoice::ALL[0]),
+        ];
+        actions.extend(
+            [
+                CapabilityId::ControllerHidAccess,
+                CapabilityId::SerialPortAccess,
+                CapabilityId::VirtualGamepadAccess,
+                CapabilityId::DesktopInputAccess,
+                CapabilityId::InputMonitoring,
+                CapabilityId::PostEvent,
+                CapabilityId::Accessibility,
+            ]
+            .map(MenuAction::OpenCapabilitySettings),
+        );
+        for action in actions {
+            assert_eq!(MenuAction::from_id(action.id().as_ref()), Some(action));
+        }
+
+        for action in [
+            MenuAction::OpenWindow(AppCenterPage::About),
+            MenuAction::OpenWindow(AppCenterPage::Changelog),
+            MenuAction::OpenWindow(AppCenterPage::Updates),
+        ] {
+            assert_eq!(
+                MenuAction::from_id(action.id().as_ref()),
+                app_center_available().then_some(action)
+            );
+        }
+        assert_eq!(MenuAction::from_id("profile-overlay-hold:45000"), None);
+        assert_eq!(MenuAction::from_id("not-a-menu-action"), None);
+    }
+
+    #[test]
+    fn window_model_captures_current_firmware_availability() {
+        let status = ready_status(ControllerTransport::Puck);
+        let window = WindowModel::from_status(&status);
+        assert!(window.firmware.available);
+        assert_eq!(
+            window.firmware.version,
+            crate::app_center_protocol::FirmwareStatus::Reported(1)
+        );
+
+        let status = BridgeStatus {
+            output: OutputStatus::configured(&bridge_runtime::OutputSelection::VirtualHid(
+                bridge_runtime::VirtualHidConfig::new(std::path::PathBuf::from("helper")),
+            )),
+            ..BridgeStatus::default()
+        };
+        let window = WindowModel::from_status(&status);
+        assert!(!window.firmware.available);
+    }
+
+    #[test]
+    fn tray_controls_capture_settings_profiles_and_in_flight_state() {
+        let mut store = BindingStore::default();
+        let gaming_id = store.create_profile("Gaming").unwrap();
+        let settings = AppSettings {
+            idle_shutdown_minutes: None,
+            power_off_on_puck: true,
+            output: OutputPreference::VirtualHid,
+            active_binding_profile: gaming_id.clone(),
+            profile_overlay_enabled: true,
+            profile_overlay_hold_ms: OVERLAY_HOLD_CHOICES[1],
+            ..AppSettings::default()
+        };
+
+        let controls = TrayControlsModel::from_parts(&settings, &store, true, true, true);
+
+        assert_eq!(controls.shutdown.idle_shutdown_minutes, None);
+        assert!(controls.shutdown.power_off_on_puck);
+        assert_eq!(controls.output.selected, OutputPreference::VirtualHid);
+        assert!(controls.output.output_change_pending);
+        assert!(controls.output.virtual_hid_enabled);
+        assert_eq!(controls.profiles.binding_profiles().len(), 2);
+        assert_eq!(
+            controls
+                .profiles
+                .binding_profiles()
+                .filter(|profile| profile.selected)
+                .map(|profile| profile.id)
+                .collect::<Vec<_>>(),
+            [gaming_id.as_str()]
+        );
+        assert!(controls.profiles.profile_overlay_enabled);
+        assert_eq!(
+            controls.profiles.profile_overlay_hold_ms,
+            OVERLAY_HOLD_CHOICES[1]
+        );
+        assert_eq!(controls.window.update_available, app_center_available());
+        assert_eq!(controls.window.app_center_available, app_center_available());
+    }
+
+    #[test]
+    fn optional_hardware_rows_have_the_requested_pipeline_order() {
+        let hidden = HardwareRowVisibility {
+            section: false,
+            firmware: true,
+            controller_details: true,
+        };
+        assert!(hardware_status_rows(hidden).is_empty());
+
+        assert_eq!(
+            hardware_status_rows(HardwareRowVisibility {
+                section: true,
+                firmware: false,
+                controller_details: false,
+            }),
+            [
+                HardwareStatusRow::Input,
+                HardwareStatusRow::Output,
+                HardwareStatusRow::Controller,
+            ]
+        );
+        assert_eq!(
+            hardware_status_rows(HardwareRowVisibility {
+                section: true,
+                firmware: true,
+                controller_details: true,
+            }),
+            [
+                HardwareStatusRow::Input,
+                HardwareStatusRow::Output,
+                HardwareStatusRow::Firmware,
+                HardwareStatusRow::Controller,
+                HardwareStatusRow::Battery,
+                HardwareStatusRow::Haptics,
+            ]
+        );
     }
 
     #[test]

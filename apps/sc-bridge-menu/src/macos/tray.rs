@@ -4,34 +4,10 @@
 )]
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum HardwareStatusRow {
-    Input,
-    Output,
-    Firmware,
-    Controller,
-    Battery,
-    Haptics,
-}
-
-pub(super) fn hardware_status_rows(visibility: HardwareRowVisibility) -> Vec<HardwareStatusRow> {
-    if !visibility.section {
-        return Vec::new();
-    }
-    let mut rows = vec![HardwareStatusRow::Input, HardwareStatusRow::Output];
-    if visibility.firmware {
-        rows.push(HardwareStatusRow::Firmware);
-    }
-    rows.push(HardwareStatusRow::Controller);
-    if visibility.controller_details {
-        rows.extend([HardwareStatusRow::Battery, HardwareStatusRow::Haptics]);
-    }
-    rows
-}
-
 impl MenuApp {
     #[allow(clippy::too_many_lines)] // Native menu construction keeps item ownership and order together.
     pub(super) fn create_tray(&mut self) -> Result<(), String> {
+        let controls = TrayControlsModel::from_state(&self.state);
         let bridge = MenuItem::new("Bridge: Starting", false, None);
         let status = MenuItem::new("Status: Looking for hardware", false, None);
         let input = MenuItem::new("Input: Discovering", false, None);
@@ -43,76 +19,94 @@ impl MenuApp {
         let current_profile = MenuItem::new("Current Profile: None · Disabled", false, None);
         let automatic_shutdown = MenuItem::new("Auto shutdown: Idle 0:00 / 15:00", false, None);
         let problem = MenuItem::new("Problem: None", false, None);
-        let run_toggle = MenuItem::with_id(RUN_TOGGLE_ID, "Start Bridge", false, None);
-        let copy_error = MenuItem::with_id(COPY_ERROR_ID, "Copy Full Error", true, None);
-        let copy = MenuItem::with_id(COPY_ID, "Copy Diagnostics", true, None);
-        let settings = MenuItem::with_id(SETTINGS_ID, "Open Input Monitoring Settings", true, None);
-        let accessibility =
-            MenuItem::with_id(ACCESSIBILITY_ID, "Open Accessibility Settings", true, None);
-        let enable_bindings =
-            MenuItem::with_id(ENABLE_BINDINGS_ID, "Request Permissions…", true, None);
-        let edit_profiles = MenuItem::with_id(EDIT_BINDINGS_ID, EDIT_PROFILES_LABEL, true, None);
-        let logs = MenuItem::with_id(LOGS_ID, "Open Log Folder", true, None);
-        let updates = MenuItem::with_id(
-            UPDATES_ID,
-            FIRMWARE_UPDATES_LABEL,
-            app_center_available(),
+        let run_toggle = MenuItem::with_id(
+            MenuAction::ToggleRun.id().into_owned(),
+            "Start Bridge",
+            false,
             None,
         );
-        let about = MenuItem::with_id(ABOUT_ID, "About", app_center_available(), None);
-        let quit = MenuItem::with_id(QUIT_ID, "Quit", true, None);
-        let idle_shutdown = vec![
-            (
-                None,
-                CheckMenuItem::with_id(
-                    IDLE_NEVER_ID,
-                    "Never",
-                    true,
-                    self.state.settings.idle_shutdown_minutes.is_none(),
-                    None,
-                ),
-            ),
-            (
-                Some(5),
-                CheckMenuItem::with_id(
-                    IDLE_5_ID,
-                    "5 minutes",
-                    true,
-                    self.state.settings.idle_shutdown_minutes == Some(5),
-                    None,
-                ),
-            ),
-            (
-                Some(10),
-                CheckMenuItem::with_id(
-                    IDLE_10_ID,
-                    "10 minutes",
-                    true,
-                    self.state.settings.idle_shutdown_minutes == Some(10),
-                    None,
-                ),
-            ),
-            (
-                Some(15),
-                CheckMenuItem::with_id(
-                    IDLE_15_ID,
-                    "15 minutes",
-                    true,
-                    self.state.settings.idle_shutdown_minutes == Some(15),
-                    None,
-                ),
-            ),
-            (
-                Some(30),
-                CheckMenuItem::with_id(
-                    IDLE_30_ID,
-                    "30 minutes",
-                    true,
-                    self.state.settings.idle_shutdown_minutes == Some(30),
-                    None,
-                ),
-            ),
-        ];
+        let copy_error = MenuItem::with_id(
+            MenuAction::CopyFullError.id().into_owned(),
+            "Copy Full Error",
+            true,
+            None,
+        );
+        let copy = MenuItem::with_id(
+            MenuAction::CopyDiagnostics.id().into_owned(),
+            "Copy Diagnostics",
+            true,
+            None,
+        );
+        let settings = MenuItem::with_id(
+            MenuAction::OpenCapabilitySettings(CapabilityId::InputMonitoring)
+                .id()
+                .into_owned(),
+            "Open Input Monitoring Settings",
+            true,
+            None,
+        );
+        let accessibility = MenuItem::with_id(
+            MenuAction::OpenCapabilitySettings(CapabilityId::Accessibility)
+                .id()
+                .into_owned(),
+            "Open Accessibility Settings",
+            true,
+            None,
+        );
+        let enable_bindings = MenuItem::with_id(
+            MenuAction::RequestDesktopPermissions.id().into_owned(),
+            "Request Permissions…",
+            true,
+            None,
+        );
+        let edit_profiles = MenuItem::with_id(
+            MenuAction::EditBindingProfiles.id().into_owned(),
+            EDIT_PROFILES_LABEL,
+            true,
+            None,
+        );
+        let logs = MenuItem::with_id(
+            MenuAction::OpenLogs.id().into_owned(),
+            "Open Log Folder",
+            true,
+            None,
+        );
+        let updates = MenuItem::with_id(
+            MenuAction::OpenWindow(AppCenterPage::Updates)
+                .id()
+                .into_owned(),
+            if controls.window.update_available {
+                UPDATE_AVAILABLE_LABEL
+            } else {
+                FIRMWARE_UPDATES_LABEL
+            },
+            controls.window.app_center_available,
+            None,
+        );
+        let about = MenuItem::with_id(
+            MenuAction::OpenWindow(AppCenterPage::About)
+                .id()
+                .into_owned(),
+            "About",
+            controls.window.app_center_available,
+            None,
+        );
+        let quit = MenuItem::with_id(MenuAction::Quit.id().into_owned(), "Quit", true, None);
+        let idle_shutdown = IdleShutdownChoice::ALL
+            .into_iter()
+            .map(|choice| {
+                (
+                    choice,
+                    CheckMenuItem::with_id(
+                        MenuAction::SetIdleShutdown(choice).id().into_owned(),
+                        choice.label(),
+                        true,
+                        controls.shutdown.idle_shutdown_minutes == choice.minutes(),
+                        None,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
         let idle_submenu = Submenu::with_items(
             "Idle Shutdown",
             true,
@@ -123,10 +117,10 @@ impl MenuApp {
         )
         .map_err(|error| error.to_string())?;
         let puck_dock = CheckMenuItem::with_id(
-            PUCK_DOCK_ID,
+            MenuAction::TogglePuckDockPowerOff.id().into_owned(),
             "Turn Off When Placed on Puck",
             true,
-            self.state.settings.power_off_on_puck,
+            controls.shutdown.power_off_on_puck,
             None,
         );
         let shutdown_submenu = Submenu::with_items(
@@ -139,17 +133,21 @@ impl MenuApp {
         )
         .map_err(|error| error.to_string())?;
         let output_bridge_device = CheckMenuItem::with_id(
-            OUTPUT_BRIDGE_DEVICE_ID,
+            MenuAction::SelectOutput(OutputPreference::BridgeDevice)
+                .id()
+                .into_owned(),
             "Bridge Device",
-            true,
-            self.state.settings.output == OutputPreference::BridgeDevice,
+            !controls.output.output_change_pending,
+            controls.output.selected == OutputPreference::BridgeDevice,
             None,
         );
         let output_virtual_hid = CheckMenuItem::with_id(
-            OUTPUT_VIRTUAL_HID_ID,
+            MenuAction::SelectOutput(OutputPreference::VirtualHid)
+                .id()
+                .into_owned(),
             "Virtual Gamepad — Experimental",
-            true,
-            self.state.settings.output == OutputPreference::VirtualHid,
+            !controls.output.output_change_pending,
+            controls.output.selected == OutputPreference::VirtualHid,
             None,
         );
         let output_submenu = Submenu::with_items(
@@ -162,22 +160,23 @@ impl MenuApp {
         )
         .map_err(|error| error.to_string())?;
         let overlay_enabled = CheckMenuItem::with_id(
-            OVERLAY_ENABLED_ID,
+            MenuAction::ToggleProfileOverlay.id().into_owned(),
             "Hold Quick Access for Profile Wheel",
             true,
-            self.state.settings.profile_overlay_enabled,
+            controls.profiles.profile_overlay_enabled,
             None,
         );
-        let overlay_hold: Vec<(u64, CheckMenuItem)> = OVERLAY_HOLD_CHOICES
+        let overlay_hold: Vec<(u64, CheckMenuItem)> = ProfileOverlayHoldChoice::ALL
             .into_iter()
-            .map(|milliseconds| {
+            .map(|choice| {
+                let milliseconds = choice.milliseconds();
                 (
                     milliseconds,
                     CheckMenuItem::with_id(
-                        format!("{OVERLAY_HOLD_PREFIX}{milliseconds}"),
+                        MenuAction::SetProfileOverlayHold(choice).id().into_owned(),
                         format!("{} seconds", milliseconds / 1_000),
                         true,
-                        self.state.settings.profile_overlay_hold_ms == milliseconds,
+                        controls.profiles.profile_overlay_hold_ms == milliseconds,
                         None,
                     ),
                 )
@@ -201,10 +200,7 @@ impl MenuApp {
             ],
         )
         .map_err(|error| error.to_string())?;
-        let binding_profiles = binding_profile_menu_items(
-            &self.state.binding_store,
-            &self.state.settings.active_binding_profile,
-        );
+        let binding_profiles = binding_profile_menu_items(&controls);
         let bindings_submenu = Submenu::new(PROFILES_MENU_LABEL, true);
         for (_, item) in &binding_profiles {
             bindings_submenu
@@ -244,7 +240,7 @@ impl MenuApp {
         let hardware_rows = MenuModel::from_status(&initial_status).hardware_rows;
         let mut root_items: Vec<&dyn tray_icon::menu::IsMenuItem> =
             vec![&bridge, &status, &run_toggle];
-        if self.state.virtual_hid_enabled {
+        if controls.output.virtual_hid_enabled {
             root_items.push(&output_submenu);
         }
         root_items.push(&separators[0]);
@@ -307,6 +303,7 @@ impl MenuApp {
             run_toggle,
             copy_error,
             copy_error_visible,
+            #[cfg(feature = "updater")]
             updates,
             idle_shutdown,
             puck_dock,
@@ -336,12 +333,11 @@ impl MenuApp {
             .problem()
             .map(str::to_owned)
             .or_else(|| self.state.output_change_problem.clone());
-        if let Err(error) = self
-            .state
-            .app_center_host
-            .update_firmware(status.output.capabilities.firmware, status.output.firmware)
-        {
-            eprintln!("cannot update app window firmware status: {error}");
+        if self.state.app_center_host.child().is_some() {
+            let window = WindowModel::from_status(&status);
+            if let Err(error) = self.state.app_center_host.update_firmware(window.firmware) {
+                eprintln!("cannot update app window firmware status: {error}");
+            }
         }
         #[cfg(feature = "updater")]
         {
@@ -435,12 +431,9 @@ impl MenuApp {
     }
 
     pub(super) fn show_app_center(&mut self, page: AppCenterPage) {
-        let output = self.state.runtime.status().output;
-        match self
-            .state
-            .app_center_host
-            .launch(page, output.capabilities.firmware, output.firmware)
-        {
+        let status = self.state.runtime.status();
+        let window = WindowModel::from_status(&status);
+        match self.state.app_center_host.launch(page, window.firmware) {
             Ok(reused) => {
                 if reused
                     && self
@@ -458,8 +451,11 @@ impl MenuApp {
 
     #[allow(clippy::too_many_lines)] // One dispatch table; splitting it hides the menu's shape.
     pub(super) fn handle_menu_event(&mut self, id: &str, event_loop: &ActiveEventLoop) {
-        match id {
-            RUN_TOGGLE_ID => {
+        let Some(action) = MenuAction::from_id(id) else {
+            return;
+        };
+        match action {
+            MenuAction::ToggleRun => {
                 // One control: what it does depends on what the bridge is
                 // doing, which is what its label already says.
                 let starts = self
@@ -476,15 +472,8 @@ impl MenuApp {
                     eprintln!("cannot {action} bridge: {error}");
                 }
             }
-            IDLE_NEVER_ID | IDLE_5_ID | IDLE_10_ID | IDLE_15_ID | IDLE_30_ID => {
-                let minutes = match id {
-                    IDLE_NEVER_ID => None,
-                    IDLE_5_ID => Some(5),
-                    IDLE_10_ID => Some(10),
-                    IDLE_15_ID => Some(15),
-                    IDLE_30_ID => Some(30),
-                    _ => unreachable!(),
-                };
+            MenuAction::SetIdleShutdown(choice) => {
+                let minutes = choice.minutes();
                 let timeout = minutes.map(|minutes| Duration::from_secs(minutes * 60));
                 if let Err(error) = self
                     .state
@@ -502,7 +491,7 @@ impl MenuApp {
                     }
                 }
             }
-            PUCK_DOCK_ID => {
+            MenuAction::TogglePuckDockPowerOff => {
                 self.state.settings.power_off_on_puck = !self.state.settings.power_off_on_puck;
                 let action = if self.state.settings.power_off_on_puck {
                     PuckDockAction::PowerOff
@@ -519,9 +508,8 @@ impl MenuApp {
                 }
                 self.update_setting_checkmarks();
             }
-            OUTPUT_BRIDGE_DEVICE_ID => self.begin_output_change(OutputPreference::BridgeDevice),
-            OUTPUT_VIRTUAL_HID_ID => self.begin_output_change(OutputPreference::VirtualHid),
-            COPY_ERROR_ID => {
+            MenuAction::SelectOutput(preference) => self.begin_output_change(preference),
+            MenuAction::CopyFullError => {
                 let recovery_error = self.state.app_center_recovery.problem().map(str::to_owned);
                 if let Some(error) = recovery_error
                     .or_else(|| self.state.output_change_problem.clone())
@@ -532,36 +520,31 @@ impl MenuApp {
                     }
                 }
             }
-            COPY_ID => {
+            MenuAction::CopyDiagnostics => {
                 if let Err(error) = copy_diagnostics(&self.state.runtime.status()) {
                     eprintln!("cannot copy diagnostics: {error}");
                 }
             }
-            SETTINGS_ID => self.open_capability_settings(CapabilityId::InputMonitoring),
-            ACCESSIBILITY_ID => self.open_capability_settings(CapabilityId::Accessibility),
-            ENABLE_BINDINGS_ID => {
+            MenuAction::OpenCapabilitySettings(id) => self.open_capability_settings(id),
+            MenuAction::RequestDesktopPermissions => {
                 self.request_permissions_in_order(true);
             }
-            EDIT_BINDINGS_ID => match launch_bindings_editor() {
+            MenuAction::EditBindingProfiles => match launch_bindings_editor() {
                 Ok(child) => self.state.editor_children.push(child),
                 Err(error) => eprintln!("cannot launch bindings editor: {error}"),
             },
-            LOGS_ID => {
+            MenuAction::OpenLogs => {
                 if let Err(error) = open_path(&self.logger.directory) {
                     eprintln!("cannot open log folder: {error}");
                 }
             }
-            ABOUT_ID | UPDATES_ID => {
-                if let Some(page) = app_center_page_for_menu(id) {
-                    self.show_app_center(page);
-                }
-            }
-            QUIT_ID => {
+            MenuAction::OpenWindow(page) => self.show_app_center(page),
+            MenuAction::Quit => {
                 if self.shutdown() {
                     event_loop.exit();
                 }
             }
-            OVERLAY_ENABLED_ID => {
+            MenuAction::ToggleProfileOverlay => {
                 self.state.settings.profile_overlay_enabled =
                     !self.state.settings.profile_overlay_enabled;
                 if !self.apply_picker_settings() {
@@ -571,17 +554,11 @@ impl MenuApp {
                 }
                 self.sync_picker_roster();
             }
-            _ if id.starts_with(BINDING_PROFILE_PREFIX) => {
-                let profile_id = &id[BINDING_PROFILE_PREFIX.len()..];
-                self.select_binding_profile(profile_id);
+            MenuAction::SelectBindingProfile(profile_id) => {
+                self.select_binding_profile(&profile_id);
             }
-            _ if id.starts_with(OVERLAY_HOLD_PREFIX) => {
-                let Ok(milliseconds) = id[OVERLAY_HOLD_PREFIX.len()..].parse::<u64>() else {
-                    return;
-                };
-                if !OVERLAY_HOLD_CHOICES.contains(&milliseconds) {
-                    return;
-                }
+            MenuAction::SetProfileOverlayHold(choice) => {
+                let milliseconds = choice.milliseconds();
                 let previous = self.state.settings.profile_overlay_hold_ms;
                 self.state.settings.profile_overlay_hold_ms = milliseconds;
                 if !self.apply_picker_settings() {
@@ -589,7 +566,6 @@ impl MenuApp {
                     self.update_setting_checkmarks();
                 }
             }
-            _ => {}
         }
     }
 

@@ -3,22 +3,8 @@ use super::logging::diagnostics_text;
 use super::permissions::{
     advance_permission_requirements, menu_capability_context, should_open_remedy, PermissionAdvance,
 };
-use super::tray::{hardware_status_rows, HardwareStatusRow};
 use super::*;
 use platform_capabilities::Remedy;
-
-#[test]
-fn app_center_menu_actions_follow_build_capability() {
-    assert_eq!(
-        app_center_page_for_menu(ABOUT_ID),
-        app_center_available().then_some(AppCenterPage::About)
-    );
-    assert_eq!(
-        app_center_page_for_menu(UPDATES_ID),
-        app_center_available().then_some(AppCenterPage::Updates)
-    );
-    assert_eq!(app_center_page_for_menu("not-an-app-center-item"), None);
-}
 
 #[test]
 fn firmware_update_menu_labels_preserve_the_visible_ampersand() {
@@ -26,44 +12,6 @@ fn firmware_update_menu_labels_preserve_the_visible_ampersand() {
     assert_eq!(item.text(), "Firmware & Updates");
     item.set_text(UPDATE_AVAILABLE_LABEL);
     assert_eq!(item.text(), "Update Available");
-}
-
-#[test]
-fn optional_hardware_rows_have_the_requested_pipeline_order() {
-    let hidden = HardwareRowVisibility {
-        section: false,
-        firmware: true,
-        controller_details: true,
-    };
-    assert!(hardware_status_rows(hidden).is_empty());
-
-    assert_eq!(
-        hardware_status_rows(HardwareRowVisibility {
-            section: true,
-            firmware: false,
-            controller_details: false,
-        }),
-        [
-            HardwareStatusRow::Input,
-            HardwareStatusRow::Output,
-            HardwareStatusRow::Controller,
-        ]
-    );
-    assert_eq!(
-        hardware_status_rows(HardwareRowVisibility {
-            section: true,
-            firmware: true,
-            controller_details: true,
-        }),
-        [
-            HardwareStatusRow::Input,
-            HardwareStatusRow::Output,
-            HardwareStatusRow::Firmware,
-            HardwareStatusRow::Controller,
-            HardwareStatusRow::Battery,
-            HardwareStatusRow::Haptics,
-        ]
-    );
 }
 
 #[test]

@@ -8,7 +8,7 @@ use bridge_runtime::{
     format_status_diagnostics, BridgeStatus, OutputChangePoll, PickerEvent, PuckDockAction,
     StatusLogRecord, StatusLogTracker, UpdateResumePoll,
 };
-use desktop_bindings::{parse_store, BindingStore};
+use desktop_bindings::parse_store;
 use desktop_input::DesktopSession;
 use menu_shell::{activate_child_application, copy_text, open_path};
 use objc2::{rc::Retained, MainThreadMarker};
@@ -34,9 +34,12 @@ use crate::app_center_protocol::{
 };
 use crate::app_state::{
     bindings_file_fingerprint, picker_roster, resolve_picker_commit, save_settings,
-    AppCenterRecovery, AppState, OutputPreference, OVERLAY_HOLD_CHOICES,
+    AppCenterRecovery, AppState, IdleShutdownChoice, OutputPreference,
 };
-use crate::model::{HardwareRowVisibility, MenuModel, RunAction, TrayState};
+use crate::model::{
+    hardware_status_rows, HardwareRowVisibility, HardwareStatusRow, MenuAction, MenuModel,
+    ProfileOverlayHoldChoice, RunAction, TrayControlsModel, TrayState, WindowModel,
+};
 
 mod icons;
 mod logging;
@@ -59,50 +62,12 @@ mod tests;
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const LOG_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 const LOG_TRUNCATION_MARKER: &str = " log_truncated=true\n";
-const RUN_TOGGLE_ID: &str = "run-toggle";
-const COPY_ERROR_ID: &str = "copy-error";
-const COPY_ID: &str = "copy-diagnostics";
-const SETTINGS_ID: &str = "input-monitoring";
-const ACCESSIBILITY_ID: &str = "accessibility";
-const ENABLE_BINDINGS_ID: &str = "enable-bindings";
-const EDIT_BINDINGS_ID: &str = "edit-bindings";
 const PROFILES_MENU_LABEL: &str = "Profiles";
 const EDIT_PROFILES_LABEL: &str = "Edit Profiles";
-const BINDING_PROFILE_PREFIX: &str = "binding-profile:";
-const LOGS_ID: &str = "open-logs";
-const ABOUT_ID: &str = "about";
-const UPDATES_ID: &str = "updates";
 // `muda` treats a single ampersand as a mnemonic marker on every platform.
 // Doubling it preserves one visible ampersand in the native macOS menu.
 const FIRMWARE_UPDATES_LABEL: &str = "Firmware && Updates";
-#[cfg(any(feature = "updater", test))]
 const UPDATE_AVAILABLE_LABEL: &str = "Update Available";
-
-const fn app_center_available() -> bool {
-    cfg!(feature = "updater")
-}
-
-fn app_center_page_for_menu(id: &str) -> Option<AppCenterPage> {
-    if !app_center_available() {
-        return None;
-    }
-    match id {
-        ABOUT_ID => Some(AppCenterPage::About),
-        UPDATES_ID => Some(AppCenterPage::Updates),
-        _ => None,
-    }
-}
-const QUIT_ID: &str = "quit";
-const IDLE_NEVER_ID: &str = "idle-never";
-const IDLE_5_ID: &str = "idle-5";
-const IDLE_10_ID: &str = "idle-10";
-const IDLE_15_ID: &str = "idle-15";
-const IDLE_30_ID: &str = "idle-30";
-const PUCK_DOCK_ID: &str = "puck-dock-power-off";
-const OUTPUT_BRIDGE_DEVICE_ID: &str = "output-bridge-device";
-const OUTPUT_VIRTUAL_HID_ID: &str = "output-virtual-hid";
-const OVERLAY_ENABLED_ID: &str = "profile-overlay-enabled";
-const OVERLAY_HOLD_PREFIX: &str = "profile-overlay-hold:";
 pub fn run(virtual_hid_enabled: bool) -> Result<(), String> {
     // A menu bar app has no windows and no Dock icon, and it must not take
     // focus when it starts. Winit otherwise runs as a regular foreground app
@@ -144,12 +109,9 @@ struct MenuItems {
     run_toggle: MenuItem,
     copy_error: MenuItem,
     copy_error_visible: bool,
-    #[cfg_attr(
-        not(feature = "updater"),
-        expect(dead_code, reason = "only the updater feature rewrites the label")
-    )]
+    #[cfg(feature = "updater")]
     updates: MenuItem,
-    idle_shutdown: Vec<(Option<u64>, CheckMenuItem)>,
+    idle_shutdown: Vec<(IdleShutdownChoice, CheckMenuItem)>,
     puck_dock: CheckMenuItem,
     output_bridge_device: CheckMenuItem,
     output_virtual_hid: CheckMenuItem,
@@ -186,21 +148,18 @@ impl From<HardwareRowVisibility> for HardwareItemVisibility {
     }
 }
 
-fn binding_profile_menu_items(
-    store: &BindingStore,
-    active_profile_id: &str,
-) -> Vec<(String, CheckMenuItem)> {
-    store
+fn binding_profile_menu_items(controls: &TrayControlsModel<'_>) -> Vec<(String, CheckMenuItem)> {
+    controls
         .profiles
-        .iter()
+        .binding_profiles()
         .map(|profile| {
             (
-                profile.id.clone(),
+                profile.id.to_owned(),
                 CheckMenuItem::with_id(
-                    format!("{BINDING_PROFILE_PREFIX}{}", profile.id),
-                    &profile.name,
+                    MenuAction::id_for_binding_profile(profile.id),
+                    profile.label,
                     true,
-                    profile.id.eq_ignore_ascii_case(active_profile_id),
+                    profile.selected,
                     None,
                 ),
             )

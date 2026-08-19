@@ -7,26 +7,28 @@ use super::*;
 impl MenuApp {
     pub(super) fn update_setting_checkmarks(&self) {
         if let Some(items) = &self.items {
-            for (minutes, item) in &items.idle_shutdown {
-                item.set_checked(*minutes == self.state.settings.idle_shutdown_minutes);
+            let controls = TrayControlsModel::from_state(&self.state);
+            for (choice, item) in &items.idle_shutdown {
+                item.set_checked(choice.minutes() == controls.shutdown.idle_shutdown_minutes);
             }
             items
                 .puck_dock
-                .set_checked(self.state.settings.power_off_on_puck);
+                .set_checked(controls.shutdown.power_off_on_puck);
             items
                 .output_bridge_device
-                .set_checked(self.state.settings.output == OutputPreference::BridgeDevice);
+                .set_checked(controls.output.selected == OutputPreference::BridgeDevice);
             items
                 .output_virtual_hid
-                .set_checked(self.state.settings.output == OutputPreference::VirtualHid);
+                .set_checked(controls.output.selected == OutputPreference::VirtualHid);
+            let selected_profile = controls.profiles.selected_binding_profile_id();
             for (profile_id, item) in &items.binding_profiles {
-                item.set_checked(*profile_id == self.state.settings.active_binding_profile);
+                item.set_checked(profile_id.eq_ignore_ascii_case(selected_profile));
             }
             items
                 .overlay_enabled
-                .set_checked(self.state.settings.profile_overlay_enabled);
+                .set_checked(controls.profiles.profile_overlay_enabled);
             for (milliseconds, item) in &items.overlay_hold {
-                item.set_checked(*milliseconds == self.state.settings.profile_overlay_hold_ms);
+                item.set_checked(*milliseconds == controls.profiles.profile_overlay_hold_ms);
             }
         }
     }
@@ -332,10 +334,8 @@ impl MenuApp {
         let Some(items) = self.items.as_mut() else {
             return Ok(());
         };
-        let binding_profiles = binding_profile_menu_items(
-            &self.state.binding_store,
-            &self.state.settings.active_binding_profile,
-        );
+        let controls = TrayControlsModel::from_state(&self.state);
+        let binding_profiles = binding_profile_menu_items(&controls);
         while items.bindings_submenu.remove_at(0).is_some() {}
         items.binding_profiles = binding_profiles;
         for (_, item) in &items.binding_profiles {
@@ -348,7 +348,12 @@ impl MenuApp {
         // after an external profile edit rebuilds the dynamic entries.
         let editor_separator = PredefinedMenuItem::separator();
         let wheel_separator = PredefinedMenuItem::separator();
-        let edit = MenuItem::with_id(EDIT_BINDINGS_ID, EDIT_PROFILES_LABEL, true, None);
+        let edit = MenuItem::with_id(
+            MenuAction::EditBindingProfiles.id().into_owned(),
+            EDIT_PROFILES_LABEL,
+            true,
+            None,
+        );
         for item in [
             &editor_separator as &dyn tray_icon::menu::IsMenuItem,
             &edit,
