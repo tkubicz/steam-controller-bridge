@@ -231,9 +231,9 @@ pub(crate) fn make_nonserial_output(
         OutputSelection::Serial => Err(OutputOpenError::Permanent(
             "serial output requires bridge-device discovery".to_owned(),
         )),
-        OutputSelection::VirtualHid(config) => VirtualHidOutput::open(config.clone())
+        OutputSelection::VirtualHid(config) => VirtualGamepad::open_macos_helper(config)
             .map(|output| {
-                let virtual_hid = Some(output.helper_metadata());
+                let virtual_hid = output.macos_helper_metadata();
                 OpenedNonserialOutput {
                     output: Box::new(output),
                     virtual_hid,

@@ -74,7 +74,7 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "PATH")]
     pub(crate) output_file: Option<PathBuf>,
 
-    /// Rust `IOHIDUserDevice` helper executable; required by `--output virtual-hid`.
+    /// Rust `IOHIDUserDevice` helper executable; required by virtual-gamepad output.
     #[arg(long, value_name = "PATH")]
     pub(crate) virtual_hid_helper: Option<PathBuf>,
 
@@ -161,6 +161,7 @@ pub(crate) enum PuckDockArg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum OutputArg {
     Serial,
+    #[value(name = "virtual-gamepad", alias = "virtual-hid")]
     VirtualHid,
     /// `compact` has always been accepted as a synonym and stays accepted, but
     /// it is hidden so the help text keeps offering one name per behaviour.
@@ -344,6 +345,7 @@ mod tests {
     fn every_output_backend_still_parses() {
         for (value, expected) in [
             ("serial", OutputArg::Serial),
+            ("virtual-gamepad", OutputArg::VirtualHid),
             ("virtual-hid", OutputArg::VirtualHid),
             ("dump", OutputArg::Dump),
             ("pretty", OutputArg::Pretty),
