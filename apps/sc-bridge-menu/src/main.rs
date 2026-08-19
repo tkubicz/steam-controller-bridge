@@ -2,34 +2,35 @@
 mod about_pages;
 #[cfg(all(target_os = "macos", feature = "updater"))]
 mod app_center;
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod app_center_host;
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod app_center_protocol;
 #[cfg(all(target_os = "macos", feature = "editor"))]
 mod bindings_editor;
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod bindings_recovery;
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod cli;
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod line_protocol;
 #[cfg(target_os = "macos")]
 mod macos;
-// Only `macos` renders the model, so a non-macOS build would see it as dead code.
-// Its unit tests therefore run on macOS only.
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod model;
 // The host side only manages the child process, so it is compiled even
 // without the `overlay` feature - a featureless build's child simply reports
 // that it cannot render and exits, the same degradation the editor gets.
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod overlay_host;
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod overlay_protocol;
 #[cfg(all(target_os = "macos", feature = "overlay"))]
 mod profile_overlay;
-#[cfg(all(target_os = "macos", feature = "updater"))]
+#[cfg(test)]
+mod test_child;
+#[cfg(feature = "updater")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod update_check;
 #[cfg(all(target_os = "macos", feature = "updater"))]
 mod window_ui;

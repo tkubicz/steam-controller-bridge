@@ -74,8 +74,7 @@ pub struct MenuModel {
     /// What the single run control does, which is also what it is labelled.
     pub run_action: RunAction,
     pub run_enabled: bool,
-    /// Set when the bridge cannot type because macOS has not granted
-    /// Accessibility, which the menu calls out rather than burying.
+    /// Set when desktop bindings need an operating-system capability.
     pub permission_required: bool,
 }
 
@@ -307,7 +306,7 @@ fn friendly_error(error: &str) -> String {
     if lower.contains("updater suspension recovery") {
         return "Update cleanup delayed; Quit will retry".to_owned();
     }
-    if lower.contains("not permitted") || lower.contains("e00002e2") {
+    if lower.contains("e00002e2") {
         return "Input Monitoring permission required".to_owned();
     }
     if lower.contains("already owned") {
@@ -676,6 +675,14 @@ mod tests {
         assert_eq!(model.status, "Status: Action required");
         assert_eq!(model.tray_state, TrayState::Error);
         assert!(model.has_error);
+    }
+
+    #[test]
+    fn generic_permission_errors_do_not_claim_a_macos_remedy() {
+        assert_eq!(
+            friendly_error("uinput: operation not permitted"),
+            "uinput: operation not permitted"
+        );
     }
 
     #[test]
