@@ -16,7 +16,6 @@ use bridge_runtime::{
 };
 use desktop_bindings::{default_store_path, parse_store, BindingStore};
 use desktop_input::DesktopSession;
-use macos_virtual_hid::ENABLE_VIRTUAL_HID_ENV;
 use objc2::{rc::Retained, MainThreadMarker};
 use objc2_app_kit::{
     NSApplicationActivationOptions, NSImage, NSRunningApplication, NSStatusBarButton,
@@ -31,6 +30,7 @@ use tiny_skia::{
 };
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use virtual_gamepad::ENABLE_VIRTUAL_HID_ENV;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};

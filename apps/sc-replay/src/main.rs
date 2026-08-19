@@ -9,8 +9,8 @@ use bridge_output::{
     DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput, SerialConfig, SerialOutput,
 };
 use clap::{Parser, ValueEnum};
-use macos_virtual_hid::{parse_usb_id, VirtualHidOptions};
 use recording::{ReplayOptions, ReplaySession, ReplayTiming, KIND_MAPPED_GAMEPAD_STATE};
+use virtual_gamepad::{parse_usb_id, VirtualHidOptions};
 
 /// Replays a recorded session through any output backend.
 #[derive(Debug, Clone, Parser)]

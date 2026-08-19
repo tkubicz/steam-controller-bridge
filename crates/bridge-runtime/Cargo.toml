@@ -13,7 +13,7 @@ controller-mapper = { path = "../controller-mapper" }
 desktop-bindings = { path = "../desktop-bindings" }
 desktop-input = { path = "../desktop-input" }
 gamepad-state = { path = "../gamepad-state" }
-macos-virtual-hid = { path = "../macos-virtual-hid" }
+virtual-gamepad = { path = "../virtual-gamepad" }
 profile-picker = { path = "../profile-picker" }
 power-monitor = { path = "../power-monitor" }
 recording = { path = "../recording" }

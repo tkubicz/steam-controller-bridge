@@ -23,7 +23,7 @@ use super::{
     POWER_OFF_COOLDOWN, RUMBLE_LEASE_TIMEOUT, RUMBLE_REFRESH_INTERVAL, RUMBLE_RETRY_INTERVAL,
     RUNTIME_POLL_INTERVAL, STATUS_INTERVAL, WAKE_SETTLE_DELAY,
 };
-use macos_virtual_hid::VirtualHidOutput;
+use virtual_gamepad::VirtualHidOutput;
 
 mod active_session;
 mod commands;
