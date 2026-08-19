@@ -68,7 +68,7 @@ impl MenuApp {
                     IDLE_NEVER_ID,
                     "Never",
                     true,
-                    self.settings.idle_shutdown_minutes.is_none(),
+                    self.state.settings.idle_shutdown_minutes.is_none(),
                     None,
                 ),
             ),
@@ -78,7 +78,7 @@ impl MenuApp {
                     IDLE_5_ID,
                     "5 minutes",
                     true,
-                    self.settings.idle_shutdown_minutes == Some(5),
+                    self.state.settings.idle_shutdown_minutes == Some(5),
                     None,
                 ),
             ),
@@ -88,7 +88,7 @@ impl MenuApp {
                     IDLE_10_ID,
                     "10 minutes",
                     true,
-                    self.settings.idle_shutdown_minutes == Some(10),
+                    self.state.settings.idle_shutdown_minutes == Some(10),
                     None,
                 ),
             ),
@@ -98,7 +98,7 @@ impl MenuApp {
                     IDLE_15_ID,
                     "15 minutes",
                     true,
-                    self.settings.idle_shutdown_minutes == Some(15),
+                    self.state.settings.idle_shutdown_minutes == Some(15),
                     None,
                 ),
             ),
@@ -108,7 +108,7 @@ impl MenuApp {
                     IDLE_30_ID,
                     "30 minutes",
                     true,
-                    self.settings.idle_shutdown_minutes == Some(30),
+                    self.state.settings.idle_shutdown_minutes == Some(30),
                     None,
                 ),
             ),
@@ -126,7 +126,7 @@ impl MenuApp {
             PUCK_DOCK_ID,
             "Turn Off When Placed on Puck",
             true,
-            self.settings.power_off_on_puck,
+            self.state.settings.power_off_on_puck,
             None,
         );
         let shutdown_submenu = Submenu::with_items(
@@ -142,14 +142,14 @@ impl MenuApp {
             OUTPUT_BRIDGE_DEVICE_ID,
             "Bridge Device",
             true,
-            self.settings.output == OutputPreference::BridgeDevice,
+            self.state.settings.output == OutputPreference::BridgeDevice,
             None,
         );
         let output_virtual_hid = CheckMenuItem::with_id(
             OUTPUT_VIRTUAL_HID_ID,
             "Virtual Gamepad — Experimental",
             true,
-            self.settings.output == OutputPreference::VirtualHid,
+            self.state.settings.output == OutputPreference::VirtualHid,
             None,
         );
         let output_submenu = Submenu::with_items(
@@ -165,7 +165,7 @@ impl MenuApp {
             OVERLAY_ENABLED_ID,
             "Hold Quick Access for Profile Wheel",
             true,
-            self.settings.profile_overlay_enabled,
+            self.state.settings.profile_overlay_enabled,
             None,
         );
         let overlay_hold: Vec<(u64, CheckMenuItem)> = OVERLAY_HOLD_CHOICES
@@ -177,7 +177,7 @@ impl MenuApp {
                         format!("{OVERLAY_HOLD_PREFIX}{milliseconds}"),
                         format!("{} seconds", milliseconds / 1_000),
                         true,
-                        self.settings.profile_overlay_hold_ms == milliseconds,
+                        self.state.settings.profile_overlay_hold_ms == milliseconds,
                         None,
                     ),
                 )
@@ -201,8 +201,10 @@ impl MenuApp {
             ],
         )
         .map_err(|error| error.to_string())?;
-        let binding_profiles =
-            binding_profile_menu_items(&self.binding_store, &self.settings.active_binding_profile);
+        let binding_profiles = binding_profile_menu_items(
+            &self.state.binding_store,
+            &self.state.settings.active_binding_profile,
+        );
         let bindings_submenu = Submenu::new(PROFILES_MENU_LABEL, true);
         for (_, item) in &binding_profiles {
             bindings_submenu
@@ -237,12 +239,12 @@ impl MenuApp {
         .map_err(|error| error.to_string())?;
         let separators: [PredefinedMenuItem; 6] =
             std::array::from_fn(|_| PredefinedMenuItem::separator());
-        let initial_status = self.runtime.status();
+        let initial_status = self.state.runtime.status();
         let copy_error_visible = initial_status.last_error.is_some();
         let hardware_rows = MenuModel::from_status(&initial_status).hardware_rows;
         let mut root_items: Vec<&dyn tray_icon::menu::IsMenuItem> =
             vec![&bridge, &status, &run_toggle];
-        if self.virtual_hid_enabled {
+        if self.state.virtual_hid_enabled {
             root_items.push(&output_submenu);
         }
         root_items.push(&separators[0]);
@@ -327,13 +329,15 @@ impl MenuApp {
         reason = "one pass keeps all menu items synchronized to the same runtime snapshot"
     )]
     pub(super) fn refresh_status(&mut self) {
-        let status = self.runtime.status();
+        let status = self.state.runtime.status();
         let recovery_problem = self
+            .state
             .app_center_recovery
             .problem()
             .map(str::to_owned)
-            .or_else(|| self.output_change_problem.clone());
+            .or_else(|| self.state.output_change_problem.clone());
         if let Err(error) = self
+            .state
             .app_center_host
             .update_firmware(status.output.capabilities.firmware, status.output.firmware)
         {
@@ -341,10 +345,10 @@ impl MenuApp {
         }
         #[cfg(feature = "updater")]
         {
-            self.update_checker.poll();
-            let available = self.update_checker.available(status.output.firmware);
-            if self.last_update_available != Some(available) {
-                self.last_update_available = Some(available);
+            self.state.update_checker.poll();
+            let available = self.state.update_checker.available(status.output.firmware);
+            if self.state.last_update_available != Some(available) {
+                self.state.last_update_available = Some(available);
                 if let Some(items) = &self.items {
                     items.updates.set_text(if available {
                         UPDATE_AVAILABLE_LABEL
@@ -431,14 +435,16 @@ impl MenuApp {
     }
 
     pub(super) fn show_app_center(&mut self, page: AppCenterPage) {
-        let output = self.runtime.status().output;
+        let output = self.state.runtime.status().output;
         match self
+            .state
             .app_center_host
             .launch(page, output.capabilities.firmware, output.firmware)
         {
             Ok(reused) => {
                 if reused
                     && self
+                        .state
                         .app_center_host
                         .child()
                         .is_some_and(|child| !activate_child_application(child))
@@ -461,9 +467,9 @@ impl MenuApp {
                     .as_ref()
                     .is_none_or(|model| model.run_action == RunAction::Start);
                 let result = if starts {
-                    self.runtime.request_start()
+                    self.state.runtime.request_start()
                 } else {
-                    self.runtime.request_stop()
+                    self.state.runtime.request_stop()
                 };
                 if let Err(error) = result {
                     let action = if starts { "start" } else { "stop" };
@@ -480,27 +486,35 @@ impl MenuApp {
                     _ => unreachable!(),
                 };
                 let timeout = minutes.map(|minutes| Duration::from_secs(minutes * 60));
-                if let Err(error) = self.runtime.request_set_idle_shutdown_timeout(timeout) {
+                if let Err(error) = self
+                    .state
+                    .runtime
+                    .request_set_idle_shutdown_timeout(timeout)
+                {
                     eprintln!("cannot update idle shutdown: {error}");
                 } else {
-                    self.settings.idle_shutdown_minutes = minutes;
+                    self.state.settings.idle_shutdown_minutes = minutes;
                     self.update_setting_checkmarks();
-                    if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+                    if let Err(error) =
+                        save_settings(&self.state.settings_path, &self.state.settings)
+                    {
                         eprintln!("cannot save menu settings: {error}");
                     }
                 }
             }
             PUCK_DOCK_ID => {
-                self.settings.power_off_on_puck = !self.settings.power_off_on_puck;
-                let action = if self.settings.power_off_on_puck {
+                self.state.settings.power_off_on_puck = !self.state.settings.power_off_on_puck;
+                let action = if self.state.settings.power_off_on_puck {
                     PuckDockAction::PowerOff
                 } else {
                     PuckDockAction::LeaveOn
                 };
-                if let Err(error) = self.runtime.request_set_puck_dock_action(action) {
-                    self.settings.power_off_on_puck = !self.settings.power_off_on_puck;
+                if let Err(error) = self.state.runtime.request_set_puck_dock_action(action) {
+                    self.state.settings.power_off_on_puck = !self.state.settings.power_off_on_puck;
                     eprintln!("cannot update Puck dock action: {error}");
-                } else if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+                } else if let Err(error) =
+                    save_settings(&self.state.settings_path, &self.state.settings)
+                {
                     eprintln!("cannot save menu settings: {error}");
                 }
                 self.update_setting_checkmarks();
@@ -508,10 +522,10 @@ impl MenuApp {
             OUTPUT_BRIDGE_DEVICE_ID => self.begin_output_change(OutputPreference::BridgeDevice),
             OUTPUT_VIRTUAL_HID_ID => self.begin_output_change(OutputPreference::VirtualHid),
             COPY_ERROR_ID => {
-                let recovery_error = self.app_center_recovery.problem().map(str::to_owned);
+                let recovery_error = self.state.app_center_recovery.problem().map(str::to_owned);
                 if let Some(error) = recovery_error
-                    .or_else(|| self.output_change_problem.clone())
-                    .or_else(|| self.runtime.status().last_error)
+                    .or_else(|| self.state.output_change_problem.clone())
+                    .or_else(|| self.state.runtime.status().last_error)
                 {
                     if let Err(copy_error) = copy_text(&error) {
                         eprintln!("cannot copy full error: {copy_error}");
@@ -519,7 +533,7 @@ impl MenuApp {
                 }
             }
             COPY_ID => {
-                if let Err(error) = copy_diagnostics(&self.runtime.status()) {
+                if let Err(error) = copy_diagnostics(&self.state.runtime.status()) {
                     eprintln!("cannot copy diagnostics: {error}");
                 }
             }
@@ -529,7 +543,7 @@ impl MenuApp {
                 self.request_permissions_in_order(true);
             }
             EDIT_BINDINGS_ID => match launch_bindings_editor() {
-                Ok(child) => self.editor_children.push(child),
+                Ok(child) => self.state.editor_children.push(child),
                 Err(error) => eprintln!("cannot launch bindings editor: {error}"),
             },
             LOGS_ID => {
@@ -548,9 +562,11 @@ impl MenuApp {
                 }
             }
             OVERLAY_ENABLED_ID => {
-                self.settings.profile_overlay_enabled = !self.settings.profile_overlay_enabled;
+                self.state.settings.profile_overlay_enabled =
+                    !self.state.settings.profile_overlay_enabled;
                 if !self.apply_picker_settings() {
-                    self.settings.profile_overlay_enabled = !self.settings.profile_overlay_enabled;
+                    self.state.settings.profile_overlay_enabled =
+                        !self.state.settings.profile_overlay_enabled;
                     self.update_setting_checkmarks();
                 }
                 self.sync_picker_roster();
@@ -566,10 +582,10 @@ impl MenuApp {
                 if !OVERLAY_HOLD_CHOICES.contains(&milliseconds) {
                     return;
                 }
-                let previous = self.settings.profile_overlay_hold_ms;
-                self.settings.profile_overlay_hold_ms = milliseconds;
+                let previous = self.state.settings.profile_overlay_hold_ms;
+                self.state.settings.profile_overlay_hold_ms = milliseconds;
                 if !self.apply_picker_settings() {
-                    self.settings.profile_overlay_hold_ms = previous;
+                    self.state.settings.profile_overlay_hold_ms = previous;
                     self.update_setting_checkmarks();
                 }
             }
@@ -578,68 +594,68 @@ impl MenuApp {
     }
 
     pub(super) fn shutdown(&mut self) -> bool {
-        if self.shutting_down {
+        if self.state.shutting_down {
             return true;
         }
-        if self.app_center_host.firmware_session_active() {
+        if self.state.app_center_host.firmware_session_active() {
             eprintln!("level=warn event=quit_deferred reason=firmware_update_active");
-            if let Some(child) = self.app_center_host.child() {
+            if let Some(child) = self.state.app_center_host.child() {
                 let _ = activate_child_application(child);
             }
             return false;
         }
-        self.shutting_down = true;
-        self.overlay.stop();
-        let _ = self.app_center_host.stop();
+        self.state.shutting_down = true;
+        self.state.overlay.stop();
+        let _ = self.state.app_center_host.stop();
         self.flush_overlay_diagnostics();
-        if let Err(error) = self.runtime.shutdown() {
+        if let Err(error) = self.state.runtime.shutdown() {
             eprintln!("bridge shutdown failed: {error}");
         }
         true
     }
 
     fn begin_output_change(&mut self, preference: OutputPreference) {
-        if preference == OutputPreference::VirtualHid && !self.virtual_hid_enabled {
-            self.output_change_problem = Some(format!(
+        if preference == OutputPreference::VirtualHid && !self.state.virtual_hid_enabled {
+            self.state.output_change_problem = Some(format!(
                 "Virtual HID is disabled; relaunch with --enable-virtual-hid or set \
                  {ENABLE_VIRTUAL_HID_ENV}=1"
             ));
             self.update_setting_checkmarks();
             return;
         }
-        if preference == self.settings.output || self.output_change.is_some() {
+        if preference == self.state.settings.output || self.state.output_change.is_some() {
             self.update_setting_checkmarks();
             return;
         }
-        let selection = match preference.runtime_selection() {
+        let selection = match output_selection(preference) {
             Ok(selection) => selection,
             Err(error) => {
-                self.output_change_problem = Some(error);
+                self.state.output_change_problem = Some(error);
                 self.update_setting_checkmarks();
                 return;
             }
         };
-        match self.runtime.begin_set_output(selection) {
+        match self.state.runtime.begin_set_output(selection) {
             Ok(request) => {
-                self.output_change = Some((request, preference));
-                self.output_change_problem = None;
+                self.state.output_change = Some((request, preference));
+                self.state.output_change_problem = None;
                 self.set_output_items_enabled(false);
             }
             Err(error) => {
-                self.output_change_problem = Some(format!("Output change failed: {error}"));
+                self.state.output_change_problem = Some(format!("Output change failed: {error}"));
                 self.update_setting_checkmarks();
             }
         }
     }
 
     pub(super) fn poll_output_change(&mut self) {
-        let Some((request, _)) = self.output_change.as_mut() else {
+        let Some((request, _)) = self.state.output_change.as_mut() else {
             return;
         };
         match request.poll() {
             OutputChangePoll::Pending => {}
             OutputChangePoll::TimedOut => {
-                self.output_change_problem = Some(
+                self.state.output_change_problem = Some(
                     "Output change is taking longer than expected; cleanup is still pending."
                         .to_owned(),
                 );
@@ -648,19 +664,21 @@ impl MenuApp {
                 // The request and the preference it was raised for are stored
                 // and taken together, so a completion cannot arrive without
                 // knowing which selection it completed.
-                if let Some((_, preference)) = self.output_change.take() {
+                if let Some((_, preference)) = self.state.output_change.take() {
                     match result {
                         Ok(()) => {
-                            self.settings.output = preference;
-                            self.output_change_problem = None;
-                            if let Err(error) = save_settings(&self.settings_path, &self.settings) {
-                                self.output_change_problem = Some(format!(
+                            self.state.settings.output = preference;
+                            self.state.output_change_problem = None;
+                            if let Err(error) =
+                                save_settings(&self.state.settings_path, &self.state.settings)
+                            {
+                                self.state.output_change_problem = Some(format!(
                                     "Output changed but settings could not be saved: {error}"
                                 ));
                             }
                         }
                         Err(error) => {
-                            self.output_change_problem =
+                            self.state.output_change_problem =
                                 Some(format!("Output change failed: {error}"));
                         }
                     }
@@ -679,17 +697,18 @@ impl MenuApp {
     }
 
     pub(super) fn handle_update_requests(&mut self, event_loop: &ActiveEventLoop) {
-        for session_request in self.app_center_host.drain() {
+        for session_request in self.state.app_center_host.drain() {
             let UpdateRequest { id, operation } = session_request.request;
             let result = match operation {
-                UpdateOperation::SuspendBridge => match self.runtime.suspend_for_update() {
+                UpdateOperation::SuspendBridge => match self.state.runtime.suspend_for_update() {
                     Ok(()) => match self
+                        .state
                         .app_center_host
                         .claim_suspension(session_request.generation)
                     {
                         Ok(()) => UpdateResult::Suspended,
                         Err(error) => {
-                            let _ = self.runtime.resume_from_update();
+                            let _ = self.state.runtime.resume_from_update();
                             UpdateResult::Error { message: error }
                         }
                     },
@@ -697,8 +716,9 @@ impl MenuApp {
                         message: format!("Bridge could not release its devices: {error}"),
                     },
                 },
-                UpdateOperation::ResumeBridge => match self.runtime.resume_from_update() {
+                UpdateOperation::ResumeBridge => match self.state.runtime.resume_from_update() {
                     Ok(()) => match self
+                        .state
                         .app_center_host
                         .release_suspension(session_request.generation)
                     {
@@ -713,6 +733,7 @@ impl MenuApp {
             };
             let response = UpdateResponse { id, result };
             if let Err(error) = self
+                .state
                 .app_center_host
                 .respond(session_request.generation, &response)
             {
@@ -726,28 +747,28 @@ impl MenuApp {
     }
 
     pub(super) fn recover_app_center_suspension(&mut self) {
-        self.app_center_host.reap();
-        if !self.app_center_host.suspension_recovery_needed() {
-            self.app_center_recovery = AppCenterRecovery::Idle;
+        self.state.app_center_host.reap();
+        if !self.state.app_center_host.suspension_recovery_needed() {
+            self.state.app_center_recovery = AppCenterRecovery::Idle;
             return;
         }
-        let state = std::mem::replace(&mut self.app_center_recovery, AppCenterRecovery::Idle);
+        let state = std::mem::replace(&mut self.state.app_center_recovery, AppCenterRecovery::Idle);
         match state {
             AppCenterRecovery::Waiting {
                 mut request,
                 mut error,
             } => match request.poll() {
                 UpdateResumePoll::Pending => {
-                    self.app_center_recovery = AppCenterRecovery::Waiting { request, error };
+                    self.state.app_center_recovery = AppCenterRecovery::Waiting { request, error };
                 }
                 UpdateResumePoll::TimedOut => {
                     let message = "Updater suspension recovery is not responding. Quit remains deferred while the original recovery request is pending.".to_owned();
                     eprintln!("level=error event=app_center_recovery_delayed");
                     error = Some(message);
-                    self.app_center_recovery = AppCenterRecovery::Waiting { request, error };
+                    self.state.app_center_recovery = AppCenterRecovery::Waiting { request, error };
                 }
                 UpdateResumePoll::Complete(Ok(())) => {
-                    self.app_center_host.complete_suspension_recovery();
+                    self.state.app_center_host.complete_suspension_recovery();
                 }
                 UpdateResumePoll::Complete(Err(error)) => {
                     self.fail_app_center_recovery(&error.to_string());
@@ -755,7 +776,7 @@ impl MenuApp {
             },
             AppCenterRecovery::Failed(error) => {
                 if !self.complete_terminated_app_center_recovery(&error) {
-                    self.app_center_recovery = AppCenterRecovery::Failed(error);
+                    self.state.app_center_recovery = AppCenterRecovery::Failed(error);
                 }
             }
             AppCenterRecovery::Idle => self.start_app_center_recovery(),
@@ -763,9 +784,9 @@ impl MenuApp {
     }
 
     fn start_app_center_recovery(&mut self) {
-        match self.runtime.begin_resume_from_update() {
+        match self.state.runtime.begin_resume_from_update() {
             Ok(request) => {
-                self.app_center_recovery = AppCenterRecovery::Waiting {
+                self.state.app_center_recovery = AppCenterRecovery::Waiting {
                     request,
                     error: None,
                 };
@@ -780,20 +801,20 @@ impl MenuApp {
         }
         let message = format!("Updater suspension recovery failed: {error}. Quit remains deferred because bridge ownership could not be proven safe.");
         eprintln!("level=error event=app_center_recovery_failed error={error:?}");
-        self.app_center_recovery = AppCenterRecovery::Failed(message);
+        self.state.app_center_recovery = AppCenterRecovery::Failed(message);
     }
 
     fn complete_terminated_app_center_recovery(&mut self, error: &str) -> bool {
-        if self.runtime.is_terminated() {
-            let join = self.runtime.join();
+        if self.state.runtime.is_terminated() {
+            let join = self.state.runtime.join();
             eprintln!(
                 "level=error event=app_center_recovery_abandoned reason=runtime_terminated error={error:?} join={join:?}"
             );
             // A joined runtime cannot still own HID or serial handles, so
             // retaining the updater's quit interlock would only strand the
             // menu process after its worker has already ended.
-            self.app_center_host.complete_suspension_recovery();
-            self.app_center_recovery = AppCenterRecovery::Idle;
+            self.state.app_center_host.complete_suspension_recovery();
+            self.state.app_center_recovery = AppCenterRecovery::Idle;
             true
         } else {
             false

@@ -22,8 +22,9 @@ app-paths = { path = "../../crates/app-paths" }
 bridge-runtime = { path = "../../crates/bridge-runtime" }
 clap.workspace = true
 desktop-bindings = { path = "../../crates/desktop-bindings" }
-profile-picker = { path = "../../crates/profile-picker" }
 menu-shell = { path = "../../crates/menu-shell" }
+platform-capabilities = { path = "../../crates/platform-capabilities" }
+profile-picker = { path = "../../crates/profile-picker" }
 release-updater = { path = "../../crates/release-updater", optional = true }
 semver = { workspace = true, optional = true }
 serde.workspace = true
@@ -36,7 +37,6 @@ tempfile.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 desktop-input = { path = "../../crates/desktop-input" }
 virtual-gamepad = { path = "../../crates/virtual-gamepad" }
-platform-capabilities = { path = "../../crates/platform-capabilities" }
 eframe = { workspace = true, optional = true }
 ui-theme = { path = "../../crates/ui-theme", optional = true }
 # Only the editor draws a controller; the overlay does not.
