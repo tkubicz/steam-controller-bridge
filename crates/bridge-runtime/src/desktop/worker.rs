@@ -329,15 +329,10 @@ pub(crate) fn publish_desktop_worker_failure(shared: &Arc<Mutex<BridgeStatus>>, 
     publish_desktop_binding_status(shared, bindings);
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn create_desktop_sink() -> Result<Box<dyn DesktopInputSink>, String> {
-    desktop_bindings::MacOsDesktopInput::new()
-        .map(|sink| Box::new(sink) as Box<dyn DesktopInputSink>)
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn create_desktop_sink() -> Result<Box<dyn DesktopInputSink>, String> {
-    Err("desktop bindings are only available on macOS".to_owned())
+    let mut factory = desktop_input::current_factory()?;
+    let session = factory.detect_session()?;
+    factory.create(&session)
 }
 
 pub(crate) fn bounded_error(error: &str) -> String {

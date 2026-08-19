@@ -22,6 +22,7 @@
     { "type": "toml", "path": "crates/controller-art/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/controller-mapper/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/desktop-bindings/Cargo.toml", "jsonpath": "$.package.version" },
+    { "type": "toml", "path": "crates/desktop-input/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/gamepad-state/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/macos-power-monitor/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/macos-virtual-hid/Cargo.toml", "jsonpath": "$.package.version" },

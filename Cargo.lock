@@ -334,6 +334,7 @@ dependencies = [
  "bridge-output",
  "controller-mapper",
  "desktop-bindings",
+ "desktop-input",
  "gamepad-state",
  "macos-power-monitor",
  "macos-virtual-hid",
@@ -818,12 +819,19 @@ name = "desktop-bindings"
 version = "1.9.0"
 dependencies = [
  "app-paths",
- "enigo",
- "objc2-core-graphics",
- "objc2-io-kit",
  "serde",
  "serde_json",
  "steam-controller-protocol",
+]
+
+[[package]]
+name = "desktop-input"
+version = "1.9.0"
+dependencies = [
+ "desktop-bindings",
+ "enigo",
+ "objc2-core-graphics",
+ "objc2-io-kit",
 ]
 
 [[package]]
@@ -3625,6 +3633,7 @@ dependencies = [
  "clap",
  "controller-art",
  "desktop-bindings",
+ "desktop-input",
  "eframe",
  "macos-virtual-hid",
  "objc2 0.6.4",
@@ -3677,6 +3686,7 @@ dependencies = [
  "core-graphics 0.25.0",
  "ctrlc",
  "desktop-bindings",
+ "desktop-input",
  "eframe",
  "gamepad-state",
  "recording",

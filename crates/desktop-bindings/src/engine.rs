@@ -649,6 +649,9 @@ impl BindingEngine {
                 first_error.get_or_insert(error);
             }
         }
+        if let Err(error) = sink.flush() {
+            first_error.get_or_insert(error);
+        }
         self.active.clear();
         self.forget_pad_latches();
         first_error.map_or(Ok(()), Err)

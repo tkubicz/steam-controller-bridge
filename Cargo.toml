@@ -12,6 +12,7 @@ members = [
     "crates/controller-art",
     "crates/controller-mapper",
     "crates/desktop-bindings",
+    "crates/desktop-input",
     "crates/profile-picker",
     "crates/recording",
     "crates/release-updater",

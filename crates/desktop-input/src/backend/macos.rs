@@ -1,3 +1,5 @@
+//! macOS desktop-input adapter and permission helpers.
+
 #[cfg(target_os = "macos")]
 mod macos {
     use enigo::{
