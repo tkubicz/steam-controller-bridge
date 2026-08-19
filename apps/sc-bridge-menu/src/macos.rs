@@ -14,10 +14,11 @@ use bridge_runtime::{
     PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord, StatusLogTracker,
     UpdateResumePoll, VirtualHidConfig,
 };
-use desktop_bindings::{
-    default_store_path, input_monitoring_access, parse_store, preflight_accessibility_access,
-    preflight_post_event_access, request_accessibility_access, request_input_monitoring_access,
-    request_post_event_access, BindingStore, PermissionState,
+use desktop_bindings::{default_store_path, parse_store, BindingStore};
+use desktop_input::{
+    input_monitoring_access, preflight_accessibility_access, preflight_post_event_access,
+    request_accessibility_access, request_input_monitoring_access, request_post_event_access,
+    PermissionState,
 };
 use macos_virtual_hid::ENABLE_VIRTUAL_HID_ENV;
 use objc2::{rc::Retained, MainThreadMarker};

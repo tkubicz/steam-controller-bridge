@@ -38,4 +38,15 @@ pub trait DesktopInputSink {
     /// # Errors
     /// Returns an error if the platform cannot inject the scroll.
     fn scroll(&mut self, x: i32, y: i32) -> Result<(), String>;
+
+    /// Commits any buffered desktop-input events.
+    ///
+    /// Immediate backends keep the default no-op. Buffered backends, such as
+    /// Linux uinput, use this to emit their synchronization boundary.
+    ///
+    /// # Errors
+    /// Returns an error if buffered events cannot be committed.
+    fn flush(&mut self) -> Result<(), String> {
+        Ok(())
+    }
 }

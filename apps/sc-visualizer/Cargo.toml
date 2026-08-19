@@ -12,6 +12,7 @@ bridge-output = { path = "../../crates/bridge-output" }
 clap.workspace = true
 ctrlc.workspace = true
 desktop-bindings = { path = "../../crates/desktop-bindings" }
+desktop-input = { path = "../../crates/desktop-input" }
 eframe = { workspace = true, features = ["wayland", "x11"] }
 gamepad-state = { path = "../../crates/gamepad-state" }
 recording = { path = "../../crates/recording" }

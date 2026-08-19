@@ -205,7 +205,7 @@ impl LabUi {
 
     #[cfg(target_os = "macos")]
     fn permission_ui(ui: &mut egui::Ui) {
-        use desktop_bindings::{input_monitoring_access, PermissionState};
+        use desktop_input::{input_monitoring_access, PermissionState};
         match input_monitoring_access() {
             PermissionState::Granted => {
                 ui.colored_label(SUCCESS, "● Input Monitoring granted");
@@ -213,7 +213,7 @@ impl LabUi {
             PermissionState::Undecided => {
                 ui.colored_label(DANGER, "● Input Monitoring has not been requested");
                 if ui.button("Request Input Monitoring").clicked() {
-                    let _ = desktop_bindings::request_input_monitoring_access();
+                    let _ = desktop_input::request_input_monitoring_access();
                 }
             }
             PermissionState::Denied => {

@@ -7,6 +7,8 @@ use steam_controller_protocol::SteamButtons;
 struct MockSink {
     events: Vec<String>,
     fail_next: bool,
+    fail_flush: bool,
+    flushes: usize,
 }
 
 impl DesktopInputSink for MockSink {
@@ -28,6 +30,16 @@ impl DesktopInputSink for MockSink {
 
     fn scroll(&mut self, x: i32, y: i32) -> Result<(), String> {
         self.push(format!("scroll:{x}:{y}"))
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        self.flushes += 1;
+        if self.fail_flush {
+            self.fail_flush = false;
+            Err("injected flush failure".to_owned())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -755,6 +767,54 @@ fn sink_failure_releases_existing_outputs_and_rebaselines() {
         .is_err());
     assert_eq!(engine.held_output_count(), 0);
     assert!(sink.events.contains(&"key:F5:false".to_owned()));
+}
+
+#[test]
+fn disconnect_flushes_after_successful_and_failed_releases() {
+    for fail_release in [false, true] {
+        let mut profile = BindingProfile::default();
+        profile.bindings.r4 = Some(chord(KeyboardKey::F5, &[]));
+        let mut engine = BindingEngine::new(profile);
+        let mut sink = MockSink::default();
+        engine.observe(buttons(&[]), &mut sink).unwrap();
+        engine
+            .observe(buttons(&[BindableControl::R4]), &mut sink)
+            .unwrap();
+        sink.fail_next = fail_release;
+        sink.fail_flush = fail_release;
+
+        let result = engine.disconnect(&mut sink);
+        assert_eq!(
+            result,
+            if fail_release {
+                Err("injected failure".to_owned())
+            } else {
+                Ok(())
+            }
+        );
+        assert_eq!(sink.flushes, 1);
+        assert_eq!(engine.held_output_count(), 0);
+    }
+}
+
+#[test]
+fn flush_failure_is_reported_after_all_releases_are_attempted() {
+    let mut profile = BindingProfile::default();
+    profile.bindings.r4 = Some(chord(KeyboardKey::F5, &[]));
+    let mut engine = BindingEngine::new(profile);
+    let mut sink = MockSink::default();
+    engine.observe(buttons(&[]), &mut sink).unwrap();
+    engine
+        .observe(buttons(&[BindableControl::R4]), &mut sink)
+        .unwrap();
+    sink.fail_flush = true;
+
+    assert_eq!(
+        engine.disconnect(&mut sink),
+        Err("injected flush failure".to_owned())
+    );
+    assert!(sink.events.contains(&"key:F5:false".to_owned()));
+    assert_eq!(sink.flushes, 1);
 }
 
 #[test]

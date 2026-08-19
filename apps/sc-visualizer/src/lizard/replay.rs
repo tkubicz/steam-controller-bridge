@@ -3,9 +3,7 @@
 use std::thread;
 use std::time::Duration;
 
-use desktop_bindings::DesktopInputSink;
-#[cfg(target_os = "macos")]
-use desktop_bindings::{KeyboardKey, Modifier, MouseButton};
+use desktop_bindings::{DesktopInputSink, KeyboardKey, Modifier, MouseButton};
 
 use crate::lizard::compare::{bridge_motion, load_profile};
 use crate::lizard::trace::{Motion, Trace};
@@ -69,22 +67,18 @@ fn inject(motion: &[Motion], speed: f64) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
 fn pointer_only_desktop_sink() -> Result<Box<dyn DesktopInputSink>, String> {
-    desktop_bindings::MacOsDesktopInput::new()
+    let mut factory = desktop_input::current_factory()
+        .map_err(|_| "desktop replay is implemented only on macOS; use --output dump".to_owned())?;
+    let session = factory.detect_session()?;
+    factory
+        .create(&session)
         .map(PointerOnlySink)
         .map(|sink| Box::new(sink) as Box<dyn DesktopInputSink>)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn pointer_only_desktop_sink() -> Result<Box<dyn DesktopInputSink>, String> {
-    Err("desktop replay is implemented only on macOS; use --output dump".to_owned())
-}
+struct PointerOnlySink(Box<dyn DesktopInputSink>);
 
-#[cfg(target_os = "macos")]
-struct PointerOnlySink(desktop_bindings::MacOsDesktopInput);
-
-#[cfg(target_os = "macos")]
 impl DesktopInputSink for PointerOnlySink {
     fn key(&mut self, _key: KeyboardKey, _pressed: bool) -> Result<(), String> {
         Ok(())
@@ -104,5 +98,9 @@ impl DesktopInputSink for PointerOnlySink {
 
     fn scroll(&mut self, _x: i32, _y: i32) -> Result<(), String> {
         Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        self.0.flush()
     }
 }
