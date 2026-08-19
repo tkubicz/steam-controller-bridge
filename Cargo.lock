@@ -336,8 +336,8 @@ dependencies = [
  "desktop-bindings",
  "desktop-input",
  "gamepad-state",
- "macos-power-monitor",
  "macos-virtual-hid",
+ "power-monitor",
  "profile-picker",
  "recording",
  "serde_json",
@@ -2351,14 +2351,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "macos-power-monitor"
-version = "1.9.0"
-dependencies = [
- "objc2-core-foundation",
- "objc2-io-kit",
-]
-
-[[package]]
 name = "macos-virtual-hid"
 version = "1.9.0"
 dependencies = [
@@ -3106,6 +3098,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0103b1cef7ec0cf76490e969665504990193874ea05c85ff9bab8b911d0a0564"
 dependencies = [
  "zerovec",
+]
+
+[[package]]
+name = "power-monitor"
+version = "1.9.0"
+dependencies = [
+ "objc2-core-foundation",
+ "objc2-io-kit",
 ]
 
 [[package]]
