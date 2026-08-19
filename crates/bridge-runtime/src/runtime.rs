@@ -1,11 +1,13 @@
 use super::{
-    automatic_shutdown_phase, binding_status_for_profile, mpsc, thread, Arc,
+    automatic_shutdown_phase, binding_status_for_profile, bounded_error, mpsc, thread, Arc,
     AutomaticShutdownStatus, BindingProfile, BridgeStatus, Duration, JoinHandle, Mutex,
-    OutputSelection, OutputStatus, PickerConfig, PickerEvent, PickerRoster, ProfilePickerStatus,
-    PuckDockAction, RuntimeConfig, RuntimeError, RuntimeState, Supervisor, COMMAND_TIMEOUT,
+    OutputSelection, OutputStatus, PickerConfig, PickerEvent, PickerRoster, PowerEvent,
+    PowerMonitor, ProfilePickerStatus, PuckDockAction, RuntimeConfig, RuntimeError, RuntimeState,
+    Supervisor, COMMAND_TIMEOUT,
 };
-#[cfg(target_os = "macos")]
-use super::{bounded_error, PowerEvent, PowerMonitor, SLEEP_TEARDOWN_ACK_TIMEOUT};
+use std::time::Instant;
+
+const POWER_CALLBACK_COMPLETION_RESERVE: Duration = Duration::from_millis(100);
 
 pub(crate) type CommandAck = mpsc::Sender<Result<(), String>>;
 
@@ -68,17 +70,20 @@ impl BridgeRuntime {
         }));
         let worker_status = Arc::clone(&status);
         let (command_sender, command_receiver) = mpsc::channel();
-        #[cfg(target_os = "macos")]
+        let (power_error_sender, power_errors) = mpsc::channel();
         let (power_monitor, startup_blocker) =
-            match power_monitor(Arc::clone(&status), command_sender.clone()) {
-                Ok(monitor) => (Some(monitor), None),
+            match power_monitor(command_sender.clone(), power_error_sender) {
+                Ok(monitor) => {
+                    if !monitor.is_live() {
+                        eprintln!("level=warn event=system_power_monitor_unavailable");
+                    }
+                    (Some(monitor), None)
+                }
                 Err(error) => {
                     eprintln!("level=error event=system_power_monitor_failed error={error:?}");
                     (None, Some(error))
                 }
             };
-        #[cfg(not(target_os = "macos"))]
-        let startup_blocker = None;
         let join = thread::spawn(move || {
             let mut supervisor = Supervisor::new(
                 config,
@@ -93,31 +98,36 @@ impl BridgeRuntime {
             command_sender,
             status,
             join: Mutex::new(Some(join)),
-            #[cfg(target_os = "macos")]
             power_monitor: Mutex::new(power_monitor),
+            power_errors: Mutex::new(power_errors),
         }
     }
 }
 
-#[cfg(target_os = "macos")]
 fn power_monitor(
-    status: Arc<Mutex<BridgeStatus>>,
     commands: mpsc::Sender<RuntimeCommand>,
+    power_errors: mpsc::Sender<String>,
 ) -> Result<PowerMonitor, String> {
-    PowerMonitor::new(move |event| match event {
-        PowerEvent::WillSleep => {
+    PowerMonitor::new(move |event| {
+        handle_power_event(&commands, &power_errors, event);
+    })
+    .map_err(|error| format!("cannot monitor system sleep safely: {error}"))
+}
+
+fn handle_power_event(
+    commands: &mpsc::Sender<RuntimeCommand>,
+    power_errors: &mpsc::Sender<String>,
+    event: PowerEvent,
+) {
+    match event {
+        PowerEvent::WillSleep { deadline } => {
             let (ack, receiver) = mpsc::channel();
             let result = commands
                 .send(RuntimeCommand::SuspendForSleep(ack))
                 .map_err(|_| "bridge runtime stopped before system sleep".to_owned())
                 .and_then(|()| {
-                    // Bounded: blocking here delays the sleep, and a teardown
-                    // wedged in a platform call must not hold sleep, the wake
-                    // notification, and app quit hostage forever. The bound
-                    // stays under macOS's ~30 s forced-sleep cap, and a late
-                    // acknowledgement lands in a dropped receiver harmlessly.
                     receiver
-                        .recv_timeout(SLEEP_TEARDOWN_ACK_TIMEOUT)
+                        .recv_timeout(power_teardown_timeout(Instant::now(), deadline))
                         .map_err(|_| {
                             "system-sleep hardware teardown did not acknowledge in time".to_owned()
                         })?
@@ -128,11 +138,7 @@ fn power_monitor(
                     eprintln!(
                         "level=error event=system_sleep_hardware_release_failed error={error:?}"
                     );
-                    let mut current = status
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    current.last_error = Some(bounded_error(&error));
-                    current.revision = current.revision.wrapping_add(1);
+                    let _ = power_errors.send(error);
                 }
             }
         }
@@ -142,8 +148,13 @@ fn power_monitor(
                 eprintln!("level=warn event=system_wake_runtime_unavailable");
             }
         }
-    })
-    .map_err(|error| format!("cannot monitor system sleep safely: {error}"))
+    }
+}
+
+fn power_teardown_timeout(now: Instant, deadline: Instant) -> Duration {
+    deadline
+        .saturating_duration_since(now)
+        .saturating_sub(POWER_CALLBACK_COMPLETION_RESERVE)
 }
 
 pub(crate) fn picker_status(config: &RuntimeConfig, open: bool) -> ProfilePickerStatus {
@@ -158,8 +169,8 @@ pub struct BridgeHandle {
     command_sender: mpsc::Sender<RuntimeCommand>,
     status: Arc<Mutex<BridgeStatus>>,
     join: Mutex<Option<JoinHandle<()>>>,
-    #[cfg(target_os = "macos")]
     power_monitor: Mutex<Option<PowerMonitor>>,
+    power_errors: Mutex<mpsc::Receiver<String>>,
 }
 
 /// The result of polling any non-blocking runtime command.
@@ -476,7 +487,6 @@ impl BridgeHandle {
     /// # Errors
     /// Returns an error if cleanup or joining fails.
     pub fn shutdown(&self) -> Result<(), RuntimeError> {
-        #[cfg(target_os = "macos")]
         self.stop_power_monitor();
         let result = self.command(RuntimeCommand::Shutdown);
         let join_result = self.join();
@@ -502,10 +512,7 @@ impl BridgeHandle {
 
     #[must_use]
     pub fn status(&self) -> BridgeStatus {
-        self.status
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        status_snapshot(&self.status, &self.power_errors)
     }
 
     fn command(
@@ -536,15 +543,32 @@ impl BridgeHandle {
         Ok(receiver)
     }
 
-    #[cfg(target_os = "macos")]
     fn stop_power_monitor(&self) {
-        drop(
-            self.power_monitor
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take(),
-        );
+        let _monitor = self
+            .power_monitor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
+}
+
+fn status_snapshot(
+    status: &Mutex<BridgeStatus>,
+    power_errors: &Mutex<mpsc::Receiver<String>>,
+) -> BridgeStatus {
+    let power_error = power_errors
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .try_iter()
+        .last();
+    let mut status = status
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(error) = power_error {
+        status.last_error = Some(bounded_error(&error));
+        status.revision = status.revision.wrapping_add(1);
+    }
+    status.clone()
 }
 
 impl Drop for BridgeHandle {
@@ -556,6 +580,66 @@ impl Drop for BridgeHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sleep_handler_waits_for_the_runtime_acknowledgement() {
+        let (commands, receiver) = mpsc::channel();
+        let (power_errors, error_receiver) = mpsc::channel();
+        let handler = thread::spawn(move || {
+            handle_power_event(
+                &commands,
+                &power_errors,
+                PowerEvent::WillSleep {
+                    deadline: std::time::Instant::now() + Duration::from_secs(1),
+                },
+            );
+        });
+
+        let RuntimeCommand::SuspendForSleep(ack) = receiver.recv().unwrap() else {
+            panic!("sleep event queued the wrong runtime command");
+        };
+        assert!(!handler.is_finished());
+        ack.send(Ok(())).unwrap();
+        handler.join().unwrap();
+        assert!(error_receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn sleep_handler_queues_deadline_error_while_status_is_contended() {
+        let status = Mutex::new(BridgeStatus::default());
+        let status_guard = status.lock().unwrap();
+        let (commands, receiver) = mpsc::channel();
+        let (power_errors, error_receiver) = mpsc::channel();
+        handle_power_event(
+            &commands,
+            &power_errors,
+            PowerEvent::WillSleep {
+                deadline: std::time::Instant::now(),
+            },
+        );
+
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            RuntimeCommand::SuspendForSleep(_)
+        ));
+        drop(status_guard);
+        let snapshot = status_snapshot(&status, &Mutex::new(error_receiver));
+        assert_eq!(
+            snapshot.last_error.as_deref(),
+            Some("system-sleep hardware teardown did not acknowledge in time")
+        );
+        assert_eq!(snapshot.revision, 1);
+    }
+
+    #[test]
+    fn sleep_handler_reserves_time_to_complete_the_provider_callback() {
+        let now = Instant::now();
+        assert_eq!(
+            power_teardown_timeout(now, now + Duration::from_secs(1)),
+            Duration::from_millis(900)
+        );
+        assert_eq!(power_teardown_timeout(now, now), Duration::ZERO);
+    }
 
     #[test]
     fn update_resume_acknowledgements_are_polled_without_waiting() {
