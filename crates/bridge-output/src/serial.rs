@@ -9,11 +9,6 @@ use bridge_protocol::{
 use gamepad_state::GamepadState;
 
 use crate::{GamepadOutput, OutputDiagnostics, OutputError, OutputFeedback};
-
-/// Board-neutral USB product marker used for zero-configuration serial
-/// discovery. Vendor, product, and manufacturer IDs deliberately remain free
-/// for independent protocol implementations.
-pub const BRIDGE_DEVICE_USB_PRODUCT: &str = "Steam Controller Bridge";
 /// How long after Ready the firmware gets to deliver its `DeviceInfo` report
 /// before the connection is classified as pre-versioning firmware.
 const FIRMWARE_REPORT_GRACE: Duration = Duration::from_secs(2);
@@ -24,31 +19,6 @@ const FIRMWARE_TARGET_TLV: u8 = 1;
 pub const MAX_FIRMWARE_TARGET_ID_LEN: usize = 64;
 const SERIAL_SERVICE_MIN_INTERVAL: Duration = Duration::from_millis(10);
 const HANDSHAKE_POLL_INTERVAL: Duration = Duration::from_millis(1);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SerialDeviceInfo {
-    pub path: String,
-    pub vendor_id: Option<u16>,
-    pub product_id: Option<u16>,
-    pub serial_number: Option<String>,
-    pub manufacturer: Option<String>,
-    pub product: Option<String>,
-}
-
-impl SerialDeviceInfo {
-    /// Whether this serial endpoint is safe to open as a callout connection.
-    /// macOS dial-in endpoints can block while waiting for carrier detect, so
-    /// discovery and updater flows must consistently exclude them.
-    #[must_use]
-    pub fn is_callout_port(&self) -> bool {
-        !cfg!(target_os = "macos") || self.path.starts_with("/dev/cu.")
-    }
-
-    #[must_use]
-    pub fn is_bridge_device(&self) -> bool {
-        self.is_callout_port() && self.product.as_deref() == Some(BRIDGE_DEVICE_USB_PRODUCT)
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FirmwareTargetId {
@@ -544,6 +514,11 @@ impl std::error::Error for SerialError {}
 impl From<io::Error> for SerialError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
+    }
+}
+impl From<serialport::Error> for SerialError {
+    fn from(value: serialport::Error) -> Self {
+        Self::Io(io::Error::other(value.to_string()))
     }
 }
 impl From<bridge_protocol::ProtocolError> for SerialError {
@@ -1107,8 +1082,7 @@ impl SerialOutput {
             // cadence; otherwise state refreshes can approach the firmware's
             // 100 ms controller-data watchdog after USB/CDC scheduling.
             .timeout(Duration::from_millis(1))
-            .open()
-            .map_err(|error| SerialError::Io(io::Error::other(error.to_string())))?;
+            .open()?;
         self.clock = Instant::now();
         self.last_poll = None;
         let mut connection =
@@ -1314,48 +1288,6 @@ fn serial_service_due(now: Duration, last_poll: Option<Duration>) -> bool {
     last_poll.is_none_or(|last_poll| now.saturating_sub(last_poll) >= SERIAL_SERVICE_MIN_INTERVAL)
 }
 
-/// Enumerates native serial port names.
-///
-/// # Errors
-/// Returns an error when the native backend cannot enumerate ports.
-pub fn available_serial_ports() -> Result<Vec<String>, SerialError> {
-    available_serial_devices().map(|ports| ports.into_iter().map(|port| port.path).collect())
-}
-
-/// Enumerates native serial ports with USB identity metadata.
-///
-/// # Errors
-/// Returns an error when the native backend cannot enumerate ports.
-pub fn available_serial_devices() -> Result<Vec<SerialDeviceInfo>, SerialError> {
-    let mut devices = serialport::available_ports()
-        .map_err(|error| SerialError::Io(io::Error::other(error.to_string())))?
-        .into_iter()
-        .map(|port| {
-            let (vendor_id, product_id, serial_number, manufacturer, product) = match port.port_type
-            {
-                serialport::SerialPortType::UsbPort(usb) => (
-                    Some(usb.vid),
-                    Some(usb.pid),
-                    usb.serial_number,
-                    usb.manufacturer,
-                    usb.product,
-                ),
-                _ => (None, None, None, None, None),
-            };
-            SerialDeviceInfo {
-                path: port.port_name,
-                vendor_id,
-                product_id,
-                serial_number,
-                manufacturer,
-                product,
-            }
-        })
-        .collect::<Vec<_>>();
-    devices.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(devices)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1380,39 +1312,6 @@ mod tests {
     }
     fn response(message: Message) -> Vec<u8> {
         Frame::new(90, message).encode().unwrap()
-    }
-
-    #[test]
-    fn bridge_device_filter_uses_the_product_marker_and_callout_path() {
-        let bridge_device = SerialDeviceInfo {
-            path: if cfg!(target_os = "macos") {
-                "/dev/cu.usbmodem11201".to_owned()
-            } else {
-                "/dev/ttyACM0".to_owned()
-            },
-            vendor_id: Some(0x1209),
-            product_id: Some(0x0001),
-            serial_number: Some("TESTSERIAL0000".to_owned()),
-            manufacturer: Some("Independent implementer".to_owned()),
-            product: Some(BRIDGE_DEVICE_USB_PRODUCT.to_owned()),
-        };
-        assert!(bridge_device.is_bridge_device());
-
-        let mut puck = bridge_device.clone();
-        puck.path = if cfg!(target_os = "macos") {
-            "/dev/cu.usbmodemFXB9961501D831".to_owned()
-        } else {
-            "/dev/ttyACM1".to_owned()
-        };
-        puck.vendor_id = Some(0x28de);
-        puck.product_id = Some(0x1304);
-        puck.manufacturer = Some("Valve Software".to_owned());
-        puck.product = Some("Steam Controller Puck".to_owned());
-        assert!(!puck.is_bridge_device());
-
-        let mut dialin = bridge_device;
-        dialin.path = "/dev/tty.usbmodem11201".to_owned();
-        assert_eq!(dialin.is_bridge_device(), !cfg!(target_os = "macos"));
     }
 
     #[test]
