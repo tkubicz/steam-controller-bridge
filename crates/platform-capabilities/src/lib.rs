@@ -5,6 +5,12 @@ use std::collections::{HashMap, VecDeque};
 
 use desktop_input::DesktopSession;
 
+#[cfg(any(target_os = "macos", test))]
+mod macos;
+
+#[cfg(any(target_os = "macos", test))]
+pub use macos::MacOsCapabilities;
+
 /// A host capability that a selected product feature may require.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapabilityId {
@@ -96,6 +102,25 @@ pub trait PlatformCapabilities {
     fn request(&mut self, id: CapabilityId) -> Result<CapabilityState, CapabilityError>;
 
     fn remedy(&self, id: CapabilityId) -> Option<Remedy>;
+}
+
+/// Selects the capability provider for the current host.
+///
+/// # Errors
+///
+/// Returns [`CapabilityError::UnsupportedPlatform`] until the current target
+/// has a provider.
+pub fn current_provider() -> Result<Box<dyn PlatformCapabilities>, CapabilityError> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(Box::new(MacOsCapabilities::new()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(CapabilityError::UnsupportedPlatform {
+            platform: std::env::consts::OS,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
