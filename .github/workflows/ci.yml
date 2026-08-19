@@ -57,8 +57,17 @@ jobs:
           python3 tools/check-firmware-artifact.py --self-test
           python3 tools/prepare-local-update.py --self-test
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
+      # Default features are the distributed configuration: local filesystem
+      # updates are absent, so this is the code users receive.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      # Unlike a workspace-wide --all-features run, this exact invocation proves
+      # the menu feature forwards into the macOS-only updater dependency.
+      - if: runner.os == 'macOS'
+        run: cargo check -p sc-bridge-menu --features local-update-source
+      # Only these packages differ when the local update source is enabled.
+      - run: cargo clippy -p release-updater -p sc-bridge-menu --all-targets --all-features -- -D warnings
+      - run: cargo test -p release-updater -p sc-bridge-menu --all-features
       - run: cargo build --workspace --all-targets
 
   deny:

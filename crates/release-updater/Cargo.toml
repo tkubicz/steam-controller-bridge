@@ -22,5 +22,10 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
+[features]
+# Development-only filesystem release source. Distributed builds never enable
+# this feature, so their only release source is UPDATE_REPOSITORY.
+local-update-source = []
+
 [lints]
 workspace = true

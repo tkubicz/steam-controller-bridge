@@ -107,12 +107,13 @@ artifacts, logs, or ordinary repository secrets.
 
 ## Local signed development source
 
-Debug builds can replace the fixed GitHub release source with one explicitly
-selected local directory. The development path preserves the production trust
-boundary: metadata still needs an embedded trusted Ed25519 key, the raw
-manifest signature is verified before parsing, and every copied artifact must
-match its signed name, size, and SHA-256. Local files cannot escape the selected
-directory through path components or symlinks.
+Builds compiled with the non-default `local-update-source` Cargo feature can
+replace the fixed GitHub release source with one explicitly selected local
+directory. The development path preserves the production trust boundary:
+metadata still needs an embedded trusted Ed25519 key, the raw manifest
+signature is verified before parsing, and every copied artifact must match its
+signed name, size, and SHA-256. Local files cannot escape the selected directory
+through path components or symlinks.
 
 Prepare a firmware-only signed catalog from the current workspace:
 
@@ -128,18 +129,23 @@ app before using that command. The application entry is pinned to the workspace
 version and is an intentional placeholder, so this catalog can test firmware
 installation but cannot stage an application replacement.
 
-The printed command sets both required variables:
+The printed command enables the required build capability and sets both
+variables:
 
+- `--features local-update-source` compiles the filesystem release client into
+  `sc-bridge-menu` and `release-updater`;
 - `SC_BRIDGE_UPDATE_PUBLIC_KEYS` embeds the throwaway public key at compile
   time;
 - `SC_BRIDGE_LOCAL_UPDATE_DIR` selects the directory at runtime.
 
 Local catalogs refresh on every check and use an isolated cache below the
 system temporary directory. They never overwrite the production update cache.
-The Updates page displays the active local path. Code compiled without debug
-assertions does not include the local source and ignores
-`SC_BRIDGE_LOCAL_UPDATE_DIR`; production builds remain locked to the GitHub
-release repository.
+The Updates page displays the active local path. Builds without
+`local-update-source` do not include the filesystem client or the environment
+variable read. `tools/build-macos-app.py` selects the shipped features
+explicitly, never enables the local-source feature, and verifies the resulting
+executable. Production builds therefore remain locked to the GitHub release
+repository.
 
 ## Local UI preview
 

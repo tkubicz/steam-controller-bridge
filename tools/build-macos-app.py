@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,8 @@ DIST_DIR = ROOT / "dist"
 APP_DIR = DIST_DIR / "Steam Controller Bridge.app"
 HELPER_NAME = "Steam Controller Bridge Virtual HID Helper.app"
 DEFAULT_HELPER_IDENTIFIER = "com.lynxware.steam-controller-bridge.virtual-hid-helper"
+SHIPPED_MENU_FEATURES = ("editor", "overlay", "updater")
+LOCAL_UPDATE_SENTINEL = b"SC_BRIDGE_LOCAL_UPDATE_DIR"
 
 
 def run(command: list[str], *, capture_output: bool = False) -> subprocess.CompletedProcess[str]:
@@ -43,6 +46,43 @@ def workspace_version() -> str:
     if not version:
         raise ValueError("workspace version validator returned no version")
     return version
+
+
+def build_command() -> list[str]:
+    features = ",".join(
+        f"sc-bridge-menu/{feature}" for feature in SHIPPED_MENU_FEATURES
+    )
+    return [
+        "cargo",
+        "build",
+        "--release",
+        "-p",
+        "sc-bridge-menu",
+        "-p",
+        "macos-virtual-hid",
+        "--bins",
+        "--no-default-features",
+        "--features",
+        features,
+    ]
+
+
+def menu_default_features() -> tuple[str, ...]:
+    manifest = (ROOT / "apps/sc-bridge-menu/Cargo.toml").read_text(encoding="utf-8")
+    match = re.search(r'^default\s*=\s*\[([^]]*)\]\s*$', manifest, re.MULTILINE)
+    if match is None:
+        raise ValueError("menu manifest has no one-line default feature list")
+    features = tuple(re.findall(r'"([^"]+)"', match.group(1)))
+    if not features:
+        raise ValueError("menu manifest default feature list is empty")
+    return features
+
+
+def verify_shipped_update_boundary(executable: Path) -> None:
+    if LOCAL_UPDATE_SENTINEL in executable.read_bytes():
+        raise ValueError(
+            "shipped menu executable contains the local update source environment variable"
+        )
 
 
 def remove_bundle(bundle: Path, expected_parent: Path) -> None:
@@ -195,6 +235,27 @@ def self_test() -> None:
         assert "--deep" in verify and "--strict" in verify
         assert helper_sign[-1].endswith(HELPER_NAME)
 
+        command = build_command()
+        assert "--no-default-features" in command
+        features = command[command.index("--features") + 1].split(",")
+        assert all(feature.startswith("sc-bridge-menu/") for feature in features)
+        assert all("local-update-source" not in feature for feature in features)
+        selected = tuple(feature.split("/", 1)[1] for feature in features)
+        assert selected == SHIPPED_MENU_FEATURES
+        assert menu_default_features() == SHIPPED_MENU_FEATURES
+
+        shipped = root / "shipped-menu"
+        shipped.write_bytes(b"production update source")
+        verify_shipped_update_boundary(shipped)
+        local = root / "local-source-menu"
+        local.write_bytes(b"prefix " + LOCAL_UPDATE_SENTINEL + b" suffix")
+        try:
+            verify_shipped_update_boundary(local)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("local update source sentinel was accepted")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -205,16 +266,8 @@ def main() -> int:
         return 0
 
     version = workspace_version()
-    run([
-        "cargo",
-        "build",
-        "--release",
-        "-p",
-        "sc-bridge-menu",
-        "-p",
-        "macos-virtual-hid",
-        "--bins",
-    ])
+    run(build_command())
+    verify_shipped_update_boundary(ROOT / "target/release/sc-bridge-menu")
     assemble_bundle(version)
     identity = os.environ.get("SC_BRIDGE_CODESIGN_IDENTITY", "-")
     helper_sign, outer_sign, verify = signing_commands(identity, APP_DIR)

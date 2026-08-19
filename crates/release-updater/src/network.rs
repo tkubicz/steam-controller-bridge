@@ -1,4 +1,4 @@
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::future::Future;
@@ -23,7 +23,7 @@ const SIGNATURES_MAX_SIZE: u64 = 16 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_mins(1);
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(20);
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 const LOCAL_COPY_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
@@ -40,6 +40,7 @@ pub enum DownloadError {
     TooLarge { maximum: u64, actual: u64 },
     #[error("invalid release asset name")]
     InvalidAssetName,
+    #[cfg(feature = "local-update-source")]
     #[error("invalid local update source: {0}")]
     InvalidLocalSource(String),
     #[error("update download cancelled")]
@@ -81,7 +82,7 @@ pub struct LatestReleaseClient {
     client: reqwest::Client,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 #[derive(Debug, Clone)]
 pub struct LocalReleaseClient {
     root: PathBuf,
@@ -302,7 +303,7 @@ impl ReleaseSource for LatestReleaseClient {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 impl LocalReleaseClient {
     pub fn new(root: impl AsRef<Path>) -> Result<Self, DownloadError> {
         let root = fs::canonicalize(root)?;
@@ -369,7 +370,7 @@ impl LocalReleaseClient {
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 impl ReleaseSource for LocalReleaseClient {
     fn fetch_metadata(
         &self,
@@ -526,7 +527,7 @@ fn temporary_file(directory: &Path, suffix: &str) -> io::Result<NamedTempFile> {
         .tempfile_in(directory)
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 fn check_cancelled(cancellation: Option<&AtomicBool>) -> Result<(), DownloadError> {
     if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
         Err(DownloadError::Cancelled)
@@ -535,7 +536,7 @@ fn check_cancelled(cancellation: Option<&AtomicBool>) -> Result<(), DownloadErro
     }
 }
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 fn copy_bounded(
     input: &mut impl io::Read,
     output: &mut impl io::Write,
@@ -608,8 +609,8 @@ mod tests {
         );
     }
 
-    /// `LocalReleaseClient` only exists in development builds.
-    #[cfg(debug_assertions)]
+    /// `LocalReleaseClient` only exists in `local-update-source` builds.
+    #[cfg(feature = "local-update-source")]
     #[test]
     fn local_source_bounds_and_cancels_atomic_copies() {
         let root = tempfile::tempdir().unwrap();

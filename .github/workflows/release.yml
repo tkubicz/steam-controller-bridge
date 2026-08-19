@@ -135,8 +135,10 @@ jobs:
       - name: Check product version invariant
         run: python3 tools/check-workspace-versions.py
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace --all-features
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo clippy -p release-updater -p sc-bridge-menu --all-targets --all-features -- -D warnings
+      - run: cargo test -p release-updater -p sc-bridge-menu --all-features
       - run: cargo build --workspace --all-targets
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
 

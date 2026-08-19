@@ -17,18 +17,32 @@ python3 tools/check-changelog.py
 python3 tools/build-macos-app.py --self-test
 python3 tools/prepare-local-update.py --self-test
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo clippy -p release-updater -p sc-bridge-menu --all-targets --all-features -- -D warnings
+cargo test -p release-updater -p sc-bridge-menu --all-features
 cargo build --workspace --all-targets
 make -C firmware/xiao-nrf52840 test
 ```
 
+The default pass checks the distributed configuration, where local filesystem
+updates are compiled out. The focused all-feature pass checks the two packages
+whose code changes when `local-update-source` is enabled. Neither pass replaces
+the other because `cfg(not(feature = "local-update-source"))` code exists only
+in the default configuration.
+
 On macOS, also build and verify the packaged application:
 
 ```bash
+cargo check -p sc-bridge-menu --features local-update-source
 ./tools/build-macos-app.py
 codesign --verify --deep --strict "dist/Steam Controller Bridge.app"
 ```
+
+The focused check uses the exact feature exposed by the menu package, proving
+that it forwards into the macOS-only `release-updater` dependency. A
+workspace-wide `--all-features` command alone cannot prove that edge because it
+enables the updater crate's feature directly.
 
 CI additionally builds the pinned Arduino firmware artifacts. `cargo deny
 check` covers advisories, licenses, bans, and sources for the shipped macOS
@@ -106,11 +120,13 @@ Run these on the exact packaged candidate; automated results are not substitutes
   refusal, close/Quit interlocks, and interruption before writing, during UF2
   writing, and before receipt commit.
 - For an unreleased candidate, run `tools/prepare-local-update.py`, launch the
-  debug menu app with the printed environment, and confirm the Updates page
+  local-source build with the printed command, and confirm the Updates page
   names the local development source. Restore Seeed Blink before the first
   installation so factory VID/PID detection, the manual recovery window, the
   revision-3 receipt, and the following automatic reinstall are exercised in
-  one sequence. Confirm a non-debug build ignores the local-source variable.
+  one sequence. Then launch with the same environment but without
+  `--features local-update-source` and confirm the app stays on the stable
+  GitHub source.
 - Flash legacy targetless revision 2 and confirm it bridges normally without an
   automatic update prompt or bootloader command; the explicit XIAO recovery
   action must release serial and require manual UF2 entry.

@@ -39,7 +39,7 @@ pub use manifest::{
     FirmwareRelease, ManifestError, ManifestSignature, ReleaseManifestV1, ReleaseSignatures,
     TrustedPublicKey,
 };
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 pub use network::LocalReleaseClient;
 pub use network::{
     download_to_path, ensure_release_artifact, ensure_release_artifact_cancellable,

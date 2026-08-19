@@ -110,8 +110,13 @@ virtual-HID entitlements.
 ```bash
 cargo build --workspace
 cargo test --workspace
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p release-updater -p sc-bridge-menu --all-targets --all-features -- -D warnings
 ```
+
+The first Clippy pass covers the distributed feature set. The focused second
+pass covers the non-default local update source in the only two packages whose
+code changes when it is enabled.
 
 No physical hardware is required. The recording crate uses the established `serde`, `serde_json`, and `base64` crates; the timing, protocol, output, and simulator paths otherwise use the standard library.
 

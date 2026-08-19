@@ -173,10 +173,12 @@ Save the launch command printed at the end, but do not run it yet. The helper
 builds firmware revision 3 from the current source and stores the catalog below
 `temp/steam-controller-bridge-local-update`.
 
-This works only in a debug build. It does not disable signature, manifest,
-artifact-hash, UF2, board, revision, or installation-receipt verification. The
-helper's application artifact is an intentional placeholder pinned to the
-current application version and must not be installed.
+This works only in a build compiled with the non-default
+`local-update-source` Cargo feature, which the helper's printed launch command
+enables. It does not disable signature, manifest, artifact-hash, UF2, board,
+revision, or installation-receipt verification. The helper's application
+artifact is an intentional placeholder pinned to the current application
+version and must not be installed.
 
 Quit every running copy of Steam Controller Bridge. Compile Blink for the XIAO
 nRF52840 Sense used by this project:
