@@ -523,7 +523,7 @@ fn pending_manual_firmware_gets_one_first_observed_receipt() {
             recorded: Arc::clone(&recorded),
             pending_response: None,
         }),
-        serial_device: Some(serial_info("/dev/cu.test", "TESTSERIAL")),
+        serial_device: Some(serial_info("serial:test", "TESTSERIAL")),
         capabilities: OutputCapabilities::for_selection(&OutputSelection::Serial),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
@@ -604,7 +604,7 @@ fn a_lost_receipt_ack_retries_the_same_receipt_after_backoff() {
         output: Box::new(DroppedReceiptAckOutput {
             attempts: Arc::clone(&attempts),
         }),
-        serial_device: Some(serial_info("/dev/cu.test", "TESTSERIAL")),
+        serial_device: Some(serial_info("serial:test", "TESTSERIAL")),
         capabilities: OutputCapabilities::for_selection(&OutputSelection::Serial),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };

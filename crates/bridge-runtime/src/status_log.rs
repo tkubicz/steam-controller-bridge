@@ -801,7 +801,7 @@ mod tests {
         let mut current = initial;
         current.revision = 1;
         current.source.connected = true;
-        current.output.endpoint = Some("/dev/cu.usbmodem1".to_owned());
+        current.output.endpoint = Some("serial:test".to_owned());
         current.output.ready = true;
         current.output.firmware = Some(bridge_output::FirmwareInfo {
             version: bridge_output::FirmwareVersion::Reported(3),

@@ -3,6 +3,9 @@ pub(super) fn is_callout_port(path: &str) -> bool {
 }
 
 #[cfg(test)]
+pub(super) const TEST_CALLOUT_PORT: &str = "/dev/cu.usbmodem11201";
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::serial_discovery::{SerialDeviceInfo, BRIDGE_DEVICE_USB_PRODUCT};
