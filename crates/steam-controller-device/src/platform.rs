@@ -1,10 +1,9 @@
-use std::fs::{File, OpenOptions};
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use hidapi::{BusType, DeviceInfo, HidApi, HidDevice};
-use rustix::fs::{flock, FlockOperation};
 
 use crate::{DeviceError, DeviceEvent, HidDeviceInfo, RawHidReport, PROTEUS_VENDOR_ID};
 
@@ -441,7 +440,33 @@ impl HidSession {
 }
 
 fn acquire_ownership_lock(selected: &HidDeviceInfo) -> Result<File, DeviceError> {
-    let lock_path = ownership_lock_path(selected);
+    let paths = app_paths::current().map_err(|error| {
+        DeviceError::Backend(format!(
+            "cannot locate the Steam Controller input ownership-lock directory: {error}"
+        ))
+    })?;
+    acquire_ownership_lock_in(&paths.runtime_dir, selected)
+}
+
+fn acquire_ownership_lock_in(
+    runtime_dir: &Path,
+    selected: &HidDeviceInfo,
+) -> Result<File, DeviceError> {
+    let mut directory = fs::DirBuilder::new();
+    directory.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        directory.mode(0o700);
+    }
+    directory.create(runtime_dir).map_err(|error| {
+        DeviceError::Backend(format!(
+            "cannot create Steam Controller input ownership-lock directory {}: {error}",
+            runtime_dir.display()
+        ))
+    })?;
+
+    let lock_path = ownership_lock_path(runtime_dir, selected);
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -454,15 +479,13 @@ fn acquire_ownership_lock(selected: &HidDeviceInfo) -> Result<File, DeviceError>
                 lock_path.display()
             ))
         })?;
-    flock(&file, FlockOperation::NonBlockingLockExclusive).map_err(|_| {
-        DeviceError::OwnershipConflict {
-            interface_number: selected.interface_number,
-        }
+    fs4::FileExt::try_lock(&file).map_err(|_| DeviceError::OwnershipConflict {
+        interface_number: selected.interface_number,
     })?;
     Ok(file)
 }
 
-fn ownership_lock_path(selected: &HidDeviceInfo) -> PathBuf {
+fn ownership_lock_path(runtime_dir: &Path, selected: &HidDeviceInfo) -> PathBuf {
     let identity = selected
         .serial_number
         .as_deref()
@@ -474,7 +497,7 @@ fn ownership_lock_path(selected: &HidDeviceInfo) -> PathBuf {
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
         });
-    std::env::temp_dir().join(format!(
+    runtime_dir.join(format!(
         "steam-controller-bridge-{:04x}-{:04x}-{identity_hash:016x}-if{}.lock",
         selected.vendor_id, selected.product_id, selected.interface_number
     ))
@@ -547,24 +570,58 @@ mod tests {
     }
 
     #[test]
-    fn ownership_lock_rejects_a_second_project_process() {
+    fn ownership_lock_uses_the_runtime_directory_and_lives_with_its_file_handle() {
         let identity = format!(
             "lock-test-{}-{}",
             std::process::id(),
-            Instant::now().elapsed().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock after epoch")
+                .as_nanos()
         );
         let target = lock_target(&identity);
-        let first = acquire_ownership_lock(&target).expect("first lock");
+        let runtime_dir = std::env::temp_dir().join(&identity).join("runtime");
+        let lock_path = ownership_lock_path(&runtime_dir, &target);
+        assert_eq!(lock_path.parent(), Some(runtime_dir.as_path()));
+        assert!(!runtime_dir.exists());
+
+        let first = acquire_ownership_lock_in(&runtime_dir, &target).expect("first lock");
+        assert!(lock_path.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&runtime_dir)
+                    .expect("runtime directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
         assert!(matches!(
-            acquire_ownership_lock(&target),
+            acquire_ownership_lock_in(&runtime_dir, &target),
             Err(DeviceError::OwnershipConflict {
                 interface_number: 2
             })
         ));
         drop(first);
-        let second = acquire_ownership_lock(&target).expect("lock after release");
+        let second = acquire_ownership_lock_in(&runtime_dir, &target).expect("lock after release");
         drop(second);
-        std::fs::remove_file(ownership_lock_path(&target)).expect("remove test lock");
+        std::fs::remove_file(lock_path).expect("remove test lock");
+        std::fs::remove_dir_all(runtime_dir.parent().expect("test directory"))
+            .expect("remove test directory");
+    }
+
+    #[test]
+    fn macos_app_path_policy_preserves_the_existing_lock_directory() {
+        let target = lock_target("stable-macos-lock-path");
+        let paths = app_paths::current().expect("macOS app paths");
+        assert_eq!(paths.runtime_dir, std::env::temp_dir());
+        assert_eq!(
+            ownership_lock_path(&paths.runtime_dir, &target).parent(),
+            Some(std::env::temp_dir().as_path())
+        );
     }
 
     #[test]
