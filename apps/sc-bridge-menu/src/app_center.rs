@@ -23,7 +23,6 @@ use crate::app_center_protocol::{
     FirmwareReceiptStatus, FirmwareStatus, FirmwareTargetStatus, UpdateOperation,
 };
 use crate::cli::{AppCenterArgs, DemoMode};
-use crate::macos::{open_path, reveal_path};
 use crate::update_check::{
     remove_obsolete_application_cache, running_version, update_context, UpdateContext,
 };
@@ -31,6 +30,7 @@ use crate::window_ui::{
     activate_window, configure_window_style, hero_transition, load_texture, parse_release_notes,
     ReleaseNotes,
 };
+use menu_shell::{open_path, reveal_path};
 
 const WINDOW_TITLE: &str = "Steam Controller Bridge";
 const APP_ICON: &[u8] = include_bytes!("../../../packaging/macos/AppIcon.png");

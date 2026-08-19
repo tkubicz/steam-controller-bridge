@@ -6,6 +6,7 @@ use super::permissions::{
 use super::support::{default_overlay_hold_ms, SETTINGS_VERSION};
 use super::tray::{hardware_status_rows, HardwareStatusRow};
 use super::*;
+use platform_capabilities::Remedy;
 
 #[test]
 fn settings_path_uses_app_path_policy() {

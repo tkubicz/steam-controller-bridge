@@ -6,12 +6,7 @@
 use std::path::Path;
 
 use desktop_bindings::{load_or_create_store, reset_store, BindingStore};
-use objc2::MainThreadMarker;
-use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationActivationPolicy,
-    NSEvent, NSModalPanelWindowLevel, NSScreen, NSWindow,
-};
-use objc2_foundation::{NSPoint, NSString};
+use menu_shell::{confirm_critical, ConfirmationChoice, CriticalConfirmation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecoveryChoice {
@@ -62,81 +57,18 @@ fn recover_with(
 /// Quit is the second button so that Escape picks it: the destructive choice
 /// must not be the accidental one.
 fn ask(path: &Path, error: &str) -> RecoveryChoice {
-    let Some(mtm) = MainThreadMarker::new() else {
-        // Cannot ask, so do not move a file the user never agreed to move.
-        return RecoveryChoice::Quit;
-    };
-    let application = NSApplication::sharedApplication(mtm);
-    // An unbundled process is a background-only application until a policy is
-    // set, and cannot show a window at all: `runModal` would block forever on an
-    // invisible alert. Both callers ask before winit/eframe sets one.
-    let policy = application.activationPolicy();
-    let raised = application.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-
-    let alert = NSAlert::new(mtm);
-    alert.setAlertStyle(NSAlertStyle::Critical);
-    alert.setMessageText(&NSString::from_str(
-        "Steam Controller Bridge cannot read your profiles",
-    ));
-    alert.setInformativeText(&NSString::from_str(&informative_text(path, error)));
-    alert.addButtonWithTitle(&NSString::from_str("Reset Profiles"));
-    alert.addButtonWithTitle(&NSString::from_str("Quit"));
-
-    // `activate` is best effort, and macOS 14 made the "ignore other apps"
-    // override a no-op, so focus cannot be taken. The window level is what
-    // actually puts the alert in front.
-    application.activate();
-    let window = alert.window();
-    window.setLevel(NSModalPanelWindowLevel);
-    // Lay out first so the frame used for centring is final.
-    alert.layout();
-    show_on_the_users_screen(&window, mtm);
-    window.orderFrontRegardless();
-    let response = alert.runModal();
-    if raised {
-        // Restore, so the menu app keeps its own policy and no Dock icon.
-        application.setActivationPolicy(policy);
-    }
-    if response == NSAlertFirstButtonReturn {
+    let message = informative_text(path, error);
+    let choice = confirm_critical(CriticalConfirmation {
+        title: "Steam Controller Bridge cannot read your profiles",
+        message: &message,
+        confirm_label: "Reset Profiles",
+        cancel_label: "Quit",
+    });
+    if choice == ConfirmationChoice::Confirmed {
         RecoveryChoice::Reset
     } else {
         RecoveryChoice::Quit
     }
-}
-
-/// With no key window `NSScreen::mainScreen` is the menu-bar screen by fallback,
-/// which strands the alert on a display the user may not be facing. The cursor
-/// is the only signal left; see `profile_overlay::window::target_screen`.
-fn show_on_the_users_screen(window: &NSWindow, mtm: MainThreadMarker) {
-    let cursor = NSEvent::mouseLocation();
-    let screens = NSScreen::screens(mtm);
-    let Some(screen) = screens
-        .iter()
-        .find(|screen| contains(screen.frame(), cursor))
-        .or_else(|| screens.iter().next())
-    else {
-        return;
-    };
-    window.setFrameOrigin(centered_origin(screen.visibleFrame(), window.frame()));
-}
-
-fn contains(frame: objc2_foundation::NSRect, point: NSPoint) -> bool {
-    point.x >= frame.origin.x
-        && point.x < frame.origin.x + frame.size.width
-        && point.y >= frame.origin.y
-        && point.y < frame.origin.y + frame.size.height
-}
-
-/// Centred horizontally, above the middle vertically, matching macOS alerts.
-fn centered_origin(screen: objc2_foundation::NSRect, window: objc2_foundation::NSRect) -> NSPoint {
-    NSPoint::new(
-        (screen.size.width - window.size.width)
-            .max(0.0)
-            .mul_add(0.5, screen.origin.x),
-        (screen.size.height - window.size.height)
-            .max(0.0)
-            .mul_add(0.6, screen.origin.y),
-    )
 }
 
 fn informative_text(path: &Path, error: &str) -> String {
@@ -152,44 +84,10 @@ fn informative_text(path: &Path, error: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{centered_origin, contains, informative_text, recover_with, RecoveryChoice};
+    use super::{informative_text, recover_with, RecoveryChoice};
     use desktop_bindings::{save_store, BindingStore};
-    use objc2_foundation::{NSPoint, NSRect, NSSize};
     use std::fs;
     use std::path::Path;
-
-    fn rect(x: f64, y: f64, width: f64, height: f64) -> NSRect {
-        NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
-    }
-
-    #[test]
-    fn the_alert_lands_on_the_display_holding_the_cursor() {
-        let primary = rect(0.0, 0.0, 1920.0, 1080.0);
-        let secondary = rect(1920.0, 0.0, 2560.0, 1440.0);
-
-        assert!(contains(primary, NSPoint::new(10.0, 10.0)));
-        assert!(!contains(secondary, NSPoint::new(10.0, 10.0)));
-        assert!(contains(secondary, NSPoint::new(2000.0, 700.0)));
-        // The shared edge belongs to exactly one screen.
-        assert!(!contains(primary, NSPoint::new(1920.0, 500.0)));
-        assert!(contains(secondary, NSPoint::new(1920.0, 500.0)));
-    }
-
-    #[test]
-    fn the_alert_is_centred_above_the_middle_of_its_screen() {
-        let origin = centered_origin(
-            rect(1920.0, 0.0, 2560.0, 1440.0),
-            rect(0.0, 0.0, 400.0, 200.0),
-        );
-        assert!((origin.x - (1920.0 + (2560.0 - 400.0) / 2.0)).abs() < 0.5);
-        assert!(origin.y > (1440.0 - 200.0) / 2.0);
-        assert!(origin.y < 1440.0 - 200.0);
-
-        // Oversized: pinned to the origin, not pushed off-screen.
-        let oversized = centered_origin(rect(0.0, 0.0, 320.0, 240.0), rect(0.0, 0.0, 800.0, 600.0));
-        assert!((oversized.x - 0.0).abs() < f64::EPSILON);
-        assert!((oversized.y - 0.0).abs() < f64::EPSILON);
-    }
 
     fn scratch(name: &str) -> std::path::PathBuf {
         let directory =

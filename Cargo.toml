@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/app-paths",
     "crates/gamepad-state",
+    "crates/menu-shell",
     "crates/power-monitor",
     "crates/virtual-gamepad",
     "crates/bridge-protocol",
