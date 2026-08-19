@@ -20,6 +20,7 @@ mod network;
 mod targets;
 #[cfg(test)]
 mod test_support;
+mod volumes;
 
 #[cfg(target_os = "macos")]
 pub use application::{
@@ -48,6 +49,10 @@ pub use network::{
 pub use targets::{
     firmware_matches_target, firmware_target, firmware_targets, FirmwareInstallerStrategy,
     FirmwareTargetCatalogError, FirmwareTargetDescriptor, UsbIdentity,
+};
+pub use volumes::{
+    current_removable_volume_locator, MacOsVolumeLocator, RemovableVolumeLocator, VolumeScan,
+    VolumeScanError,
 };
 
 /// GitHub repository that owns the only accepted production update channel.
