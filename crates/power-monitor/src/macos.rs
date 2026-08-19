@@ -46,7 +46,7 @@ impl PowerMonitor {
         let barrier = Arc::new(Barrier::new(2));
         let worker_barrier = Arc::clone(&barrier);
         let thread = std::thread::Builder::new()
-            .name("macos-power-monitor".to_owned())
+            .name("power-monitor".to_owned())
             .spawn(move || run_loop_thread(Box::new(handler), &sender, &worker_barrier))
             .map_err(|error| PowerMonitorError::new(error.to_string()))?;
 

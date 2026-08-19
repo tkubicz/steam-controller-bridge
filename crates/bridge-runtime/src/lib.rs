@@ -69,9 +69,9 @@ use desktop_bindings::{
 #[cfg(test)]
 use desktop_bindings::{PadMotionMode, PadSample};
 use gamepad_state::OutputSuppression;
-#[cfg(target_os = "macos")]
-use macos_power_monitor::{PowerEvent, PowerMonitor};
 pub use macos_virtual_hid::VirtualHidConfig;
+#[cfg(target_os = "macos")]
+use power_monitor::{PowerEvent, PowerMonitor};
 use profile_picker::{Picker, PickerEvents, PickerInput};
 // Frontends drive the wheel and render it, so its vocabulary is part of the
 // runtime's public surface.

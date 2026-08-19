@@ -1,4 +1,4 @@
-//! Owned system sleep/wake notifications for macOS.
+//! Owned system sleep/wake notifications.
 //!
 //! `IOKit`'s power API is a C callback API, so this crate is the workspace's one
 //! deliberately narrow unsafe boundary. The rest of the project receives typed

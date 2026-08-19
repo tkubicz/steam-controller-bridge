@@ -1,5 +1,5 @@
 [package]
-name = "macos-power-monitor"
+name = "power-monitor"
 version = "1.9.0"
 edition.workspace = true
 license.workspace = true
