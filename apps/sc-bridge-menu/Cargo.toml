@@ -22,6 +22,7 @@ app-paths = { path = "../../crates/app-paths" }
 bridge-runtime = { path = "../../crates/bridge-runtime" }
 desktop-bindings = { path = "../../crates/desktop-bindings" }
 profile-picker = { path = "../../crates/profile-picker" }
+menu-shell = { path = "../../crates/menu-shell" }
 serde.workspace = true
 serde_json.workspace = true
 

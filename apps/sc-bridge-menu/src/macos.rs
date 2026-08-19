@@ -3,7 +3,6 @@ use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -16,13 +15,12 @@ use bridge_runtime::{
 };
 use desktop_bindings::{default_store_path, parse_store, BindingStore};
 use desktop_input::DesktopSession;
+use menu_shell::{activate_child_application, copy_text, open_path};
 use objc2::{rc::Retained, MainThreadMarker};
-use objc2_app_kit::{
-    NSApplicationActivationOptions, NSImage, NSRunningApplication, NSStatusBarButton,
-};
+use objc2_app_kit::{NSImage, NSStatusBarButton};
 use platform_capabilities::{
     current_provider, CapabilityContext, CapabilityId, CapabilityRequestOutcome, CapabilityState,
-    PlatformCapabilities, Remedy,
+    PlatformCapabilities,
 };
 use serde::{Deserialize, Serialize};
 use tiny_skia::{
@@ -63,12 +61,7 @@ use support::{
     settings_path, AppSettings, BindingsFileFingerprint, OutputPreference, PickerEventMailbox,
     OVERLAY_HOLD_CHOICES,
 };
-pub(crate) use system::open_path;
-#[cfg(feature = "updater")]
-pub(crate) use system::reveal_path;
-use system::{
-    activate_child_application, apply_capability_remedy, copy_text, launch_bindings_editor,
-};
+use system::{apply_capability_remedy, launch_bindings_editor};
 
 #[cfg(test)]
 mod tests;

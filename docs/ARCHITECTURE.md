@@ -45,6 +45,7 @@ game/browser -> gamepad feedback -> bridge device -> protocol feedback
 | `profile-picker` | Profile-wheel hold, sector, paging, and input-suppression logic. |
 | `bridge-core` | Hardware-independent decode/map/output lifecycle. |
 | `bridge-runtime` | Live hardware ownership, discovery, safety cleanup, power policy, and status. |
+| `menu-shell` | Platform clipboard, open/reveal, confirmation, and child-activation effects. |
 | `power-monitor` | Typed sleep/wake notifications and acknowledgement ownership. |
 | `release-updater` | Signed metadata, rollback policy, bounded downloads, staging, firmware-target catalog, and target-specific installation. |
 | `controller-art`, `ui-theme` | Shared visual primitives without controller or profile policy. |

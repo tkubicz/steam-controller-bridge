@@ -82,7 +82,9 @@ impl AboutContent {
                         )
                         .clicked()
                     {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(REPOSITORY_URL));
+                        if let Err(error) = menu_shell::open_url(REPOSITORY_URL) {
+                            eprintln!("cannot open project repository: {error}");
+                        }
                     }
                 });
             });
@@ -104,7 +106,9 @@ impl AboutContent {
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.link("Full changelog ↗").clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(CHANGELOG_URL));
+                    if let Err(error) = menu_shell::open_url(CHANGELOG_URL) {
+                        eprintln!("cannot open project changelog: {error}");
+                    }
                 }
             });
         });
