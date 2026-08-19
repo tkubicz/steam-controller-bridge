@@ -5,7 +5,7 @@
 | Layer | Status | Evidence | Notes |
 | --- | --- | --- | --- |
 | Rust compile | passing | macOS workspace check and Clippy | warnings denied |
-| Linux portability | partial | `cargo clippy --target x86_64-unknown-linux-gnu -p macos-virtual-hid --all-targets -- -D warnings` | new crate passes; full workspace requires the unavailable `x86_64-linux-gnu-gcc` for an existing TLS dependency |
+| Linux portability | partial | `cargo clippy --target x86_64-unknown-linux-gnu -p virtual-gamepad --all-targets -- -D warnings` | new crate passes; full workspace requires the unavailable `x86_64-linux-gnu-gcc` for an existing TLS dependency |
 | Dry-run IPC | passing | `dry_run_ipc` integration test | no entitlement or live device |
 | Packaged helper | passing | `build-macos-app.py`, `codesign --verify --deep --strict` | assembly/signature gate only; nested helper alone has the entitlement |
 | Normal-host ad-hoc helper launch | blocked as expected | packaged `--self-test` exits 137 | AMFI kills the restricted-entitlement process before `main`; unsigned release `--self-test` passes |

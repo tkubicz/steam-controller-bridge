@@ -336,7 +336,6 @@ dependencies = [
  "desktop-bindings",
  "desktop-input",
  "gamepad-state",
- "macos-virtual-hid",
  "power-monitor",
  "profile-picker",
  "recording",
@@ -344,6 +343,7 @@ dependencies = [
  "steam-controller-device",
  "steam-controller-discovery",
  "steam-controller-protocol",
+ "virtual-gamepad",
 ]
 
 [[package]]
@@ -1364,8 +1364,8 @@ dependencies = [
  "bridge-output",
  "clap",
  "gamepad-state",
- "macos-virtual-hid",
  "recording",
+ "virtual-gamepad",
 ]
 
 [[package]]
@@ -2348,22 +2348,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d640282b302c0bb0a2a8e0233ead9035e3bed871f0b7e81fe4a1ec829765db44"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "macos-virtual-hid"
-version = "1.9.0"
-dependencies = [
- "block2 0.6.2",
- "bridge-output",
- "dispatch2",
- "gamepad-state",
- "objc2-core-foundation",
- "objc2-io-kit",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -3627,8 +3611,8 @@ dependencies = [
  "clap",
  "ctrlc",
  "desktop-bindings",
- "macos-virtual-hid",
  "recording",
+ "virtual-gamepad",
 ]
 
 [[package]]
@@ -3643,7 +3627,6 @@ dependencies = [
  "desktop-bindings",
  "desktop-input",
  "eframe",
- "macos-virtual-hid",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -3658,6 +3641,7 @@ dependencies = [
  "tiny-skia 0.12.0",
  "tray-icon",
  "ui-theme",
+ "virtual-gamepad",
  "winit",
 ]
 
@@ -3679,8 +3663,8 @@ version = "1.9.0"
 dependencies = [
  "bridge-output",
  "clap",
- "macos-virtual-hid",
  "recording",
+ "virtual-gamepad",
 ]
 
 [[package]]
@@ -4636,6 +4620,22 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtual-gamepad"
+version = "1.9.0"
+dependencies = [
+ "block2 0.6.2",
+ "bridge-output",
+ "dispatch2",
+ "gamepad-state",
+ "objc2-core-foundation",
+ "objc2-io-kit",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+]
 
 [[package]]
 name = "walkdir"

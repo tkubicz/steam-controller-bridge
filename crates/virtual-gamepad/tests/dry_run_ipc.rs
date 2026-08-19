@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use bridge_output::GamepadOutput;
 use gamepad_state::{Button, GamepadState};
-use macos_virtual_hid::{VirtualHidConfig, VirtualHidOutput, HELPER_PROTOCOL_VERSION};
+use virtual_gamepad::{VirtualHidConfig, VirtualHidOutput, HELPER_PROTOCOL_VERSION};
 
 fn helper_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_sc-virtual-hid-helper"))

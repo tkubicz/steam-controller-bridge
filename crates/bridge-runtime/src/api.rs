@@ -5,9 +5,9 @@ use bridge_core::{BridgeConfig, BridgeMetrics};
 use bridge_output::{DumpFormat, FirmwareInfo, OutputDiagnostics, SerialConfig};
 use controller_mapper::MapperConfig;
 use desktop_bindings::BindingProfile;
-use macos_virtual_hid::VirtualHidConfig;
 use profile_picker::{PickerConfig, PickerRoster};
 use steam_controller_device::{masked_serial, ControllerTransport, HidDeviceInfo};
+use virtual_gamepad::VirtualHidConfig;
 
 use crate::DEFAULT_IDLE_SHUTDOWN_TIMEOUT;
 
@@ -195,7 +195,7 @@ impl OutputCapabilities {
 /// Re-exported rather than restated, for the same reason as the firmware
 /// types: frontends render the helper's identity without depending on the
 /// virtual-HID crate, and a field added there cannot go missing here.
-pub use macos_virtual_hid::VirtualHidHelperMetadata as VirtualHidStatus;
+pub use virtual_gamepad::VirtualHidHelperMetadata as VirtualHidStatus;
 
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct OutputStatus {

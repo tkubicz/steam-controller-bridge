@@ -11,8 +11,8 @@ use bridge_output::{
 use clap::{Parser, ValueEnum};
 use gamepad_simulator::{apply_keyboard_command, automated_sequence};
 use gamepad_state::{Button, GamepadState};
-use macos_virtual_hid::{parse_usb_id, VirtualHidOptions};
 use recording::RecordingOutput;
+use virtual_gamepad::{parse_usb_id, VirtualHidOptions};
 
 /// Drives any output backend with synthetic gamepad states.
 #[derive(Debug, Clone, Parser)]

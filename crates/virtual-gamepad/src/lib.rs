@@ -1,9 +1,9 @@
 //! Rust client and helper contract for the experimental macOS virtual gamepad.
 
+mod backend;
 mod client;
 pub mod contract;
 pub mod helper;
-mod platform;
 
 use std::path::PathBuf;
 use std::time::Duration;

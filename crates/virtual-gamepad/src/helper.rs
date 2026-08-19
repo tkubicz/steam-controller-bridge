@@ -4,10 +4,10 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
+use crate::backend;
 use crate::contract::{
     read_json_line, write_json_line, HelperRequest, HelperResponse, HELPER_PROTOCOL_VERSION,
 };
-use crate::platform;
 use crate::{
     VirtualHidError, VirtualHidErrorClass, VirtualHidHelperMetadata, GAMEPAD_REPORT_DESCRIPTOR,
     NEUTRAL_INPUT_REPORT,
@@ -128,7 +128,7 @@ fn run_protocol(
     let mut device = if dry_run {
         None
     } else {
-        Some(platform::VirtualDevice::create(
+        Some(backend::VirtualDevice::create(
             vendor_id,
             product_id,
             responses.clone(),
@@ -137,7 +137,7 @@ fn run_protocol(
     };
     let metadata = device.as_ref().map_or_else(
         VirtualHidHelperMetadata::default,
-        platform::VirtualDevice::metadata,
+        backend::VirtualDevice::metadata,
     );
     responses
         .send(HelperResponse::Ready {

@@ -32,7 +32,7 @@ tempfile.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 clap.workspace = true
 desktop-input = { path = "../../crates/desktop-input" }
-macos-virtual-hid = { path = "../../crates/macos-virtual-hid" }
+virtual-gamepad = { path = "../../crates/virtual-gamepad" }
 platform-capabilities = { path = "../../crates/platform-capabilities" }
 eframe = { workspace = true, optional = true }
 ui-theme = { path = "../../crates/ui-theme", optional = true }

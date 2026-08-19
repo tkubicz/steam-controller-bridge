@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use bridge_runtime::MAX_IDLE_SHUTDOWN_TIMEOUT;
 use clap::{Parser, ValueEnum};
-use macos_virtual_hid::{parse_usb_id, VirtualHidOptions};
+use virtual_gamepad::{parse_usb_id, VirtualHidOptions};
 
 /// Bridges a Steam Controller 2 to a protocol-compatible output device, or replays a recording.
 ///
@@ -214,7 +214,7 @@ impl Cli {
         if self.output() == OutputArg::VirtualHid && !virtual_hid_enabled {
             return Err(format!(
                 "virtual HID output is experimental; pass --enable-virtual-hid or set {}=1",
-                macos_virtual_hid::ENABLE_VIRTUAL_HID_ENV
+                virtual_gamepad::ENABLE_VIRTUAL_HID_ENV
             ));
         }
         match self.input {

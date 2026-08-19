@@ -59,7 +59,7 @@ def build_command() -> list[str]:
         "-p",
         "sc-bridge-menu",
         "-p",
-        "macos-virtual-hid",
+        "virtual-gamepad",
         "--bins",
         "--no-default-features",
         "--features",

@@ -38,8 +38,8 @@ claimed. The bridge device remains the proven dual-rumble backend.
 ## Development commands
 
 ```bash
-cargo build -p macos-virtual-hid --bin sc-virtual-hid-helper
-cargo test -p macos-virtual-hid --test dry_run_ipc
+cargo build -p virtual-gamepad --bin sc-virtual-hid-helper
+cargo test -p virtual-gamepad --test dry_run_ipc
 
 cargo run -p gamepad-simulator -- automated \
   --output virtual-hid \

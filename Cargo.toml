@@ -4,7 +4,7 @@ members = [
     "crates/app-paths",
     "crates/gamepad-state",
     "crates/power-monitor",
-    "crates/macos-virtual-hid",
+    "crates/virtual-gamepad",
     "crates/bridge-protocol",
     "crates/bridge-output",
     "crates/bridge-core",

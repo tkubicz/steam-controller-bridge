@@ -30,7 +30,7 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
-    let virtual_hid_enabled = macos_virtual_hid::virtual_hid_enabled(cli.enable_virtual_hid)?;
+    let virtual_hid_enabled = virtual_gamepad::virtual_hid_enabled(cli.enable_virtual_hid)?;
     // Every cross-field rule is checked before a backend is built, so a bad
     // combination cannot leave a truncated output file behind.
     cli.validate(virtual_hid_enabled)?;

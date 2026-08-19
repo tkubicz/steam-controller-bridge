@@ -38,7 +38,7 @@ mod window_ui;
 fn main() {
     let cli = cli::parse();
     let result = match cli.command {
-        None => macos_virtual_hid::virtual_hid_enabled(cli.enable_virtual_hid).and_then(macos::run),
+        None => virtual_gamepad::virtual_hid_enabled(cli.enable_virtual_hid).and_then(macos::run),
         Some(cli::Command::AppCenter(arguments)) => {
             #[cfg(feature = "updater")]
             {
