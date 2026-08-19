@@ -71,7 +71,7 @@ use desktop_bindings::{PadMotionMode, PadSample};
 use gamepad_state::OutputSuppression;
 use power_monitor::{PowerEvent, PowerMonitor};
 use profile_picker::{Picker, PickerEvents, PickerInput};
-pub use virtual_gamepad::VirtualHidConfig;
+pub use virtual_gamepad::{VirtualGamepadBackendKind, VirtualGamepadConfig, VirtualHidConfig};
 // Frontends drive the wheel and render it, so its vocabulary is part of the
 // runtime's public surface.
 pub use profile_picker::{PickerConfig, PickerEvent, PickerRoster};

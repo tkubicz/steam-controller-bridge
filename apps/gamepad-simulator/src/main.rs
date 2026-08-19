@@ -43,8 +43,8 @@ struct Cli {
     #[arg(long)]
     serial_log: bool,
 
-    /// Rust `IOHIDUserDevice` helper executable; required by `--output virtual-hid`.
-    /// Example: gamepad-simulator automated --output virtual-hid --virtual-hid-helper ./sc-virtual-hid-helper
+    /// Rust `IOHIDUserDevice` helper executable; required by virtual-gamepad output.
+    /// Example: gamepad-simulator automated --output virtual-gamepad --virtual-hid-helper ./sc-virtual-hid-helper
     #[arg(long, value_name = "PATH")]
     virtual_hid_helper: Option<PathBuf>,
 
@@ -99,6 +99,7 @@ enum OutputArg {
     Recording,
     Mock,
     Serial,
+    #[value(name = "virtual-gamepad", alias = "virtual-hid")]
     VirtualHid,
 }
 
@@ -242,6 +243,10 @@ mod tests {
 
     #[test]
     fn identity_override_is_paired_and_requires_virtual_hid_output() {
+        assert_eq!(
+            OutputArg::from_str("virtual-hid", false).unwrap(),
+            OutputArg::VirtualHid
+        );
         assert!(Cli::try_parse_from([
             "gamepad-simulator",
             "automated",
@@ -265,7 +270,7 @@ mod tests {
             "gamepad-simulator",
             "automated",
             "--output",
-            "virtual-hid",
+            "virtual-gamepad",
             "--virtual-hid-helper",
             "/tmp/helper",
             "--virtual-hid-vendor-id",

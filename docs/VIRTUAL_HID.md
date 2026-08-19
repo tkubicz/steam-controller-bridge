@@ -42,20 +42,22 @@ cargo build -p virtual-gamepad --bin sc-virtual-hid-helper
 cargo test -p virtual-gamepad --test dry_run_ipc
 
 cargo run -p gamepad-simulator -- automated \
-  --output virtual-hid \
+  --output virtual-gamepad \
   --virtual-hid-helper ./target/debug/sc-virtual-hid-helper
 
 cargo run -p sc-bridge -- \
   --enable-virtual-hid \
-  --output virtual-hid \
+  --output virtual-gamepad \
   --virtual-hid-helper ./target/debug/sc-virtual-hid-helper
 ```
+
+`--output virtual-hid` remains accepted as a compatibility alias.
 
 The equivalent environment opt-in is:
 
 ```bash
 SC_BRIDGE_ENABLE_VIRTUAL_HID=1 cargo run -p sc-bridge -- \
-  --output virtual-hid \
+  --output virtual-gamepad \
   --virtual-hid-helper ./target/debug/sc-virtual-hid-helper
 ```
 

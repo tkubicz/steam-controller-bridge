@@ -3,6 +3,7 @@
 mod backend;
 mod client;
 pub mod contract;
+mod facade;
 pub mod helper;
 
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ pub use contract::{
     encode_input_report, DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID, GAMEPAD_REPORT_DESCRIPTOR,
     HELPER_PROTOCOL_VERSION, INPUT_REPORT_LEN, NEUTRAL_INPUT_REPORT,
 };
+pub use facade::{VirtualGamepad, VirtualGamepadBackendKind, VirtualGamepadConfig};
 use serde::{Deserialize, Serialize};
 
 /// Runtime opt-in used by release binaries before they expose or open the
@@ -232,8 +234,11 @@ pub fn parse_usb_id(value: &str) -> Result<u16, String> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum VirtualHidErrorClass {
+pub enum VirtualGamepadErrorClass {
     UnsupportedPlatform,
+    PermissionDenied,
+    DriverMissing,
+    BackendUnavailable,
     MissingHelper,
     InvalidConfiguration,
     SpawnFailed,
@@ -255,14 +260,14 @@ pub enum VirtualHidErrorClass {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{class:?}: {message}")]
-pub struct VirtualHidError {
-    class: VirtualHidErrorClass,
+pub struct VirtualGamepadError {
+    class: VirtualGamepadErrorClass,
     message: String,
 }
 
-impl VirtualHidError {
+impl VirtualGamepadError {
     #[must_use]
-    pub fn new(class: VirtualHidErrorClass, message: impl Into<String>) -> Self {
+    pub fn new(class: VirtualGamepadErrorClass, message: impl Into<String>) -> Self {
         let mut message = message.into();
         if message.len() > 1_024 {
             let mut boundary = 1_024;
@@ -275,7 +280,7 @@ impl VirtualHidError {
     }
 
     #[must_use]
-    pub const fn class(&self) -> VirtualHidErrorClass {
+    pub const fn class(&self) -> VirtualGamepadErrorClass {
         self.class
     }
 
@@ -288,17 +293,33 @@ impl VirtualHidError {
     pub const fn is_permanent_configuration_failure(&self) -> bool {
         matches!(
             self.class,
-            VirtualHidErrorClass::UnsupportedPlatform
-                | VirtualHidErrorClass::MissingHelper
-                | VirtualHidErrorClass::InvalidConfiguration
-                | VirtualHidErrorClass::StartupKilled
-                | VirtualHidErrorClass::ProtocolMismatch
-                | VirtualHidErrorClass::ProtocolViolation
-                | VirtualHidErrorClass::EntitlementMissing
-                | VirtualHidErrorClass::EntitlementRejected
+            VirtualGamepadErrorClass::UnsupportedPlatform
+                | VirtualGamepadErrorClass::PermissionDenied
+                | VirtualGamepadErrorClass::DriverMissing
+                | VirtualGamepadErrorClass::BackendUnavailable
+                | VirtualGamepadErrorClass::MissingHelper
+                | VirtualGamepadErrorClass::InvalidConfiguration
+                | VirtualGamepadErrorClass::StartupKilled
+                | VirtualGamepadErrorClass::ProtocolMismatch
+                | VirtualGamepadErrorClass::ProtocolViolation
+                | VirtualGamepadErrorClass::EntitlementMissing
+                | VirtualGamepadErrorClass::EntitlementRejected
         )
     }
 }
+
+impl From<VirtualGamepadError> for bridge_output::OutputError {
+    fn from(error: VirtualGamepadError) -> Self {
+        if error.is_permanent_configuration_failure() {
+            Self::Configuration(error.to_string())
+        } else {
+            Self::Transport(error.to_string())
+        }
+    }
+}
+
+pub type VirtualHidError = VirtualGamepadError;
+pub type VirtualHidErrorClass = VirtualGamepadErrorClass;
 
 #[cfg(test)]
 mod tests {
@@ -313,6 +334,16 @@ mod tests {
         assert!(unicode.message().len() <= 1_024);
         assert!(unicode.message().chars().all(|character| character == 'é'));
         assert!(error.is_permanent_configuration_failure());
+        for class in [
+            VirtualGamepadErrorClass::PermissionDenied,
+            VirtualGamepadErrorClass::DriverMissing,
+            VirtualGamepadErrorClass::BackendUnavailable,
+        ] {
+            assert!(
+                VirtualGamepadError::new(class, "unavailable").is_permanent_configuration_failure(),
+                "{class:?}"
+            );
+        }
         assert!(
             !VirtualHidError::new(VirtualHidErrorClass::HelperExited, "gone")
                 .is_permanent_configuration_failure()

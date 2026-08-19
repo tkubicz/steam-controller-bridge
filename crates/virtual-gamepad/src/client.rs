@@ -8,9 +8,10 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use bridge_output::{GamepadOutput, OutputDiagnostics, OutputError};
+use bridge_output::{GamepadOutput, OutputDiagnostics, OutputError, OutputFeedback};
 use gamepad_state::GamepadState;
 
+use crate::backend::Backend;
 use crate::contract::{
     read_json_line, write_json_line, HelperRequest, HelperResponse, HELPER_PROTOCOL_VERSION,
     INPUT_REPORT_LEN,
@@ -371,22 +372,11 @@ impl VirtualHidOutput {
         self.mailbox.close();
     }
 
-    fn map_output_error(error: &VirtualHidError) -> OutputError {
-        if error.is_permanent_configuration_failure() {
-            OutputError::Configuration(error.to_string())
-        } else {
-            OutputError::Transport(error.to_string())
-        }
-    }
-}
-
-impl GamepadOutput for VirtualHidOutput {
-    fn send_state(&mut self, state: &GamepadState) -> Result<(), OutputError> {
+    fn backend_send_state(&mut self, state: &GamepadState) -> Result<(), VirtualHidError> {
         if let Some(error) = self.failure() {
-            return Err(Self::map_output_error(&error));
+            return Err(error);
         }
-        let report =
-            crate::encode_input_report(state).map_err(|error| Self::map_output_error(&error))?;
+        let report = crate::encode_input_report(state)?;
         match self.mailbox.enqueue_report(report, false, None) {
             Ok(coalesced) => {
                 if coalesced {
@@ -400,67 +390,126 @@ impl GamepadOutput for VirtualHidOutput {
             }
             Err(error) => {
                 self.latch_failure(error.clone());
-                Err(Self::map_output_error(&error))
+                Err(error)
             }
         }
     }
 
-    fn send_neutral(&mut self) -> Result<(), OutputError> {
+    fn backend_send_neutral(&mut self) -> Result<(), VirtualHidError> {
         if let Some(error) = self.failure() {
-            return Err(Self::map_output_error(&error));
+            return Err(error);
         }
         let (sender, receiver) = mpsc::channel();
         let deadline = Instant::now() + self.config.acknowledgement_timeout;
-        self.mailbox
-            .enqueue_report(
-                crate::NEUTRAL_INPUT_REPORT,
-                true,
-                Some(Acknowledgement { sender, deadline }),
-            )
-            .map_err(|error| Self::map_output_error(&error))?;
+        self.mailbox.enqueue_report(
+            crate::NEUTRAL_INPUT_REPORT,
+            true,
+            Some(Acknowledgement { sender, deadline }),
+        )?;
         let wait = deadline.saturating_duration_since(Instant::now()) + ACKNOWLEDGEMENT_GRACE;
         if let Ok(result) = receiver.recv_timeout(wait) {
-            result.map_err(|error| Self::map_output_error(&error))
+            result
         } else {
             let error = VirtualHidError::new(
                 VirtualHidErrorClass::AcknowledgementTimeout,
                 "virtual HID neutral report acknowledgement timed out",
             );
             self.latch_failure(error.clone());
-            Err(Self::map_output_error(&error))
+            Err(error)
         }
     }
 
-    fn service(&mut self) -> Result<(), OutputError> {
-        self.failure()
-            .map_or(Ok(()), |error| Err(Self::map_output_error(&error)))
+    fn backend_service(&mut self) -> Result<(), VirtualHidError> {
+        self.failure().map_or(Ok(()), Err)
     }
 
-    fn diagnostics(&self) -> OutputDiagnostics {
+    fn backend_diagnostics(&self) -> OutputDiagnostics {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .diagnostics
     }
+
+    fn backend_shutdown(&mut self) -> Result<(), VirtualHidError> {
+        let Some(worker) = self.worker.take() else {
+            return Ok(());
+        };
+        let deadline = Instant::now() + self.config.shutdown_timeout;
+        let (sender, receiver) = mpsc::channel();
+        let result = match self
+            .mailbox
+            .enqueue_shutdown(Acknowledgement { sender, deadline })
+        {
+            Ok(()) => {
+                let wait =
+                    deadline.saturating_duration_since(Instant::now()) + ACKNOWLEDGEMENT_GRACE;
+                receiver.recv_timeout(wait).unwrap_or_else(|_| {
+                    Err(VirtualHidError::new(
+                        VirtualHidErrorClass::AcknowledgementTimeout,
+                        "virtual HID shutdown acknowledgement timed out",
+                    ))
+                })
+            }
+            Err(error) => Err(error),
+        };
+        self.mailbox.close();
+        if worker.join().is_err() && result.is_ok() {
+            return Err(VirtualHidError::new(
+                VirtualHidErrorClass::HelperExited,
+                "virtual HID worker panicked during shutdown",
+            ));
+        }
+        result
+    }
+}
+
+impl Backend for VirtualHidOutput {
+    fn send_state(&mut self, state: &GamepadState) -> Result<(), VirtualHidError> {
+        self.backend_send_state(state)
+    }
+
+    fn send_neutral(&mut self) -> Result<(), VirtualHidError> {
+        self.backend_send_neutral()
+    }
+
+    fn service(&mut self) -> Result<(), VirtualHidError> {
+        self.backend_service()
+    }
+
+    fn take_feedback(&mut self) -> Option<OutputFeedback> {
+        None
+    }
+
+    fn diagnostics(&self) -> OutputDiagnostics {
+        self.backend_diagnostics()
+    }
+
+    fn shutdown(&mut self) -> Result<(), VirtualHidError> {
+        self.backend_shutdown()
+    }
+}
+
+impl GamepadOutput for VirtualHidOutput {
+    fn send_state(&mut self, state: &GamepadState) -> Result<(), OutputError> {
+        self.backend_send_state(state).map_err(OutputError::from)
+    }
+
+    fn send_neutral(&mut self) -> Result<(), OutputError> {
+        self.backend_send_neutral().map_err(OutputError::from)
+    }
+
+    fn service(&mut self) -> Result<(), OutputError> {
+        self.backend_service().map_err(OutputError::from)
+    }
+
+    fn diagnostics(&self) -> OutputDiagnostics {
+        self.backend_diagnostics()
+    }
 }
 
 impl Drop for VirtualHidOutput {
     fn drop(&mut self) {
-        let Some(worker) = self.worker.take() else {
-            return;
-        };
-        let deadline = Instant::now() + self.config.shutdown_timeout;
-        let (sender, receiver) = mpsc::channel();
-        if self
-            .mailbox
-            .enqueue_shutdown(Acknowledgement { sender, deadline })
-            .is_ok()
-        {
-            let wait = deadline.saturating_duration_since(Instant::now()) + ACKNOWLEDGEMENT_GRACE;
-            let _ = receiver.recv_timeout(wait);
-        }
-        self.mailbox.close();
-        let _ = worker.join();
+        let _ = self.backend_shutdown();
     }
 }
 
