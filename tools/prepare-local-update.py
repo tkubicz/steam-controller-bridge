@@ -101,7 +101,7 @@ def launch_command(public_keys: str, output: Path) -> str:
         [
             f"SC_BRIDGE_UPDATE_PUBLIC_KEYS={shlex.quote(public_keys)}",
             f"SC_BRIDGE_LOCAL_UPDATE_DIR={shlex.quote(str(output))}",
-            "cargo run -p sc-bridge-menu",
+            "cargo run -p sc-bridge-menu --features local-update-source",
         ]
     )
 
@@ -174,7 +174,7 @@ def prepare(output: Path) -> None:
 
     public_keys = "".join(paths["public"].read_text(encoding="ascii").splitlines())
     print(f"\nLocal signed update source prepared at:\n  {output}\n")
-    print("Quit any running menu app, then launch the debug build with:\n")
+    print("Quit any running menu app, then launch a local-source build with:\n")
     print(launch_command(public_keys, output))
 
 
@@ -204,6 +204,7 @@ def self_test() -> None:
         quoted = launch_command("fixture=value", external / "path with spaces")
         assert "'" in quoted
         assert "SC_BRIDGE_LOCAL_UPDATE_DIR=" in quoted
+        assert "--features local-update-source" in quoted
 
 
 def main() -> int:

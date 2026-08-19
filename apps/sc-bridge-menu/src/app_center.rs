@@ -623,7 +623,6 @@ fn catalog_presentation(
 }
 
 fn initial_update_status(updates: Option<&Result<UpdateContext, String>>) -> String {
-    #[cfg(debug_assertions)]
     if updates
         .and_then(|result| result.as_ref().ok())
         .and_then(UpdateContext::local_root)
@@ -631,9 +630,6 @@ fn initial_update_status(updates: Option<&Result<UpdateContext, String>>) -> Str
     {
         return "Open Updates to check the signed local development catalog.".to_owned();
     }
-    // A release build has no local development channel to distinguish.
-    #[cfg(not(debug_assertions))]
-    let _ = updates;
     "Open Updates to check the signed stable release.".to_owned()
 }
 
@@ -720,7 +716,6 @@ impl AppCenter {
             .clone()
     }
 
-    #[cfg(debug_assertions)]
     fn local_update_root(&self) -> Option<&Path> {
         self.updates.as_ref()?.as_ref().ok()?.local_root()
     }
@@ -733,14 +728,11 @@ impl AppCenter {
     }
 
     fn update_source_name(&self) -> &'static str {
-        let local = self.uses_local_updates();
-        #[cfg(debug_assertions)]
-        if local {
-            return "local development catalog";
+        if self.uses_local_updates() {
+            "local development catalog"
+        } else {
+            "stable release"
         }
-        #[cfg(not(debug_assertions))]
-        let _ = local;
-        "stable release"
     }
 
     fn application_current_message(&self) -> String {
@@ -751,14 +743,11 @@ impl AppCenter {
     }
 
     fn application_newer_title(&self) -> &'static str {
-        let local = self.uses_local_updates();
-        #[cfg(debug_assertions)]
-        if local {
-            return "Newer than local catalog";
+        if self.uses_local_updates() {
+            "Newer than local catalog"
+        } else {
+            "Newer than stable"
         }
-        #[cfg(not(debug_assertions))]
-        let _ = local;
-        "Newer than stable"
     }
 
     fn application_newer_message(&self) -> String {

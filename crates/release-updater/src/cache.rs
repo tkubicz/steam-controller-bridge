@@ -5,12 +5,12 @@ use std::time::{Duration, SystemTime};
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 use sha2::{Digest as _, Sha256};
 use tempfile::Builder as TempFileBuilder;
 use thiserror::Error;
 
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 use crate::artifact::lower_hex;
 use crate::{
     verify_artifact, verify_signed_manifest, ArtifactDescriptor, ArtifactError, ManifestError,
@@ -59,7 +59,7 @@ impl ReleaseCache {
         Ok(Self::new(paths.cache_dir))
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "local-update-source")]
     #[must_use]
     pub fn for_local_source(root: &Path) -> Self {
         let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
@@ -206,8 +206,8 @@ mod tests {
         assert!(cache.check_due(Duration::from_mins(1), &upgraded));
     }
 
-    /// Local update sources only exist in development builds.
-    #[cfg(debug_assertions)]
+    /// Local update sources only exist in `local-update-source` builds.
+    #[cfg(feature = "local-update-source")]
     #[test]
     fn local_sources_use_stable_isolated_temporary_caches() {
         let first = temporary_directory("local-cache-first");

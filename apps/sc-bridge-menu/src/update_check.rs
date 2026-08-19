@@ -1,14 +1,13 @@
 use std::fs;
-#[cfg(debug_assertions)]
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 use std::sync::Once;
 use std::thread;
 use std::time::Duration;
 
 use bridge_runtime::FirmwareInfo;
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 use release_updater::LocalReleaseClient;
 use release_updater::{
     classify_firmware_release, embedded_trusted_keys, firmware_matches_target, firmware_target,
@@ -19,15 +18,15 @@ use release_updater::{
 use semver::Version;
 
 const CHECK_INTERVAL: Duration = Duration::from_hours(24);
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 const LOCAL_UPDATE_DIRECTORY_ENV: &str = "SC_BRIDGE_LOCAL_UPDATE_DIR";
-#[cfg(debug_assertions)]
+#[cfg(feature = "local-update-source")]
 static LOCAL_UPDATE_NOTICE: Once = Once::new();
 
 #[derive(Clone)]
 enum UpdateChannel {
     Production(LatestReleaseClient),
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "local-update-source")]
     Local(LocalReleaseClient),
 }
 
@@ -42,7 +41,7 @@ impl UpdateContext {
     pub(crate) fn source(&self) -> &dyn ReleaseSource {
         match &self.channel {
             UpdateChannel::Production(source) => source,
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "local-update-source")]
             UpdateChannel::Local(source) => source,
         }
     }
@@ -58,23 +57,19 @@ impl UpdateContext {
     pub(crate) fn check_interval(&self) -> Duration {
         match &self.channel {
             UpdateChannel::Production(_) => CHECK_INTERVAL,
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "local-update-source")]
             UpdateChannel::Local(_) => Duration::ZERO,
         }
     }
 
     pub(crate) fn is_local(&self) -> bool {
-        match &self.channel {
-            UpdateChannel::Production(_) => false,
-            #[cfg(debug_assertions)]
-            UpdateChannel::Local(_) => true,
-        }
+        self.channel.is_local()
     }
 
-    #[cfg(debug_assertions)]
     pub(crate) fn local_root(&self) -> Option<&Path> {
         match &self.channel {
             UpdateChannel::Production(_) => None,
+            #[cfg(feature = "local-update-source")]
             UpdateChannel::Local(source) => Some(source.root()),
         }
     }
@@ -82,9 +77,16 @@ impl UpdateContext {
 
 impl UpdateChannel {
     fn configured() -> Result<Self, String> {
-        #[cfg(debug_assertions)]
-        if let Some(root) = development_update_source() {
-            let source = LocalReleaseClient::new(&root).map_err(|error| {
+        let local_root = development_update_source();
+        Self::select(local_root.as_deref())
+    }
+
+    /// Selects the release channel for a candidate local root. Builds without
+    /// `local-update-source` ignore the candidate and stay on GitHub releases.
+    fn select(local_root: Option<&Path>) -> Result<Self, String> {
+        #[cfg(feature = "local-update-source")]
+        if let Some(root) = local_root {
+            let source = LocalReleaseClient::new(root).map_err(|error| {
                 format!(
                     "{LOCAL_UPDATE_DIRECTORY_ENV}={} cannot be used: {error}",
                     root.display()
@@ -98,9 +100,21 @@ impl UpdateChannel {
             });
             return Ok(Self::Local(source));
         }
+
+        #[cfg(not(feature = "local-update-source"))]
+        let _ = local_root;
+
         Ok(Self::Production(
             LatestReleaseClient::new().map_err(|error| error.to_string())?,
         ))
+    }
+
+    fn is_local(&self) -> bool {
+        match self {
+            Self::Production(_) => false,
+            #[cfg(feature = "local-update-source")]
+            Self::Local(_) => true,
+        }
     }
 
     fn cache(&self) -> Result<ReleaseCache, String> {
@@ -108,7 +122,7 @@ impl UpdateChannel {
             Self::Production(_) => {
                 ReleaseCache::for_current_user().map_err(|error| error.to_string())
             }
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "local-update-source")]
             Self::Local(source) => Ok(ReleaseCache::for_local_source(source.root())),
         }
     }
@@ -122,7 +136,7 @@ pub(crate) fn update_context() -> Result<UpdateContext, String> {
     let keys = embedded_trusted_keys().map_err(|error| error.to_string())?;
     if keys.is_empty() {
         let message = match channel {
-            #[cfg(debug_assertions)]
+            #[cfg(feature = "local-update-source")]
             UpdateChannel::Local(_) => {
                 "Local updates require a trusted development key in SC_BRIDGE_UPDATE_PUBLIC_KEYS."
             }
@@ -140,11 +154,17 @@ pub(crate) fn update_context() -> Result<UpdateContext, String> {
     })
 }
 
-#[cfg(debug_assertions)]
 pub(crate) fn development_update_source() -> Option<PathBuf> {
-    std::env::var_os(LOCAL_UPDATE_DIRECTORY_ENV)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    #[cfg(feature = "local-update-source")]
+    {
+        std::env::var_os(LOCAL_UPDATE_DIRECTORY_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    }
+    #[cfg(not(feature = "local-update-source"))]
+    {
+        None
+    }
 }
 
 pub struct UpdateChecker {
@@ -289,6 +309,14 @@ mod tests {
             version: FirmwareVersion::Reported(revision),
             ..FirmwareInfo::default()
         }
+    }
+
+    #[test]
+    fn a_local_root_is_honoured_only_by_a_local_update_source_build() {
+        let directory = tempfile::tempdir().unwrap();
+        let channel = UpdateChannel::select(Some(directory.path()))
+            .expect("a valid source selects an update channel");
+        assert_eq!(channel.is_local(), cfg!(feature = "local-update-source"));
     }
 
     #[test]

@@ -13,6 +13,9 @@ overlay = ["dep:eframe", "dep:ui-theme"]
 # About, Changelog, and Updates are tabs of one window, so the former `about`
 # feature no longer names anything that can be built on its own.
 updater = ["dep:chrono", "dep:eframe", "dep:ui-theme", "dep:release-updater", "dep:semver"]
+# The menu-side capability includes the updater UI and forwards the matching
+# feature only when the macOS-only optional dependency is present.
+local-update-source = ["updater", "release-updater?/local-update-source"]
 
 [dependencies]
 app-paths = { path = "../../crates/app-paths" }

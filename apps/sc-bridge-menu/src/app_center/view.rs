@@ -24,7 +24,6 @@ enum FirmwareAction {
 
 impl AppCenter {
     pub(super) fn updates_page(&mut self, ui: &mut egui::Ui) {
-        #[cfg(debug_assertions)]
         if let Some(root) = self.local_update_root() {
             status_callout(
                 ui,
