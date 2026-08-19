@@ -8,14 +8,6 @@ pub(super) const SETTINGS_VERSION: u32 = 4;
 /// Hold durations the menu offers, in milliseconds.
 pub(super) const OVERLAY_HOLD_CHOICES: [u64; 2] = [2_000, 3_000];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PermissionStage {
-    InputMonitoring,
-    PostEvent,
-    Accessibility,
-    Ready,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum OutputPreference {
@@ -40,22 +32,6 @@ impl OutputPreference {
                 .map(VirtualHidConfig::new)
                 .map(OutputSelection::VirtualHid),
         }
-    }
-}
-
-pub(super) const fn permission_stage(
-    input_monitoring: bool,
-    post_event: bool,
-    accessibility: bool,
-) -> PermissionStage {
-    if !input_monitoring {
-        PermissionStage::InputMonitoring
-    } else if !post_event {
-        PermissionStage::PostEvent
-    } else if !accessibility {
-        PermissionStage::Accessibility
-    } else {
-        PermissionStage::Ready
     }
 }
 

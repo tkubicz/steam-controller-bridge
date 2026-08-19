@@ -523,8 +523,8 @@ impl MenuApp {
                     eprintln!("cannot copy diagnostics: {error}");
                 }
             }
-            SETTINGS_ID => open_privacy_pane(PrivacyPane::InputMonitoring),
-            ACCESSIBILITY_ID => open_privacy_pane(PrivacyPane::Accessibility),
+            SETTINGS_ID => self.open_capability_settings(CapabilityId::InputMonitoring),
+            ACCESSIBILITY_ID => self.open_capability_settings(CapabilityId::Accessibility),
             ENABLE_BINDINGS_ID => {
                 self.request_permissions_in_order(true);
             }

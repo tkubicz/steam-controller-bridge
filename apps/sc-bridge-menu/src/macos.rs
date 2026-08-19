@@ -15,15 +15,15 @@ use bridge_runtime::{
     UpdateResumePoll, VirtualHidConfig,
 };
 use desktop_bindings::{default_store_path, parse_store, BindingStore};
-use desktop_input::{
-    input_monitoring_access, preflight_accessibility_access, preflight_post_event_access,
-    request_accessibility_access, request_input_monitoring_access, request_post_event_access,
-    PermissionState,
-};
+use desktop_input::DesktopSession;
 use macos_virtual_hid::ENABLE_VIRTUAL_HID_ENV;
 use objc2::{rc::Retained, MainThreadMarker};
 use objc2_app_kit::{
     NSApplicationActivationOptions, NSImage, NSRunningApplication, NSStatusBarButton,
+};
+use platform_capabilities::{
+    current_provider, CapabilityContext, CapabilityId, CapabilityRequestOutcome, CapabilityState,
+    PlatformCapabilities, Remedy,
 };
 use serde::{Deserialize, Serialize};
 use tiny_skia::{
@@ -59,15 +59,15 @@ use logging::{copy_diagnostics, StatusLogger};
 #[cfg(test)]
 use support::bundled_virtual_hid_helper_path_from;
 use support::{
-    bindings_file_fingerprint, load_settings, permission_stage, picker_roster,
-    resolve_picker_commit, save_settings, settings_path, AppSettings, BindingsFileFingerprint,
-    OutputPreference, PermissionStage, PickerEventMailbox, OVERLAY_HOLD_CHOICES,
+    bindings_file_fingerprint, load_settings, picker_roster, resolve_picker_commit, save_settings,
+    settings_path, AppSettings, BindingsFileFingerprint, OutputPreference, PickerEventMailbox,
+    OVERLAY_HOLD_CHOICES,
 };
 pub(crate) use system::open_path;
 #[cfg(feature = "updater")]
 pub(crate) use system::reveal_path;
 use system::{
-    activate_child_application, copy_text, launch_bindings_editor, open_privacy_pane, PrivacyPane,
+    activate_child_application, apply_capability_remedy, copy_text, launch_bindings_editor,
 };
 
 #[cfg(test)]
@@ -243,7 +243,8 @@ struct MenuApp {
     bindings_path: PathBuf,
     binding_store: BindingStore,
     bindings_file_fingerprint: BindingsFileFingerprint,
-    permission_request_pending: Option<PermissionStage>,
+    capabilities: Box<dyn PlatformCapabilities>,
+    permission_request_pending: Option<CapabilityId>,
     shutting_down: bool,
     overlay: OverlayHost,
     /// Bounded/coalesced wheel events from the runtime thread.
@@ -320,6 +321,7 @@ impl MenuApp {
         }
         save_settings(&settings_path, &settings)?;
         let bindings_file_fingerprint = bindings_file_fingerprint(&bindings_path)?;
+        let capabilities = current_provider().map_err(|error| error.to_string())?;
         // The dormant gate never resolves or launches the helper. Once enabled,
         // a bad packaged path still names the saved value that unsticks launch.
         let effective_output = settings
@@ -381,6 +383,7 @@ impl MenuApp {
             bindings_path,
             binding_store,
             bindings_file_fingerprint,
+            capabilities,
             permission_request_pending: None,
             shutting_down: false,
             overlay: OverlayHost::new(),
