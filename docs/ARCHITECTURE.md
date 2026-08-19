@@ -105,6 +105,13 @@ pretending live access exists. All project-authored crates forbid unsafe code
 except `power-monitor`, whose documented IOKit/Core Foundation ownership
 is isolated behind a safe typed API.
 
+The portable-core allowlist is enforced by
+[`tools/check-portable-core.py`](../tools/check-portable-core.py). Platform
+selection is permitted only in a facade root or its backend modules; ordinary
+files added anywhere else in an allowlisted crate are checked automatically for
+target configuration, native dependencies and APIs, and recognizable platform
+data-path literals.
+
 The core host depends on the public bridge-device contract, not a board model.
 Zero-configuration serial discovery uses the exact USB product marker
 `Steam Controller Bridge`, followed by a required protocol-v1 Hello handshake;

@@ -51,6 +51,8 @@ jobs:
           components: rustfmt, clippy
       - name: Check Python tool invariants
         run: |
+          python3 tools/check-portable-core.py --self-test
+          python3 tools/check-portable-core.py
           python3 tools/check-workspace-versions.py --self-test
           python3 tools/check-workspace-versions.py
           python3 tools/build-macos-app.py --self-test

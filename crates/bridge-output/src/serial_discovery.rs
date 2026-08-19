@@ -88,7 +88,7 @@ mod tests {
 
     fn bridge_device(product: &str) -> SerialDeviceInfo {
         SerialDeviceInfo {
-            path: "/dev/cu.usbmodem11201".to_owned(),
+            path: platform::TEST_CALLOUT_PORT.to_owned(),
             vendor_id: Some(0x1209),
             product_id: Some(0x0001),
             serial_number: Some("TESTSERIAL0000".to_owned()),
