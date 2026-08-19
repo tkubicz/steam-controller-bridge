@@ -15,14 +15,12 @@ desktop-input = { path = "../desktop-input" }
 gamepad-state = { path = "../gamepad-state" }
 macos-virtual-hid = { path = "../macos-virtual-hid" }
 profile-picker = { path = "../profile-picker" }
+power-monitor = { path = "../power-monitor" }
 recording = { path = "../recording" }
 serde_json.workspace = true
 steam-controller-discovery = { path = "../steam-controller-discovery" }
 steam-controller-device = { path = "../steam-controller-device" }
 steam-controller-protocol = { path = "../steam-controller-protocol" }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-power-monitor = { path = "../power-monitor" }
 
 [lints]
 workspace = true

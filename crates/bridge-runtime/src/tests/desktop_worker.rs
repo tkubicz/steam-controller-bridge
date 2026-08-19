@@ -597,6 +597,8 @@ fn only_an_already_unusable_output_is_excused_from_neutral_before_release() {
     let (ack, _receiver) = mpsc::channel();
     assert!(ActiveExit::StoppedWithAck(ack).requires_neutral_before_release());
     let (ack, _receiver) = mpsc::channel();
+    assert!(ActiveExit::SuspendedWithAck(ack).requires_neutral_before_release());
+    let (ack, _receiver) = mpsc::channel();
     assert!(
         ActiveExit::OutputChange(OutputSelection::Mock, ack).requires_neutral_before_release(),
         "a backend switch must still neutralize the output it is replacing"

@@ -70,7 +70,6 @@ use desktop_bindings::{
 use desktop_bindings::{PadMotionMode, PadSample};
 use gamepad_state::OutputSuppression;
 pub use macos_virtual_hid::VirtualHidConfig;
-#[cfg(target_os = "macos")]
 use power_monitor::{PowerEvent, PowerMonitor};
 use profile_picker::{Picker, PickerEvents, PickerInput};
 // Frontends drive the wheel and render it, so its vocabulary is part of the
@@ -162,11 +161,6 @@ impl OutputRetryState {
     }
 }
 
-/// The longest a `WillSleep` callback waits for the hardware teardown before
-/// acknowledging the sleep anyway. Far above every bounded teardown step, and
-/// safely under macOS's ~30-second forced-sleep cap.
-#[cfg(target_os = "macos")]
-const SLEEP_TEARDOWN_ACK_TIMEOUT: Duration = Duration::from_secs(25);
 /// How long after a system wake before hardware discovery may reopen ports.
 /// A bridge device's CDC interface can re-enumerate for a couple of seconds after a
 /// wake, and touching it mid-setup is the window the sleep suspension exists

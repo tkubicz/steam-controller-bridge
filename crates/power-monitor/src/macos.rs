@@ -3,6 +3,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
 use std::sync::{mpsc, Arc, Barrier};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use objc2_core_foundation::{kCFRunLoopCommonModes, CFRetained, CFRunLoop};
 use objc2_io_kit::{
@@ -16,11 +17,7 @@ use objc2_io_kit::{
 
 use crate::{PowerEvent, PowerMonitorError};
 
-impl PowerMonitorError {
-    fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
-    }
-}
+const SLEEP_TEARDOWN_DEADLINE: Duration = Duration::from_secs(25);
 
 /// Owns the `IOKit` notification port and the run-loop thread that services it.
 pub struct PowerMonitor {
@@ -68,6 +65,11 @@ impl PowerMonitor {
             run_loop: Some(run_loop),
             thread: Some(thread),
         })
+    }
+
+    #[must_use]
+    pub const fn is_live(&self) -> bool {
+        true
     }
 }
 
@@ -215,7 +217,13 @@ unsafe extern "C-unwind" fn system_power_event(
     match message_type {
         K_IO_MESSAGE_CAN_SYSTEM_SLEEP => allow_power_change(state.root_port, message_argument),
         K_IO_MESSAGE_SYSTEM_WILL_SLEEP => {
-            invoke_handler(state, PowerEvent::WillSleep, "will_sleep");
+            invoke_handler(
+                state,
+                PowerEvent::WillSleep {
+                    deadline: Instant::now() + SLEEP_TEARDOWN_DEADLINE,
+                },
+                "will_sleep",
+            );
             allow_power_change(state.root_port, message_argument);
         }
         K_IO_MESSAGE_SYSTEM_HAS_POWERED_ON => {
@@ -248,6 +256,7 @@ mod tests {
     #[test]
     fn registration_and_teardown_are_owned_by_the_safe_wrapper() {
         let monitor = PowerMonitor::new(|_| {}).expect("register system-power notifications");
+        assert!(monitor.is_live());
         drop(monitor);
     }
 }
