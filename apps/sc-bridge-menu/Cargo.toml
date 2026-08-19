@@ -30,6 +30,7 @@ tempfile.workspace = true
 clap.workspace = true
 desktop-input = { path = "../../crates/desktop-input" }
 macos-virtual-hid = { path = "../../crates/macos-virtual-hid" }
+platform-capabilities = { path = "../../crates/platform-capabilities" }
 eframe = { workspace = true, optional = true }
 ui-theme = { path = "../../crates/ui-theme", optional = true }
 # Only the editor draws a controller; the overlay does not.

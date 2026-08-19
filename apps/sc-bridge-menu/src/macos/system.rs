@@ -19,29 +19,27 @@ pub(super) fn copy_text(value: &str) -> Result<(), String> {
     }
 }
 
-/// The System Settings panes a user has to visit when macOS has already
-/// recorded a refusal, since nothing can re-prompt after that.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PrivacyPane {
-    InputMonitoring,
-    Accessibility,
-}
-
-pub(super) const fn privacy_pane_url(pane: PrivacyPane) -> &'static str {
-    match pane {
-        PrivacyPane::InputMonitoring => {
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
+pub(super) fn apply_capability_remedy(id: CapabilityId, remedy: &Remedy) {
+    match remedy {
+        Remedy::OpenUrl(url) => {
+            let pane = match id {
+                CapabilityId::InputMonitoring => "InputMonitoring",
+                CapabilityId::PostEvent | CapabilityId::Accessibility => "Accessibility",
+                _ => "Capability",
+            };
+            eprintln!("level=info event=privacy_pane_opened pane={pane}");
+            if let Err(error) = open_path(url) {
+                eprintln!("cannot open {pane} settings: {error}");
+            }
         }
-        PrivacyPane::Accessibility => {
-            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        Remedy::RequestFromSystem => {
+            eprintln!("cannot apply {id:?} remedy without an interactive provider request");
         }
-    }
-}
-
-pub(super) fn open_privacy_pane(pane: PrivacyPane) {
-    eprintln!("level=info event=privacy_pane_opened pane={pane:?}");
-    if let Err(error) = open_path(privacy_pane_url(pane)) {
-        eprintln!("cannot open {pane:?} settings: {error}");
+        Remedy::Instructions { text, command } => {
+            eprintln!(
+                "cannot display {id:?} instructions in the macOS menu: {text}; command={command:?}"
+            );
+        }
     }
 }
 

@@ -1,7 +1,9 @@
 use super::icons::{template_icon_rgba, ICON_HEIGHT, ICON_RENDER_SCALE, ICON_WIDTH};
 use super::logging::diagnostics_text;
+use super::permissions::{
+    advance_permission_requirements, menu_capability_context, should_open_remedy, PermissionAdvance,
+};
 use super::support::{default_overlay_hold_ms, SETTINGS_VERSION};
-use super::system::privacy_pane_url;
 use super::tray::{hardware_status_rows, HardwareStatusRow};
 use super::*;
 
@@ -71,45 +73,138 @@ fn optional_hardware_rows_have_the_requested_pipeline_order() {
 }
 
 #[test]
-fn a_refused_permission_sends_the_user_to_the_pane_that_grants_it() {
+fn a_blocked_capability_sends_the_user_to_the_pane_that_grants_it() {
     // macOS shows no dialog once it has recorded a refusal, so the pane is
     // the only remaining route, and each permission has its own.
-    assert_ne!(
-        privacy_pane_url(PrivacyPane::InputMonitoring),
-        privacy_pane_url(PrivacyPane::Accessibility),
-    );
-    for pane in [PrivacyPane::InputMonitoring, PrivacyPane::Accessibility] {
-        let url = privacy_pane_url(pane);
+    let provider = platform_capabilities::MacOsCapabilities::new();
+    let input = provider
+        .remedy(CapabilityId::InputMonitoring)
+        .expect("input monitoring should have a remedy");
+    let accessibility = provider
+        .remedy(CapabilityId::Accessibility)
+        .expect("accessibility should have a remedy");
+
+    assert_ne!(input, accessibility);
+    for remedy in [input, accessibility] {
+        let Remedy::OpenUrl(url) = remedy else {
+            panic!("macOS permission remedies must open System Settings");
+        };
         assert!(
             url.starts_with("x-apple.systempreferences:"),
-            "{pane:?} must open System Settings, got {url}",
+            "permission remedy must open System Settings, got {url}",
         );
     }
 }
 
 #[test]
-fn permission_requests_never_skip_input_monitoring_or_post_event() {
-    assert_eq!(
-        permission_stage(false, false, false),
-        PermissionStage::InputMonitoring
+fn menu_context_preserves_the_selected_output_and_desktop_requirements() {
+    let bridge = menu_capability_context(OutputPreference::BridgeDevice, true);
+    assert_ne!(
+        bridge.virtual_output_enabled,
+        bridge.serial_output_or_firmware_enabled,
     );
+    assert!(bridge.controller_input_enabled);
+    assert!(bridge.serial_output_or_firmware_enabled);
+    assert!(!bridge.virtual_output_enabled);
+    assert!(bridge.desktop_bindings_enabled);
+    assert_eq!(bridge.desktop_session, Some(DesktopSession::MacOs));
+
+    let virtual_hid = menu_capability_context(OutputPreference::VirtualHid, true);
     assert_eq!(
-        permission_stage(false, true, true),
-        PermissionStage::InputMonitoring
+        virtual_hid.serial_output_or_firmware_enabled,
+        cfg!(feature = "updater"),
     );
+    assert!(virtual_hid.virtual_output_enabled);
+}
+
+#[test]
+fn menu_permission_flow_stops_before_a_later_ordered_requirement() {
+    let requirements = vec![platform_capabilities::RequirementGroup::Ordered(vec![
+        CapabilityId::InputMonitoring,
+        CapabilityId::PostEvent,
+        CapabilityId::Accessibility,
+    ])];
+    let mut provider = platform_capabilities::ScriptedProvider::new(requirements)
+        .with_state(CapabilityId::InputMonitoring, CapabilityState::Satisfied)
+        .with_state(
+            CapabilityId::PostEvent,
+            CapabilityState::Blocked {
+                reason: "post-event denied".to_owned(),
+            },
+        )
+        .with_state(
+            CapabilityId::Accessibility,
+            CapabilityState::Blocked {
+                reason: "accessibility denied".to_owned(),
+            },
+        )
+        .with_request_state(
+            CapabilityId::PostEvent,
+            CapabilityState::Blocked {
+                reason: "post-event denied".to_owned(),
+            },
+        );
+
+    let result = advance_permission_requirements(&mut provider, &CapabilityContext::default())
+        .expect("the scripted request should succeed");
+    assert!(matches!(
+        result,
+        PermissionAdvance::Waiting(CapabilityRequestOutcome {
+            id: CapabilityId::PostEvent,
+            current: CapabilityState::Blocked { .. },
+            ..
+        })
+    ));
+    assert!(!provider
+        .calls()
+        .contains(&platform_capabilities::CapabilityCall::Probe(
+            CapabilityId::Accessibility
+        )));
+}
+
+#[test]
+fn only_explicit_non_pending_requests_open_a_settings_remedy() {
+    let pending = CapabilityRequestOutcome {
+        id: CapabilityId::InputMonitoring,
+        previous: CapabilityState::Undecided,
+        current: CapabilityState::Pending,
+        remedy: Some(Remedy::OpenUrl("settings://input".to_owned())),
+    };
+    let blocked = CapabilityRequestOutcome {
+        id: CapabilityId::PostEvent,
+        previous: CapabilityState::Undecided,
+        current: CapabilityState::Blocked {
+            reason: "denied".to_owned(),
+        },
+        remedy: Some(Remedy::OpenUrl("settings://post-event".to_owned())),
+    };
+
+    assert!(!should_open_remedy(false, &blocked));
+    assert!(!should_open_remedy(true, &pending));
+    assert!(should_open_remedy(true, &blocked));
+}
+
+#[test]
+fn satisfied_requirements_activate_without_requesting_any_capability() {
+    let requirements = vec![platform_capabilities::RequirementGroup::Ordered(vec![
+        CapabilityId::InputMonitoring,
+        CapabilityId::PostEvent,
+        CapabilityId::Accessibility,
+    ])];
+    let mut provider = platform_capabilities::ScriptedProvider::new(requirements)
+        .with_state(CapabilityId::InputMonitoring, CapabilityState::Satisfied)
+        .with_state(CapabilityId::PostEvent, CapabilityState::Satisfied)
+        .with_state(CapabilityId::Accessibility, CapabilityState::Satisfied);
+
     assert_eq!(
-        permission_stage(true, false, false),
-        PermissionStage::PostEvent
+        advance_permission_requirements(&mut provider, &CapabilityContext::default())
+            .expect("satisfied requirements should not fail"),
+        PermissionAdvance::Ready,
     );
-    assert_eq!(
-        permission_stage(true, false, true),
-        PermissionStage::PostEvent
-    );
-    assert_eq!(
-        permission_stage(true, true, false),
-        PermissionStage::Accessibility
-    );
-    assert_eq!(permission_stage(true, true, true), PermissionStage::Ready);
+    assert!(provider
+        .calls()
+        .iter()
+        .all(|call| !matches!(call, platform_capabilities::CapabilityCall::Request(_))));
 }
 
 fn temporary_settings_path(name: &str) -> PathBuf {
