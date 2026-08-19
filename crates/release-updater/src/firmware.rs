@@ -12,8 +12,9 @@ use bridge_output::{
 };
 
 use crate::{
-    firmware_matches_target, firmware_target, verify_artifact, ArtifactError,
-    FirmwareInstallerStrategy, FirmwareRelease, FirmwareTargetDescriptor,
+    current_removable_volume_locator, firmware_matches_target, firmware_target, verify_artifact,
+    ArtifactError, FirmwareInstallerStrategy, FirmwareRelease, FirmwareTargetDescriptor,
+    MacOsVolumeLocator, RemovableVolumeLocator, VolumeScanError,
 };
 const AUTOMATIC_BOOTLOADER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTOMATIC_BOOTLOADER_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -89,6 +90,8 @@ pub const fn classify_firmware_release(
 pub enum FirmwareFlashError {
     #[error("firmware I/O failed: {0}")]
     Io(#[from] io::Error),
+    #[error("removable-volume discovery failed: {0}")]
+    VolumeScan(#[from] VolumeScanError),
     #[error("cannot select firmware device: {0}")]
     Discovery(String),
     #[error("unsupported bootloader board: {0}")]
@@ -167,14 +170,14 @@ fn target_device_kind(
 pub fn discover_bootloader_volumes(
     root: &Path,
 ) -> Result<Vec<BootloaderVolume>, FirmwareFlashError> {
+    discover_bootloader_volumes_with(&MacOsVolumeLocator::with_root(root))
+}
+
+fn discover_bootloader_volumes_with(
+    locator: &dyn RemovableVolumeLocator,
+) -> Result<Vec<BootloaderVolume>, FirmwareFlashError> {
     let mut volumes = Vec::new();
-    let entries = match fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(volumes),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in entries {
-        let root = entry?.path();
+    for root in locator.enumerate()?.roots {
         let info_path = root.join("INFO_UF2.TXT");
         let Ok(info) = fs::read_to_string(info_path) else {
             continue;
@@ -227,7 +230,6 @@ pub fn validate_uf2(path: &Path, expected_family: u32) -> Result<(), FirmwareFla
 pub fn flash_firmware(
     artifact_path: &Path,
     release: &FirmwareRelease,
-    volumes_root: &Path,
     cancelled: &AtomicBool,
     progress: impl FnMut(FirmwareFlashProgress),
 ) -> Result<FirmwareInfo, FirmwareFlashError> {
@@ -237,24 +239,19 @@ pub fn flash_firmware(
     match target.installer {
         FirmwareInstallerStrategy::Uf2 => validate_uf2(artifact_path, target.uf2_family_id)?,
     }
+    let volume_locator = current_removable_volume_locator()?;
     let mut adapter = NativeFlashAdapter {
         started: Instant::now(),
         firmware_session: None,
         target,
+        volume_locator,
     };
-    flash_with_adapter(
-        &mut adapter,
-        artifact_path,
-        release,
-        volumes_root,
-        cancelled,
-        progress,
-    )
+    flash_with_adapter(&mut adapter, artifact_path, release, cancelled, progress)
 }
 
 trait FlashAdapter {
     fn devices(&mut self) -> Result<Vec<FirmwareDevice>, FirmwareFlashError>;
-    fn volumes(&mut self, root: &Path) -> Result<Vec<BootloaderVolume>, FirmwareFlashError>;
+    fn volumes(&mut self) -> Result<Vec<BootloaderVolume>, FirmwareFlashError>;
     fn firmware_info(&mut self, path: &str) -> Result<FirmwareInfo, FirmwareFlashError>;
     fn enter_uf2_bootloader(&mut self, path: &str) -> Result<(), FirmwareFlashError>;
     fn release_device(&mut self) {}
@@ -276,6 +273,7 @@ struct NativeFlashAdapter {
     started: Instant,
     firmware_session: Option<(String, SerialOutput)>,
     target: &'static FirmwareTargetDescriptor,
+    volume_locator: Box<dyn RemovableVolumeLocator>,
 }
 
 impl NativeFlashAdapter {
@@ -305,8 +303,8 @@ impl FlashAdapter for NativeFlashAdapter {
         discover_firmware_devices(self.target)
     }
 
-    fn volumes(&mut self, root: &Path) -> Result<Vec<BootloaderVolume>, FirmwareFlashError> {
-        discover_bootloader_volumes(root)
+    fn volumes(&mut self) -> Result<Vec<BootloaderVolume>, FirmwareFlashError> {
+        discover_bootloader_volumes_with(self.volume_locator.as_ref())
     }
 
     fn firmware_info(&mut self, path: &str) -> Result<FirmwareInfo, FirmwareFlashError> {
@@ -371,7 +369,6 @@ fn flash_with_adapter(
     adapter: &mut impl FlashAdapter,
     artifact_path: &Path,
     release: &FirmwareRelease,
-    volumes_root: &Path,
     cancelled: &AtomicBool,
     mut progress: impl FnMut(FirmwareFlashProgress),
 ) -> Result<FirmwareInfo, FirmwareFlashError> {
@@ -382,14 +379,7 @@ fn flash_with_adapter(
         return Err(FirmwareFlashError::Cancelled);
     }
 
-    let prepared = prepare_flash_target(
-        adapter,
-        target,
-        release,
-        volumes_root,
-        cancelled,
-        &mut progress,
-    )?;
+    let prepared = prepare_flash_target(adapter, target, release, cancelled, &mut progress)?;
     if cancelled.load(Ordering::Acquire) {
         return Err(FirmwareFlashError::CancelledInBootloader);
     }
@@ -454,11 +444,10 @@ fn prepare_flash_target(
     adapter: &mut impl FlashAdapter,
     target: &FirmwareTargetDescriptor,
     release: &FirmwareRelease,
-    volumes_root: &Path,
     cancelled: &AtomicBool,
     progress: &mut impl FnMut(FirmwareFlashProgress),
 ) -> Result<PreparedFlash, FirmwareFlashError> {
-    let mounted = select_supported_volume(adapter.volumes(volumes_root)?, target)?;
+    let mounted = select_supported_volume(adapter.volumes()?, target)?;
     let devices = adapter.devices()?;
     let mut expected_serial = None;
     let mut automatic_entry_may_have_started = false;
@@ -528,7 +517,6 @@ fn prepare_flash_target(
                     progress(FirmwareFlashProgress::WaitingForBootloader);
                     match wait_for_volume(
                         adapter,
-                        volumes_root,
                         cancelled,
                         AUTOMATIC_BOOTLOADER_WAIT_TIMEOUT,
                         true,
@@ -551,7 +539,6 @@ fn prepare_flash_target(
             progress(FirmwareFlashProgress::ManualRecovery);
             wait_for_volume(
                 adapter,
-                volumes_root,
                 cancelled,
                 MANUAL_BOOTLOADER_WAIT_TIMEOUT,
                 automatic_entry_may_have_started,
@@ -732,7 +719,6 @@ fn supported_board_id(board_id: &str, target: &FirmwareTargetDescriptor) -> bool
 
 fn wait_for_volume(
     adapter: &mut impl FlashAdapter,
-    root: &Path,
     cancelled: &AtomicBool,
     timeout: Duration,
     entered_bootloader: bool,
@@ -747,7 +733,7 @@ fn wait_for_volume(
                 FirmwareFlashError::Cancelled
             });
         }
-        if let Some(volume) = select_supported_volume(adapter.volumes(root)?, target)? {
+        if let Some(volume) = select_supported_volume(adapter.volumes()?, target)? {
             return Ok(volume);
         }
         adapter.wait(Duration::from_millis(250));
@@ -853,7 +839,7 @@ mod tests {
                 .unwrap_or_else(|| self.default_devices.clone()))
         }
 
-        fn volumes(&mut self, _root: &Path) -> Result<Vec<BootloaderVolume>, FirmwareFlashError> {
+        fn volumes(&mut self) -> Result<Vec<BootloaderVolume>, FirmwareFlashError> {
             Ok(self
                 .volumes
                 .pop_front()
@@ -979,7 +965,6 @@ mod tests {
             &mut adapter,
             Path::new("firmware.uf2"),
             &release(7),
-            Path::new("/Volumes"),
             &AtomicBool::new(false),
             |state| progress.push(state),
         )
@@ -1014,7 +999,6 @@ mod tests {
             &mut adapter,
             Path::new("firmware.uf2"),
             &release(2),
-            Path::new("/Volumes"),
             &AtomicBool::new(false),
             |state| progress.push(state),
         )
@@ -1057,7 +1041,6 @@ mod tests {
                 &mut adapter,
                 Path::new("firmware.uf2"),
                 &release(3),
-                Path::new("/Volumes"),
                 &AtomicBool::new(false),
                 |state| progress.push(state),
             )
@@ -1097,7 +1080,6 @@ mod tests {
             &mut adapter,
             Path::new("firmware.uf2"),
             &release(3),
-            Path::new("/Volumes"),
             &AtomicBool::new(false),
             |state| progress.push(state),
         )
@@ -1135,7 +1117,6 @@ mod tests {
                 &mut adapter,
                 Path::new("firmware.uf2"),
                 &release(3),
-                Path::new("/Volumes"),
                 &AtomicBool::new(false),
                 |_| {},
             ),
@@ -1166,7 +1147,6 @@ mod tests {
             &mut adapter,
             Path::new("firmware.uf2"),
             &release(2),
-            Path::new("/Volumes"),
             &AtomicBool::new(false),
             |state| progress.push(state),
         )
@@ -1195,7 +1175,6 @@ mod tests {
             &mut adapter,
             Path::new("firmware.uf2"),
             &release(2),
-            Path::new("/Volumes"),
             &cancelled,
             |state| {
                 if state == FirmwareFlashProgress::ManualRecovery {
@@ -1230,7 +1209,6 @@ mod tests {
                 &mut adapter,
                 Path::new("firmware.uf2"),
                 &release(2),
-                Path::new("/Volumes"),
                 &AtomicBool::new(false),
                 |_| {},
             ),
@@ -1260,7 +1238,6 @@ mod tests {
                 &mut adapter,
                 Path::new("firmware.uf2"),
                 &release(2),
-                Path::new("/Volumes"),
                 &AtomicBool::new(false),
                 |_| {},
             )
@@ -1291,7 +1268,6 @@ mod tests {
             &mut adapter,
             Path::new("firmware.uf2"),
             &release(2),
-            Path::new("/Volumes"),
             &cancelled,
             |state| {
                 if state == FirmwareFlashProgress::WaitingForBootloader {
@@ -1341,7 +1317,6 @@ mod tests {
                 &mut adapter,
                 Path::new("firmware.uf2"),
                 &release(8),
-                Path::new("/Volumes"),
                 &AtomicBool::new(false),
                 |_| {},
             )
@@ -1369,7 +1344,6 @@ mod tests {
                 &mut pending,
                 Path::new("firmware.uf2"),
                 &release(8),
-                Path::new("/Volumes"),
                 &AtomicBool::new(false),
                 |_| {},
             ),
@@ -1398,7 +1372,6 @@ mod tests {
             &mut adapter,
             Path::new("firmware.uf2"),
             &release(2),
-            Path::new("/Volumes"),
             &AtomicBool::new(false),
             |_| {},
         )
@@ -1423,7 +1396,6 @@ mod tests {
                 &mut entry,
                 Path::new("firmware.uf2"),
                 &release(9),
-                Path::new("/Volumes"),
                 &AtomicBool::new(false),
                 |_| {},
             ),
@@ -1438,7 +1410,6 @@ mod tests {
                 &mut mounted_and_factory,
                 Path::new("firmware.uf2"),
                 &release(9),
-                Path::new("/Volumes"),
                 &AtomicBool::new(false),
                 |_| {},
             ),
@@ -1455,7 +1426,6 @@ mod tests {
                 &mut mismatch,
                 Path::new("firmware.uf2"),
                 &release(9),
-                Path::new("/Volumes"),
                 &AtomicBool::new(false),
                 |_| {},
             ),
@@ -1474,7 +1444,6 @@ mod tests {
                 &mut adapter,
                 Path::new("firmware.uf2"),
                 &release(10),
-                Path::new("/Volumes"),
                 &AtomicBool::new(true),
                 |_| {},
             ),
@@ -1576,7 +1545,6 @@ mod tests {
                 &mut adapter,
                 Path::new("firmware.uf2"),
                 &release(3),
-                Path::new("/Volumes"),
                 &AtomicBool::new(false),
                 |_| {},
             ),

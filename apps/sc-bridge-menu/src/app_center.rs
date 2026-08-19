@@ -869,16 +869,10 @@ impl AppCenter {
                 }
                 let session = ActiveFirmwareSession::begin(session_active);
                 let flash_result = catch_unwind(AssertUnwindSafe(|| {
-                    flash_firmware(
-                        &path,
-                        &manifest.firmware,
-                        Path::new("/Volumes"),
-                        &cancel,
-                        |progress| {
-                            let _ = sender.send(WorkerEvent::FirmwareProgress(progress));
-                            ctx.request_repaint();
-                        },
-                    )
+                    flash_firmware(&path, &manifest.firmware, &cancel, |progress| {
+                        let _ = sender.send(WorkerEvent::FirmwareProgress(progress));
+                        ctx.request_repaint();
+                    })
                 }));
                 let resume_result = host.request(UpdateOperation::ResumeBridge);
                 drop(session);
