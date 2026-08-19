@@ -5,10 +5,12 @@ use std::time::{Duration, Instant};
 
 use hidapi::{BusType, DeviceInfo, HidApi, HidDevice};
 
-use crate::{DeviceError, DeviceEvent, HidDeviceInfo, RawHidReport, PROTEUS_VENDOR_ID};
+use crate::{
+    ControllerSession, ControllerSessionStep, DeviceError, DeviceEvent, HidDeviceInfo,
+    PROTEUS_VENDOR_ID,
+};
 
 const REPORT_BUFFER_SIZE: usize = 1024;
-const RECONNECT_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Enumerates all HID collections using a stable path-based ordering.
 ///
@@ -120,12 +122,10 @@ pub struct HidSession {
     /// [`ControllerEnumerator`] starts without one and builds it lazily, so a
     /// session that never loses its device never pays for a second enumeration.
     api: Option<HidApi>,
-    selected: HidDeviceInfo,
+    lifecycle: ControllerSession,
     _ownership_lock: File,
     device: Option<HidDevice>,
     started: Instant,
-    next_reconnect: Instant,
-    pending_connected: bool,
 }
 
 impl HidSession {
@@ -210,18 +210,16 @@ impl HidSession {
         let now = Instant::now();
         Self {
             api,
-            selected,
+            lifecycle: ControllerSession::new(selected),
             _ownership_lock: ownership_lock,
             device: Some(device),
             started: now,
-            next_reconnect: now,
-            pending_connected: true,
         }
     }
 
     #[must_use]
     pub fn device_info(&self) -> &HidDeviceInfo {
-        &self.selected
+        self.lifecycle.device_info()
     }
 
     /// Sends the single SDL-compatible Steam Controller 2 lizard-off setting.
@@ -235,13 +233,14 @@ impl HidSession {
     /// Returns [`DeviceError`] for an unsupported collection, disconnected
     /// session, or native HID write failure.
     pub fn suppress_lizard_mode(&self) -> Result<(), DeviceError> {
-        if !self.selected.supports_lizard_mode_suppression() {
+        let selected = self.device_info();
+        if !selected.supports_lizard_mode_suppression() {
             return Err(DeviceError::UnsupportedLizardSuppressionTarget {
-                vendor_id: self.selected.vendor_id,
-                product_id: self.selected.product_id,
-                usage_page: self.selected.usage_page,
-                usage: self.selected.usage,
-                interface_number: self.selected.interface_number,
+                vendor_id: selected.vendor_id,
+                product_id: selected.product_id,
+                usage_page: selected.usage_page,
+                usage: selected.usage,
+                interface_number: selected.interface_number,
             });
         }
         let device = self.device.as_ref().ok_or(DeviceError::NotConnected)?;
@@ -263,13 +262,14 @@ impl HidSession {
     /// Returns [`DeviceError`] for an unsupported collection, disconnected
     /// session, or native HID output failure.
     pub fn set_rumble(&self, low_frequency: u16, high_frequency: u16) -> Result<(), DeviceError> {
-        if !self.selected.supports_rumble() {
+        let selected = self.device_info();
+        if !selected.supports_rumble() {
             return Err(DeviceError::UnsupportedRumbleTarget {
-                vendor_id: self.selected.vendor_id,
-                product_id: self.selected.product_id,
-                usage_page: self.selected.usage_page,
-                usage: self.selected.usage,
-                interface_number: self.selected.interface_number,
+                vendor_id: selected.vendor_id,
+                product_id: selected.product_id,
+                usage_page: selected.usage_page,
+                usage: selected.usage,
+                interface_number: selected.interface_number,
             });
         }
         let device = self.device.as_ref().ok_or(DeviceError::NotConnected)?;
@@ -302,13 +302,14 @@ impl HidSession {
         side: steam_controller_protocol::PadHapticSide,
         gain: steam_controller_protocol::PadHapticGain,
     ) -> Result<(), DeviceError> {
-        if !self.selected.supports_pad_haptics() {
+        let selected = self.device_info();
+        if !selected.supports_pad_haptics() {
             return Err(DeviceError::UnsupportedPadHapticsTarget {
-                vendor_id: self.selected.vendor_id,
-                product_id: self.selected.product_id,
-                usage_page: self.selected.usage_page,
-                usage: self.selected.usage,
-                interface_number: self.selected.interface_number,
+                vendor_id: selected.vendor_id,
+                product_id: selected.product_id,
+                usage_page: selected.usage_page,
+                usage: selected.usage,
+                interface_number: selected.interface_number,
             });
         }
         let device = self.device.as_ref().ok_or(DeviceError::NotConnected)?;
@@ -336,13 +337,14 @@ impl HidSession {
     /// Returns [`DeviceError`] for an unsupported collection, disconnected
     /// session, or native HID write failure.
     pub fn power_off(&self) -> Result<(), DeviceError> {
-        if !self.selected.supports_power_off() {
+        let selected = self.device_info();
+        if !selected.supports_power_off() {
             return Err(DeviceError::UnsupportedPowerOffTarget {
-                vendor_id: self.selected.vendor_id,
-                product_id: self.selected.product_id,
-                usage_page: self.selected.usage_page,
-                usage: self.selected.usage,
-                interface_number: self.selected.interface_number,
+                vendor_id: selected.vendor_id,
+                product_id: selected.product_id,
+                usage_page: selected.usage_page,
+                usage: selected.usage,
+                interface_number: selected.interface_number,
             });
         }
         let device = self.device.as_ref().ok_or(DeviceError::NotConnected)?;
@@ -365,77 +367,94 @@ impl HidSession {
     ///
     /// Returns [`DeviceError`] if refreshing or opening the HID backend fails.
     pub fn poll(&mut self, timeout: Duration) -> Result<Option<DeviceEvent>, DeviceError> {
-        if self.pending_connected {
-            self.pending_connected = false;
-            return Ok(Some(DeviceEvent::Connected(self.selected.clone())));
+        match self.lifecycle.next_step(self.started.elapsed(), timeout) {
+            ControllerSessionStep::Event(event) => Ok(Some(event)),
+            ControllerSessionStep::Read { timeout } => Ok(self.read_report(timeout)),
+            ControllerSessionStep::Wait { duration } => {
+                thread::sleep(duration);
+                Ok(None)
+            }
+            ControllerSessionStep::Retry => self.retry_connect(),
+            ControllerSessionStep::Close => {
+                self.close_native_handles();
+                self.lifecycle.closed();
+                Ok(None)
+            }
+            ControllerSessionStep::Stopped => Ok(None),
         }
+    }
 
-        if self.device.is_none() {
-            if Instant::now() < self.next_reconnect {
-                thread::sleep(
-                    timeout.min(
-                        self.next_reconnect
-                            .saturating_duration_since(Instant::now()),
-                    ),
-                );
-                return Ok(None);
-            }
-            // Reconnection is the only thing this session needs a context for,
-            // so a session opened through ControllerEnumerator builds one here
-            // rather than at open time.
-            if self.api.is_none() {
-                self.api = Some(HidApi::new().map_err(|error| backend_error(&error))?);
-            }
-            let selected = self.selected.clone();
-            let api = self
-                .api
-                .as_mut()
-                .ok_or_else(|| DeviceError::Backend("HID reconnect context missing".to_owned()))?;
-            api.refresh_devices()
-                .map_err(|error| backend_error(&error))?;
-            let candidate = api
-                .device_list()
-                .find(|candidate| matches_selected(candidate, &selected))
-                .cloned();
-            if let Some(candidate) = candidate {
-                let opened = candidate.open_device(api).ok();
-                if let Some(device) = opened {
-                    self.selected = convert_info(&candidate);
-                    self.device = Some(device);
-                    return Ok(Some(DeviceEvent::Connected(self.selected.clone())));
-                }
-                self.next_reconnect = Instant::now() + RECONNECT_INTERVAL;
-                return Ok(None);
-            }
-            self.next_reconnect = Instant::now() + RECONNECT_INTERVAL;
-            return Ok(None);
+    /// Closes the native HID device and reconnect context while the ownership
+    /// lock is still held. Calling this more than once is harmless.
+    pub fn shutdown(&mut self) {
+        self.lifecycle.request_shutdown();
+        if self
+            .lifecycle
+            .next_step(self.started.elapsed(), Duration::ZERO)
+            == ControllerSessionStep::Close
+        {
+            self.close_native_handles();
+            self.lifecycle.closed();
         }
+    }
 
+    fn read_report(&mut self, timeout: Duration) -> Option<DeviceEvent> {
         let mut buffer = [0_u8; REPORT_BUFFER_SIZE];
         let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-        let Some(device) = self.device.as_ref() else {
-            return Ok(None);
-        };
-        let read_result = device.read_timeout(&mut buffer, timeout_ms);
-        match read_result {
-            Ok(0) => Ok(None),
-            Ok(length) => {
-                let data = buffer[..length].to_vec();
-                Ok(Some(DeviceEvent::Report(RawHidReport {
-                    timestamp: self.started.elapsed(),
-                    report_id: data.first().copied().unwrap_or(0),
-                    data,
-                    source_device_id: self.selected.id.clone(),
-                    transport: self.selected.transport.clone(),
-                    dropped_reports: 0,
-                })))
-            }
+        let device = self.device.as_ref()?;
+        match device.read_timeout(&mut buffer, timeout_ms) {
+            Ok(0) => None,
+            Ok(length) => Some(self.lifecycle.report(
+                self.started.elapsed(),
+                buffer[..length].to_vec(),
+                0,
+            )),
             Err(_) => {
                 self.device = None;
-                self.next_reconnect = Instant::now() + RECONNECT_INTERVAL;
-                Ok(Some(DeviceEvent::Disconnected))
+                Some(self.lifecycle.disconnected(self.started.elapsed()))
             }
         }
+    }
+
+    fn retry_connect(&mut self) -> Result<Option<DeviceEvent>, DeviceError> {
+        // Reconnection is the only thing this session needs a context for, so
+        // a session opened through ControllerEnumerator builds one here rather
+        // than at open time.
+        if self.api.is_none() {
+            self.api = Some(HidApi::new().map_err(|error| backend_error(&error))?);
+        }
+        let selected = self.lifecycle.device_info().clone();
+        let api = self
+            .api
+            .as_mut()
+            .ok_or_else(|| DeviceError::Backend("HID reconnect context missing".to_owned()))?;
+        api.refresh_devices()
+            .map_err(|error| backend_error(&error))?;
+        let candidate = api
+            .device_list()
+            .find(|candidate| matches_selected(candidate, &selected))
+            .cloned();
+        let Some(candidate) = candidate else {
+            self.lifecycle.retry_failed(self.started.elapsed());
+            return Ok(None);
+        };
+        let Some(device) = candidate.open_device(api).ok() else {
+            self.lifecycle.retry_failed(self.started.elapsed());
+            return Ok(None);
+        };
+        self.device = Some(device);
+        Ok(Some(self.lifecycle.reconnected(convert_info(&candidate))))
+    }
+
+    fn close_native_handles(&mut self) {
+        self.device = None;
+        self.api = None;
+    }
+}
+
+impl Drop for HidSession {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 

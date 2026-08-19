@@ -2,6 +2,10 @@
 
 use std::time::Duration;
 
+mod session;
+
+pub use session::{ControllerSession, ControllerSessionStep, CONTROLLER_RECONNECT_INTERVAL};
+
 pub const LIZARD_MODE_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 pub const PROTEUS_VENDOR_ID: u16 = 0x28de;
 pub const PROTEUS_PRODUCT_ID: u16 = 0x1304;
@@ -454,6 +458,8 @@ impl HidSession {
     pub fn power_off(&self) -> Result<(), DeviceError> {
         Err(DeviceError::UnsupportedPlatform)
     }
+
+    pub fn shutdown(&mut self) {}
 }
 
 #[cfg(test)]
