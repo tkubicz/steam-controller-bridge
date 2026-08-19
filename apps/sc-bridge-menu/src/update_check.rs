@@ -171,35 +171,42 @@ pub struct UpdateChecker {
     manifest: Option<ReleaseManifestV1>,
     result: Option<Receiver<Result<CatalogRefresh, CatalogRefreshError>>>,
     running_version: Version,
+    started: bool,
 }
 
 impl UpdateChecker {
     pub fn new() -> Self {
-        let mut checker = Self {
+        Self {
             manifest: None,
             result: None,
             running_version: running_version(),
-        };
-        let Ok(context) = update_context() else {
-            return checker;
-        };
-        checker.manifest = context.cache().load_manifest(context.keys()).ok();
-        let obsolete_application = checker
+            started: false,
+        }
+    }
+
+    fn start_with(&mut self, context: impl FnOnce() -> Result<UpdateContext, String>) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        let Ok(context) = context() else { return };
+        self.manifest = context.cache().load_manifest(context.keys()).ok();
+        let obsolete_application = self
             .manifest
             .as_ref()
-            .filter(|manifest| checker.running_version >= manifest.application_version)
+            .filter(|manifest| self.running_version >= manifest.application_version)
             .map(|manifest| manifest.application.artifact.clone());
         if !context
             .cache()
-            .check_due(context.check_interval(), &checker.running_version)
+            .check_due(context.check_interval(), &self.running_version)
         {
             if let Some(artifact) = obsolete_application {
                 let cache = context.cache().clone();
                 thread::spawn(move || remove_obsolete_application_cache(&cache, &artifact));
             }
-            return checker;
+            return;
         }
-        let running_version = checker.running_version.clone();
+        let running_version = self.running_version.clone();
         let (sender, result) = mpsc::sync_channel(1);
         thread::spawn(move || {
             if let Some(artifact) = obsolete_application {
@@ -214,11 +221,11 @@ impl UpdateChecker {
                 &running_version,
             ));
         });
-        checker.result = Some(result);
-        checker
+        self.result = Some(result);
     }
 
     pub fn poll(&mut self) {
+        self.start_with(update_context);
         let Some(result) = self.result.as_ref() else {
             return;
         };
@@ -254,6 +261,12 @@ impl UpdateChecker {
             return true;
         }
         firmware_update_available(&self.running_version, &manifest.firmware, firmware)
+    }
+}
+
+impl Default for UpdateChecker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -373,5 +386,14 @@ mod tests {
 
         assert!(!artifact_path.exists());
         assert!(!cache.root().join("staged-app").exists());
+    }
+
+    #[test]
+    fn automatic_update_start_is_one_shot_even_when_setup_is_unavailable() {
+        let mut checker = UpdateChecker::new();
+        checker.start_with(|| Err("unavailable".to_owned()));
+        checker.start_with(|| panic!("a second start must not replace in-flight state"));
+
+        assert!(checker.started);
     }
 }

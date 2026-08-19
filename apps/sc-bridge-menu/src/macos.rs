@@ -1,19 +1,14 @@
-use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::bindings_recovery::load_store_or_recover;
 use bridge_runtime::{
-    format_status_diagnostics, BridgeHandle, BridgeRuntime, BridgeStatus, OutputChangePoll,
-    OutputSelection, PendingOutputChange, PendingUpdateResume, PickerConfig, PickerEvent,
-    PickerRoster, PuckDockAction, RuntimeConfig, StatusLogRecord, StatusLogTracker,
-    UpdateResumePoll, VirtualHidConfig,
+    format_status_diagnostics, BridgeStatus, OutputChangePoll, PickerEvent, PuckDockAction,
+    StatusLogRecord, StatusLogTracker, UpdateResumePoll,
 };
-use desktop_bindings::{default_store_path, parse_store, BindingStore};
+use desktop_bindings::{parse_store, BindingStore};
 use desktop_input::DesktopSession;
 use menu_shell::{activate_child_application, copy_text, open_path};
 use objc2::{rc::Retained, MainThreadMarker};
@@ -22,7 +17,6 @@ use platform_capabilities::{
     current_provider, CapabilityContext, CapabilityId, CapabilityRequestOutcome, CapabilityState,
     PlatformCapabilities,
 };
-use serde::{Deserialize, Serialize};
 use tiny_skia::{
     FillRule, LineCap, LineJoin, Paint, Path as SkiaPath, PathBuilder, Pixmap, Stroke, Transform,
 };
@@ -35,14 +29,14 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 use winit::window::WindowId;
 
-use crate::app_center_host::AppCenterHost;
 use crate::app_center_protocol::{
     AppCenterPage, UpdateOperation, UpdateRequest, UpdateResponse, UpdateResult,
 };
+use crate::app_state::{
+    bindings_file_fingerprint, picker_roster, resolve_picker_commit, save_settings,
+    AppCenterRecovery, AppState, OutputPreference, OVERLAY_HOLD_CHOICES,
+};
 use crate::model::{HardwareRowVisibility, MenuModel, RunAction, TrayState};
-use crate::overlay_host::OverlayHost;
-#[cfg(feature = "updater")]
-use crate::update_check::UpdateChecker;
 
 mod icons;
 mod logging;
@@ -56,11 +50,7 @@ use icons::{template_icon, NativeTrayIcons};
 use logging::{copy_diagnostics, StatusLogger};
 #[cfg(test)]
 use support::bundled_virtual_hid_helper_path_from;
-use support::{
-    bindings_file_fingerprint, load_settings, picker_roster, resolve_picker_commit, save_settings,
-    settings_path, AppSettings, BindingsFileFingerprint, OutputPreference, PickerEventMailbox,
-    OVERLAY_HOLD_CHOICES,
-};
+use support::output_selection;
 use system::{apply_capability_remedy, launch_bindings_editor};
 
 #[cfg(test)]
@@ -113,7 +103,6 @@ const OUTPUT_BRIDGE_DEVICE_ID: &str = "output-bridge-device";
 const OUTPUT_VIRTUAL_HID_ID: &str = "output-virtual-hid";
 const OVERLAY_ENABLED_ID: &str = "profile-overlay-enabled";
 const OVERLAY_HOLD_PREFIX: &str = "profile-overlay-hold:";
-const PICKER_EVENT_MAILBOX_CAPACITY: usize = 32;
 pub fn run(virtual_hid_enabled: bool) -> Result<(), String> {
     // A menu bar app has no windows and no Dock icon, and it must not take
     // focus when it starts. Winit otherwise runs as a regular foreground app
@@ -220,7 +209,7 @@ fn binding_profile_menu_items(
 }
 
 struct MenuApp {
-    runtime: BridgeHandle,
+    state: AppState,
     tray: Option<TrayIcon>,
     tray_icons: Option<NativeTrayIcons>,
     items: Option<MenuItems>,
@@ -229,139 +218,34 @@ struct MenuApp {
     last_recovery_problem: Option<String>,
     next_poll: Instant,
     logger: StatusLogger,
-    settings: AppSettings,
-    /// Product-surface gate only; macOS still enforces the helper entitlement.
-    virtual_hid_enabled: bool,
-    settings_path: PathBuf,
-    bindings_path: PathBuf,
-    binding_store: BindingStore,
-    bindings_file_fingerprint: BindingsFileFingerprint,
-    capabilities: Box<dyn PlatformCapabilities>,
-    permission_request_pending: Option<CapabilityId>,
-    shutting_down: bool,
-    overlay: OverlayHost,
-    /// Bounded/coalesced wheel events from the runtime thread.
-    picker_events: Arc<PickerEventMailbox>,
-    /// Profile ids in the order last published to the wheel, so a
-    /// `Commit { index }` resolves against what the wheel showed even if the
-    /// store has changed since.
-    picker_roster_ids: Vec<String>,
-    picker_roster_revision: u64,
-    /// Monotonic count of roster publish attempts. A revision is spent even by
-    /// a publish whose acknowledgement failed, because the runtime may still
-    /// apply it late - reusing the number would let events from that stale
-    /// generation resolve against a newer id list.
-    picker_roster_publishes: u64,
-    /// The last roster publish failed; retried on the next status poll so a
-    /// transient runtime stall cannot leave the wheel dead until the next
-    /// unrelated store change.
-    picker_roster_dirty: bool,
-    /// Spawned bindings editors, reaped on the status poll once they exit.
-    editor_children: Vec<std::process::Child>,
-    /// About, Changelog, and Updates share one child native event loop. The
-    /// host also owns the updater's safety-ordered bridge lifecycle requests.
-    app_center_host: AppCenterHost,
-    app_center_recovery: AppCenterRecovery,
-    output_change: Option<(PendingOutputChange, OutputPreference)>,
-    output_change_problem: Option<String>,
-    #[cfg(feature = "updater")]
-    update_checker: UpdateChecker,
-    #[cfg(feature = "updater")]
-    last_update_available: Option<bool>,
-}
-
-enum AppCenterRecovery {
-    Idle,
-    Waiting {
-        request: PendingUpdateResume,
-        error: Option<String>,
-    },
-    Failed(String),
-}
-
-impl AppCenterRecovery {
-    fn problem(&self) -> Option<&str> {
-        match self {
-            Self::Waiting {
-                error: Some(error), ..
-            }
-            | Self::Failed(error) => Some(error),
-            Self::Idle | Self::Waiting { error: None, .. } => None,
-        }
-    }
 }
 
 impl MenuApp {
     /// Builds the menu app, or reports `None` when an unreadable profile store
     /// was presented to the user and they chose to quit rather than reset it.
     fn new(proxy: EventLoopProxy<()>, virtual_hid_enabled: bool) -> Result<Option<Self>, String> {
-        let settings_path = settings_path()?;
-        let (settings, warning) = load_settings(&settings_path);
-        if let Some(warning) = warning {
-            eprintln!("level=warn event=settings_load_failed message={warning:?} action=defaults");
-        }
-        let bindings_path = default_store_path()?;
-        let Some(binding_store) = load_store_or_recover(&bindings_path)? else {
+        let state = AppState::load(
+            virtual_hid_enabled,
+            || current_provider().map_err(|error| error.to_string()),
+            |settings_path, preference| {
+                output_selection(preference).map_err(|error| {
+                    format!(
+                        "cannot start with the saved gamepad output: {error}. Run the packaged \
+                         application, or set \"output\" to \"bridge_device\" in {}",
+                        settings_path.display()
+                    )
+                })
+            },
+            move || {
+                let _ = proxy.send_event(());
+            },
+        )?;
+        let Some(state) = state else {
             return Ok(None);
         };
-        let active_profile = binding_store
-            .profile_by_id(&settings.active_binding_profile)
-            .or_else(|| binding_store.profiles.first())
-            .cloned();
-        let mut settings = settings;
-        if let Some(profile) = &active_profile {
-            settings.active_binding_profile.clone_from(&profile.id);
-        }
-        save_settings(&settings_path, &settings)?;
-        let bindings_file_fingerprint = bindings_file_fingerprint(&bindings_path)?;
-        let capabilities = current_provider().map_err(|error| error.to_string())?;
-        // The dormant gate never resolves or launches the helper. Once enabled,
-        // a bad packaged path still names the saved value that unsticks launch.
-        let effective_output = settings
-            .output
-            .when_virtual_hid_enabled(virtual_hid_enabled);
-        let output = effective_output.runtime_selection().map_err(|error| {
-            format!(
-                "cannot start with the saved gamepad output: {error}. Run the packaged \
-                 application, or set \"output\" to \"bridge_device\" in {}",
-                settings_path.display()
-            )
-        })?;
-        let config = RuntimeConfig {
-            output,
-            idle_shutdown_timeout: settings
-                .idle_shutdown_minutes
-                .map(|minutes| Duration::from_secs(minutes * 60)),
-            puck_dock_action: if settings.power_off_on_puck {
-                PuckDockAction::PowerOff
-            } else {
-                PuckDockAction::LeaveOn
-            },
-            binding_profile: active_profile,
-            profile_picker: settings.picker_config(),
-            picker_roster: picker_roster(&binding_store, &settings.active_binding_profile, 0),
-            ..RuntimeConfig::default()
-        };
-        let profile_ids = binding_store
-            .profiles
-            .iter()
-            .map(|profile| profile.id.clone())
-            .collect();
-        // The runtime thread hands wheel events over and wakes the event loop
-        // immediately. Polling for them would add up to POLL_INTERVAL of lag
-        // between letting go of Quick Access and the wheel appearing.
-        let picker_events = Arc::new(PickerEventMailbox::default());
-        let picker_sender = Arc::clone(&picker_events);
-        let runtime = BridgeRuntime::spawn_with_picker(
-            config,
-            Box::new(move |event| {
-                if picker_sender.publish(event) {
-                    let _ = proxy.send_event(());
-                }
-            }),
-        );
+        let logger = StatusLogger::new()?;
         Ok(Some(Self {
-            runtime,
+            state,
             tray: None,
             tray_icons: None,
             items: None,
@@ -369,32 +253,7 @@ impl MenuApp {
             last_model: None,
             last_recovery_problem: None,
             next_poll: Instant::now(),
-            logger: StatusLogger::new()?,
-            settings,
-            virtual_hid_enabled,
-            settings_path,
-            bindings_path,
-            binding_store,
-            bindings_file_fingerprint,
-            capabilities,
-            permission_request_pending: None,
-            shutting_down: false,
-            overlay: OverlayHost::new(),
-            picker_events,
-            // Matches the roster just handed to the runtime in `config`.
-            picker_roster_ids: profile_ids,
-            picker_roster_revision: 0,
-            picker_roster_publishes: 0,
-            picker_roster_dirty: false,
-            editor_children: Vec::new(),
-            app_center_host: AppCenterHost::new(),
-            app_center_recovery: AppCenterRecovery::Idle,
-            output_change: None,
-            output_change_problem: None,
-            #[cfg(feature = "updater")]
-            update_checker: UpdateChecker::new(),
-            #[cfg(feature = "updater")]
-            last_update_available: None,
+            logger,
         }))
     }
 }
@@ -441,12 +300,13 @@ impl ApplicationHandler for MenuApp {
         self.drain_picker_events();
         self.flush_overlay_diagnostics();
         if Instant::now() >= self.next_poll {
-            if self.picker_roster_dirty {
+            if self.state.picker_roster_dirty {
                 // A publish the runtime failed to acknowledge left the wheel
                 // one generation behind; retry until it lands.
                 self.sync_picker_roster();
             }
-            self.editor_children
+            self.state
+                .editor_children
                 .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
             self.handle_update_requests(event_loop);
             self.reload_bindings_if_changed();

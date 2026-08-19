@@ -6,6 +6,8 @@ mod app_center;
 mod app_center_host;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod app_center_protocol;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod app_state;
 #[cfg(all(target_os = "macos", feature = "editor"))]
 mod bindings_editor;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]

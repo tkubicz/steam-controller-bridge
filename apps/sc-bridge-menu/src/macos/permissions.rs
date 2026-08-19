@@ -57,7 +57,7 @@ pub(super) const fn should_open_remedy(
 
 impl MenuApp {
     fn capability_context(&self) -> CapabilityContext {
-        menu_capability_context(self.settings.output, self.virtual_hid_enabled)
+        menu_capability_context(self.state.settings.output, self.state.virtual_hid_enabled)
     }
 
     /// Walks the active capability requirements, asking macOS for whatever is missing.
@@ -68,13 +68,13 @@ impl MenuApp {
     /// only way forward -- but opening it on every launch would be obnoxious.
     pub(super) fn request_permissions_in_order(&mut self, interactive: bool) {
         let context = self.capability_context();
-        match advance_permission_requirements(self.capabilities.as_mut(), &context) {
+        match advance_permission_requirements(self.state.capabilities.as_mut(), &context) {
             Ok(PermissionAdvance::Ready) => {
-                self.permission_request_pending = None;
+                self.state.permission_request_pending = None;
                 self.activate_desktop_bindings_after_permission();
             }
             Ok(PermissionAdvance::Waiting(outcome)) => {
-                self.permission_request_pending = Some(outcome.id);
+                self.state.permission_request_pending = Some(outcome.id);
                 if should_open_remedy(interactive, &outcome) {
                     if let Some(remedy) = &outcome.remedy {
                         apply_capability_remedy(outcome.id, remedy);
@@ -86,14 +86,14 @@ impl MenuApp {
     }
 
     pub(super) fn observe_permission_grants(&mut self) {
-        let Some(id) = self.permission_request_pending else {
+        let Some(id) = self.state.permission_request_pending else {
             return;
         };
-        if !self.capabilities.probe(id).is_met() {
+        if !self.state.capabilities.probe(id).is_met() {
             return;
         }
 
-        self.permission_request_pending = None;
+        self.state.permission_request_pending = None;
         match id {
             CapabilityId::InputMonitoring => {
                 eprintln!("level=info event=input_monitoring_permission_granted");
@@ -117,13 +117,13 @@ impl MenuApp {
     }
 
     pub(super) fn open_capability_settings(&self, id: CapabilityId) {
-        if let Some(remedy) = self.capabilities.remedy(id) {
+        if let Some(remedy) = self.state.capabilities.remedy(id) {
             apply_capability_remedy(id, &remedy);
         }
     }
 
     pub(super) fn activate_desktop_bindings_after_permission(&self) {
-        if let Err(error) = self.runtime.request_enable_desktop_bindings() {
+        if let Err(error) = self.state.runtime.request_enable_desktop_bindings() {
             eprintln!("cannot activate desktop bindings after Accessibility grant: {error}");
         }
     }

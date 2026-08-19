@@ -8,23 +8,25 @@ impl MenuApp {
     pub(super) fn update_setting_checkmarks(&self) {
         if let Some(items) = &self.items {
             for (minutes, item) in &items.idle_shutdown {
-                item.set_checked(*minutes == self.settings.idle_shutdown_minutes);
+                item.set_checked(*minutes == self.state.settings.idle_shutdown_minutes);
             }
-            items.puck_dock.set_checked(self.settings.power_off_on_puck);
+            items
+                .puck_dock
+                .set_checked(self.state.settings.power_off_on_puck);
             items
                 .output_bridge_device
-                .set_checked(self.settings.output == OutputPreference::BridgeDevice);
+                .set_checked(self.state.settings.output == OutputPreference::BridgeDevice);
             items
                 .output_virtual_hid
-                .set_checked(self.settings.output == OutputPreference::VirtualHid);
+                .set_checked(self.state.settings.output == OutputPreference::VirtualHid);
             for (profile_id, item) in &items.binding_profiles {
-                item.set_checked(*profile_id == self.settings.active_binding_profile);
+                item.set_checked(*profile_id == self.state.settings.active_binding_profile);
             }
             items
                 .overlay_enabled
-                .set_checked(self.settings.profile_overlay_enabled);
+                .set_checked(self.state.settings.profile_overlay_enabled);
             for (milliseconds, item) in &items.overlay_hold {
-                item.set_checked(*milliseconds == self.settings.profile_overlay_hold_ms);
+                item.set_checked(*milliseconds == self.state.settings.profile_overlay_hold_ms);
             }
         }
     }
@@ -36,8 +38,9 @@ impl MenuApp {
     /// claims a wheel the running bridge does not have.
     pub(super) fn apply_picker_settings(&mut self) -> bool {
         let accepted = match self
+            .state
             .runtime
-            .request_set_picker_config(self.settings.picker_config())
+            .request_set_picker_config(self.state.settings.picker_config())
         {
             Ok(()) => true,
             Err(error) => {
@@ -46,13 +49,13 @@ impl MenuApp {
             }
         };
         if accepted {
-            if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+            if let Err(error) = save_settings(&self.state.settings_path, &self.state.settings) {
                 eprintln!("cannot save profile wheel settings: {error}");
             }
         }
         self.update_setting_checkmarks();
-        if !self.settings.profile_overlay_enabled {
-            self.overlay.stop();
+        if !self.state.settings.profile_overlay_enabled {
+            self.state.overlay.stop();
         }
         accepted
     }
@@ -68,39 +71,41 @@ impl MenuApp {
         // guarantees any concurrently emitted old event is already in this
         // bounded mailbox, so the second drain resolves it against old ids.
         self.drain_picker_events();
-        let previous_revision = self.picker_roster_revision;
+        let previous_revision = self.state.picker_roster_revision;
         // Spent regardless of outcome: a publish whose acknowledgement timed
         // out may still be applied by the runtime later, and that stale
         // generation must never share a number with a successful one.
-        let revision = self.picker_roster_publishes.wrapping_add(1);
-        self.picker_roster_publishes = revision;
+        let revision = self.state.picker_roster_publishes.wrapping_add(1);
+        self.state.picker_roster_publishes = revision;
         let roster = picker_roster(
-            &self.binding_store,
-            &self.settings.active_binding_profile,
+            &self.state.binding_store,
+            &self.state.settings.active_binding_profile,
             revision,
         );
-        if let Err(error) = self.runtime.set_picker_roster(roster) {
+        if let Err(error) = self.state.runtime.set_picker_roster(roster) {
             eprintln!("cannot publish the profile wheel roster: {error}");
-            self.picker_roster_dirty = true;
+            self.state.picker_roster_dirty = true;
             return;
         }
-        self.picker_roster_dirty = false;
+        self.state.picker_roster_dirty = false;
         self.drain_picker_events();
         // A drained commit can synchronously select a profile and publish a
         // newer roster. That nested update supersedes this one.
-        if self.picker_roster_revision != previous_revision {
+        if self.state.picker_roster_revision != previous_revision {
             return;
         }
         // The snapshot a later `Commit { index }` resolves against, taken at
         // the same moment the runtime and the overlay learn this roster.
-        self.picker_roster_ids = self
+        self.state.picker_roster_ids = self
+            .state
             .binding_store
             .profiles
             .iter()
             .map(|profile| profile.id.clone())
             .collect();
-        self.picker_roster_revision = revision;
+        self.state.picker_roster_revision = revision;
         let names = self
+            .state
             .binding_store
             .profiles
             .iter()
@@ -109,11 +114,12 @@ impl MenuApp {
         // `picker_config` is already sanitized; the default is for the wheel
         // switched off, where the overlay still wants a plausible layout.
         let sectors = self
+            .state
             .settings
             .picker_config()
             .unwrap_or_default()
             .sectors_per_page;
-        self.overlay.set_roster(names, roster.active, sectors);
+        self.state.overlay.set_roster(names, roster.active, sectors);
     }
 
     /// Handles everything the runtime's wheel reports.
@@ -126,31 +132,31 @@ impl MenuApp {
         // A queued event can be drained after a quit has begun or after the
         // wheel was switched off; neither may resurrect the overlay process
         // the teardown just killed.
-        if self.shutting_down {
+        if self.state.shutting_down {
             return;
         }
-        if !self.settings.profile_overlay_enabled {
-            self.overlay.stop();
+        if !self.state.settings.profile_overlay_enabled {
+            self.state.overlay.stop();
             return;
         }
         match event {
-            PickerEvent::Preparing => self.overlay.start(),
+            PickerEvent::Preparing => self.state.overlay.start(),
             PickerEvent::Opened {
                 selected,
                 page,
                 roster_revision,
-            } if roster_revision == self.picker_roster_revision => {
+            } if roster_revision == self.state.picker_roster_revision => {
                 // Idempotent, and the safety net for a `Preparing` that never
                 // arrived because reports were sparse enough to skip past it.
-                self.overlay.start();
-                self.overlay.show(selected, page);
+                self.state.overlay.start();
+                self.state.overlay.show(selected, page);
             }
             PickerEvent::Selection {
                 selected,
                 page,
                 roster_revision,
-            } if roster_revision == self.picker_roster_revision => {
-                self.overlay.show(selected, page);
+            } if roster_revision == self.state.picker_roster_revision => {
+                self.state.overlay.show(selected, page);
             }
             PickerEvent::Opened {
                 roster_revision, ..
@@ -160,7 +166,7 @@ impl MenuApp {
             } => {
                 eprintln!(
                     "level=warn event=stale_profile_wheel_visual_event event_revision={roster_revision} current_revision={}",
-                    self.picker_roster_revision
+                    self.state.picker_roster_revision
                 );
             }
             PickerEvent::Commit {
@@ -169,21 +175,21 @@ impl MenuApp {
             } => {
                 // Killing the process takes the window with it, which is both
                 // instant and the only way to leave nothing behind.
-                self.overlay.stop();
+                self.state.overlay.stop();
                 // Resolved against the roster the wheel was actually showing,
                 // not the live store: an external edit can reorder the store
                 // between the publish and the press, and an index into the
                 // wrong list would silently apply the wrong profile.
                 let Some(profile_id) = resolve_picker_commit(
-                    &self.picker_roster_ids,
-                    self.picker_roster_revision,
+                    &self.state.picker_roster_ids,
+                    self.state.picker_roster_revision,
                     roster_revision,
                     index,
                 )
                 .map(str::to_owned) else {
                     eprintln!(
                         "level=warn event=profile_wheel_commit_unknown index={index} event_revision={roster_revision} current_revision={}",
-                        self.picker_roster_revision
+                        self.state.picker_roster_revision
                     );
                     return;
                 };
@@ -195,19 +201,19 @@ impl MenuApp {
             // normally has nothing to stop, being far shorter than the half
             // hold that starts one, and the runtime has already replayed its
             // press to the desktop bindings.
-            PickerEvent::Dismissed | PickerEvent::TriggerTapped => self.overlay.stop(),
+            PickerEvent::Dismissed | PickerEvent::TriggerTapped => self.state.overlay.stop(),
         }
     }
 
     pub(super) fn drain_picker_events(&mut self) {
-        while let Some(event) = self.picker_events.pop() {
+        while let Some(event) = self.state.picker_events.pop() {
             self.handle_picker_event(event);
         }
     }
 
     pub(super) fn flush_overlay_diagnostics(&mut self) {
-        let mut diagnostics = self.overlay.drain_diagnostics();
-        diagnostics.extend(self.app_center_host.drain_diagnostics());
+        let mut diagnostics = self.state.overlay.drain_diagnostics();
+        diagnostics.extend(self.state.app_center_host.drain_diagnostics());
         if let Err(error) = self.logger.write_diagnostics(&diagnostics) {
             eprintln!("cannot write child-process diagnostics: {error}");
         }
@@ -220,33 +226,35 @@ impl MenuApp {
     /// feature switched off while the wheel is up, either of which would
     /// otherwise strand a window on screen.
     pub(super) fn sync_overlay_process(&mut self, status: &BridgeStatus) {
-        let wanted = self.settings.profile_overlay_enabled && status.controller.connected;
-        if !wanted && self.overlay.is_running() {
-            self.overlay.stop();
+        let wanted = self.state.settings.profile_overlay_enabled && status.controller.connected;
+        if !wanted && self.state.overlay.is_running() {
+            self.state.overlay.stop();
         }
     }
 
     pub(super) fn select_binding_profile(&mut self, profile_id: &str) {
         if self
+            .state
             .settings
             .active_binding_profile
             .eq_ignore_ascii_case(profile_id)
         {
             return;
         }
-        let Some(profile) = self.binding_store.profile_by_id(profile_id).cloned() else {
+        let Some(profile) = self.state.binding_store.profile_by_id(profile_id).cloned() else {
             return;
         };
         if let Err(error) = self
+            .state
             .runtime
             .request_set_binding_profile(Some(profile.clone()))
         {
             eprintln!("cannot switch binding profile: {error}");
             return;
         }
-        self.settings.active_binding_profile = profile.id;
+        self.state.settings.active_binding_profile = profile.id;
         self.update_setting_checkmarks();
-        if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+        if let Err(error) = save_settings(&self.state.settings_path, &self.state.settings) {
             eprintln!("cannot save active binding profile: {error}");
         }
         // The wheel highlights whichever profile is in use, so it has to learn
@@ -256,17 +264,17 @@ impl MenuApp {
     }
 
     pub(super) fn reload_bindings_if_changed(&mut self) {
-        let fingerprint = match bindings_file_fingerprint(&self.bindings_path) {
+        let fingerprint = match bindings_file_fingerprint(&self.state.bindings_path) {
             Ok(fingerprint) => fingerprint,
             Err(error) => {
                 eprintln!("cannot inspect binding profiles: {error}");
                 return;
             }
         };
-        if fingerprint == self.bindings_file_fingerprint {
+        if fingerprint == self.state.bindings_file_fingerprint {
             return;
         }
-        let bytes = match fs::read(&self.bindings_path) {
+        let bytes = match fs::read(&self.state.bindings_path) {
             Ok(bytes) => bytes,
             Err(error) => {
                 eprintln!("cannot reload binding profiles: {error}");
@@ -283,15 +291,17 @@ impl MenuApp {
             }
         };
         let profile = store
-            .profile_by_id(&self.settings.active_binding_profile)
+            .profile_by_id(&self.state.settings.active_binding_profile)
             .or_else(|| store.profiles.first())
             .cloned();
         if let Some(profile) = profile {
             let current = self
+                .state
                 .binding_store
-                .profile_by_id(&self.settings.active_binding_profile);
+                .profile_by_id(&self.state.settings.active_binding_profile);
             if current != Some(&profile) {
                 if let Err(error) = self
+                    .state
                     .runtime
                     .request_set_binding_profile(Some(profile.clone()))
                 {
@@ -300,13 +310,16 @@ impl MenuApp {
                 }
                 self.request_permissions_in_order(false);
             }
-            self.settings.active_binding_profile.clone_from(&profile.id);
-            if let Err(error) = save_settings(&self.settings_path, &self.settings) {
+            self.state
+                .settings
+                .active_binding_profile
+                .clone_from(&profile.id);
+            if let Err(error) = save_settings(&self.state.settings_path, &self.state.settings) {
                 eprintln!("cannot save active binding profile: {error}");
             }
         }
-        self.binding_store = store;
-        self.bindings_file_fingerprint = fingerprint;
+        self.state.binding_store = store;
+        self.state.bindings_file_fingerprint = fingerprint;
         if let Err(error) = self.rebuild_bindings_submenu() {
             eprintln!("cannot rebuild Profiles menu: {error}");
         }
@@ -319,9 +332,12 @@ impl MenuApp {
         let Some(items) = self.items.as_mut() else {
             return Ok(());
         };
+        let binding_profiles = binding_profile_menu_items(
+            &self.state.binding_store,
+            &self.state.settings.active_binding_profile,
+        );
         while items.bindings_submenu.remove_at(0).is_some() {}
-        items.binding_profiles =
-            binding_profile_menu_items(&self.binding_store, &self.settings.active_binding_profile);
+        items.binding_profiles = binding_profiles;
         for (_, item) in &items.binding_profiles {
             items
                 .bindings_submenu
