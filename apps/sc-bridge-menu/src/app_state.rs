@@ -77,6 +77,46 @@ pub(super) const SETTINGS_VERSION: u32 = 4;
 /// Hold durations the menu offers, in milliseconds.
 pub(super) const OVERLAY_HOLD_CHOICES: [u64; 2] = [2_000, 3_000];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleShutdownChoice {
+    Never,
+    FiveMinutes,
+    TenMinutes,
+    FifteenMinutes,
+    ThirtyMinutes,
+}
+
+impl IdleShutdownChoice {
+    pub const ALL: [Self; 5] = [
+        Self::Never,
+        Self::FiveMinutes,
+        Self::TenMinutes,
+        Self::FifteenMinutes,
+        Self::ThirtyMinutes,
+    ];
+
+    pub const fn minutes(self) -> Option<u64> {
+        match self {
+            Self::Never => None,
+            Self::FiveMinutes => Some(5),
+            Self::TenMinutes => Some(10),
+            Self::FifteenMinutes => Some(15),
+            Self::ThirtyMinutes => Some(30),
+        }
+    }
+
+    const fn from_minutes(minutes: Option<u64>) -> Option<Self> {
+        match minutes {
+            None => Some(Self::Never),
+            Some(5) => Some(Self::FiveMinutes),
+            Some(10) => Some(Self::TenMinutes),
+            Some(15) => Some(Self::FifteenMinutes),
+            Some(30) => Some(Self::ThirtyMinutes),
+            Some(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum OutputPreference {
@@ -235,7 +275,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
-            idle_shutdown_minutes: Some(15),
+            idle_shutdown_minutes: IdleShutdownChoice::FifteenMinutes.minutes(),
             power_off_on_puck: false,
             output: OutputPreference::BridgeDevice,
             active_binding_profile: default_binding_profile_id(),
@@ -372,9 +412,7 @@ pub(super) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
     match parsed {
         Ok(mut settings)
             if matches!(settings.version, 1 | 2 | 3 | SETTINGS_VERSION)
-                && settings
-                    .idle_shutdown_minutes
-                    .is_none_or(|minutes| matches!(minutes, 5 | 10 | 15 | 30)) =>
+                && IdleShutdownChoice::from_minutes(settings.idle_shutdown_minutes).is_some() =>
         {
             settings.version = SETTINGS_VERSION;
             // A hand-edited hold falls back alone rather than dragging every
