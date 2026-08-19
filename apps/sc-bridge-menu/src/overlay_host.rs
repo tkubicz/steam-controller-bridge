@@ -320,6 +320,7 @@ impl Drop for OverlayHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_child::{diagnostic, read_to_end};
 
     #[test]
     fn a_host_with_no_child_swallows_every_command() {
@@ -413,7 +414,7 @@ mod tests {
     fn repeated_child_cycles_reap_processes_and_join_writers() {
         let mut host = OverlayHost::new();
         for index in 0..32 {
-            let mut command = Command::new("/bin/cat");
+            let mut command = read_to_end();
             host.spawn_command(&mut command).unwrap();
             host.set_roster(vec![format!("Profile {index}")], Some(0), 8);
             host.show(0, 0);
@@ -426,8 +427,7 @@ mod tests {
     #[test]
     fn child_stderr_and_host_lifecycle_events_are_collected() {
         let mut host = OverlayHost::new();
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "echo 'level=info event=overlay_test_child' >&2"]);
+        let mut command = diagnostic("level=info event=overlay_test_child");
         host.spawn_command(&mut command).unwrap();
         assert!(host.child.as_mut().unwrap().wait().unwrap().success());
         assert!(!host.reap_if_exited());

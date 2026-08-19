@@ -1,4 +1,4 @@
-use std::io::{BufReader, Write as _};
+use std::io::{BufReader, Read, Write as _};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::{self, JoinHandle};
@@ -123,6 +123,23 @@ impl AppCenterHost {
     }
 
     fn spawn_command(&mut self, command: &mut Command) -> Result<(), String> {
+        self.spawn_command_with_streams(command, |stdout, stderr| (stdout, stderr))
+    }
+
+    #[cfg(test)]
+    fn spawn_test_command(&mut self, command: &mut Command) -> Result<(), String> {
+        self.spawn_command_with_streams(command, |stdout, stderr| (stderr, stdout))
+    }
+
+    fn spawn_command_with_streams<R, D>(
+        &mut self,
+        command: &mut Command,
+        select_streams: impl FnOnce(std::process::ChildStdout, std::process::ChildStderr) -> (R, D),
+    ) -> Result<(), String>
+    where
+        R: Read + Send + 'static,
+        D: Read + Send + 'static,
+    {
         if self.child.is_some() || self.suspension_owner.is_some() {
             return Err("an app window session is already active".to_owned());
         }
@@ -146,13 +163,14 @@ impl AppCenterHost {
             cleanup_child(&mut child);
             return Err("app window stderr is unavailable".to_owned());
         };
+        let (requests, diagnostics_stream) = select_streams(output, stderr);
 
         let request_sender = self.request_sender.clone();
         let diagnostics = self.diagnostic_sender.clone();
         let reader_thread = thread::Builder::new()
             .name("app-center-ipc-reader".to_owned())
             .spawn(move || {
-                let mut reader = BufReader::new(output);
+                let mut reader = BufReader::new(requests);
                 loop {
                     match read(&mut reader) {
                         Ok(Some(request)) => {
@@ -186,7 +204,7 @@ impl AppCenterHost {
 
         let diagnostics = self.diagnostic_sender.clone();
         let stderr_thread = thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
+            let mut reader = BufReader::new(diagnostics_stream);
             loop {
                 match read_bounded_line(&mut reader, MAX_DIAGNOSTIC_LINE_BYTES) {
                     Ok(Some(line)) => {
@@ -419,6 +437,7 @@ fn cleanup_child(child: &mut Child) {
 mod tests {
     use super::*;
     use crate::app_center_protocol::{UpdateOperation, UpdateRequest};
+    use crate::test_child::{mark_on_close, request, request_and_wait, wait_for_line};
 
     fn request_line(id: u64) -> String {
         String::from_utf8(
@@ -435,9 +454,8 @@ mod tests {
     fn a_real_child_request_is_tagged_with_its_generation() {
         let mut host = AppCenterHost::new();
         let line = request_line(9);
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "printf '%s' \"$1\"; read _", "app-center-test", &line]);
-        host.spawn_command(&mut command).unwrap();
+        let mut command = request_and_wait(&line);
+        host.spawn_test_command(&mut command).unwrap();
         let generation = host.generation.unwrap();
 
         let request = (0..100)
@@ -458,9 +476,8 @@ mod tests {
     fn an_exited_generation_cannot_deliver_a_stale_request() {
         let mut host = AppCenterHost::new();
         let line = request_line(3);
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "printf '%s' \"$1\"", "app-center-test", &line]);
-        host.spawn_command(&mut command).unwrap();
+        let mut command = request(&line);
+        host.spawn_test_command(&mut command).unwrap();
         host.child.as_mut().unwrap().wait().unwrap();
         assert!(host.reap());
         assert!(host.drain().is_empty());
@@ -469,9 +486,8 @@ mod tests {
     #[test]
     fn suspension_ownership_survives_child_exit_until_recovery() {
         let mut host = AppCenterHost::new();
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "read _"]);
-        host.spawn_command(&mut command).unwrap();
+        let mut command = wait_for_line();
+        host.spawn_test_command(&mut command).unwrap();
         let generation = host.generation.unwrap();
         host.claim_suspension(generation).unwrap();
         host.discard_child();
@@ -488,14 +504,8 @@ mod tests {
             std::env::temp_dir().join(format!("app-center-graceful-stop-{}", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         let mut host = AppCenterHost::new();
-        let mut command = Command::new("/bin/sh");
-        command.args([
-            "-c",
-            "IFS= read -r line; case \"$line\" in *close*) : > \"$1\";; esac",
-            "app-center-test",
-        ]);
-        command.arg(&marker);
-        host.spawn_command(&mut command).unwrap();
+        let mut command = mark_on_close(&marker);
+        host.spawn_test_command(&mut command).unwrap();
 
         host.stop().unwrap();
 
@@ -510,14 +520,8 @@ mod tests {
         let lines = (0..=REQUEST_CAPACITY)
             .map(|id| request_line(u64::try_from(id).unwrap()))
             .collect::<String>();
-        let mut command = Command::new("/bin/sh");
-        command.args([
-            "-c",
-            "printf '%s' \"$1\"; read _",
-            "app-center-test",
-            &lines,
-        ]);
-        host.spawn_command(&mut command).unwrap();
+        let mut command = request_and_wait(&lines);
+        host.spawn_test_command(&mut command).unwrap();
 
         let retired = (0..100).any(|_| {
             if host.reap() {

@@ -14,15 +14,18 @@ overlay = ["dep:eframe", "dep:ui-theme"]
 # feature no longer names anything that can be built on its own.
 updater = ["dep:chrono", "dep:eframe", "dep:ui-theme", "dep:release-updater", "dep:semver"]
 # The menu-side capability includes the updater UI and forwards the matching
-# feature only when the macOS-only optional dependency is present.
+# feature to the optional updater dependency.
 local-update-source = ["updater", "release-updater?/local-update-source"]
 
 [dependencies]
 app-paths = { path = "../../crates/app-paths" }
 bridge-runtime = { path = "../../crates/bridge-runtime" }
+clap.workspace = true
 desktop-bindings = { path = "../../crates/desktop-bindings" }
 profile-picker = { path = "../../crates/profile-picker" }
 menu-shell = { path = "../../crates/menu-shell" }
+release-updater = { path = "../../crates/release-updater", optional = true }
+semver = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 
@@ -31,7 +34,6 @@ steam-controller-device = { path = "../../crates/steam-controller-device" }
 tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-clap.workspace = true
 desktop-input = { path = "../../crates/desktop-input" }
 virtual-gamepad = { path = "../../crates/virtual-gamepad" }
 platform-capabilities = { path = "../../crates/platform-capabilities" }
@@ -45,8 +47,6 @@ winit.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
-release-updater = { path = "../../crates/release-updater", optional = true }
-semver = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 
 [lints]
