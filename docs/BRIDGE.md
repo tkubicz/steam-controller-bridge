@@ -30,6 +30,13 @@ therefore does not block an active Bluetooth controller. Zero active sources
 waits; multiple active sources fail safely, list their global `sc-probe`
 indices and identities, and require `--index N`.
 
+On Linux, an `EBUSY` returned during the initial hidraw open is reported
+separately from missing device permissions and the project's own process lock.
+The in-tree `hid-steam` driver normally exposes a compatible userspace hidraw
+endpoint, so its presence alone is not a reason to unbind it. Close competing
+controller tools first and preserve the exact hidraw path and error if the
+conflict persists.
+
 An explicit `--index N` is a global `sc-probe list` index, so resolving it
 requires the full HID inventory. The runtime caches the selected stable
 identity and backs the global lookup off from two seconds to a ten-second

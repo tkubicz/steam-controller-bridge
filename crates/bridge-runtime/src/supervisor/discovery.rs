@@ -167,7 +167,7 @@ impl Supervisor {
                         detail: format!(
                             "Waiting to open Steam Controller collection index {index}"
                         ),
-                        error: Some(ownership_guidance(&error)),
+                        error: Some(controller_open_error(&error)),
                     },
                 }
             }
@@ -179,23 +179,7 @@ impl Supervisor {
         &mut self,
     ) -> Discovery<ActiveControllerSource> {
         if self.controller_discovery.scan_due() {
-            let discovered = self
-                .enumerate_controller_candidates()
-                .map_err(|error| error.to_string());
-            // Borrowed as a separate field so the open closure can reuse the
-            // shared context while the discovery state is mutated.
-            let enumerator = self.controller_enumerator.as_ref();
-            self.controller_discovery
-                .refresh(discovered, |_, info| match enumerator {
-                    Some(enumerator) => enumerator.open(info).map_err(|error| {
-                        format!(
-                            "{}: {}",
-                            controller_source_identity(info),
-                            ownership_guidance(&error)
-                        )
-                    }),
-                    None => Err("the HID context is unavailable".to_owned()),
-                });
+            self.refresh_controller_candidates();
         }
 
         if self.controller_discovery.is_empty() {
@@ -209,7 +193,12 @@ impl Supervisor {
                 return Discovery::Wait {
                     detail: "Steam Controller input found, but no collection can be opened"
                         .to_owned(),
-                    error: self.controller_discovery.current_errors(&[]),
+                    error: self.controller_discovery.current_errors(&[]).map(|detail| {
+                        controller_open_error_message(
+                            detail,
+                            self.controller_discovery.ownership_conflict(),
+                        )
+                    }),
                 };
             }
             return Discovery::Wait {
@@ -223,7 +212,15 @@ impl Supervisor {
             Ok(None) => Discovery::Wait {
                 detail: "Steam Controller input found; waiting for valid controller state"
                     .to_owned(),
-                error: self.controller_discovery.current_errors(&probe.failures),
+                error: self
+                    .controller_discovery
+                    .current_errors(&probe.failures)
+                    .map(|detail| {
+                        controller_open_error_message(
+                            detail,
+                            self.controller_discovery.ownership_conflict(),
+                        )
+                    }),
             },
             Ok(Some(selected)) => {
                 let selected_info = self.controller_discovery.candidate(selected).info().clone();
@@ -301,6 +298,29 @@ impl Supervisor {
         self.controller_enumerator()
             .and_then(ControllerEnumerator::enumerate)
             .map(|devices| devices.into_iter().enumerate().collect())
+    }
+
+    fn refresh_controller_candidates(&mut self) {
+        let discovered = self
+            .enumerate_controller_candidates()
+            .map_err(|error| error.to_string());
+        // Borrowed as a separate field so the open closure can reuse the
+        // shared context while the discovery state is mutated.
+        let enumerator = self.controller_enumerator.as_ref();
+        self.controller_discovery
+            .refresh(discovered, |_, info| match enumerator {
+                Some(enumerator) => enumerator.open(info).map_err(|error| {
+                    let ownership_conflict = error.ownership_conflict_kind();
+                    ControllerOpenFailure::new(
+                        format!("{}: {error}", controller_source_identity(info)),
+                        ownership_conflict,
+                    )
+                }),
+                None => Err(ControllerOpenFailure::new(
+                    "the HID context is unavailable".to_owned(),
+                    None,
+                )),
+            });
     }
 
     pub(super) fn clear_controller_discovery(&mut self) {

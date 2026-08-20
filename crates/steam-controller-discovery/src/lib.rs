@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use steam_controller_device::{
     masked_serial, ControllerEnumerator, DeviceError, DeviceEvent, HidDeviceInfo, HidSession,
-    RawHidReport,
+    OwnershipConflictKind, RawHidReport,
 };
 use steam_controller_protocol::{
     DecodedReport, SteamControllerDecoder, EXTENDED_INPUT_REPORT_ID, INPUT_REPORT_ID,
@@ -77,6 +77,22 @@ pub struct ControllerProbe {
     pub failures: Vec<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct ControllerOpenFailure {
+    detail: String,
+    ownership_conflict: Option<OwnershipConflictKind>,
+}
+
+impl ControllerOpenFailure {
+    #[must_use]
+    pub const fn new(detail: String, ownership_conflict: Option<OwnershipConflictKind>) -> Self {
+        Self {
+            detail,
+            ownership_conflict,
+        }
+    }
+}
+
 /// Retains inactive candidate sessions and reconciles them against HID scans.
 ///
 /// Keeping these sessions open avoids repeatedly creating native reader
@@ -86,7 +102,7 @@ pub struct ControllerDiscoveryState<S> {
     next_scan: Instant,
     stable_scan_interval: Duration,
     supported_devices_seen: bool,
-    open_failures: Vec<String>,
+    open_failures: Vec<ControllerOpenFailure>,
     scan_error: Option<String>,
 }
 
@@ -117,7 +133,7 @@ impl<S> ControllerDiscoveryState<S> {
     pub fn refresh(
         &mut self,
         discovered: Result<Vec<(usize, HidDeviceInfo)>, String>,
-        mut open: impl FnMut(usize, &HidDeviceInfo) -> Result<S, String>,
+        mut open: impl FnMut(usize, &HidDeviceInfo) -> Result<S, ControllerOpenFailure>,
     ) -> ControllerReconcileMetrics {
         let Ok(discovered) = discovered else {
             self.scan_error = discovered.err();
@@ -208,11 +224,25 @@ impl<S> ControllerDiscoveryState<S> {
         let errors = self
             .scan_error
             .iter()
-            .chain(&self.open_failures)
-            .chain(probe_failures)
             .map(String::as_str)
+            .chain(
+                self.open_failures
+                    .iter()
+                    .map(|failure| failure.detail.as_str()),
+            )
+            .chain(probe_failures.iter().map(String::as_str))
             .collect::<Vec<_>>();
         (!errors.is_empty()).then(|| errors.join("; "))
+    }
+
+    #[must_use]
+    pub fn ownership_conflict(&self) -> Option<OwnershipConflictKind> {
+        self.open_failures
+            .iter()
+            .filter_map(|failure| failure.ownership_conflict)
+            .fold(None, |current, incoming| {
+                Some(OwnershipConflictKind::most_actionable(current, incoming))
+            })
     }
 
     #[must_use]
@@ -366,13 +396,6 @@ fn controller_source_identity(info: &HidDeviceInfo) -> String {
     )
 }
 
-pub const CONTROLLER_OWNERSHIP_GUIDANCE: &str =
-    "Fully quit Steam and other controller tools; if Steam's ipcserver remains, stop its LaunchAgent manually";
-
-fn ownership_guidance(error: &DeviceError) -> String {
-    format!("{error}. {CONTROLLER_OWNERSHIP_GUIDANCE}")
-}
-
 /// Why one discovery attempt did not produce a session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControllerSearch {
@@ -380,7 +403,7 @@ pub enum ControllerSearch {
     Backend(String),
     CannotOpen {
         detail: String,
-        ownership_conflict: bool,
+        ownership_conflict: Option<OwnershipConflictKind>,
     },
     NoInputYet,
     Ambiguous(usize),
@@ -398,10 +421,19 @@ impl std::fmt::Display for ControllerSearch {
                     "Cannot enumerate Steam Controller input: {detail}"
                 )
             }
-            Self::CannotOpen { detail, .. } => write!(
-                formatter,
-                "Steam Controller input found, but no collection can be opened: {detail}"
-            ),
+            Self::CannotOpen {
+                detail,
+                ownership_conflict,
+            } => {
+                write!(
+                    formatter,
+                    "Steam Controller input found, but no collection can be opened: {detail}"
+                )?;
+                steam_controller_device::write_controller_ownership_guidance(
+                    formatter,
+                    *ownership_conflict,
+                )
+            }
             Self::NoInputYet => write!(
                 formatter,
                 "Steam Controller input found; waiting for valid controller state"
@@ -418,7 +450,6 @@ impl std::fmt::Display for ControllerSearch {
 pub struct ActiveControllerFinder {
     enumerator: ControllerEnumerator,
     discovery: ControllerDiscoveryState<HidSession>,
-    ownership_conflict: bool,
 }
 
 impl ActiveControllerFinder {
@@ -431,7 +462,6 @@ impl ActiveControllerFinder {
         Ok(Self {
             enumerator: ControllerEnumerator::new()?,
             discovery: ControllerDiscoveryState::new(),
-            ownership_conflict: false,
         })
     }
 
@@ -468,15 +498,12 @@ impl ActiveControllerFinder {
                 .map(|devices| devices.into_iter().enumerate().collect::<Vec<_>>())
                 .map_err(|error| error.to_string());
             let enumerator = &self.enumerator;
-            self.ownership_conflict = false;
-            let ownership_conflict = &mut self.ownership_conflict;
             self.discovery.refresh(discovered, |_, info| {
                 enumerator.open(info).map_err(|error| {
-                    *ownership_conflict |= matches!(error, DeviceError::OwnershipConflict { .. });
-                    format!(
-                        "{}: {}",
-                        controller_source_identity(info),
-                        ownership_guidance(&error)
+                    let ownership_conflict = error.ownership_conflict_kind();
+                    ControllerOpenFailure::new(
+                        format!("{}: {error}", controller_source_identity(info)),
+                        ownership_conflict,
                     )
                 })
             });
@@ -491,7 +518,7 @@ impl ActiveControllerFinder {
                         .discovery
                         .current_errors(&[])
                         .unwrap_or_else(|| "no detail available".to_owned()),
-                    ownership_conflict: self.ownership_conflict,
+                    ownership_conflict: self.discovery.ownership_conflict(),
                 }
             } else {
                 ControllerSearch::NoController
@@ -508,7 +535,7 @@ impl ActiveControllerFinder {
             Ok(None) => Err(match self.discovery.current_errors(&probe.failures) {
                 Some(detail) => ControllerSearch::CannotOpen {
                     detail,
-                    ownership_conflict: self.ownership_conflict,
+                    ownership_conflict: self.discovery.ownership_conflict(),
                 },
                 None => ControllerSearch::NoInputYet,
             }),
@@ -540,6 +567,47 @@ mod tests {
     }
 
     #[test]
+    fn failed_inventory_scan_preserves_open_failure_classification() {
+        let puck = HidDeviceInfo {
+            id: "puck-interface-2".to_owned(),
+            path: "puck-interface-2".to_owned(),
+            vendor_id: steam_controller_device::PROTEUS_VENDOR_ID,
+            product_id: steam_controller_device::PROTEUS_PRODUCT_ID,
+            usage_page: steam_controller_device::STEAM_USAGE_PAGE,
+            usage: steam_controller_device::STEAM_CONTROLLER_USAGE,
+            interface_number: steam_controller_device::FIRST_PROTEUS_SLOT_INTERFACE,
+            serial_number: None,
+            manufacturer: None,
+            product: None,
+            transport: "USB".to_owned(),
+        };
+        let mut discovery = ControllerDiscoveryState::<()>::new();
+        discovery.refresh(Ok(vec![(40, puck)]), |_, _| {
+            Err(ControllerOpenFailure::new(
+                "Puck interface 2: project lock held".to_owned(),
+                Some(OwnershipConflictKind::ProjectProcess),
+            ))
+        });
+
+        discovery.refresh(Err("temporary enumeration failure".to_owned()), |_, _| {
+            unreachable!("a failed inventory scan must not attempt to open candidates")
+        });
+
+        assert_eq!(
+            discovery.ownership_conflict(),
+            Some(OwnershipConflictKind::ProjectProcess)
+        );
+        let errors = discovery.current_errors(&[]).expect("retained errors");
+        assert!(errors.contains("temporary enumeration failure"));
+        assert!(errors.contains("project lock held"));
+
+        discovery.refresh(Ok(Vec::new()), |_, _| {
+            unreachable!("an empty inventory must not attempt to open candidates")
+        });
+        assert_eq!(discovery.ownership_conflict(), None);
+    }
+
+    #[test]
     fn inventory_backoff_is_bounded() {
         assert_eq!(
             inventory_scan_interval(false, MAX_STABLE_SCAN_INTERVAL),
@@ -566,7 +634,7 @@ mod tests {
             ControllerSearch::Backend("IOKit unavailable".to_owned()),
             ControllerSearch::CannotOpen {
                 detail: "held by Steam".to_owned(),
-                ownership_conflict: true,
+                ownership_conflict: Some(OwnershipConflictKind::ProjectProcess),
             },
             ControllerSearch::NoInputYet,
             ControllerSearch::Ambiguous(2),
@@ -580,6 +648,11 @@ mod tests {
         }
         assert!(rendered[1].contains("IOKit unavailable"));
         assert!(rendered[2].contains("held by Steam"));
+        assert!(
+            rendered[2].contains(steam_controller_device::ownership_conflict_guidance(
+                OwnershipConflictKind::ProjectProcess
+            ))
+        );
         assert!(rendered[4].contains("2 Steam Controller sources"));
     }
 

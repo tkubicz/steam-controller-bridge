@@ -7,12 +7,24 @@ use hidapi::{BusType, DeviceInfo, HidApi, HidDevice};
 
 use crate::{
     ControllerSession, ControllerSessionStep, DeviceError, DeviceEvent, HidDeviceInfo,
-    PROTEUS_VENDOR_ID,
+    OwnershipConflictKind, PROTEUS_VENDOR_ID,
 };
 
 const REPORT_BUFFER_SIZE: usize = 1024;
 #[cfg(target_os = "linux")]
 const FEATURE_REPORT_EPIPE_DELAY: Duration = Duration::from_millis(20);
+
+#[must_use]
+pub const fn ownership_conflict_guidance(kind: OwnershipConflictKind) -> &'static str {
+    match kind {
+        OwnershipConflictKind::ProjectProcess => {
+            "Close the other Steam Controller Bridge app or tool (sc-bridge, sc-bridge-menu, sc-probe, or sc-visualizer), then retry"
+        }
+        OwnershipConflictKind::Kernel => {
+            "Close Steam and other controller tools, then retry. Do not unbind hid-steam solely because it is attached"
+        }
+    }
+}
 
 /// Enumerates all HID collections exposed by the platform backend using a
 /// stable path-based ordering.
@@ -582,11 +594,21 @@ fn open_error(_selected: &HidDeviceInfo, error: &hidapi::HidError) -> DeviceErro
 
 #[cfg(target_os = "linux")]
 fn open_error(selected: &HidDeviceInfo, error: &hidapi::HidError) -> DeviceError {
+    if linux_device_busy(error) {
+        return DeviceError::KernelOwnershipConflict {
+            path: selected.path.clone(),
+        };
+    }
     DeviceError::Backend(format!(
         "cannot open the selected collection {}; verify read/write access to the \
          hidraw device, stop Steam and other controller tools, and then retry: {error}",
         selected.path
     ))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_device_busy(error: &hidapi::HidError) -> bool {
+    linux_hid_error_kind(error) == Some(std::io::ErrorKind::ResourceBusy)
 }
 
 #[cfg(target_os = "macos")]
@@ -619,12 +641,24 @@ fn retry_feature_report(
 
 #[cfg(target_os = "linux")]
 fn feature_report_stalled(error: &hidapi::HidError) -> bool {
+    linux_hid_error_kind(error) == Some(std::io::ErrorKind::BrokenPipe)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_hid_error_kind(error: &hidapi::HidError) -> Option<std::io::ErrorKind> {
     match error {
-        hidapi::HidError::HidApiError { message } => {
-            message.contains("EPIPE") || message.ends_with("Broken pipe")
+        hidapi::HidError::IoError { error } => Some(error.kind()),
+        hidapi::HidError::HidApiError { message }
+            if message.contains("EPIPE") || message.ends_with("Broken pipe") =>
+        {
+            Some(std::io::ErrorKind::BrokenPipe)
         }
-        hidapi::HidError::IoError { error } => error.kind() == std::io::ErrorKind::BrokenPipe,
-        _ => false,
+        hidapi::HidError::HidApiError { message }
+            if message.contains("Device or resource busy") || message.contains("(os error 16)") =>
+        {
+            Some(std::io::ErrorKind::ResourceBusy)
+        }
+        _ => None,
     }
 }
 
@@ -779,5 +813,31 @@ mod tests {
         assert!(feature_report_stalled(&error));
         assert_eq!(sends, 2);
         assert_eq!(waits, 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_busy_open_is_a_distinct_kernel_ownership_conflict() {
+        let target = lock_target("/dev/hidraw3");
+        let busy = hid_error(
+            "failed to open device with path /dev/hidraw3: Device or resource busy (os error 16)",
+        );
+        assert!(matches!(
+            open_error(&target, &busy),
+            DeviceError::KernelOwnershipConflict { path } if path == "/dev/hidraw3"
+        ));
+        assert!(linux_device_busy(&hidapi::HidError::IoError {
+            error: std::io::Error::from(std::io::ErrorKind::ResourceBusy),
+        }));
+        assert!(!linux_device_busy(&hid_error(
+            "failed to open device with path /dev/hidraw3: os error 160",
+        )));
+
+        let permission = hid_error(
+            "failed to open device with path /dev/hidraw3: Permission denied (os error 13)",
+        );
+        let rendered = open_error(&target, &permission).to_string();
+        assert!(rendered.contains("verify read/write access"));
+        assert!(!rendered.contains("kernel HID stack"));
     }
 }

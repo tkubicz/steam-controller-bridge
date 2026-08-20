@@ -234,7 +234,9 @@ mod macos {
         KIND_WARNING,
     };
     use serde_json::json;
-    use steam_controller_device::{enumerate, DeviceEvent, HidDeviceInfo, HidSession};
+    use steam_controller_device::{
+        controller_open_error, enumerate, DeviceEvent, HidDeviceInfo, HidSession,
+    };
     use steam_controller_discovery::ActiveControllerFinder;
     use steam_controller_protocol::{DecodedReport, SteamControllerDecoder};
 
@@ -775,7 +777,8 @@ mod macos {
                     "index {index} is not a supported Steam Controller input collection"
                 ));
             }
-            let session = HidSession::open_info(&info).map_err(|error| error.to_string())?;
+            let session =
+                HidSession::open_info(&info).map_err(|error| controller_open_error(&error))?;
             return Ok(OpenedController {
                 index,
                 info,
