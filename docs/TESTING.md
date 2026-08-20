@@ -12,6 +12,8 @@ USB re-enumeration, browser behavior, or visual acceptance.
 ```bash
 python3 tools/check-workspace-versions.py --self-test
 python3 tools/check-workspace-versions.py
+python3 tools/check-linux-udev-rules.py --self-test
+python3 tools/check-linux-udev-rules.py
 python3 tools/check-changelog.py --self-test
 python3 tools/check-changelog.py
 python3 tools/build-macos-app.py --self-test
@@ -49,6 +51,11 @@ check` covers advisories, licenses, bans, and sources for the shipped macOS
 dependency graph; CI separately audits the `steam-controller-device` graph for
 the x86-64 Linux target used by the hosted runner. The Linux provider audit
 remains scoped away from the unshipped Linux GUI stack.
+
+Ubuntu CI runs `udevadm verify` on every checked-in Linux device rule. The
+cross-platform policy check separately rejects missing, duplicate, broad, or
+world-writable controller access entries. Installation and headless fallback
+policy are documented with the [Linux packaging inputs](../packaging/linux/README.md).
 
 ## Automated coverage map
 
