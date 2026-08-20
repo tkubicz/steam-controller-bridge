@@ -32,9 +32,7 @@ device, also run the explicitly ignored native smoke targets:
 
 ```bash
 cargo test -p steam-controller-device --test linux_no_device -- --ignored
-cargo test -p bridge-output \
-  serial_discovery::linux::tests::native_serial_discovery_handles_an_empty_bridge_scan \
-  -- --ignored --exact
+cargo test -p bridge-output --test linux_no_device -- --ignored
 ```
 
 The default pass checks the distributed configuration, where local filesystem
