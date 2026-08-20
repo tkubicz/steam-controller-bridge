@@ -48,9 +48,10 @@ enables the updater crate's feature directly.
 
 CI additionally builds the pinned Arduino firmware artifacts. `cargo deny
 check` covers advisories, licenses, bans, and sources for the shipped macOS
-dependency graph; CI separately audits the `steam-controller-device` graph for
-the x86-64 Linux target used by the hosted runner. The Linux provider audit
-remains scoped away from the unshipped Linux GUI stack.
+dependency graph; CI separately audits the `platform-capabilities` graph for
+the x86-64 Linux target used by the hosted runner. That graph includes the
+Linux controller HID, serial, and access-check dependencies while remaining
+scoped away from the unshipped Linux GUI stack.
 
 Ubuntu CI runs `udevadm verify` on every checked-in Linux device rule. The
 cross-platform policy check separately rejects missing, duplicate, broad, or

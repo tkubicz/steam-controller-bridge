@@ -3,7 +3,11 @@ use crate::{
     Remedy, RequirementGroup,
 };
 
-const DEVICE_RULE_PATH: &str = "packaging/linux/60-steam-controller-bridge.rules";
+const DEVICE_RULE_NAME: &str = "60-steam-controller-bridge.rules";
+const DEVICE_ACCESS_DOCUMENTATION: &str = concat!(
+    env!("CARGO_PKG_REPOSITORY"),
+    "/blob/main/packaging/linux/README.md"
+);
 
 trait LinuxAccessApi {
     fn controller_hid_access(&self) -> CapabilityState;
@@ -70,10 +74,10 @@ impl PlatformCapabilities for LinuxCapabilities {
     fn remedy(&self, id: CapabilityId) -> Option<Remedy> {
         let text = match id {
             CapabilityId::ControllerHidAccess => format!(
-                "For an active desktop session, install the narrowly matched controller rule in {DEVICE_RULE_PATH}. For a headless service, use its documented dedicated-group fallback. Reload udev rules and reconnect the controller, or restart the service after changing groups"
+                "For an active desktop session, install the narrowly matched {DEVICE_RULE_NAME} under /etc/udev/rules.d, or use the copy installed by your package under /usr/lib/udev/rules.d. Follow {DEVICE_ACCESS_DOCUMENTATION}. For a headless service, use the documented dedicated-group fallback. Reload udev rules and reconnect the controller, or restart the service after changing groups"
             ),
             CapabilityId::SerialPortAccess => format!(
-                "For an active desktop session with the official XIAO bridge, install the narrowly matched rule in {DEVICE_RULE_PATH}. For a third-party bridge, add an equally narrow rule for its USB identity or use the distribution's serial-access group. For a headless service, use the documented dedicated-group fallback with an exact device match. Reload udev rules and reconnect the bridge, or start a new login or restart the service after changing groups"
+                "For an active desktop session with the official XIAO bridge, install the narrowly matched {DEVICE_RULE_NAME} under /etc/udev/rules.d, or use the copy installed by your package under /usr/lib/udev/rules.d. Follow {DEVICE_ACCESS_DOCUMENTATION}. For a third-party bridge, add an equally narrow rule for its USB identity or use the distribution's serial-access group. For a headless service, use the documented dedicated-group fallback with an exact device match. Reload udev rules and reconnect the bridge, or start a new login or restart the service after changing groups"
             ),
             CapabilityId::VirtualGamepadAccess
             | CapabilityId::DesktopInputAccess
@@ -334,8 +338,22 @@ mod tests {
         else {
             panic!("serial access must provide instructions");
         };
+        assert!(!text.contains("rule in packaging/linux/"));
+        assert!(text.contains("/etc/udev/rules.d"));
+        assert!(text.contains("/usr/lib/udev/rules.d"));
+        assert!(text.contains(DEVICE_ACCESS_DOCUMENTATION));
         assert!(text.contains("third-party bridge"));
         assert!(text.contains("serial-access group"));
+
+        let Some(Remedy::Instructions { text, .. }) =
+            provider.remedy(CapabilityId::ControllerHidAccess)
+        else {
+            panic!("controller HID access must provide instructions");
+        };
+        assert!(!text.contains("rule in packaging/linux/"));
+        assert!(text.contains("/etc/udev/rules.d"));
+        assert!(text.contains("/usr/lib/udev/rules.d"));
+        assert!(text.contains(DEVICE_ACCESS_DOCUMENTATION));
     }
 
     #[test]
