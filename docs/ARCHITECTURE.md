@@ -99,11 +99,11 @@ recovery.
 
 ## Platform boundary
 
-Live HID and desktop integration are macOS-specific. Shared crates compile on
-other targets and return explicit unsupported-platform errors instead of
-pretending live access exists. All project-authored crates forbid unsafe code
-except `power-monitor`, whose documented IOKit/Core Foundation ownership
-is isolated behind a safe typed API.
+Live controller HID is implemented on macOS and Linux. Desktop integration and
+the shipped application remain macOS-specific; unsupported providers return
+explicit errors instead of pretending live access exists. All project-authored
+crates forbid unsafe code except `power-monitor`, whose documented IOKit/Core
+Foundation ownership is isolated behind a safe typed API.
 
 The portable-core allowlist is enforced by
 [`tools/check-portable-core.py`](../tools/check-portable-core.py). Platform
@@ -111,6 +111,9 @@ selection is permitted only in a facade root or its backend modules; ordinary
 files added anywhere else in an allowlisted crate are checked automatically for
 target configuration, native dependencies and APIs, and recognizable platform
 data-path literals.
+
+The Linux HID backend choice, VM evidence, and deferred hardware paths are
+recorded in [the S0 Linux hardware-path decision](decisions/s0-linux-vm-hardware-path.md).
 
 The core host depends on the public bridge-device contract, not a board model.
 Zero-configuration serial discovery uses the exact USB product marker

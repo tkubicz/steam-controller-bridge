@@ -46,7 +46,9 @@ enables the updater crate's feature directly.
 
 CI additionally builds the pinned Arduino firmware artifacts. `cargo deny
 check` covers advisories, licenses, bans, and sources for the shipped macOS
-dependency graph.
+dependency graph; CI separately audits the `steam-controller-device` graph for
+the x86-64 Linux target used by the hosted runner. The Linux provider audit
+remains scoped away from the unshipped Linux GUI stack.
 
 ## Automated coverage map
 

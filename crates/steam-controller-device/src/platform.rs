@@ -11,8 +11,11 @@ use crate::{
 };
 
 const REPORT_BUFFER_SIZE: usize = 1024;
+#[cfg(target_os = "linux")]
+const FEATURE_REPORT_EPIPE_DELAY: Duration = Duration::from_millis(20);
 
-/// Enumerates all HID collections using a stable path-based ordering.
+/// Enumerates all HID collections exposed by the platform backend using a
+/// stable path-based ordering.
 ///
 /// # Errors
 ///
@@ -24,10 +27,10 @@ pub fn enumerate() -> Result<Vec<HidDeviceInfo>, DeviceError> {
 
 /// Reusable HID context for discovery.
 ///
-/// Constructing a [`HidApi`] initializes HIDAPI and enumerates every collection
-/// in the system, so doing it per scan or per open attempt is what made idle
-/// discovery expensive. This type builds one context and reuses it for filtered
-/// scans, full-inventory scans, and opening sessions.
+/// Constructing a [`HidApi`] initializes HIDAPI and enumerates the backend's
+/// collection inventory, so doing it per scan or per open attempt is what made
+/// idle discovery expensive. This type builds one context and reuses it for
+/// filtered scans, full-inventory scans, and opening sessions.
 pub struct ControllerEnumerator {
     api: HidApi,
     initial_devices: Option<Vec<HidDeviceInfo>>,
@@ -52,7 +55,7 @@ impl ControllerEnumerator {
 
     /// Refreshes only the supported Puck and Bluetooth controller identities.
     ///
-    /// Asks macOS for Valve's VID instead of rebuilding metadata for every HID
+    /// Asks HIDAPI for Valve's VID instead of rebuilding metadata for every HID
     /// collection. The result still passes through the exact Puck/Bluetooth
     /// classifier before it leaves this type.
     ///
@@ -74,7 +77,7 @@ impl ControllerEnumerator {
         )))
     }
 
-    /// Refreshes the whole system inventory, whose ordering defines the global
+    /// Refreshes the whole backend inventory, whose ordering defines the global
     /// indices `sc-probe list` prints and `--index N` selects.
     ///
     /// # Errors
@@ -98,7 +101,7 @@ impl ControllerEnumerator {
     /// # Errors
     ///
     /// Returns [`DeviceError`] when the collection is no longer listed, is
-    /// already owned, or macOS refuses access.
+    /// already owned, or the platform refuses access.
     pub fn open(&self, info: &HidDeviceInfo) -> Result<HidSession, DeviceError> {
         let native = self
             .api
@@ -134,7 +137,7 @@ impl HidSession {
     /// # Errors
     ///
     /// Returns [`DeviceError`] if enumeration fails, the index is invalid, or
-    /// another project process owns the selected slot, or macOS refuses to
+    /// another project process owns the selected slot, or the platform refuses to
     /// open the selected HID collection.
     pub fn open_index(index: usize) -> Result<Self, DeviceError> {
         let api = HidApi::new().map_err(|error| backend_error(&error))?;
@@ -155,7 +158,7 @@ impl HidSession {
     /// # Errors
     ///
     /// Returns [`DeviceError`] when the collection disappeared, is already
-    /// owned, or macOS refuses access.
+    /// owned, or the platform refuses access.
     pub fn open_info(info: &HidDeviceInfo) -> Result<Self, DeviceError> {
         let api = HidApi::new().map_err(|error| backend_error(&error))?;
         let native = api
@@ -191,13 +194,9 @@ impl HidSession {
     ) -> Result<(HidDeviceInfo, File, HidDevice), DeviceError> {
         let selected = convert_info(native);
         let ownership_lock = acquire_ownership_lock(&selected)?;
-        let device = native.open_device(api).map_err(|error| {
-            DeviceError::Backend(format!(
-                "cannot open the selected collection; verify Input Monitoring \
-                 permission, fully quit Steam, boot out its ipcserver LaunchAgent, \
-                 and then retry: {error}"
-            ))
-        })?;
+        let device = native
+            .open_device(api)
+            .map_err(|error| open_error(&selected, &error))?;
         Ok((selected, ownership_lock, device))
     }
 
@@ -244,15 +243,17 @@ impl HidSession {
             });
         }
         let device = self.device.as_ref().ok_or(DeviceError::NotConnected)?;
-        device
-            .send_feature_report(&steam_controller_protocol::lizard_mode_off_feature_report())
-            .map_err(|error| {
-                DeviceError::Backend(format!(
-                    "lizard-mode feature write failed; ensure Steam Controller 2 \
+        send_feature_report(
+            device,
+            &steam_controller_protocol::lizard_mode_off_feature_report(),
+        )
+        .map_err(|error| {
+            DeviceError::Backend(format!(
+                "lizard-mode feature write failed; ensure Steam Controller 2 \
                      is awake on the selected transport and its vendor collection is producing \
                      0x42/0x45 reports: {error}"
-                ))
-            })
+            ))
+        })
     }
 
     /// Sends the SDL-compatible standard dual-rumble output report.
@@ -348,14 +349,16 @@ impl HidSession {
             });
         }
         let device = self.device.as_ref().ok_or(DeviceError::NotConnected)?;
-        device
-            .send_feature_report(&steam_controller_protocol::power_off_feature_report())
-            .map_err(|error| {
-                DeviceError::Backend(format!(
-                    "power-off feature write failed; ensure Steam Controller 2 is \
+        send_feature_report(
+            device,
+            &steam_controller_protocol::power_off_feature_report(),
+        )
+        .map_err(|error| {
+            DeviceError::Backend(format!(
+                "power-off feature write failed; ensure Steam Controller 2 is \
                      awake on the selected transport and its vendor collection is active: {error}"
-                ))
-            })
+            ))
+        })
     }
 
     /// Waits for the next lifecycle event or input report.
@@ -568,6 +571,63 @@ fn backend_error(error: &hidapi::HidError) -> DeviceError {
     DeviceError::Backend(error.to_string())
 }
 
+#[cfg(target_os = "macos")]
+fn open_error(_selected: &HidDeviceInfo, error: &hidapi::HidError) -> DeviceError {
+    DeviceError::Backend(format!(
+        "cannot open the selected collection; verify Input Monitoring \
+         permission, fully quit Steam, boot out its ipcserver LaunchAgent, \
+         and then retry: {error}"
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn open_error(selected: &HidDeviceInfo, error: &hidapi::HidError) -> DeviceError {
+    DeviceError::Backend(format!(
+        "cannot open the selected collection {}; verify read/write access to the \
+         hidraw device, stop Steam and other controller tools, and then retry: {error}",
+        selected.path
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn send_feature_report(device: &HidDevice, report: &[u8]) -> Result<(), hidapi::HidError> {
+    device.send_feature_report(report)
+}
+
+#[cfg(target_os = "linux")]
+fn send_feature_report(device: &HidDevice, report: &[u8]) -> Result<(), hidapi::HidError> {
+    retry_feature_report(
+        || device.send_feature_report(report),
+        || thread::sleep(FEATURE_REPORT_EPIPE_DELAY),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn retry_feature_report(
+    mut send: impl FnMut() -> Result<(), hidapi::HidError>,
+    mut wait: impl FnMut(),
+) -> Result<(), hidapi::HidError> {
+    match send() {
+        Ok(()) => Ok(()),
+        Err(error) if feature_report_stalled(&error) => {
+            wait();
+            send()
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn feature_report_stalled(error: &hidapi::HidError) -> bool {
+    match error {
+        hidapi::HidError::HidApiError { message } => {
+            message.contains("EPIPE") || message.ends_with("Broken pipe")
+        }
+        hidapi::HidError::IoError { error } => error.kind() == std::io::ErrorKind::BrokenPipe,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,6 +692,7 @@ mod tests {
             .expect("remove test directory");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn macos_app_path_policy_preserves_the_existing_lock_directory() {
         let target = lock_target("stable-macos-lock-path");
@@ -654,5 +715,69 @@ mod tests {
         let mut same = selected.clone();
         same.id = "different-enumeration-id".to_owned();
         assert!(same_collection(&same, &selected));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn hid_error(message: &str) -> hidapi::HidError {
+        hidapi::HidError::HidApiError {
+            message: message.to_owned(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_feature_write_retries_only_broken_pipe() {
+        let mut sends = 0;
+        let mut waits = 0;
+        retry_feature_report(
+            || {
+                sends += 1;
+                if sends == 1 {
+                    Err(hid_error("ioctl (GFEATURE): Broken pipe"))
+                } else {
+                    Ok(())
+                }
+            },
+            || waits += 1,
+        )
+        .expect("second feature write succeeds");
+        assert_eq!(sends, 2);
+        assert_eq!(waits, 1);
+
+        let mut sends = 0;
+        let mut waits = 0;
+        let error = retry_feature_report(
+            || {
+                sends += 1;
+                Err(hid_error("ioctl (SFEATURE): EACCES: Permission denied"))
+            },
+            || waits += 1,
+        )
+        .expect_err("non-EPIPE failure is terminal");
+        assert!(error.to_string().contains("EACCES"));
+        assert_eq!(sends, 1);
+        assert_eq!(waits, 0);
+
+        assert!(feature_report_stalled(&hidapi::HidError::IoError {
+            error: std::io::Error::from(std::io::ErrorKind::BrokenPipe),
+        }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_feature_write_retry_is_bounded() {
+        let mut sends = 0;
+        let mut waits = 0;
+        let error = retry_feature_report(
+            || {
+                sends += 1;
+                Err(hid_error("ioctl (GFEATURE): EPIPE: Broken pipe"))
+            },
+            || waits += 1,
+        )
+        .expect_err("persistent EPIPE is terminal");
+        assert!(feature_report_stalled(&error));
+        assert_eq!(sends, 2);
+        assert_eq!(waits, 1);
     }
 }
