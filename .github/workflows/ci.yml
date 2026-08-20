@@ -54,10 +54,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes libudev-dev
+      - name: Verify Linux controller access rule
+        if: runner.os == 'Linux'
+        run: |
+          for rule in "${GITHUB_WORKSPACE}"/packaging/linux/*.rules; do
+            udevadm verify "${rule}"
+          done
       - name: Check Python tool invariants
         run: |
           python3 tools/check-portable-core.py --self-test
           python3 tools/check-portable-core.py
+          python3 tools/check-linux-udev-rules.py --self-test
+          python3 tools/check-linux-udev-rules.py
           python3 tools/check-workspace-versions.py --self-test
           python3 tools/check-workspace-versions.py
           python3 tools/build-macos-app.py --self-test

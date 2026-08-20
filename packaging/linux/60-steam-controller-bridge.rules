@@ -1,0 +1,5 @@
+# Official Steam Controller 2 Puck over USB.
+SUBSYSTEM=="hidraw", KERNELS=="0003:28DE:1304.*", TAG+="uaccess"
+
+# Steam Controller 2 over direct Bluetooth.
+SUBSYSTEM=="hidraw", KERNELS=="0005:28DE:1303.*", TAG+="uaccess"
