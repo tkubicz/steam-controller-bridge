@@ -54,8 +54,10 @@ remains scoped away from the unshipped Linux GUI stack.
 
 Ubuntu CI runs `udevadm verify` on every checked-in Linux device rule. The
 cross-platform policy check separately rejects missing, duplicate, broad, or
-world-writable controller access entries. Installation and headless fallback
-policy are documented with the [Linux packaging inputs](../packaging/linux/README.md).
+world-writable controller HID and bridge serial access entries, and requires
+the exact bridge rule to opt out of ModemManager probing. Installation and
+headless fallback policy are documented with the
+[Linux packaging inputs](../packaging/linux/README.md).
 
 ## Automated coverage map
 

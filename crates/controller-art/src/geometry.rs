@@ -265,7 +265,7 @@ pub(crate) fn dpad_shape() -> &'static UnitShape {
 pub(crate) fn dpad_arm(control: Control) -> ([f32; 2], [f32; 2]) {
     let (arm, thick) = (DPAD_ARM, DPAD_THICKNESS);
     let length = arm - thick;
-    let offset = (arm + thick) * 0.5;
+    let offset = f32::midpoint(arm, thick);
     match control {
         Control::DpadUp => (
             [DPAD_CENTER[0], DPAD_CENTER[1] - offset],

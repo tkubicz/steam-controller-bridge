@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Keep Linux controller access limited to the supported HID identities."""
+"""Keep Linux device access limited to supported runtime identities."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -13,6 +14,7 @@ RULE_DIRECTORY = ROOT / "packaging/linux"
 RULE_FILENAME = "60-steam-controller-bridge.rules"
 README_PATH = ROOT / "packaging/linux/README.md"
 IDENTITY_PATH = ROOT / "crates/steam-controller-device/src/lib.rs"
+FIRMWARE_TARGETS_PATH = ROOT / "crates/release-updater/firmware-targets.json"
 RUST_U16_CONSTANT = re.compile(
     r"^pub const (?P<name>[A-Z0-9_]+): u16 = 0x(?P<value>[0-9a-fA-F]+);$",
     re.MULTILINE,
@@ -22,6 +24,7 @@ REQUIRED_IDENTITIES = (
     "PROTEUS_PRODUCT_ID",
     "STEAM_CONTROLLER_BLUETOOTH_PRODUCT_ID",
 )
+BRIDGE_TARGET_ID = "seeed-xiao-nrf52840"
 
 
 def controller_identities(source: str) -> tuple[tuple[str, int, int], ...]:
@@ -39,10 +42,53 @@ def controller_identities(source: str) -> tuple[tuple[str, int, int], ...]:
     )
 
 
-def expected_rules(source: str, assignment: str) -> tuple[str, ...]:
+def controller_rules(source: str, assignment: str) -> tuple[str, ...]:
     return tuple(
         f'SUBSYSTEM=="hidraw", KERNELS=="{bus}:{vendor:04X}:{product:04X}.*", {assignment}'
         for bus, vendor, product in controller_identities(source)
+    )
+
+
+def bridge_identity(source: str) -> tuple[int, int, str, str]:
+    data = json.loads(source)
+    target = next(
+        (target for target in data.get("targets", []) if target.get("id") == BRIDGE_TARGET_ID),
+        None,
+    )
+    if target is None:
+        raise ValueError(f"missing firmware target: {BRIDGE_TARGET_ID}")
+
+    try:
+        usb = target["application_usb"]
+        return (
+            int(usb["vendor_id"], 0),
+            int(usb["product_id"], 0),
+            target["application_manufacturer"],
+            target["application_product"],
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"invalid application identity for {BRIDGE_TARGET_ID}") from error
+
+
+def bridge_rule(source: str, assignment: str) -> str:
+    vendor, product, manufacturer, product_name = bridge_identity(source)
+    return (
+        f'SUBSYSTEM=="tty", ATTRS{{idVendor}}=="{vendor:04x}", '
+        f'ATTRS{{idProduct}}=="{product:04x}", '
+        f'ATTRS{{manufacturer}}=="{manufacturer}", '
+        f'ATTRS{{product}}=="{product_name}", {assignment}, '
+        'ENV{ID_MM_DEVICE_IGNORE}="1"'
+    )
+
+
+def expected_rules(
+    identity_source: str,
+    firmware_targets: str,
+    assignment: str,
+) -> tuple[str, ...]:
+    return (
+        *controller_rules(identity_source, assignment),
+        bridge_rule(firmware_targets, assignment),
     )
 
 
@@ -72,15 +118,23 @@ def exact_rule_errors(text: str, expected: tuple[str, ...], label: str) -> list[
     return errors
 
 
-def policy_errors(rule_text: str, identity_source: str) -> list[str]:
+def policy_errors(
+    rule_text: str, identity_source: str, firmware_targets: str
+) -> list[str]:
     try:
-        expected = expected_rules(identity_source, 'TAG+="uaccess"')
-    except ValueError as error:
+        expected = expected_rules(
+            identity_source,
+            firmware_targets,
+            'TAG+="uaccess"',
+        )
+    except (ValueError, json.JSONDecodeError) as error:
         return [str(error)]
-    return exact_rule_errors(rule_text, expected, "controller access")
+    return exact_rule_errors(rule_text, expected, "device access")
 
 
-def rule_set_errors(rule_files: dict[str, str], identity_source: str) -> list[str]:
+def rule_set_errors(
+    rule_files: dict[str, str], identity_source: str, firmware_targets: str
+) -> list[str]:
     errors: list[str] = []
     actual_names = set(rule_files)
 
@@ -90,20 +144,29 @@ def rule_set_errors(rule_files: dict[str, str], identity_source: str) -> list[st
         errors.append(f"unexpected Linux device access rule file: {name}")
 
     if RULE_FILENAME in rule_files:
-        errors.extend(policy_errors(rule_files[RULE_FILENAME], identity_source))
+        errors.extend(
+            policy_errors(
+                rule_files[RULE_FILENAME], identity_source, firmware_targets
+            )
+        )
     return errors
 
 
-def documentation_errors(readme: str, identity_source: str) -> list[str]:
+def documentation_errors(
+    readme: str, identity_source: str, firmware_targets: str
+) -> list[str]:
     try:
         expected = expected_rules(
             identity_source,
+            firmware_targets,
             'GROUP="steam-controller-bridge", MODE="0660"',
         )
-    except ValueError as error:
+    except (ValueError, json.JSONDecodeError) as error:
         return [str(error)]
     documented = "\n".join(
-        line for line in readme.splitlines() if line.startswith('SUBSYSTEM=="hidraw"')
+        stripped
+        for line in readme.splitlines()
+        if (stripped := line.strip()).startswith('SUBSYSTEM=="')
     )
     return exact_rule_errors(documented, expected, "headless fallback")
 
@@ -116,65 +179,111 @@ def self_test() -> None:
             "pub const STEAM_CONTROLLER_BLUETOOTH_PRODUCT_ID: u16 = 0x1303;",
         )
     )
-    expected = expected_rules(identities, 'TAG+="uaccess"')
+    firmware_targets = json.dumps(
+        {
+            "targets": [
+                {
+                    "id": BRIDGE_TARGET_ID,
+                    "application_usb": {
+                        "vendor_id": "0x045e",
+                        "product_id": "0x028e",
+                    },
+                    "application_manufacturer": "Lynxware",
+                    "application_product": "Steam Controller Bridge",
+                }
+            ]
+        }
+    )
+    expected = expected_rules(
+        identities,
+        firmware_targets,
+        'TAG+="uaccess"',
+    )
     exact = "\n".join(("# identities", *expected, ""))
-    assert policy_errors(exact, identities) == []
+    assert policy_errors(exact, identities, firmware_targets) == []
 
-    duplicate = policy_errors("\n".join((*expected, expected[0])), identities)
-    assert duplicate == [f"duplicate controller access rule: {expected[0]}"]
+    duplicate = policy_errors(
+        "\n".join((*expected, expected[0])), identities, firmware_targets
+    )
+    assert duplicate == [f"duplicate device access rule: {expected[0]}"]
 
-    missing = policy_errors(expected[0], identities)
-    assert missing == [f"missing controller access rule: {expected[1]}"]
+    missing = policy_errors("\n".join(expected[:2]), identities, firmware_targets)
+    assert missing == [f"missing device access rule: {expected[2]}"]
 
     broad = policy_errors(
         "\n".join(
             (
-                expected[0],
-                expected[1],
+                *expected,
                 'SUBSYSTEM=="hidraw", KERNELS=="0003:28DE:*", TAG+="uaccess"',
             )
         ),
         identities,
+        firmware_targets,
     )
     assert broad == [
-        'unexpected controller access rule: SUBSYSTEM=="hidraw", '
+        'unexpected device access rule: SUBSYSTEM=="hidraw", '
         'KERNELS=="0003:28DE:*", TAG+="uaccess"'
     ]
 
     world_writable = policy_errors(
         "\n".join(
             (
-                expected[0],
-                expected[1],
+                *expected,
                 'SUBSYSTEM=="hidraw", MODE="0666"',
             )
         ),
         identities,
+        firmware_targets,
     )
     assert world_writable == [
-        'unexpected controller access rule: SUBSYSTEM=="hidraw", MODE="0666"'
+        'unexpected device access rule: SUBSYSTEM=="hidraw", MODE="0666"'
     ]
 
     drifted = identities.replace("0x1304", "0x1305")
-    assert policy_errors(exact, drifted)
+    assert policy_errors(exact, drifted, firmware_targets)
 
-    assert rule_set_errors({RULE_FILENAME: exact}, identities) == []
-    assert rule_set_errors({}, identities) == [
+    broad_bridge = expected[2].replace(
+        ', ATTRS{manufacturer}=="Lynxware", ATTRS{product}=="Steam Controller Bridge"',
+        "",
+    )
+    assert policy_errors(
+        "\n".join((*expected[:2], broad_bridge)), identities, firmware_targets
+    )
+    assert policy_errors(
+        exact.replace(', ENV{ID_MM_DEVICE_IGNORE}="1"', ""),
+        identities,
+        firmware_targets,
+    )
+
+    drifted_bridge = firmware_targets.replace("0x028e", "0x028f")
+    assert policy_errors(exact, identities, drifted_bridge)
+
+    assert rule_set_errors({RULE_FILENAME: exact}, identities, firmware_targets) == []
+    assert rule_set_errors({}, identities, firmware_targets) == [
         f"missing Linux device access rule file: {RULE_FILENAME}"
     ]
     assert rule_set_errors(
         {RULE_FILENAME: exact, "99-open.rules": 'SUBSYSTEM=="hidraw", MODE="0666"'},
         identities,
+        firmware_targets,
     ) == ["unexpected Linux device access rule file: 99-open.rules"]
 
     headless = "\n".join(
         expected_rules(
             identities,
+            firmware_targets,
             'GROUP="steam-controller-bridge", MODE="0660"',
         )
     )
-    assert documentation_errors(headless, identities) == []
-    assert documentation_errors(headless.replace("1304", "1305"), identities)
+    assert documentation_errors(headless, identities, firmware_targets) == []
+    assert documentation_errors(
+        headless.replace("1304", "1305"), identities, firmware_targets
+    )
+    assert documentation_errors(
+        f'{headless}\n  SUBSYSTEM=="tty", MODE="0666"',
+        identities,
+        firmware_targets,
+    )
 
 
 def main() -> int:
@@ -187,13 +296,18 @@ def main() -> int:
         return 0
 
     identity_source = IDENTITY_PATH.read_text(encoding="utf-8")
+    firmware_targets = FIRMWARE_TARGETS_PATH.read_text(encoding="utf-8")
     rule_files = {
         path.name: path.read_text(encoding="utf-8")
         for path in RULE_DIRECTORY.glob("*.rules")
     }
-    errors = rule_set_errors(rule_files, identity_source)
+    errors = rule_set_errors(rule_files, identity_source, firmware_targets)
     errors.extend(
-        documentation_errors(README_PATH.read_text(encoding="utf-8"), identity_source)
+        documentation_errors(
+            README_PATH.read_text(encoding="utf-8"),
+            identity_source,
+            firmware_targets,
+        )
     )
     if errors:
         for error in errors:
