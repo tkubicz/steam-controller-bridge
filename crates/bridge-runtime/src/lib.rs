@@ -81,13 +81,15 @@ use recording::{
 };
 use serde_json::json;
 use steam_controller_device::{
-    masked_serial, ControllerEnumerator, ControllerTransport, DeviceError, DeviceEvent,
-    HidDeviceInfo, HidSession, LizardModeHeartbeat, RawHidReport,
+    controller_open_error, controller_open_error_message, masked_serial, ControllerEnumerator,
+    ControllerTransport, DeviceError, DeviceEvent, HidDeviceInfo, HidSession, LizardModeHeartbeat,
+    RawHidReport,
 };
 use steam_controller_discovery::{
     choose_unique_active, inventory_scan_interval as controller_inventory_scan_interval,
     next_stable_scan_interval as next_stable_controller_scan_interval, same_controller_collection,
-    ControllerDiscoveryState, MIN_STABLE_SCAN_INTERVAL as MIN_STABLE_CONTROLLER_SCAN_INTERVAL,
+    ControllerDiscoveryState, ControllerOpenFailure,
+    MIN_STABLE_SCAN_INTERVAL as MIN_STABLE_CONTROLLER_SCAN_INTERVAL,
 };
 #[cfg(test)]
 use steam_controller_discovery::{

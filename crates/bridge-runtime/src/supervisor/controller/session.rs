@@ -352,13 +352,6 @@ pub(crate) fn acknowledge_all_with_result(acks: &mut Vec<CommandAck>, result: &R
     }
 }
 
-pub(crate) fn ownership_guidance(error: &DeviceError) -> String {
-    format!(
-        "{error}. Fully quit Steam and other controller tools; if Steam's ipcserver remains, \
-         stop its LaunchAgent manually"
-    )
-}
-
 pub(crate) fn is_latest_state_report(report_id: u8) -> bool {
     matches!(report_id, INPUT_REPORT_ID | EXTENDED_INPUT_REPORT_ID)
 }

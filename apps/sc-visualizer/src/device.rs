@@ -11,7 +11,9 @@ use controller_mapper::ControllerMapper;
 use gamepad_state::GamepadState;
 use recording::{RecordingEvent, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
 use serde_json::json;
-use steam_controller_device::{enumerate, DeviceEvent, HidDeviceInfo, HidSession, RawHidReport};
+use steam_controller_device::{
+    controller_open_error, enumerate, DeviceEvent, HidDeviceInfo, HidSession, RawHidReport,
+};
 use steam_controller_discovery::{ActiveControllerFinder, ControllerSearch};
 use steam_controller_protocol::DecodedReport;
 
@@ -192,7 +194,7 @@ fn broker_open(
             .and_then(|info| {
                 HidSession::open_info(&info)
                     .map(|session| (info, session))
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| controller_open_error(&error))
             })
             .map_or_else(BrokerEvent::Failed, |(info, session)| {
                 BrokerEvent::Opened(Box::new(BrokerOpened {

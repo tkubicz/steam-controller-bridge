@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use recording::{RecordingEvent, RecordingWriter, KIND_DEVICE_CONNECTED, KIND_DEVICE_DISCONNECTED};
 use serde_json::json;
 use steam_controller_device::{
-    enumerate, DeviceEvent, HidDeviceInfo, HidSession, LizardModeHeartbeat,
+    controller_open_error, enumerate, DeviceEvent, HidDeviceInfo, HidSession, LizardModeHeartbeat,
 };
 use steam_controller_protocol::{DecodedReport, SteamControllerDecoder, SteamControllerState};
 
@@ -195,7 +195,8 @@ fn inspect_devices(index: Option<usize>) -> Result<(), String> {
 }
 
 fn monitor(index: usize, raw: bool, duration: Option<Duration>) -> Result<(), String> {
-    let mut session = HidSession::open_index(index).map_err(|error| error.to_string())?;
+    let mut session =
+        HidSession::open_index(index).map_err(|error| controller_open_error(&error))?;
     let mut decoder = SteamControllerDecoder::new();
     let mut previous_state: Option<SteamControllerState> = None;
     eprintln!("Monitoring collection {index}; press Ctrl+C to stop.");
@@ -275,7 +276,8 @@ fn capture(
     include_decoded_states: bool,
     duration: Option<Duration>,
 ) -> Result<(), String> {
-    let mut session = HidSession::open_index(index).map_err(|error| error.to_string())?;
+    let mut session =
+        HidSession::open_index(index).map_err(|error| controller_open_error(&error))?;
     let mut decoder = SteamControllerDecoder::new();
     let mut recording = RecordingWriter::new(
         File::create(output_path)
@@ -511,7 +513,7 @@ fn open_supported_controller_input(index: usize) -> Result<(HidDeviceInfo, HidSe
              28de:1303 Bluetooth ff00:0001 interface -1 collection"
         ));
     }
-    let session = HidSession::open_info(&info).map_err(|error| error.to_string())?;
+    let session = HidSession::open_info(&info).map_err(|error| controller_open_error(&error))?;
     Ok((info, session))
 }
 

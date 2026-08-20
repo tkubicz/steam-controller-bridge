@@ -243,6 +243,9 @@ pub enum DeviceError {
     OwnershipConflict {
         interface_number: i32,
     },
+    KernelOwnershipConflict {
+        path: String,
+    },
     UnsupportedLizardSuppressionTarget {
         vendor_id: u16,
         product_id: u16,
@@ -274,6 +277,27 @@ pub enum DeviceError {
     UnsupportedPlatform,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnershipConflictKind {
+    ProjectProcess,
+    Kernel,
+}
+
+impl OwnershipConflictKind {
+    /// Keeps the conflict whose remedy is most directly actionable.
+    ///
+    /// A project-process lock identifies an owner the user can close. Once it
+    /// is released, a later scan will still report any remaining native busy
+    /// endpoint.
+    #[must_use]
+    pub const fn most_actionable(current: Option<Self>, incoming: Self) -> Self {
+        match (current, incoming) {
+            (Some(Self::ProjectProcess), _) | (_, Self::ProjectProcess) => Self::ProjectProcess,
+            _ => Self::Kernel,
+        }
+    }
+}
+
 impl std::fmt::Display for DeviceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -283,9 +307,11 @@ impl std::fmt::Display for DeviceError {
             Self::OwnershipConflict { interface_number } => write!(
                 f,
                 "HID interface {interface_number} is already owned by another \
-                 steam-controller-bridge tool; stop the other sc-bridge, \
-                 sc-probe, or sc-visualizer process and retry"
+                 steam-controller-bridge tool"
             ),
+            Self::KernelOwnershipConflict { path } => {
+                write!(f, "Linux reported the HID endpoint {path} busy")
+            }
             Self::UnsupportedLizardSuppressionTarget {
                 vendor_id,
                 product_id,
@@ -378,11 +404,58 @@ fn write_unsupported_target(
 
 impl std::error::Error for DeviceError {}
 
+impl DeviceError {
+    #[must_use]
+    pub const fn ownership_conflict_kind(&self) -> Option<OwnershipConflictKind> {
+        match self {
+            Self::OwnershipConflict { .. } => Some(OwnershipConflictKind::ProjectProcess),
+            Self::KernelOwnershipConflict { .. } => Some(OwnershipConflictKind::Kernel),
+            _ => None,
+        }
+    }
+}
+
+#[must_use]
+pub fn controller_open_error(error: &DeviceError) -> String {
+    controller_open_error_message(error.to_string(), error.ownership_conflict_kind())
+}
+
+#[must_use]
+/// Appends the provider-owned remedy to an owned controller-open diagnostic.
+///
+/// # Panics
+///
+/// Panics if formatting into a [`String`] fails. The standard library's
+/// [`String`] formatter is infallible.
+pub fn controller_open_error_message(
+    mut detail: String,
+    ownership_conflict: Option<OwnershipConflictKind>,
+) -> String {
+    write_controller_ownership_guidance(&mut detail, ownership_conflict)
+        .expect("writing to a String cannot fail");
+    detail
+}
+
+/// Writes the provider-owned ownership remedy, including its separator.
+///
+/// # Errors
+///
+/// Returns the destination writer's formatting error.
+pub fn write_controller_ownership_guidance(
+    output: &mut impl std::fmt::Write,
+    ownership_conflict: Option<OwnershipConflictKind>,
+) -> std::fmt::Result {
+    if let Some(kind) = ownership_conflict {
+        write!(output, ". {}", ownership_conflict_guidance(kind))?;
+    }
+    Ok(())
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod platform;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub use platform::{enumerate, ControllerEnumerator, HidSession};
+pub use platform::{enumerate, ownership_conflict_guidance, ControllerEnumerator, HidSession};
 
 /// Unsupported-platform live-HID stub. Every fallible stub in this section returns
 /// [`DeviceError::UnsupportedPlatform`] without touching hardware.
@@ -393,6 +466,12 @@ pub use platform::{enumerate, ControllerEnumerator, HidSession};
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn enumerate() -> Result<Vec<HidDeviceInfo>, DeviceError> {
     Err(DeviceError::UnsupportedPlatform)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[must_use]
+pub const fn ownership_conflict_guidance(_kind: OwnershipConflictKind) -> &'static str {
+    "Close other Steam Controller Bridge and controller tools, then retry"
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -483,6 +562,54 @@ mod tests {
             product: Some("Controller".to_owned()),
             transport: "USB".to_owned(),
         }
+    }
+
+    #[test]
+    fn open_errors_add_one_provider_owned_remedy_for_ownership_conflicts() {
+        for error in [
+            DeviceError::OwnershipConflict {
+                interface_number: 2,
+            },
+            DeviceError::KernelOwnershipConflict {
+                path: "test-hidraw".to_owned(),
+            },
+        ] {
+            let guidance = ownership_conflict_guidance(
+                error
+                    .ownership_conflict_kind()
+                    .expect("ownership variant has a conflict kind"),
+            );
+            let rendered = controller_open_error(&error);
+            assert!(rendered.ends_with(guidance));
+            assert_eq!(rendered.matches(guidance).count(), 1);
+        }
+
+        assert_eq!(
+            controller_open_error(&DeviceError::Backend("permission denied".to_owned())),
+            "HID backend failed: permission denied"
+        );
+
+        let guidance = ownership_conflict_guidance(OwnershipConflictKind::ProjectProcess);
+        let rendered = controller_open_error_message(
+            "Puck interface 2 failed; Puck interface 3 failed".to_owned(),
+            Some(OwnershipConflictKind::ProjectProcess),
+        );
+        assert_eq!(rendered.matches(guidance).count(), 1);
+    }
+
+    #[test]
+    fn project_process_conflicts_are_the_most_actionable_aggregate() {
+        use OwnershipConflictKind::{Kernel, ProjectProcess};
+
+        assert_eq!(OwnershipConflictKind::most_actionable(None, Kernel), Kernel);
+        assert_eq!(
+            OwnershipConflictKind::most_actionable(Some(Kernel), ProjectProcess),
+            ProjectProcess
+        );
+        assert_eq!(
+            OwnershipConflictKind::most_actionable(Some(ProjectProcess), Kernel),
+            ProjectProcess
+        );
     }
 
     #[test]

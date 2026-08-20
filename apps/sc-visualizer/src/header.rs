@@ -2,7 +2,8 @@
 //! recording, and the current status line.
 
 use eframe::egui;
-use steam_controller_discovery::{ControllerSearch, CONTROLLER_OWNERSHIP_GUIDANCE};
+use steam_controller_device::{ownership_conflict_guidance, OwnershipConflictKind};
+use steam_controller_discovery::ControllerSearch;
 use ui_theme::{ACCENT, DANGER, MUTED_TEXT, SUCCESS, TEXT};
 
 use crate::Visualizer;
@@ -65,11 +66,10 @@ fn connection_problem(search: &ControllerSearch) -> Option<ConnectionProblem> {
     else {
         return None;
     };
-    let cleaned = raw_details
-        .replace(&format!(". {CONTROLLER_OWNERSHIP_GUIDANCE}"), "")
-        .replace(CONTROLLER_OWNERSHIP_GUIDANCE, "");
+    let conflict = *ownership_conflict;
+    let guidance = conflict.map(ownership_conflict_guidance);
     let mut details = Vec::new();
-    for detail in cleaned
+    for detail in raw_details
         .split("; ")
         .map(str::trim)
         .filter(|detail| !detail.is_empty())
@@ -80,18 +80,22 @@ fn connection_problem(search: &ControllerSearch) -> Option<ConnectionProblem> {
         }
     }
     Some(ConnectionProblem {
-        title: if *ownership_conflict {
+        title: if conflict.is_some() {
             "Controller is already in use"
         } else {
             "Controller input could not be opened"
         },
-        explanation: if *ownership_conflict {
-            "Another Steam or controller process currently owns the compatible HID interfaces."
-        } else {
-            "The controller was found, but none of its compatible input interfaces could be opened."
+        explanation: match conflict {
+            Some(OwnershipConflictKind::ProjectProcess) => {
+                "Another Steam Controller Bridge app or tool owns the compatible HID interfaces."
+            }
+            Some(OwnershipConflictKind::Kernel) => {
+                "Linux reported the compatible HID endpoint busy while opening the controller."
+            }
+            None => "The controller was found, but none of its compatible input interfaces could be opened.",
         },
         details,
-        guidance: ownership_conflict.then_some(CONTROLLER_OWNERSHIP_GUIDANCE),
+        guidance,
     })
 }
 
@@ -141,22 +145,37 @@ mod tests {
 
     #[test]
     fn ownership_failures_become_one_summary_and_collapsed_interface_details() {
+        let guidance = ownership_conflict_guidance(OwnershipConflictKind::ProjectProcess);
         let search = ControllerSearch::CannotOpen {
-            detail: format!(
-                "Puck interface 3: HID interface 3 is already owned. {CONTROLLER_OWNERSHIP_GUIDANCE}; Puck interface 4: HID interface 4 is already owned. {CONTROLLER_OWNERSHIP_GUIDANCE}"
-            ),
-            ownership_conflict: true,
+            detail: "Puck interface 3: HID interface 3 is already owned; Puck interface 4: HID interface 4 is already owned".to_owned(),
+            ownership_conflict: Some(OwnershipConflictKind::ProjectProcess),
         };
         let problem = connection_problem(&search).expect("cannot-open errors are structured");
         assert_eq!(problem.title, "Controller is already in use");
-        assert_eq!(problem.guidance, Some(CONTROLLER_OWNERSHIP_GUIDANCE));
+        assert_eq!(problem.guidance, Some(guidance));
         assert_eq!(problem.details.len(), 2);
         assert!(problem.details[0].contains("interface 3"));
         assert!(problem.details[1].contains("interface 4"));
         assert!(problem
             .details
             .iter()
-            .all(|detail| !detail.contains("Fully quit Steam")));
+            .all(|detail| !detail.contains(guidance)));
+    }
+
+    #[test]
+    fn kernel_conflicts_keep_linux_specific_explanation_and_guidance() {
+        let guidance = ownership_conflict_guidance(OwnershipConflictKind::Kernel);
+        let search = ControllerSearch::CannotOpen {
+            detail: "Linux reported the HID endpoint /dev/hidraw3 busy".to_owned(),
+            ownership_conflict: Some(OwnershipConflictKind::Kernel),
+        };
+        let problem = connection_problem(&search).expect("cannot-open errors are structured");
+        assert!(problem.explanation.contains("Linux reported"));
+        assert_eq!(problem.guidance, Some(guidance));
+        assert_eq!(
+            problem.details,
+            ["Linux reported the HID endpoint /dev/hidraw3 busy"]
+        );
     }
 
     #[test]
