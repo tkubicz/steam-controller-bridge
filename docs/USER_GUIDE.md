@@ -548,11 +548,11 @@ needed. Live mode automatically:
   `28de:1303`, Bluetooth, usage `ff00:0001`, interface `-1`;
 - observes candidates without feature writes until exactly one emits a complete
   valid `0x42` or `0x45` controller-state report;
-- filters macOS callout ports by the exact USB product marker
+- filters macOS `/dev/cu.*` callout ports or Linux `/dev/ttyACM<N>` and
+  `/dev/ttyUSB<N>` endpoints by the exact USB product marker
   `Steam Controller Bridge`, regardless of VID, PID, or manufacturer;
 - completes the protocol-v1 Hello handshake before selecting a bridge device;
-- remembers its stable USB serial number across a changed `/dev/cu.usbmodem…`
-  path; and
+- remembers its stable USB serial number across a changed host port path; and
 - waits and rescans every 500 ms when hardware is absent. Once supported
   collections are already open, report queues are still checked every 500 ms
   while unchanged metadata scans back off from two to at most ten seconds.
@@ -561,18 +561,20 @@ If more than one supported source produces controller states, the bridge
 refuses the ambiguity, lists transport/product/serial/index, and asks for
 `--index N`. An idle connected Puck does not conflict with an active Bluetooth
 controller. If more than one bridge device completes Hello, use `--port PATH`.
-An explicit port bypasses the USB product marker but still requires Hello.
+An explicit port bypasses the USB product marker and automatic path policy but
+still requires Hello.
 Explicit forms are:
 
 ```bash
 ./sc-bridge --controller auto --port auto
 ./sc-bridge --index N
 ./sc-bridge --port /dev/cu.usbmodemXXXX
+./sc-bridge --port /dev/ttyACM0
 ./sc-bridge --index N --port /dev/cu.usbmodemXXXX --record session.jsonl
 ```
 
 While automatic discovery is waiting, it keeps each supported controller
-collection open so macOS does not repeatedly allocate HID readers. Stop the
+collection open so the host does not repeatedly allocate HID readers. Stop the
 bridge before using `sc-probe monitor`, `sc-probe rumble`,
 `sc-probe suppress-lizard`, or `sc-visualizer`; `sc-probe list` is safe because
 it only enumerates metadata. The long-idle effect of keeping these collections
@@ -928,7 +930,7 @@ the first device. Quit the bridge, run `target/release/sc-probe list`, identify
 the intended active `ff00:0001` collection from the listed transport, product,
 serial, and index, then restart with `./sc-bridge --index N`. For gamepad-output
 ambiguity, disconnect the unused device or restart with
-`./sc-bridge --port /dev/cu.usbmodem…`.
+`./sc-bridge --port PATH`.
 
 ### The bridge stays in `Waiting`
 
@@ -937,8 +939,8 @@ connection` means no exact supported collection is enumerated. `waiting for
 valid controller state` means collections opened but no complete state stream
 was observed; wake the controller and verify its solid white Puck LED or solid
 blue Bluetooth LED. `Waiting for a Steam Controller Bridge protocol device`
-means no callout port has the exact USB product marker. A Hello-handshake
-message means a candidate port exists but protocol negotiation
+means no eligible host serial endpoint has the exact USB product marker. A
+Hello-handshake message means a candidate port exists but protocol negotiation
 failed; close other serial tools and reflash current firmware if needed.
 
 ### `A` still types Space or a touchpad moves the pointer

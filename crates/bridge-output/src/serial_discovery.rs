@@ -1,13 +1,17 @@
 use crate::serial::SerialError;
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod portable;
 
+#[cfg(target_os = "linux")]
+use linux as platform;
 #[cfg(target_os = "macos")]
 use macos as platform;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use portable as platform;
 
 /// Board-neutral USB product marker used for zero-configuration serial
@@ -27,17 +31,25 @@ pub struct SerialDeviceInfo {
 
 impl SerialDeviceInfo {
     /// Returns whether the host backend considers the endpoint safe for an
-    /// outgoing connection. macOS rejects dial-in endpoints because opening
-    /// them can block while waiting for carrier detect.
+    /// outgoing connection. macOS accepts `/dev/cu.*`; Linux accepts numbered
+    /// `/dev/ttyACM<N>` and `/dev/ttyUSB<N>` endpoints.
     #[must_use]
     pub fn is_callout_port(&self) -> bool {
-        platform::is_callout_port(&self.path)
+        !self.path.is_empty() && platform::is_callout_port(&self.path)
     }
 
     #[must_use]
     pub fn is_bridge_device(&self) -> bool {
         self.is_callout_port() && self.product.as_deref() == Some(BRIDGE_DEVICE_USB_PRODUCT)
     }
+}
+
+pub(crate) fn open_error(path: &str, error: serialport::Error) -> SerialError {
+    platform::open_error(path, error)
+}
+
+fn generic_open_error(error: serialport::Error) -> SerialError {
+    error.into()
 }
 
 /// Enumerates native serial port names.
@@ -101,5 +113,14 @@ mod tests {
     fn bridge_device_filter_uses_product_marker() {
         assert!(bridge_device(BRIDGE_DEVICE_USB_PRODUCT).is_bridge_device());
         assert!(!bridge_device("Steam Controller Puck").is_bridge_device());
+    }
+
+    #[test]
+    fn empty_paths_are_never_eligible_endpoints() {
+        let mut device = bridge_device(BRIDGE_DEVICE_USB_PRODUCT);
+        device.path.clear();
+
+        assert!(!device.is_callout_port());
+        assert!(!device.is_bridge_device());
     }
 }

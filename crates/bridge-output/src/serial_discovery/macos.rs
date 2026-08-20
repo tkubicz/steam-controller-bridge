@@ -1,5 +1,11 @@
+use super::{generic_open_error, SerialError};
+
 pub(super) fn is_callout_port(path: &str) -> bool {
     path.starts_with("/dev/cu.")
+}
+
+pub(super) fn open_error(_path: &str, error: serialport::Error) -> SerialError {
+    generic_open_error(error)
 }
 
 #[cfg(test)]

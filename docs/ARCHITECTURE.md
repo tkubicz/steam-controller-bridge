@@ -118,7 +118,9 @@ recorded in [the S0 Linux hardware-path decision](decisions/s0-linux-vm-hardware
 The core host depends on the public bridge-device contract, not a board model.
 Zero-configuration serial discovery uses the exact USB product marker
 `Steam Controller Bridge`, followed by a required protocol-v1 Hello handshake;
-an explicit port bypasses only the marker. The contract is documented in
+host providers restrict automatic candidates to safe endpoint names. An
+explicit port bypasses the marker and automatic path policy, but not the Hello
+handshake. The contract is documented in
 [SERIAL_TRANSPORT.md](SERIAL_TRANSPORT.md) and
 [GAMEPAD_PROTOCOL.md](GAMEPAD_PROTOCOL.md).
 

@@ -43,15 +43,18 @@ identity and backs the global lookup off from two seconds to a ten-second
 ceiling while it is waiting to open the collection; open retries continue every
 500 ms. It does not rebuild the full-system HID metadata on every retry.
 
-Bridge-device discovery enumerates serial metadata rather than matching
-filenames. An automatic candidate must be a macOS `/dev/cu.*` callout port with
-the exact USB product marker `Steam Controller Bridge`, then complete the
+Bridge-device discovery enumerates serial metadata rather than relying on a
+specific board identity. An automatic candidate must be a macOS `/dev/cu.*`
+callout port or a Linux `/dev/ttyACM<N>` or `/dev/ttyUSB<N>` endpoint with the
+exact USB product marker `Steam Controller Bridge`, then complete the
 protocol-v1 Hello handshake. VID, PID, manufacturer, and board model are not
 part of this core contract. This rejects the Puck's own `usbmodem` port without
 excluding independent implementations. The runtime remembers the stable USB
 serial number so it can prefer the same implementation after its path changes.
 Multiple Hello-valid devices require `--port PATH`. An explicit port bypasses
-the product marker, but still requires a valid Hello handshake.
+the product marker and automatic path policy, but still requires a valid Hello
+handshake. Linux permission failures point to a narrow device udev rule or the
+distribution's serial-access group.
 
 Overrides remain available:
 

@@ -158,6 +158,14 @@ fn target_device_kind(
         vendor_id: device.vendor_id?,
         product_id: device.product_id?,
     };
+
+    target_usb_device_kind(identity, target)
+}
+
+fn target_usb_device_kind(
+    identity: crate::UsbIdentity,
+    target: &FirmwareTargetDescriptor,
+) -> Option<FirmwareDeviceKind> {
     if target.factory_application_usb.contains(&identity) {
         Some(FirmwareDeviceKind::FactoryApplication)
     } else if target.bootloader_usb.contains(&identity) {
@@ -1555,7 +1563,7 @@ mod tests {
     }
 
     #[test]
-    fn target_device_detection_accepts_standard_and_sense_usb_ids() {
+    fn target_usb_identity_classification_accepts_standard_and_sense_ids() {
         for (product_id, expected) in [
             (0x8044, FirmwareDeviceKind::FactoryApplication),
             (0x0044, FirmwareDeviceKind::Uf2Bootloader),
@@ -1563,20 +1571,30 @@ mod tests {
             (0x0045, FirmwareDeviceKind::Uf2Bootloader),
         ] {
             assert_eq!(
-                target_device_kind(
-                    &SerialDeviceInfo {
-                        path: "/dev/cu.fixture".to_owned(),
-                        vendor_id: Some(0x2886),
-                        product_id: Some(product_id),
-                        serial_number: None,
-                        manufacturer: Some("Seeed".to_owned()),
-                        product: None,
+                target_usb_device_kind(
+                    crate::UsbIdentity {
+                        vendor_id: 0x2886,
+                        product_id,
                     },
                     test_target(),
                 ),
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn target_device_detection_rejects_an_ineligible_endpoint() {
+        let device = SerialDeviceInfo {
+            path: String::new(),
+            vendor_id: Some(0x2886),
+            product_id: Some(0x8044),
+            serial_number: None,
+            manufacturer: Some("Seeed".to_owned()),
+            product: None,
+        };
+
+        assert_eq!(target_device_kind(&device, test_target()), None);
     }
 
     #[test]

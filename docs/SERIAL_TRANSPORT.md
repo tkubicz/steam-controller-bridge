@@ -8,11 +8,12 @@ unchanged.
 
 ## Discovery and opt-in identity
 
-On macOS, zero-configuration discovery considers only callout ports
-(`/dev/cu.*`) whose USB product string is exactly `Steam Controller Bridge`.
-The product string is the implementation's explicit opt-in marker. VID, PID,
-manufacturer, serial-port filename, and board model are not discovery
-requirements.
+Zero-configuration discovery considers macOS callout ports (`/dev/cu.*`) and
+Linux USB serial endpoints (`/dev/ttyACM<N>` or `/dev/ttyUSB<N>`) whose USB
+product string is exactly `Steam Controller Bridge`. The product string is the
+implementation's explicit opt-in marker. VID, PID, manufacturer, and board
+model are not discovery requirements; the host-specific port name only limits
+which endpoints are safe automatic candidates.
 
 Every candidate must still open successfully and complete the protocol-v1
 Hello exchange. A marker is not proof of protocol compatibility. With
@@ -20,12 +21,20 @@ Hello exchange. A marker is not proof of protocol compatibility. With
 product marker but never bypasses Hello negotiation or protocol validation.
 
 The runtime remembers the stable USB serial identity of the selected bridge
-device and prefers it after macOS assigns a different callout path. If multiple
+device and prefers it after the host assigns a different port path. If multiple
 candidates complete Hello and no remembered identity selects exactly one, the
 runtime reports an ambiguity and requires `--port PATH`.
 
 Implementers who cannot or do not want to publish the discovery marker can
 therefore remain fully usable through the explicit-port path.
+
+If access is denied for a protocol-compatible third-party device on Linux,
+grant the selected serial endpoint read/write access through a narrowly matched
+udev rule or the distribution's serial-access group (commonly `dialout`).
+Group changes require a new login session or service restart. Discovery does
+not grant broad access to arbitrary USB serial devices. If ModemManager probes
+the endpoint, use a narrowly matched `ID_MM_DEVICE_IGNORE` rule for that device
+rather than disabling modem detection broadly.
 
 ## Session lifecycle and safety
 
@@ -115,7 +124,7 @@ cargo run -p gamepad-simulator -- automated --output serial \
   --port /dev/cu.usbmodemXXXX --baud 115200 --serial-log
 
 cargo run -p sc-replay -- session.jsonl --output serial \
-  --port /dev/cu.usbmodemXXXX --baud 115200
+  --port /dev/ttyACM0 --baud 115200
 ```
 
 The visualizer exposes the same explicit endpoint and baud controls. The

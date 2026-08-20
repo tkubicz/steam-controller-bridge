@@ -1082,7 +1082,8 @@ impl SerialOutput {
             // cadence; otherwise state refreshes can approach the firmware's
             // 100 ms controller-data watchdog after USB/CDC scheduling.
             .timeout(Duration::from_millis(1))
-            .open()?;
+            .open()
+            .map_err(|error| crate::serial_discovery::open_error(&self.path, error))?;
         self.clock = Instant::now();
         self.last_poll = None;
         let mut connection =
