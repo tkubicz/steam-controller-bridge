@@ -1,4 +1,4 @@
-//! HID discovery and raw report capture, with macOS access isolated behind cfg.
+//! HID discovery and raw report capture, with native access isolated behind cfg.
 
 use std::time::Duration;
 
@@ -347,7 +347,10 @@ impl std::fmt::Display for DeviceError {
                 *interface_number,
             ),
             Self::UnsupportedPlatform => {
-                write!(f, "live HID access is currently implemented only on macOS")
+                write!(
+                    f,
+                    "live HID access is currently implemented only on macOS and Linux"
+                )
             }
         }
     }
@@ -375,30 +378,30 @@ fn write_unsupported_target(
 
 impl std::error::Error for DeviceError {}
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod platform;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub use platform::{enumerate, ControllerEnumerator, HidSession};
 
-/// Non-macOS live-HID stub. Every fallible stub in this section returns
+/// Unsupported-platform live-HID stub. Every fallible stub in this section returns
 /// [`DeviceError::UnsupportedPlatform`] without touching hardware.
 #[allow(
     clippy::missing_errors_doc,
-    reason = "documented by the non-macOS stub contract"
+    reason = "documented by the unsupported-platform stub contract"
 )]
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn enumerate() -> Result<Vec<HidDeviceInfo>, DeviceError> {
     Err(DeviceError::UnsupportedPlatform)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub struct ControllerEnumerator;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[allow(
     clippy::missing_errors_doc,
-    reason = "documented by the non-macOS stub contract"
+    reason = "documented by the unsupported-platform stub contract"
 )]
 impl ControllerEnumerator {
     pub fn new() -> Result<Self, DeviceError> {
@@ -418,13 +421,13 @@ impl ControllerEnumerator {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub struct HidSession;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[allow(
     clippy::missing_errors_doc,
-    reason = "documented by the non-macOS stub contract"
+    reason = "documented by the unsupported-platform stub contract"
 )]
 impl HidSession {
     pub fn open_index(_index: usize) -> Result<Self, DeviceError> {

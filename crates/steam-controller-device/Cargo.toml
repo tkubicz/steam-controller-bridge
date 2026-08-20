@@ -11,7 +11,10 @@ fs4.workspace = true
 steam-controller-protocol = { path = "../steam-controller-protocol" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-hidapi.workspace = true
+hidapi = { workspace = true, features = ["macos-shared-device"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+hidapi = { workspace = true, features = ["linux-native"] }
 
 [lints]
 workspace = true

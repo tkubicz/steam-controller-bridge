@@ -54,7 +54,7 @@ tokio = { version = "1.52.3", features = ["macros", "net", "rt", "time"] }
 tempfile = "3.27.0"
 fs4 = "1.1.0"
 thiserror = "2.0.19"
-hidapi = { version = "2.6.6", default-features = false, features = ["macos-shared-device"] }
+hidapi = { version = "2.6.6", default-features = false }
 rfd = "0.17.2"
 eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "glow"] }
 tray-icon = "0.24.2"

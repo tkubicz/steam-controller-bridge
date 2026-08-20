@@ -1,8 +1,8 @@
 [graph]
-# This project ships macOS only: live HID access is macOS-gated by design, and
-# the release artifacts are a macOS app plus board firmware. Linux CI exists to
-# compile the unsupported-platform stubs and catch cfg-gated lints, not to
-# produce a supported build.
+# This project ships macOS only: the release artifacts are a macOS app plus
+# board firmware. Linux CI compiles early native providers and catches
+# cfg-gated lints, but does not produce a supported build. CI audits the Linux
+# controller-HID provider separately from its crate manifest.
 #
 # Scoping the graph keeps the audit honest. Unscoped, it reports advisories from
 # dependencies that no shipped binary contains: the Wayland stack behind
