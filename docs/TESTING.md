@@ -27,6 +27,16 @@ cargo build --workspace --all-targets
 make -C firmware/xiao-nrf52840 test
 ```
 
+On a Linux runner with no attached supported controller or bridge serial
+device, also run the explicitly ignored native smoke targets:
+
+```bash
+cargo test -p steam-controller-device --test linux_no_device -- --ignored
+cargo test -p bridge-output \
+  serial_discovery::linux::tests::native_serial_discovery_handles_an_empty_bridge_scan \
+  -- --ignored --exact
+```
+
 The default pass checks the distributed configuration, where local filesystem
 updates are compiled out. The focused all-feature pass checks the two packages
 whose code changes when `local-update-source` is enabled. Neither pass replaces
@@ -59,6 +69,13 @@ world-writable controller HID and bridge serial access entries, and requires
 the exact bridge rule to opt out of ModemManager probing. Installation and
 headless fallback policy are documented with the
 [Linux packaging inputs](../packaging/linux/README.md).
+
+The Ubuntu hosted runner also executes explicitly no-device native smoke tests:
+the filtered HID enumerator is constructed, refreshed, and dropped across two
+empty scans, and bridge serial discovery completes without a matching
+endpoint. The ordinary workspace suite supplies the scripted connect, report,
+disconnect, retry, and shutdown lifecycle coverage. These checks do not claim
+physical Puck or XIAO access.
 
 ## Automated coverage map
 

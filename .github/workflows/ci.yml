@@ -76,6 +76,13 @@ jobs:
       # updates are absent, so this is the code users receive.
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Run Linux no-device enumeration smoke tests
+        if: runner.os == 'Linux'
+        run: |
+          cargo test -p steam-controller-device --test linux_no_device -- --ignored
+          cargo test -p bridge-output \
+            serial_discovery::linux::tests::native_serial_discovery_handles_an_empty_bridge_scan \
+            -- --ignored --exact
       # Unlike a workspace-wide --all-features run, this exact invocation proves
       # the menu feature forwards into the macOS-only updater dependency.
       - if: runner.os == 'macOS'
