@@ -5,9 +5,13 @@ use std::collections::{HashMap, VecDeque};
 
 use desktop_input::DesktopSession;
 
+#[cfg(any(target_os = "linux", test))]
+mod linux;
 #[cfg(any(target_os = "macos", test))]
 mod macos;
 
+#[cfg(any(target_os = "linux", test))]
+pub use linux::LinuxCapabilities;
 #[cfg(any(target_os = "macos", test))]
 pub use macos::MacOsCapabilities;
 
@@ -115,7 +119,11 @@ pub fn current_provider() -> Result<Box<dyn PlatformCapabilities>, CapabilityErr
     {
         Ok(Box::new(MacOsCapabilities::new()))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Box::new(LinuxCapabilities::new()))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Err(CapabilityError::UnsupportedPlatform {
             platform: std::env::consts::OS,

@@ -1,0 +1,399 @@
+use crate::{
+    CapabilityContext, CapabilityError, CapabilityId, CapabilityState, PlatformCapabilities,
+    Remedy, RequirementGroup,
+};
+
+const DEVICE_RULE_PATH: &str = "packaging/linux/60-steam-controller-bridge.rules";
+
+trait LinuxAccessApi {
+    fn controller_hid_access(&self) -> CapabilityState;
+    fn serial_port_access(&self) -> CapabilityState;
+}
+
+/// Linux capability provider for controller HID and bridge serial access.
+pub struct LinuxCapabilities {
+    api: Box<dyn LinuxAccessApi>,
+}
+
+impl LinuxCapabilities {
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            api: Box::new(NativeLinuxAccessApi::new()),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Default for LinuxCapabilities {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PlatformCapabilities for LinuxCapabilities {
+    fn requirements(&self, context: &CapabilityContext) -> Vec<RequirementGroup> {
+        let mut independent = Vec::new();
+        if context.controller_input_enabled {
+            independent.push(CapabilityId::ControllerHidAccess);
+        }
+        if context.serial_output_or_firmware_enabled {
+            independent.push(CapabilityId::SerialPortAccess);
+        }
+        if independent.is_empty() {
+            Vec::new()
+        } else {
+            vec![RequirementGroup::Independent(independent)]
+        }
+    }
+
+    fn probe(&self, id: CapabilityId) -> CapabilityState {
+        match id {
+            CapabilityId::ControllerHidAccess => self.api.controller_hid_access(),
+            CapabilityId::SerialPortAccess => self.api.serial_port_access(),
+            CapabilityId::VirtualGamepadAccess | CapabilityId::DesktopInputAccess => {
+                CapabilityState::Unavailable {
+                    reason: "the selected Linux provider is not implemented yet".to_owned(),
+                }
+            }
+            CapabilityId::InputMonitoring
+            | CapabilityId::PostEvent
+            | CapabilityId::Accessibility => CapabilityState::NotRequired,
+        }
+    }
+
+    fn request(&mut self, id: CapabilityId) -> Result<CapabilityState, CapabilityError> {
+        Ok(self.probe(id))
+    }
+
+    fn remedy(&self, id: CapabilityId) -> Option<Remedy> {
+        let text = match id {
+            CapabilityId::ControllerHidAccess => format!(
+                "For an active desktop session, install the narrowly matched controller rule in {DEVICE_RULE_PATH}. For a headless service, use its documented dedicated-group fallback. Reload udev rules and reconnect the controller, or restart the service after changing groups"
+            ),
+            CapabilityId::SerialPortAccess => format!(
+                "For an active desktop session with the official XIAO bridge, install the narrowly matched rule in {DEVICE_RULE_PATH}. For a third-party bridge, add an equally narrow rule for its USB identity or use the distribution's serial-access group. For a headless service, use the documented dedicated-group fallback with an exact device match. Reload udev rules and reconnect the bridge, or start a new login or restart the service after changing groups"
+            ),
+            CapabilityId::VirtualGamepadAccess
+            | CapabilityId::DesktopInputAccess
+            | CapabilityId::InputMonitoring
+            | CapabilityId::PostEvent
+            | CapabilityId::Accessibility => return None,
+        };
+        Some(Remedy::Instructions {
+            text,
+            command: None,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct NativeLinuxAccessApi {
+    controller: std::cell::RefCell<Option<steam_controller_device::ControllerEnumerator>>,
+}
+
+#[cfg(target_os = "linux")]
+impl NativeLinuxAccessApi {
+    fn new() -> Self {
+        Self {
+            controller: std::cell::RefCell::new(None),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxAccessApi for NativeLinuxAccessApi {
+    fn controller_hid_access(&self) -> CapabilityState {
+        let mut controller = self.controller.borrow_mut();
+        if controller.is_none() {
+            match steam_controller_device::ControllerEnumerator::new() {
+                Ok(enumerator) => *controller = Some(enumerator),
+                Err(error) => {
+                    return CapabilityState::Unavailable {
+                        reason: format!(
+                            "cannot initialize Linux controller HID enumeration: {error}"
+                        ),
+                    };
+                }
+            }
+        }
+        match controller
+            .as_mut()
+            .expect("controller enumerator was initialized")
+            .enumerate()
+        {
+            Ok(devices) => access_state(
+                devices.into_iter().map(|device| device.path),
+                "controller HID endpoint",
+                check_path_access,
+            ),
+            Err(error) => CapabilityState::Unavailable {
+                reason: format!("cannot enumerate Linux controller HID endpoints: {error}"),
+            },
+        }
+    }
+
+    fn serial_port_access(&self) -> CapabilityState {
+        match bridge_output::available_serial_devices() {
+            Ok(devices) => access_state(
+                devices
+                    .into_iter()
+                    .filter(bridge_output::SerialDeviceInfo::is_bridge_device)
+                    .map(|device| device.path),
+                "bridge serial endpoint",
+                check_path_access,
+            ),
+            Err(error) => CapabilityState::Unavailable {
+                reason: format!("cannot enumerate Linux bridge serial endpoints: {error}"),
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn check_path_access(path: &str) -> Result<(), PathAccessError> {
+    use rustix::fs::{accessat, Access, AtFlags, CWD};
+    use rustix::io::Errno;
+
+    match accessat(
+        CWD,
+        path,
+        Access::READ_OK | Access::WRITE_OK,
+        AtFlags::EACCESS,
+    ) {
+        Ok(()) => Ok(()),
+        Err(Errno::ACCES | Errno::PERM) => Err(PathAccessError::Denied),
+        Err(Errno::NOENT) => Err(PathAccessError::Missing),
+        Err(error) => Err(PathAccessError::Other(error.to_string())),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathAccessError {
+    Denied,
+    Missing,
+    Other(String),
+}
+
+fn access_state(
+    paths: impl IntoIterator<Item = String>,
+    device: &str,
+    mut check: impl FnMut(&str) -> Result<(), PathAccessError>,
+) -> CapabilityState {
+    use std::collections::BTreeSet;
+
+    let mut denied = None;
+    let mut unavailable = None;
+    for path in paths.into_iter().collect::<BTreeSet<_>>() {
+        match check(&path) {
+            Ok(()) => return CapabilityState::Satisfied,
+            Err(PathAccessError::Denied) => {
+                denied.get_or_insert(path);
+            }
+            Err(PathAccessError::Missing) => {}
+            Err(PathAccessError::Other(error)) => {
+                unavailable.get_or_insert((path, error));
+            }
+        }
+    }
+
+    if let Some(path) = denied {
+        CapabilityState::Blocked {
+            reason: format!("Linux {device} {path} is not readable and writable"),
+        }
+    } else if let Some((path, error)) = unavailable {
+        CapabilityState::Unavailable {
+            reason: format!("cannot inspect Linux {device} {path}: {error}"),
+        }
+    } else {
+        CapabilityState::Satisfied
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use crate::evaluate_requirements;
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct FakeApi {
+        controller: CapabilityState,
+        serial: CapabilityState,
+        probes: Rc<RefCell<Vec<CapabilityId>>>,
+    }
+
+    impl LinuxAccessApi for FakeApi {
+        fn controller_hid_access(&self) -> CapabilityState {
+            self.probes
+                .borrow_mut()
+                .push(CapabilityId::ControllerHidAccess);
+            self.controller.clone()
+        }
+
+        fn serial_port_access(&self) -> CapabilityState {
+            self.probes
+                .borrow_mut()
+                .push(CapabilityId::SerialPortAccess);
+            self.serial.clone()
+        }
+    }
+
+    fn provider(
+        controller: CapabilityState,
+        serial: CapabilityState,
+    ) -> (LinuxCapabilities, Rc<RefCell<Vec<CapabilityId>>>) {
+        let probes = Rc::new(RefCell::new(Vec::new()));
+        (
+            LinuxCapabilities {
+                api: Box::new(FakeApi {
+                    controller,
+                    serial,
+                    probes: Rc::clone(&probes),
+                }),
+            },
+            probes,
+        )
+    }
+
+    #[test]
+    fn requirements_follow_active_linux_hid_and_serial_features() {
+        let (provider, probes) = provider(CapabilityState::Satisfied, CapabilityState::Satisfied);
+
+        assert!(provider
+            .requirements(&CapabilityContext::default())
+            .is_empty());
+        assert_eq!(
+            provider.requirements(&CapabilityContext {
+                controller_input_enabled: true,
+                ..CapabilityContext::default()
+            }),
+            [RequirementGroup::Independent(vec![
+                CapabilityId::ControllerHidAccess,
+            ])]
+        );
+        assert_eq!(
+            provider.requirements(&CapabilityContext {
+                serial_output_or_firmware_enabled: true,
+                ..CapabilityContext::default()
+            }),
+            [RequirementGroup::Independent(vec![
+                CapabilityId::SerialPortAccess,
+            ])]
+        );
+        assert_eq!(
+            provider.requirements(&CapabilityContext {
+                controller_input_enabled: true,
+                serial_output_or_firmware_enabled: true,
+                ..CapabilityContext::default()
+            }),
+            [RequirementGroup::Independent(vec![
+                CapabilityId::ControllerHidAccess,
+                CapabilityId::SerialPortAccess,
+            ])]
+        );
+        assert!(probes.borrow().is_empty());
+    }
+
+    #[test]
+    fn independent_access_failures_are_both_reported() {
+        let (provider, probes) = provider(
+            CapabilityState::Blocked {
+                reason: "hidraw denied".to_owned(),
+            },
+            CapabilityState::Blocked {
+                reason: "serial denied".to_owned(),
+            },
+        );
+        let context = CapabilityContext {
+            controller_input_enabled: true,
+            serial_output_or_firmware_enabled: true,
+            ..CapabilityContext::default()
+        };
+
+        let report = evaluate_requirements(&provider, &context);
+
+        assert_eq!(report.unsatisfied.len(), 2);
+        assert_eq!(
+            probes.borrow().as_slice(),
+            [
+                CapabilityId::ControllerHidAccess,
+                CapabilityId::SerialPortAccess,
+            ]
+        );
+        assert!(report.unsatisfied.iter().all(|requirement| matches!(
+            requirement.remedy,
+            Some(Remedy::Instructions { command: None, .. })
+        )));
+        let Some(Remedy::Instructions { text, .. }) =
+            provider.remedy(CapabilityId::SerialPortAccess)
+        else {
+            panic!("serial access must provide instructions");
+        };
+        assert!(text.contains("third-party bridge"));
+        assert!(text.contains("serial-access group"));
+    }
+
+    #[test]
+    fn request_rechecks_access_without_claiming_a_system_prompt() {
+        let (mut provider, probes) =
+            provider(CapabilityState::Satisfied, CapabilityState::Satisfied);
+
+        assert_eq!(
+            provider.request(CapabilityId::SerialPortAccess).unwrap(),
+            CapabilityState::Satisfied
+        );
+        assert_eq!(probes.borrow().as_slice(), [CapabilityId::SerialPortAccess]);
+        assert!(!matches!(
+            provider.remedy(CapabilityId::SerialPortAccess),
+            Some(Remedy::RequestFromSystem)
+        ));
+    }
+
+    #[test]
+    fn endpoint_access_needs_one_usable_candidate_and_tolerates_absence() {
+        assert_eq!(
+            access_state(Vec::new(), "device", |_| unreachable!()),
+            CapabilityState::Satisfied
+        );
+        assert_eq!(
+            access_state(["missing".to_owned()], "device", |_| Err(
+                PathAccessError::Missing
+            )),
+            CapabilityState::Satisfied
+        );
+        assert_eq!(
+            access_state(
+                ["denied".to_owned(), "usable".to_owned()],
+                "device",
+                |path| if path == "usable" {
+                    Ok(())
+                } else {
+                    Err(PathAccessError::Denied)
+                }
+            ),
+            CapabilityState::Satisfied
+        );
+    }
+
+    #[test]
+    fn endpoint_access_distinguishes_denial_from_probe_failure() {
+        assert!(matches!(
+            access_state(["denied".to_owned()], "device", |_| {
+                Err(PathAccessError::Denied)
+            }),
+            CapabilityState::Blocked { reason } if reason.contains("denied")
+        ));
+        assert!(matches!(
+            access_state(["broken".to_owned()], "device", |_| {
+                Err(PathAccessError::Other("I/O error".to_owned()))
+            }),
+            CapabilityState::Unavailable { reason }
+                if reason.contains("broken") && reason.contains("I/O error")
+        ));
+    }
+}

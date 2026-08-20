@@ -10,5 +10,10 @@ repository.workspace = true
 desktop-input = { path = "../desktop-input" }
 thiserror.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+bridge-output = { path = "../bridge-output" }
+rustix.workspace = true
+steam-controller-device = { path = "../steam-controller-device" }
+
 [lints]
 workspace = true
