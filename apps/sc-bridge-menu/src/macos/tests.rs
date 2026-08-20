@@ -378,22 +378,18 @@ fn template_icons_are_valid_and_distinct_for_every_state() {
             pixels.len(),
             usize::try_from(ICON_WIDTH * ICON_HEIGHT * 4).unwrap()
         );
-        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        let rgba_pixels = pixels.as_chunks::<4>().0;
+        assert!(rgba_pixels.iter().any(|pixel| pixel[3] != 0));
         assert!(
-            pixels
-                .chunks_exact(4)
+            rgba_pixels
+                .iter()
                 .any(|pixel| pixel[3] > 0 && pixel[3] < 255),
             "{state:?} should retain anti-aliased edges"
         );
-        let occupied_rows: Vec<_> = pixels
-            .chunks_exact(usize::try_from(ICON_WIDTH * 4).unwrap())
+        let occupied_rows: Vec<_> = rgba_pixels
+            .chunks_exact(usize::try_from(ICON_WIDTH).unwrap())
             .enumerate()
-            .filter_map(|(row, pixels)| {
-                pixels
-                    .chunks_exact(4)
-                    .any(|pixel| pixel[3] > 8)
-                    .then_some(row)
-            })
+            .filter_map(|(row, pixels)| pixels.iter().any(|pixel| pixel[3] > 8).then_some(row))
             .collect();
         assert!(
             occupied_rows.last().unwrap() - occupied_rows.first().unwrap()
