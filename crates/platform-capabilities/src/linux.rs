@@ -163,7 +163,7 @@ fn check_path_access(path: &str) -> Result<(), PathAccessError> {
         AtFlags::EACCESS,
     ) {
         Ok(()) => Ok(()),
-        Err(Errno::ACCES | Errno::PERM) => Err(PathAccessError::Denied),
+        Err(Errno::ACCESS | Errno::PERM) => Err(PathAccessError::Denied),
         Err(Errno::NOENT) => Err(PathAccessError::Missing),
         Err(error) => Err(PathAccessError::Other(error.to_string())),
     }
