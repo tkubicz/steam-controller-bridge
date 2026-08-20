@@ -105,6 +105,12 @@ explicit errors instead of pretending live access exists. All project-authored
 crates forbid unsafe code except `power-monitor`, whose documented IOKit/Core
 Foundation ownership is isolated behind a safe typed API.
 
+Linux capability policy derives controller HID and bridge serial requirements
+independently from the active features. Its probes filter native enumeration
+results to supported endpoints before inspecting read/write access without
+opening or retaining a device; an absent device is left to normal discovery
+rather than reported as a permission failure.
+
 The portable-core allowlist is enforced by
 [`tools/check-portable-core.py`](../tools/check-portable-core.py). Platform
 selection is permitted only in a facade root or its backend modules; ordinary
