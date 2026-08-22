@@ -1,0 +1,20 @@
+[package]
+name = "xiao-usb-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+bridge-output = { path = "../../crates/bridge-output" }
+bridge-protocol = { path = "../../crates/bridge-protocol" }
+ctrlc = { version = "3.5.2", features = ["termination"] }
+gamepad-simulator = { path = "../../apps/gamepad-simulator" }
+gamepad-state = { path = "../../crates/gamepad-state" }
+nusb = "0.2.7"
+recording = { path = "../../crates/recording" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
+rustix = { version = "1.1.4", features = ["fs"] }
+
+[workspace]

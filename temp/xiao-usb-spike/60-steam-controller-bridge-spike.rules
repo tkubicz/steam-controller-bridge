@@ -1,0 +1,1 @@
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="045e", ATTR{idProduct}=="028e", ATTR{manufacturer}=="Lynxware", ATTR{product}=="Steam Controller Bridge", TAG+="uaccess"
