@@ -3,4 +3,5 @@
 /firmware/xiao-nrf52840/build/
 *.frames
 .DS_Store
-/temp/
+/temp/*
+!/temp/xiao-usb-spike/*
