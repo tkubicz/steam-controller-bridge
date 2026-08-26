@@ -33,7 +33,6 @@ impl Supervisor {
         let endpoints = match discover_output_endpoints_with(
             &self.config.bridge_endpoint,
             available_bridge_endpoints,
-            available_serial_endpoints,
         ) {
             Ok(endpoints) => endpoints,
             Err(error) => {
@@ -59,17 +58,15 @@ impl Supervisor {
             };
         }
 
-        let mut valid = Vec::new();
-        let mut failures = Vec::new();
-        for candidate in candidates {
-            let candidate = candidate.with_serial_baud_rate(self.config.serial_baud_rate);
-            match BridgeOutput::open(candidate.clone(), self.config.bridge_transport_config) {
-                Ok(output) => valid.push((candidate, output)),
-                Err(error) => {
-                    failures.push(format!("{}: {error}", candidate.display_label()));
-                }
-            }
-        }
+        let candidates = candidates
+            .into_iter()
+            .map(|candidate| candidate.with_serial_baud_rate(self.config.serial_baud_rate))
+            .collect();
+        let (mut valid, failures) = open_output_candidates_with(
+            candidates,
+            self.preferred_output_stable_id.as_deref(),
+            |candidate| BridgeOutput::open(candidate.clone(), self.config.bridge_transport_config),
+        );
         if valid.is_empty() {
             return OutputDiscovery::Wait {
                 detail:

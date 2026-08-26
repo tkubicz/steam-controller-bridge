@@ -9,8 +9,9 @@ use bridge_protocol::{
 use gamepad_state::GamepadState;
 
 use crate::{
-    endpoint_discovery::open_error, BridgeEndpoint, BridgeEndpointLocator, GamepadOutput,
-    OutputDiagnostics, OutputError, OutputFeedback,
+    endpoint_discovery::{open_error, BridgeEndpointLocator},
+    BridgeEndpoint, GamepadOutput, OutputDiagnostics, OutputError, OutputFeedback,
+    BRIDGE_BUSY_ERROR_MARKER,
 };
 /// How long after Ready the firmware gets to deliver its `DeviceInfo` report
 /// before the connection is classified as pre-versioning firmware.
@@ -107,7 +108,7 @@ pub enum FirmwareTarget {
     Malformed,
 }
 
-pub trait ByteTransport {
+pub trait ByteTransport: Send {
     /// Writes one complete protocol frame.
     ///
     /// # Errors
@@ -478,6 +479,7 @@ pub enum BridgeTransportError {
     Io(io::Error),
     AccessDenied(String),
     DeviceBusy(String),
+    GamepadUnavailable(String),
     InvalidTopology(String),
     Disconnected(String),
     Protocol(bridge_protocol::ProtocolError),
@@ -505,8 +507,11 @@ impl std::fmt::Display for BridgeTransportError {
             ),
             Self::DeviceBusy(endpoint) => write!(
                 f,
-                "bridge endpoint {endpoint} is already owned by another process or driver"
+                "{BRIDGE_BUSY_ERROR_MARKER} at {endpoint}; another process or driver may own it"
             ),
+            Self::GamepadUnavailable(reason) => {
+                write!(f, "bridge gamepad output is unavailable: {reason}")
+            }
             Self::InvalidTopology(reason) => {
                 write!(f, "official bridge USB topology is invalid: {reason}")
             }
@@ -987,7 +992,7 @@ impl ByteTransport for SerialPortTransport {
     }
 }
 
-trait TransportFactory {
+trait TransportFactory: Send {
     fn open(
         &mut self,
         endpoint: &BridgeEndpoint,
@@ -1310,12 +1315,17 @@ impl GamepadOutput for BridgeOutput {
         unreachable!("two reconnect attempts always return")
     }
     fn send_neutral(&mut self) -> Result<(), OutputError> {
-        self.desired_state = None;
-        self.connection
+        self.desired_state = Some(GamepadState::neutral());
+        let result = self
+            .connection
             .as_mut()
             .ok_or_else(|| OutputError::Transport(BridgeTransportError::NotReady.to_string()))?
             .send_neutral_now()
-            .map_err(|error| OutputError::Transport(error.to_string()))
+            .map_err(|error| OutputError::Transport(error.to_string()));
+        if result.is_ok() {
+            self.desired_state = None;
+        }
+        result
     }
     fn service(&mut self) -> Result<(), OutputError> {
         if !transport_service_due(self.clock.elapsed(), self.last_poll) {
@@ -1394,7 +1404,7 @@ impl GamepadOutput for BridgeOutput {
 
 impl Drop for BridgeOutput {
     fn drop(&mut self) {
-        if !self.bootloader_transition {
+        if !self.bootloader_transition && self.desired_state.is_some() {
             if let Some(connection) = &mut self.connection {
                 let _ = connection.send_neutral_now();
             }
@@ -1410,6 +1420,21 @@ fn transport_service_due(now: Duration, last_poll: Option<Duration>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_output_remains_send() {
+        fn assert_send<T: Send>() {}
+
+        assert_send::<BridgeOutput>();
+    }
+
+    #[test]
+    fn bridge_busy_errors_keep_the_bridge_specific_classifier() {
+        let error = BridgeTransportError::DeviceBusy("endpoint".to_owned()).to_string();
+
+        assert!(error.contains(BRIDGE_BUSY_ERROR_MARKER));
+        assert!(!error.contains("already owned"));
+    }
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -1464,6 +1489,10 @@ mod tests {
     enum OpenStep {
         Fail(&'static str),
         Transport(VecDeque<io::Result<Vec<u8>>>),
+        TransportWithWrites {
+            reads: VecDeque<io::Result<Vec<u8>>>,
+            writes: VecDeque<io::Result<()>>,
+        },
     }
 
     struct ScriptedFactory {
@@ -1481,14 +1510,23 @@ mod tests {
                 OpenStep::Fail(message) => Err(io::Error::other(message).into()),
                 OpenStep::Transport(reads) => Ok(Box::new(LifecycleTransport {
                     reads,
+                    writes: VecDeque::new(),
                     events: Arc::clone(&self.events),
                 })),
+                OpenStep::TransportWithWrites { reads, writes } => {
+                    Ok(Box::new(LifecycleTransport {
+                        reads,
+                        writes,
+                        events: Arc::clone(&self.events),
+                    }))
+                }
             }
         }
     }
 
     struct LifecycleTransport {
         reads: VecDeque<io::Result<Vec<u8>>>,
+        writes: VecDeque<io::Result<()>>,
         events: Arc<Mutex<Vec<LifecycleEvent>>>,
     }
 
@@ -1500,7 +1538,7 @@ mod tests {
                     .unwrap()
                     .push(LifecycleEvent::Write(message));
             }
-            Ok(())
+            self.writes.pop_front().unwrap_or(Ok(()))
         }
 
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
@@ -1630,9 +1668,9 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_sends_neutral_before_releasing_the_transport() {
+    fn shutdown_sends_neutral_after_active_output_before_releasing_the_transport() {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let output = output_with_script(
+        let mut output = output_with_script(
             [OpenStep::Transport(VecDeque::from([Ok(response(
                 Message::HelloResponse {
                     selected_version: PROTOCOL_VERSION,
@@ -1641,6 +1679,9 @@ mod tests {
             Arc::clone(&events),
         )
         .unwrap();
+        let mut state = GamepadState::neutral();
+        state.left_x = 1.0;
+        output.send_state(&state).unwrap();
 
         drop(output);
 
@@ -1654,6 +1695,41 @@ mod tests {
             .position(|event| matches!(event, LifecycleEvent::TransportDrop))
             .expect("transport drop");
         assert!(neutral < released);
+    }
+
+    #[test]
+    fn shutdown_retries_a_failed_explicit_neutral_before_releasing_the_transport() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut output = output_with_script(
+            [OpenStep::TransportWithWrites {
+                reads: VecDeque::from([Ok(response(Message::HelloResponse {
+                    selected_version: PROTOCOL_VERSION,
+                }))]),
+                writes: VecDeque::from([
+                    Ok(()),
+                    Ok(()),
+                    Err(io::Error::new(io::ErrorKind::TimedOut, "neutral timeout")),
+                    Ok(()),
+                ]),
+            }],
+            Arc::clone(&events),
+        )
+        .unwrap();
+        let mut state = GamepadState::neutral();
+        state.left_x = 1.0;
+        output.send_state(&state).unwrap();
+
+        assert!(output.send_neutral().is_err());
+        assert_eq!(output.desired_state, Some(GamepadState::neutral()));
+        drop(output);
+
+        let events = events.lock().unwrap();
+        let neutral_writes = events
+            .iter()
+            .filter(|event| matches!(event, LifecycleEvent::Write(Message::Neutral)))
+            .count();
+        assert_eq!(neutral_writes, 2);
+        assert_eq!(events.last(), Some(&LifecycleEvent::TransportDrop));
     }
 
     #[test]

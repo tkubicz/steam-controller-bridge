@@ -1,5 +1,5 @@
-use std::collections::BTreeSet;
 use std::io;
+use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 mod backend;
@@ -20,17 +20,28 @@ pub const PRODUCT: &str = "Steam Controller Bridge";
 pub struct Locator {
     pub bus_number: u8,
     pub device_address: u8,
-    pub control_interface: u8,
-    pub data_interface: u8,
-    pub xinput_interface: u8,
-    pub bulk_in_endpoint: u8,
-    pub bulk_out_endpoint: u8,
+}
+
+impl Locator {
+    #[must_use]
+    pub fn device_node(&self) -> PathBuf {
+        PathBuf::from(format!(
+            "/dev/bus/usb/{:03}/{:03}",
+            self.bus_number, self.device_address
+        ))
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub locator: Locator,
     pub stable_id: String,
+}
+
+#[derive(Debug, Default)]
+pub struct Discovery {
+    pub devices: Vec<DeviceInfo>,
+    pub errors: Vec<Error>,
 }
 
 impl std::fmt::Debug for DeviceInfo {
@@ -47,6 +58,7 @@ impl std::fmt::Debug for DeviceInfo {
 pub enum Error {
     AccessDenied(String),
     Busy(String),
+    GamepadUnavailable(String),
     InvalidTopology(String),
     Disconnected(String),
     Unsupported,
@@ -58,6 +70,9 @@ impl std::fmt::Display for Error {
         match self {
             Self::AccessDenied(endpoint) => write!(formatter, "access denied: {endpoint}"),
             Self::Busy(endpoint) => write!(formatter, "endpoint busy: {endpoint}"),
+            Self::GamepadUnavailable(reason) => {
+                write!(formatter, "Xbox gamepad interface is unavailable: {reason}")
+            }
             Self::InvalidTopology(reason) => write!(formatter, "invalid USB topology: {reason}"),
             Self::Disconnected(endpoint) => write!(formatter, "disconnected: {endpoint}"),
             Self::Unsupported => formatter.write_str("Linux USB is unsupported on this platform"),
@@ -72,6 +87,7 @@ impl std::error::Error for Error {
             Self::Io(error) => Some(error),
             Self::AccessDenied(_)
             | Self::Busy(_)
+            | Self::GamepadUnavailable(_)
             | Self::InvalidTopology(_)
             | Self::Disconnected(_)
             | Self::Unsupported => None,
@@ -79,17 +95,13 @@ impl std::error::Error for Error {
     }
 }
 
-/// Enumerates exact official bridge USB devices and validates their topology.
+/// Enumerates exact official bridge USB devices and validates their interface classes.
 ///
 /// # Errors
-/// Returns an access, ownership, descriptor, disconnection, or host I/O error.
-pub fn discover(excluded_stable_ids: &BTreeSet<String>) -> Result<Vec<DeviceInfo>, Error> {
-    platform::discover(excluded_stable_ids)
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn is_excluded(serial: Option<&str>, excluded_stable_ids: &BTreeSet<String>) -> bool {
-    serial.is_some_and(|serial| excluded_stable_ids.contains(serial))
+/// Returns a host I/O error when USB enumeration itself fails. Device-specific
+/// failures are retained alongside usable devices.
+pub fn discover() -> Result<Discovery, Error> {
+    platform::discover()
 }
 
 /// Opens the exact official bridge identified by its stable USB serial.
@@ -132,11 +144,6 @@ mod tests {
             locator: Locator {
                 bus_number: 3,
                 device_address: 4,
-                control_interface: 0,
-                data_interface: 1,
-                xinput_interface: 2,
-                bulk_in_endpoint: 0x82,
-                bulk_out_endpoint: 0x01,
             },
             stable_id: "TESTSERIAL0000".to_owned(),
         };
@@ -148,11 +155,14 @@ mod tests {
     }
 
     #[test]
-    fn serial_fallback_excludes_only_matching_stable_raw_devices() {
-        let excluded = BTreeSet::from(["SERIAL-FALLBACK".to_owned()]);
-
-        assert!(is_excluded(Some("SERIAL-FALLBACK"), &excluded));
-        assert!(!is_excluded(Some("RAW-ONLY"), &excluded));
-        assert!(!is_excluded(None, &excluded));
+    fn locator_formats_the_linux_usb_device_node() {
+        assert_eq!(
+            Locator {
+                bus_number: 3,
+                device_address: 4,
+            }
+            .device_node(),
+            PathBuf::from("/dev/bus/usb/003/004")
+        );
     }
 }

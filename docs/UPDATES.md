@@ -79,10 +79,9 @@ firmware the app releases the bridge endpoint and opens a 60-second manual
 recovery window asking for two quick presses of the reset button beside the
 USB-C connector.
 
-On Linux, App Center uses the same direct raw-USB transport as the running
-bridge and reconnects by stable USB serial after the device address changes.
-Factory firmware and UF2 bootloader discovery remain serial/removable-volume
-operations. The updater never claims or detaches the Xbox interface.
+The shipped App Center and removable-volume provider remain macOS-only. Linux
+direct USB supports the running bridge, but Linux firmware installation still
+needs a removable-volume provider and a supported updater entry point.
 
 Before writing, the manual and automatic paths both require exactly one
 accepted XIAO/Sense board ID and the catalog UF2 family. Multiple devices or a

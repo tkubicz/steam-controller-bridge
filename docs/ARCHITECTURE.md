@@ -37,6 +37,7 @@ game/browser -> gamepad feedback -> bridge device -> protocol feedback
 | `bridge-protocol` | Integer wire format, framing, CRC, and stream recovery. |
 | `bridge-output` | Output backends and the negotiated transport-neutral bridge session. |
 | `linux-bridge-usb` | Exact official-bridge USB discovery, descriptor validation, and CDC interface transport. |
+| `virtual-gamepad` | Platform facade for virtual controller output and helper isolation. |
 | `recording` | Versioned JSONL recording and deterministic or timed replay. |
 | `steam-controller-device` | HID metadata, sessions, lifecycle events, and the exact write allowlist. |
 | `steam-controller-protocol` | Steam Controller 2 report layouts and typed decode errors. |
@@ -103,22 +104,26 @@ recovery.
 Live controller HID is implemented on macOS and Linux. Desktop integration and
 the shipped application remain macOS-specific; unsupported providers return
 explicit errors instead of pretending live access exists. Unsafe platform code
-is isolated behind safe typed APIs in `power-monitor` and the single
-`USBDEVFS_DROP_PRIVILEGES` wrapper in `linux-bridge-usb`; other authored crates
-retain the workspace prohibition.
+is isolated behind safe typed APIs in `power-monitor`, `virtual-gamepad`, and
+the single `USBDEVFS_DROP_PRIVILEGES` wrapper in `linux-bridge-usb`; other
+authored crates retain the workspace prohibition.
 
 Linux capability policy derives controller HID and bridge-device requirements
-independently from active features. Its bridge probe checks an eligible serial
-node or briefly opens the exact raw USB node to validate access and topology;
-it claims no interface and retains no handle. An absent device is left to
-normal discovery rather than reported as a permission failure.
+independently from active features. Its bridge probe checks read/write access
+to each eligible serial or exact raw USB node without opening or retaining a
+device. An absent device is left to normal discovery rather than reported as a
+permission failure; full topology and `xpad` readiness are validated only when
+the raw endpoint is opened.
 
 The portable-core allowlist is enforced by
 [`tools/check-portable-core.py`](../tools/check-portable-core.py). Platform
 selection is permitted only in a facade root or its backend modules; ordinary
 files added anywhere else in an allowlisted crate are checked automatically for
 target configuration, native dependencies and APIs, and recognizable platform
-data-path literals.
+data-path literals. `linux-bridge-usb` is a safe cross-platform facade whose
+native dependencies are target-scoped inside that crate; the checker permits
+the facade dependency but restricts direct use to the endpoint-discovery
+backend.
 
 The Linux HID backend choice, VM evidence, and deferred hardware paths are
 recorded in [the S0 Linux hardware-path decision](decisions/s0-linux-vm-hardware-path.md).

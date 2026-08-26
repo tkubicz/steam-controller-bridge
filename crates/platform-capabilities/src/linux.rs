@@ -144,7 +144,7 @@ impl LinuxAccessApi for NativeLinuxAccessApi {
                 endpoints
                     .into_iter()
                     .filter(bridge_output::BridgeEndpoint::is_bridge_device)
-                    .filter_map(|endpoint| endpoint.serial_path().map(str::to_owned)),
+                    .map(|endpoint| endpoint.access_path()),
                 "bridge-device endpoint",
                 check_path_access,
             ),

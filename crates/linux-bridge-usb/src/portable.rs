@@ -1,7 +1,6 @@
-use std::collections::BTreeSet;
 use std::io;
 
-use crate::{DeviceInfo, Error};
+use crate::{Discovery, Error};
 
 pub(super) struct UsbTransport {
     unavailable: (),
@@ -11,8 +10,8 @@ pub(super) struct UsbTransport {
     clippy::unnecessary_wraps,
     reason = "the portable stub preserves the fallible Linux discovery API"
 )]
-pub(super) fn discover(_excluded_stable_ids: &BTreeSet<String>) -> Result<Vec<DeviceInfo>, Error> {
-    Ok(Vec::new())
+pub(super) fn discover() -> Result<Discovery, Error> {
+    Ok(Discovery::default())
 }
 
 pub(super) fn open(_stable_id: &str) -> Result<UsbTransport, Error> {

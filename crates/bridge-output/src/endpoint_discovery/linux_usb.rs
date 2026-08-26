@@ -1,28 +1,55 @@
-use std::collections::BTreeSet;
-
 use crate::bridge_transport::{BridgeTransportError, ByteTransport};
 use crate::endpoint_discovery::BridgeEndpoint;
 
+pub use linux_bridge_usb::{
+    Locator as LinuxUsbLocator, MANUFACTURER as OFFICIAL_BRIDGE_USB_MANUFACTURER,
+    PRODUCT as OFFICIAL_BRIDGE_USB_PRODUCT, PRODUCT_ID, VENDOR_ID,
+};
+
 pub(crate) fn with_official_usb_endpoints(
-    serial_endpoints: Vec<BridgeEndpoint>,
+    serial_result: Result<Vec<BridgeEndpoint>, BridgeTransportError>,
 ) -> Result<Vec<BridgeEndpoint>, BridgeTransportError> {
-    let serial_ids = official_serial_ids(&serial_endpoints);
-    linux_bridge_usb::discover(&serial_ids)
-        .map(|devices| merge_official_usb_endpoints(serial_endpoints, devices, &serial_ids))
-        .map_err(map_error)
+    with_official_usb_endpoints_with(serial_result, linux_bridge_usb::discover)
+}
+
+fn with_official_usb_endpoints_with(
+    serial_result: Result<Vec<BridgeEndpoint>, BridgeTransportError>,
+    discover: impl FnOnce() -> Result<linux_bridge_usb::Discovery, linux_bridge_usb::Error>,
+) -> Result<Vec<BridgeEndpoint>, BridgeTransportError> {
+    let (serial_endpoints, serial_error) = match serial_result {
+        Ok(endpoints) => (endpoints, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    match discover() {
+        Ok(discovery) => {
+            if discovery.devices.is_empty() && serial_endpoints.is_empty() {
+                if let Some(error) = discovery.errors.into_iter().next() {
+                    return Err(map_error(error));
+                }
+                if let Some(error) = serial_error {
+                    return Err(error);
+                }
+            }
+            Ok(merge_official_usb_endpoints(
+                serial_endpoints,
+                discovery.devices,
+            ))
+        }
+        Err(error) if serial_endpoints.is_empty() => {
+            Err(serial_error.unwrap_or_else(|| map_error(error)))
+        }
+        Err(_) => Ok(serial_endpoints),
+    }
 }
 
 fn merge_official_usb_endpoints(
     mut serial_endpoints: Vec<BridgeEndpoint>,
     devices: Vec<linux_bridge_usb::DeviceInfo>,
-    serial_ids: &BTreeSet<String>,
 ) -> Vec<BridgeEndpoint> {
     for device in devices {
-        if serial_ids.contains(&device.stable_id) {
-            continue;
-        }
         serial_endpoints.push(BridgeEndpoint::official_linux_usb(
-            device.locator,
+            device.locator.bus_number,
+            device.locator.device_address,
             device.stable_id,
         ));
     }
@@ -32,15 +59,6 @@ fn merge_official_usb_endpoints(
             .then_with(|| left.stable_id().cmp(&right.stable_id()))
     });
     serial_endpoints
-}
-
-fn official_serial_ids(serial_endpoints: &[BridgeEndpoint]) -> BTreeSet<String> {
-    serial_endpoints
-        .iter()
-        .filter(|endpoint| endpoint.is_bridge_device())
-        .filter_map(BridgeEndpoint::stable_id)
-        .map(str::to_owned)
-        .collect()
 }
 
 pub(crate) fn open(
@@ -70,6 +88,9 @@ fn map_error(error: linux_bridge_usb::Error) -> BridgeTransportError {
             BridgeTransportError::AccessDenied(endpoint)
         }
         linux_bridge_usb::Error::Busy(endpoint) => BridgeTransportError::DeviceBusy(endpoint),
+        linux_bridge_usb::Error::GamepadUnavailable(reason) => {
+            BridgeTransportError::GamepadUnavailable(reason)
+        }
         linux_bridge_usb::Error::InvalidTopology(reason) => {
             BridgeTransportError::InvalidTopology(reason)
         }
@@ -92,7 +113,7 @@ mod tests {
     };
 
     #[test]
-    fn matching_serial_endpoint_deduplicates_the_raw_usb_candidate() {
+    fn matching_serial_endpoint_keeps_raw_usb_as_an_open_fallback() {
         let serial = BridgeEndpoint::serial_port("/dev/ttyACM0", 115_200)
             .with_stable_id("same")
             .with_usb_identity(BridgeUsbIdentity {
@@ -104,14 +125,8 @@ mod tests {
         let locator = linux_bridge_usb::Locator {
             bus_number: 3,
             device_address: 4,
-            control_interface: 0,
-            data_interface: 1,
-            xinput_interface: 2,
-            bulk_in_endpoint: 0x82,
-            bulk_out_endpoint: 0x01,
         };
 
-        let serial_ids = official_serial_ids(std::slice::from_ref(&serial));
         let endpoints = merge_official_usb_endpoints(
             vec![serial],
             vec![
@@ -124,19 +139,56 @@ mod tests {
                     stable_id: "other".to_owned(),
                 },
             ],
-            &serial_ids,
         );
 
-        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints.len(), 3);
         assert_eq!(
             endpoints
                 .iter()
                 .filter(|endpoint| endpoint.stable_id() == Some("same"))
                 .count(),
-            1
+            2
         );
         assert!(endpoints.iter().any(|endpoint| {
             endpoint.stable_id() == Some("other") && endpoint.serial_path().is_none()
         }));
+    }
+
+    #[test]
+    fn a_raw_discovery_failure_does_not_discard_serial_fallbacks() {
+        let serial = BridgeEndpoint::serial_port("serial:fallback", 115_200);
+
+        let endpoints = with_official_usb_endpoints_with(Ok(vec![serial.clone()]), || {
+            Err(linux_bridge_usb::Error::Io(std::io::Error::other(
+                "USB enumeration failed",
+            )))
+        })
+        .unwrap();
+
+        assert_eq!(endpoints, vec![serial]);
+    }
+
+    #[test]
+    fn one_bad_raw_device_does_not_hide_a_good_raw_device() {
+        let locator = linux_bridge_usb::Locator {
+            bus_number: 3,
+            device_address: 4,
+        };
+
+        let endpoints = with_official_usb_endpoints_with(Ok(Vec::new()), || {
+            Ok(linux_bridge_usb::Discovery {
+                devices: vec![linux_bridge_usb::DeviceInfo {
+                    locator,
+                    stable_id: "good".to_owned(),
+                }],
+                errors: vec![linux_bridge_usb::Error::InvalidTopology(
+                    "bad prototype".to_owned(),
+                )],
+            })
+        })
+        .unwrap();
+
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].stable_id(), Some("good"));
     }
 }

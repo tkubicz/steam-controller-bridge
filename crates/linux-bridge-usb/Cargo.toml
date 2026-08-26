@@ -13,7 +13,9 @@ rustix.workspace = true
 
 [lints.rust]
 unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
 
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
+undocumented_unsafe_blocks = "deny"

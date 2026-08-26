@@ -97,8 +97,10 @@ NATIVE_PACKAGES = frozenset(
         "zbus",
     }
 )
+NATIVE_FACADE_PACKAGES = frozenset({"linux-bridge-usb"})
 NATIVE_MARKERS = tuple(
-    package.replace("-", "_") + "::" for package in sorted(NATIVE_PACKAGES)
+    package.replace("-", "_") + "::"
+    for package in sorted(NATIVE_PACKAGES | NATIVE_FACADE_PACKAGES)
 ) + ("libudev", "objc2", "std::os::")
 RUST_CHARACTER_LITERAL = re.compile(
     r"(?:b)?'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]+\}|.)|[^\\'\n])'"
@@ -118,7 +120,11 @@ TARGET_CONST_MODULE = re.compile(r"\bstd::env::consts\b")
 
 
 def is_native_package(package: str) -> bool:
-    return package in NATIVE_PACKAGES or package.startswith("objc2-")
+    return (
+        package in NATIVE_PACKAGES
+        or package in NATIVE_FACADE_PACKAGES
+        or package.startswith("objc2-")
+    )
 
 
 def is_portable_file(path: PurePosixPath) -> bool:
@@ -935,7 +941,18 @@ def manifest_policy_errors(
     for line_number, source, table, key, value in statements:
         if not table and key and key[0] == "target":
             errors.append(f"{path}:{line_number}: platform cfg: {source}")
-        if manifest_dependency_is_native(table, key, value, native_aliases):
+        allowed_facade = (
+            path == PurePosixPath("crates/bridge-output/Cargo.toml")
+            and table == ("dependencies",)
+            and key == ("linux-bridge-usb",)
+            and not any(
+                inline_key == ("package",)
+                for inline_key, _ in inline_table_entries(value)
+            )
+        )
+        if manifest_dependency_is_native(
+            table, key, value, native_aliases
+        ) and not allowed_facade:
             errors.append(f"{path}:{line_number}: native backend detail: {source}")
     return errors
 
@@ -1407,6 +1424,27 @@ def self_test() -> None:
     assert file_errors(
         PurePosixPath("crates/bridge-output/src/endpoint_discovery/macos.rs"),
         allowed + 'const DATA: &str = "/dev/cu.test";\nuse objc2::MainThreadMarker;\n',
+    ) == []
+    assert file_errors(
+        PurePosixPath("crates/bridge-output/Cargo.toml"),
+        '[dependencies]\nlinux-bridge-usb = { path = "../linux-bridge-usb" }\n',
+    ) == []
+    renamed_facade_errors = file_errors(
+        PurePosixPath("crates/bridge-output/Cargo.toml"),
+        '[dependencies]\nusb = { package = "linux-bridge-usb", path = "../linux-bridge-usb" }\n',
+    )
+    assert len(renamed_facade_errors) == 1
+    assert "native backend detail" in renamed_facade_errors[0]
+    direct_facade_errors = file_errors(
+        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        '[dependencies]\nlinux-bridge-usb = { path = "../linux-bridge-usb" }\n',
+    )
+    assert len(direct_facade_errors) == 1
+    assert "native backend detail" in direct_facade_errors[0]
+    assert len(file_errors(core, "use linux_bridge_usb::DeviceInfo;\n")) == 1
+    assert file_errors(
+        PurePosixPath("crates/bridge-output/src/endpoint_discovery/linux_usb.rs"),
+        "use linux_bridge_usb::DeviceInfo;\n",
     ) == []
     assert file_errors(PurePosixPath("crates/menu-shell/src/lib.rs"), allowed) == []
 

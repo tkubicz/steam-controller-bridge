@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bridge_output::{
-    available_bridge_endpoints, new_firmware_install_receipt, random_firmware_request_id,
+    available_serial_endpoints, new_firmware_install_receipt, random_firmware_request_id,
     BridgeEndpoint, BridgeOutput, BridgeTransportConfig, FirmwareCapabilities, FirmwareInfo,
     FirmwareInstallReceipt, FirmwareInstallSource, FirmwareInstallState, FirmwareVersion,
 };
@@ -124,16 +124,8 @@ pub enum FirmwareFlashError {
 pub fn discover_firmware_devices(
     target: &FirmwareTargetDescriptor,
 ) -> Result<Vec<FirmwareDevice>, FirmwareFlashError> {
-    available_bridge_endpoints()
-        .map_err(|error| FirmwareFlashError::Discovery(error.to_string()))
-        .map(|endpoints| classify_firmware_devices(endpoints, target))
-}
-
-fn classify_firmware_devices(
-    endpoints: Vec<BridgeEndpoint>,
-    target: &FirmwareTargetDescriptor,
-) -> Vec<FirmwareDevice> {
-    endpoints
+    let devices = available_serial_endpoints()
+        .map_err(|error| FirmwareFlashError::Discovery(error.to_string()))?
         .into_iter()
         .filter_map(|endpoint| {
             if endpoint.is_bridge_device() {
@@ -145,7 +137,8 @@ fn classify_firmware_devices(
                 target_device_kind(&endpoint, target).map(|kind| FirmwareDevice { endpoint, kind })
             }
         })
-        .collect()
+        .collect();
+    Ok(devices)
 }
 
 fn target_device_kind(
@@ -805,8 +798,7 @@ fn copy_and_flush(source: &Path, destination: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use bridge_output::{
-        FirmwareTarget, FirmwareTargetId, LinuxUsbLocator, SerialDeviceInfo,
-        DEFAULT_BRIDGE_BAUD_RATE,
+        FirmwareTarget, FirmwareTargetId, SerialDeviceInfo, DEFAULT_BRIDGE_BAUD_RATE,
     };
     use std::collections::VecDeque;
 
@@ -848,24 +840,6 @@ mod tests {
         FirmwareDevice {
             endpoint: fixture_endpoint(),
             kind: FirmwareDeviceKind::Uf2Bootloader,
-        }
-    }
-
-    fn raw_bridge_device(stable_id: &str, bus_number: u8, device_address: u8) -> FirmwareDevice {
-        FirmwareDevice {
-            endpoint: BridgeEndpoint::official_linux_usb(
-                LinuxUsbLocator {
-                    bus_number,
-                    device_address,
-                    control_interface: 0,
-                    data_interface: 1,
-                    xinput_interface: 2,
-                    bulk_in_endpoint: 0x82,
-                    bulk_out_endpoint: 0x01,
-                },
-                stable_id,
-            ),
-            kind: FirmwareDeviceKind::BridgeApplication,
         }
     }
 
@@ -1682,97 +1656,11 @@ mod tests {
     }
 
     #[test]
-    fn updater_classifies_raw_bridge_and_factory_serial_endpoints() {
-        let raw = raw_bridge_device("raw-bridge", 3, 4).endpoint;
-        let factory = fixture_endpoint();
-
-        let devices = classify_firmware_devices(vec![raw.clone(), factory.clone()], test_target());
-
-        assert_eq!(
-            devices,
-            vec![
-                FirmwareDevice {
-                    endpoint: raw,
-                    kind: FirmwareDeviceKind::BridgeApplication,
-                },
-                FirmwareDevice {
-                    endpoint: factory,
-                    kind: FirmwareDeviceKind::FactoryApplication,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn raw_reconnect_tracks_stable_identity_not_ephemeral_usb_address() {
-        let previous = info(
-            2,
-            FirmwareCapabilities::ENTER_UF2_BOOTLOADER | FirmwareCapabilities::INSTALL_RECEIPT,
-            FirmwareInstallState::Recorded(FirmwareInstallReceipt {
-                installed_at: 100,
-                install_id: [1; 16],
-                source: FirmwareInstallSource::FirstObserved,
-            }),
-        );
-
-        let mut matching = fake();
-        matching.volumes.push_back(Vec::new());
-        matching.volumes.push_back(vec![volume()]);
-        matching
-            .devices
-            .push_back(vec![raw_bridge_device("stable", 3, 4)]);
-        matching
-            .devices
-            .push_back(vec![raw_bridge_device("stable", 7, 12)]);
-        matching.infos.push_back(previous);
-        matching.default_version = FirmwareVersion::Reported(3);
-        matching.default_capabilities = FirmwareCapabilities::INSTALL_RECEIPT;
-
-        assert!(flash_with_adapter(
-            &mut matching,
-            Path::new("firmware.uf2"),
-            &release(3),
-            &AtomicBool::new(false),
-            |_| {},
-        )
-        .is_ok());
-
-        let mut different = fake();
-        different.volumes.push_back(Vec::new());
-        different.volumes.push_back(vec![volume()]);
-        different
-            .devices
-            .push_back(vec![raw_bridge_device("stable", 3, 4)]);
-        different
-            .devices
-            .push_back(vec![raw_bridge_device("other", 3, 4)]);
-        different.infos.push_back(previous);
-        different.default_version = FirmwareVersion::Reported(3);
-        different.default_capabilities = FirmwareCapabilities::INSTALL_RECEIPT;
-
-        assert!(matches!(
-            flash_with_adapter(
-                &mut different,
-                Path::new("firmware.uf2"),
-                &release(3),
-                &AtomicBool::new(false),
-                |_| {},
-            ),
-            Err(FirmwareFlashError::Revision {
-                expected: 3,
-                actual: None
-            })
-        ));
-    }
-
-    #[test]
     fn persistent_post_flash_discovery_failure_keeps_its_diagnostic() {
         let mut adapter = fake();
         adapter.volumes.push_back(Vec::new());
         adapter.volumes.push_back(vec![volume()]);
-        adapter
-            .devices
-            .push_back(vec![raw_bridge_device("stable", 3, 4)]);
+        adapter.devices.push_back(vec![device(true)]);
         adapter.infos.push_back(info(
             2,
             FirmwareCapabilities::ENTER_UF2_BOOTLOADER,
@@ -1782,7 +1670,7 @@ mod tests {
                 source: FirmwareInstallSource::FirstObserved,
             }),
         ));
-        adapter.default_device_error = Some("raw USB access denied".to_owned());
+        adapter.default_device_error = Some("firmware rediscovery failed".to_owned());
 
         assert!(matches!(
             flash_with_adapter(
@@ -1792,7 +1680,7 @@ mod tests {
                 &AtomicBool::new(false),
                 |_| {},
             ),
-            Err(FirmwareFlashError::Discovery(message)) if message == "raw USB access denied"
+            Err(FirmwareFlashError::Discovery(message)) if message == "firmware rediscovery failed"
         ));
     }
 
