@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bridge_output::{
-    available_serial_endpoints, new_firmware_install_receipt, random_firmware_request_id,
+    available_bridge_endpoints, new_firmware_install_receipt, random_firmware_request_id,
     BridgeEndpoint, BridgeOutput, BridgeTransportConfig, FirmwareCapabilities, FirmwareInfo,
     FirmwareInstallReceipt, FirmwareInstallSource, FirmwareInstallState, FirmwareVersion,
 };
@@ -124,8 +124,16 @@ pub enum FirmwareFlashError {
 pub fn discover_firmware_devices(
     target: &FirmwareTargetDescriptor,
 ) -> Result<Vec<FirmwareDevice>, FirmwareFlashError> {
-    let devices = available_serial_endpoints()
-        .map_err(|error| FirmwareFlashError::Discovery(error.to_string()))?
+    available_bridge_endpoints()
+        .map_err(|error| FirmwareFlashError::Discovery(error.to_string()))
+        .map(|endpoints| classify_firmware_devices(endpoints, target))
+}
+
+fn classify_firmware_devices(
+    endpoints: Vec<BridgeEndpoint>,
+    target: &FirmwareTargetDescriptor,
+) -> Vec<FirmwareDevice> {
+    endpoints
         .into_iter()
         .filter_map(|endpoint| {
             if endpoint.is_bridge_device() {
@@ -137,8 +145,7 @@ pub fn discover_firmware_devices(
                 target_device_kind(&endpoint, target).map(|kind| FirmwareDevice { endpoint, kind })
             }
         })
-        .collect();
-    Ok(devices)
+        .collect()
 }
 
 fn target_device_kind(
@@ -578,10 +585,18 @@ fn verify_reconnected_firmware(
     progress(FirmwareFlashProgress::WaitingForApplication);
     let deadline = adapter.elapsed() + APPLICATION_RECONNECT_TIMEOUT;
     let mut last_revision = None;
+    let mut last_discovery_error = None;
     while adapter.elapsed() < deadline {
         adapter.wait(Duration::from_millis(250));
-        let Ok(devices) = adapter.devices() else {
-            continue;
+        let devices = match adapter.devices() {
+            Ok(devices) => {
+                last_discovery_error = None;
+                devices
+            }
+            Err(error) => {
+                last_discovery_error = Some(error);
+                continue;
+            }
         };
         if devices.len() > 1 {
             return Err(FirmwareFlashError::Discovery(format!(
@@ -658,13 +673,32 @@ fn verify_reconnected_firmware(
             Ok(_) | Err(_) => {}
         }
     }
+    Err(reconnect_timeout_error(
+        copy_error,
+        last_discovery_error,
+        release.revision,
+        last_revision,
+    ))
+}
+
+fn reconnect_timeout_error(
+    copy_error: Option<io::Error>,
+    discovery_error: Option<FirmwareFlashError>,
+    expected_revision: u16,
+    actual_revision: Option<u16>,
+) -> FirmwareFlashError {
     if let Some(error) = copy_error {
-        return Err(error.into());
+        return error.into();
     }
-    Err(FirmwareFlashError::Revision {
-        expected: release.revision,
-        actual: last_revision,
-    })
+    if actual_revision.is_none() {
+        if let Some(error) = discovery_error {
+            return error;
+        }
+    }
+    FirmwareFlashError::Revision {
+        expected: expected_revision,
+        actual: actual_revision,
+    }
 }
 
 fn validate_version_policy(
@@ -771,7 +805,8 @@ fn copy_and_flush(source: &Path, destination: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use bridge_output::{
-        FirmwareTarget, FirmwareTargetId, SerialDeviceInfo, DEFAULT_BRIDGE_BAUD_RATE,
+        FirmwareTarget, FirmwareTargetId, LinuxUsbLocator, SerialDeviceInfo,
+        DEFAULT_BRIDGE_BAUD_RATE,
     };
     use std::collections::VecDeque;
 
@@ -816,6 +851,24 @@ mod tests {
         }
     }
 
+    fn raw_bridge_device(stable_id: &str, bus_number: u8, device_address: u8) -> FirmwareDevice {
+        FirmwareDevice {
+            endpoint: BridgeEndpoint::official_linux_usb(
+                LinuxUsbLocator {
+                    bus_number,
+                    device_address,
+                    control_interface: 0,
+                    data_interface: 1,
+                    xinput_interface: 2,
+                    bulk_in_endpoint: 0x82,
+                    bulk_out_endpoint: 0x01,
+                },
+                stable_id,
+            ),
+            kind: FirmwareDeviceKind::BridgeApplication,
+        }
+    }
+
     fn fixture_endpoint() -> BridgeEndpoint {
         BridgeEndpoint::from_serial_device(
             SerialDeviceInfo {
@@ -857,6 +910,7 @@ mod tests {
         now: Duration,
         devices: VecDeque<Vec<FirmwareDevice>>,
         default_devices: Vec<FirmwareDevice>,
+        default_device_error: Option<String>,
         volumes: VecDeque<Vec<BootloaderVolume>>,
         default_volumes: Vec<BootloaderVolume>,
         versions: VecDeque<FirmwareVersion>,
@@ -875,10 +929,13 @@ mod tests {
 
     impl FlashAdapter for FakeAdapter {
         fn devices(&mut self) -> Result<Vec<FirmwareDevice>, FirmwareFlashError> {
-            Ok(self
-                .devices
-                .pop_front()
-                .unwrap_or_else(|| self.default_devices.clone()))
+            if let Some(devices) = self.devices.pop_front() {
+                return Ok(devices);
+            }
+            if let Some(error) = &self.default_device_error {
+                return Err(FirmwareFlashError::Discovery(error.clone()));
+            }
+            Ok(self.default_devices.clone())
         }
 
         fn volumes(&mut self) -> Result<Vec<BootloaderVolume>, FirmwareFlashError> {
@@ -968,6 +1025,7 @@ mod tests {
             now: Duration::ZERO,
             devices: VecDeque::new(),
             default_devices: Vec::new(),
+            default_device_error: None,
             volumes: VecDeque::new(),
             default_volumes: Vec::new(),
             versions: VecDeque::new(),
@@ -1621,6 +1679,121 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn updater_classifies_raw_bridge_and_factory_serial_endpoints() {
+        let raw = raw_bridge_device("raw-bridge", 3, 4).endpoint;
+        let factory = fixture_endpoint();
+
+        let devices = classify_firmware_devices(vec![raw.clone(), factory.clone()], test_target());
+
+        assert_eq!(
+            devices,
+            vec![
+                FirmwareDevice {
+                    endpoint: raw,
+                    kind: FirmwareDeviceKind::BridgeApplication,
+                },
+                FirmwareDevice {
+                    endpoint: factory,
+                    kind: FirmwareDeviceKind::FactoryApplication,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_reconnect_tracks_stable_identity_not_ephemeral_usb_address() {
+        let previous = info(
+            2,
+            FirmwareCapabilities::ENTER_UF2_BOOTLOADER | FirmwareCapabilities::INSTALL_RECEIPT,
+            FirmwareInstallState::Recorded(FirmwareInstallReceipt {
+                installed_at: 100,
+                install_id: [1; 16],
+                source: FirmwareInstallSource::FirstObserved,
+            }),
+        );
+
+        let mut matching = fake();
+        matching.volumes.push_back(Vec::new());
+        matching.volumes.push_back(vec![volume()]);
+        matching
+            .devices
+            .push_back(vec![raw_bridge_device("stable", 3, 4)]);
+        matching
+            .devices
+            .push_back(vec![raw_bridge_device("stable", 7, 12)]);
+        matching.infos.push_back(previous);
+        matching.default_version = FirmwareVersion::Reported(3);
+        matching.default_capabilities = FirmwareCapabilities::INSTALL_RECEIPT;
+
+        assert!(flash_with_adapter(
+            &mut matching,
+            Path::new("firmware.uf2"),
+            &release(3),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .is_ok());
+
+        let mut different = fake();
+        different.volumes.push_back(Vec::new());
+        different.volumes.push_back(vec![volume()]);
+        different
+            .devices
+            .push_back(vec![raw_bridge_device("stable", 3, 4)]);
+        different
+            .devices
+            .push_back(vec![raw_bridge_device("other", 3, 4)]);
+        different.infos.push_back(previous);
+        different.default_version = FirmwareVersion::Reported(3);
+        different.default_capabilities = FirmwareCapabilities::INSTALL_RECEIPT;
+
+        assert!(matches!(
+            flash_with_adapter(
+                &mut different,
+                Path::new("firmware.uf2"),
+                &release(3),
+                &AtomicBool::new(false),
+                |_| {},
+            ),
+            Err(FirmwareFlashError::Revision {
+                expected: 3,
+                actual: None
+            })
+        ));
+    }
+
+    #[test]
+    fn persistent_post_flash_discovery_failure_keeps_its_diagnostic() {
+        let mut adapter = fake();
+        adapter.volumes.push_back(Vec::new());
+        adapter.volumes.push_back(vec![volume()]);
+        adapter
+            .devices
+            .push_back(vec![raw_bridge_device("stable", 3, 4)]);
+        adapter.infos.push_back(info(
+            2,
+            FirmwareCapabilities::ENTER_UF2_BOOTLOADER,
+            FirmwareInstallState::Recorded(FirmwareInstallReceipt {
+                installed_at: 100,
+                install_id: [1; 16],
+                source: FirmwareInstallSource::FirstObserved,
+            }),
+        ));
+        adapter.default_device_error = Some("raw USB access denied".to_owned());
+
+        assert!(matches!(
+            flash_with_adapter(
+                &mut adapter,
+                Path::new("firmware.uf2"),
+                &release(3),
+                &AtomicBool::new(false),
+                |_| {},
+            ),
+            Err(FirmwareFlashError::Discovery(message)) if message == "raw USB access denied"
+        ));
     }
 
     #[test]

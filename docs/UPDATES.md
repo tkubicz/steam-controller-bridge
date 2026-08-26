@@ -75,9 +75,14 @@ Targetless legacy firmware, malformed target identity, and a different valid
 target remain usable for bridging and receive no automatic firmware prompt or
 bootloader command. A user may still choose the explicitly labeled
 **Install or Recover XIAO Firmware** action. For unidentified application
-firmware the app releases the serial device and opens a 60-second manual
+firmware the app releases the bridge endpoint and opens a 60-second manual
 recovery window asking for two quick presses of the reset button beside the
 USB-C connector.
+
+On Linux, App Center uses the same direct raw-USB transport as the running
+bridge and reconnects by stable USB serial after the device address changes.
+Factory firmware and UF2 bootloader discovery remain serial/removable-volume
+operations. The updater never claims or detaches the Xbox interface.
 
 Before writing, the manual and automatic paths both require exactly one
 accepted XIAO/Sense board ID and the catalog UF2 family. Multiple devices or a

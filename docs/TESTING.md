@@ -146,6 +146,10 @@ Run these on the exact packaged candidate; automated results are not substitutes
   and confirm the receipt does not change. Also verify wrong/multiple-board
   refusal, close/Quit interlocks, and interruption before writing, during UF2
   writing, and before receipt commit.
+- On Linux, repeat the automatic App Center update while the official bridge is
+  using direct raw USB. Confirm `xpad` retains the Xbox interface, the UF2
+  transition succeeds, the application reconnects under the same stable serial
+  even when its bus address changes, and the receipt is committed and re-read.
 - For an unreleased candidate, run `tools/prepare-local-update.py`, launch the
   local-source build with the printed command, and confirm the Updates page
   names the local development source. Restore Seeed Blink before the first
