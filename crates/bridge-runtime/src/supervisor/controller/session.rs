@@ -282,15 +282,111 @@ pub(crate) fn output_candidates(
     }
 }
 
-pub(crate) fn discover_output_endpoints_with<E>(
+pub(crate) fn discover_output_endpoints_with(
     selection: &BridgeEndpointSelection,
-    discover_all: impl FnOnce() -> Result<Vec<BridgeEndpoint>, E>,
-    discover_serial: impl FnOnce() -> Result<Vec<BridgeEndpoint>, E>,
-) -> Result<Vec<BridgeEndpoint>, E> {
+    discover_all: impl FnOnce() -> Result<BridgeEndpointDiscovery, BridgeTransportError>,
+    discover_serial: impl FnOnce() -> Result<Vec<BridgeEndpoint>, BridgeTransportError>,
+) -> Result<BridgeEndpointDiscovery, BridgeTransportError> {
     match selection {
         BridgeEndpointSelection::AutoBridgeDevice => discover_all(),
-        BridgeEndpointSelection::SerialPort(_) => discover_serial(),
+        BridgeEndpointSelection::SerialPort(path) => {
+            let fallback =
+                BridgeEndpoint::serial_port(path, bridge_output::DEFAULT_BRIDGE_BAUD_RATE);
+            let (endpoint, warnings) = match discover_serial() {
+                Ok(endpoints) => (
+                    endpoints
+                        .into_iter()
+                        .find(|endpoint| endpoint.serial_path() == Some(path))
+                        .unwrap_or(fallback),
+                    Vec::new(),
+                ),
+                Err(error) => (fallback, vec![error]),
+            };
+            Ok(BridgeEndpointDiscovery {
+                endpoints: vec![endpoint],
+                warnings,
+            })
+        }
     }
+}
+
+pub(crate) fn open_output_candidates_with<T, E>(
+    candidates: Vec<BridgeEndpoint>,
+    preferred_stable_id: Option<&str>,
+    mut open: impl FnMut(&BridgeEndpoint) -> Result<T, E>,
+) -> (Vec<(BridgeEndpoint, T)>, Vec<String>)
+where
+    E: std::fmt::Display,
+{
+    let mut groups: Vec<Vec<BridgeEndpoint>> = Vec::new();
+    for candidate in candidates {
+        let matching_group = candidate.stable_id().and_then(|stable_id| {
+            groups.iter().position(|group| {
+                group
+                    .first()
+                    .and_then(BridgeEndpoint::stable_id)
+                    .is_some_and(|existing| existing == stable_id)
+            })
+        });
+        if let Some(index) = matching_group {
+            groups[index].push(candidate);
+        } else {
+            groups.push(vec![candidate]);
+        }
+    }
+
+    let mut failures = Vec::new();
+    if let Some(index) = preferred_stable_id.and_then(|preferred| {
+        groups.iter().position(|group| {
+            group
+                .first()
+                .and_then(BridgeEndpoint::stable_id)
+                .is_some_and(|stable_id| stable_id == preferred)
+        })
+    }) {
+        let preferred = groups.remove(index);
+        let (valid, preferred_failures) = open_candidate_group(preferred, &mut open);
+        failures.extend(preferred_failures);
+        if !valid.is_empty() {
+            return (valid, failures);
+        }
+    }
+
+    let mut valid = Vec::new();
+    for group in groups {
+        let (opened, group_failures) = open_candidate_group(group, &mut open);
+        valid.extend(opened);
+        failures.extend(group_failures);
+    }
+    (valid, failures)
+}
+
+fn open_candidate_group<T, E>(
+    group: Vec<BridgeEndpoint>,
+    open: &mut impl FnMut(&BridgeEndpoint) -> Result<T, E>,
+) -> (Vec<(BridgeEndpoint, T)>, Vec<String>)
+where
+    E: std::fmt::Display,
+{
+    let (serial, raw_usb): (Vec<_>, Vec<_>) = group
+        .into_iter()
+        .partition(|candidate| candidate.kind() == bridge_output::BridgeTransportKind::SerialPort);
+    let mut valid = Vec::new();
+    let mut failures = Vec::new();
+    for candidates in [serial, raw_usb] {
+        for candidate in candidates {
+            match open(&candidate) {
+                Ok(output) => valid.push((candidate, output)),
+                Err(error) => {
+                    failures.push(format!("{}: {error}", candidate.display_label()));
+                }
+            }
+        }
+        if !valid.is_empty() {
+            break;
+        }
+    }
+    (valid, failures)
 }
 
 pub(crate) fn choose_output_index<T>(

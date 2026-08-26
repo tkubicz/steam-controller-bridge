@@ -7,6 +7,7 @@ use super::*;
 impl Supervisor {
     pub(super) fn discover_output(&mut self) -> OutputDiscovery {
         if self.config.output != OutputSelection::BridgeDevice {
+            self.output_discovery_warnings.clear();
             return match make_non_bridge_output(&self.config.output) {
                 Ok(opened) => {
                     self.update_status(|status| {
@@ -30,11 +31,7 @@ impl Supervisor {
             };
         }
 
-        let endpoints = match discover_output_endpoints_with(
-            &self.config.bridge_endpoint,
-            available_bridge_endpoints,
-            available_serial_endpoints,
-        ) {
+        let endpoints = match self.discover_bridge_output_endpoints() {
             Ok(endpoints) => endpoints,
             Err(error) => {
                 return OutputDiscovery::Wait {
@@ -59,17 +56,15 @@ impl Supervisor {
             };
         }
 
-        let mut valid = Vec::new();
-        let mut failures = Vec::new();
-        for candidate in candidates {
-            let candidate = candidate.with_serial_baud_rate(self.config.serial_baud_rate);
-            match BridgeOutput::open(candidate.clone(), self.config.bridge_transport_config) {
-                Ok(output) => valid.push((candidate, output)),
-                Err(error) => {
-                    failures.push(format!("{}: {error}", candidate.display_label()));
-                }
-            }
-        }
+        let candidates = candidates
+            .into_iter()
+            .map(|candidate| candidate.with_serial_baud_rate(self.config.serial_baud_rate))
+            .collect();
+        let (mut valid, failures) = open_output_candidates_with(
+            candidates,
+            self.preferred_output_stable_id.as_deref(),
+            |candidate| BridgeOutput::open(candidate.clone(), self.config.bridge_transport_config),
+        );
         if valid.is_empty() {
             return OutputDiscovery::Wait {
                 detail:
@@ -110,6 +105,36 @@ impl Supervisor {
             capabilities: OutputCapabilities::for_selection(&self.config.output),
             first_observed_receipt: FirstObservedReceiptState::Idle,
         })
+    }
+
+    fn discover_bridge_output_endpoints(
+        &mut self,
+    ) -> Result<Vec<BridgeEndpoint>, BridgeTransportError> {
+        match discover_output_endpoints_with(
+            &self.config.bridge_endpoint,
+            discover_bridge_endpoints,
+            available_serial_endpoints,
+        ) {
+            Ok(discovery) => {
+                self.log_output_discovery_warnings(&discovery.warnings);
+                Ok(discovery.endpoints)
+            }
+            Err(error) => {
+                self.output_discovery_warnings.clear();
+                Err(error)
+            }
+        }
+    }
+
+    fn log_output_discovery_warnings(&mut self, warnings: &[BridgeTransportError]) {
+        let warnings = warnings.iter().map(ToString::to_string).collect::<Vec<_>>();
+        if warnings == self.output_discovery_warnings {
+            return;
+        }
+        self.output_discovery_warnings = warnings;
+        for warning in &self.output_discovery_warnings {
+            eprintln!("level=warn event=output_discovery_warning error={warning:?}");
+        }
     }
 
     pub(super) fn discover_controller_source(&mut self) -> Discovery<ActiveControllerSource> {

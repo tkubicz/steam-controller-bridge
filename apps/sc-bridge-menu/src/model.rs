@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use bridge_runtime::{
     AutomaticShutdownPhase, BridgeStatus, DesktopBindingsState, FirmwareTarget, FirmwareVersion,
-    OutputBackend, PuckDockAction, RuntimeState,
+    OutputBackend, PuckDockAction, RuntimeState, BRIDGE_BUSY_ERROR_MARKER,
 };
 use desktop_bindings::BindingStore;
 use platform_capabilities::CapabilityId;
@@ -676,7 +676,7 @@ fn friendly_error(error: &str) -> String {
     if lower.contains("already owned") {
         return "Controller is already in use".to_owned();
     }
-    if lower.contains("device or resource busy") {
+    if lower.contains(BRIDGE_BUSY_ERROR_MARKER) {
         return "Bridge device is busy".to_owned();
     }
     if lower.contains("multiple active steam controller") {
@@ -1193,6 +1193,16 @@ mod tests {
         assert_eq!(
             friendly_error("uinput: operation not permitted"),
             "uinput: operation not permitted"
+        );
+    }
+
+    #[test]
+    fn bridge_busy_errors_are_not_reported_as_controller_ownership() {
+        assert_eq!(
+            friendly_error(&format!(
+                "{BRIDGE_BUSY_ERROR_MARKER} at endpoint; another process may own it"
+            )),
+            "Bridge device is busy"
         );
     }
 

@@ -395,18 +395,7 @@ fn remembered_output_serial_survives_a_changed_port_path() {
 
 #[test]
 fn raw_usb_output_ambiguity_never_recommends_a_serial_only_selector() {
-    let raw = BridgeEndpoint::official_linux_usb(
-        bridge_output::LinuxUsbLocator {
-            bus_number: 3,
-            device_address: 4,
-            control_interface: 0,
-            data_interface: 1,
-            xinput_interface: 2,
-            bulk_in_endpoint: 0x82,
-            bulk_out_endpoint: 0x01,
-        },
-        "raw-device",
-    );
+    let raw = BridgeEndpoint::official_linux_usb(3, 4, "raw-device");
     let valid = vec![
         (bridge_endpoint("serial:one", "serial-device"), ()),
         (raw, ()),
@@ -447,16 +436,119 @@ fn automatic_output_requires_the_marker_but_an_explicit_port_bypasses_it() {
 
 #[test]
 fn explicit_serial_output_bypasses_raw_usb_discovery() {
-    let explicit = BridgeEndpoint::serial_port("serial:explicit", 115_200);
-
-    let endpoints = discover_output_endpoints_with(
+    let enumerated = BridgeEndpoint::serial_port("serial:explicit", 115_200)
+        .with_stable_id("explicit-device")
+        .with_usb_identity(bridge_output::BridgeUsbIdentity {
+            vendor_id: 0xbeef,
+            product_id: 0x1234,
+            manufacturer: Some("Community implementation".to_owned()),
+            product: Some("Custom development firmware".to_owned()),
+        });
+    let discovery = discover_output_endpoints_with(
         &BridgeEndpointSelection::SerialPort("serial:explicit".to_owned()),
-        || -> Result<Vec<BridgeEndpoint>, ()> { panic!("raw USB discovery must not run") },
-        || Ok(vec![explicit.clone()]),
+        || -> Result<BridgeEndpointDiscovery, BridgeTransportError> {
+            panic!("raw USB discovery must not run")
+        },
+        || Ok(vec![enumerated.clone()]),
     )
     .unwrap();
 
-    assert_eq!(endpoints, vec![explicit]);
+    assert_eq!(discovery.endpoints, vec![enumerated]);
+    assert!(discovery.warnings.is_empty());
+}
+
+#[test]
+fn explicit_serial_output_survives_serial_enumeration_failure() {
+    let discovery = discover_output_endpoints_with(
+        &BridgeEndpointSelection::SerialPort("serial:explicit".to_owned()),
+        || -> Result<BridgeEndpointDiscovery, BridgeTransportError> {
+            panic!("raw USB discovery must not run")
+        },
+        || {
+            Err(BridgeTransportError::InvalidTopology(
+                "serial enumeration failed".to_owned(),
+            ))
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        discovery.endpoints,
+        vec![BridgeEndpoint::serial_port("serial:explicit", 115_200)]
+    );
+    assert_eq!(discovery.warnings.len(), 1);
+    assert!(discovery.warnings[0]
+        .to_string()
+        .contains("serial enumeration failed"));
+}
+
+#[test]
+fn matching_serial_failure_falls_back_to_raw_usb_without_duplicate_output() {
+    let serial = bridge_endpoint("serial:primary", "same-device");
+    let raw = BridgeEndpoint::official_linux_usb(3, 4, "same-device");
+    let mut attempts = Vec::new();
+
+    let (valid, failures) =
+        open_output_candidates_with(vec![raw.clone(), serial], None, |candidate| {
+            attempts.push(candidate.kind());
+            if candidate.serial_path().is_some() {
+                Err("serial endpoint is busy")
+            } else {
+                Ok(())
+            }
+        });
+
+    assert_eq!(
+        attempts,
+        vec![
+            bridge_output::BridgeTransportKind::SerialPort,
+            bridge_output::BridgeTransportKind::LinuxUsb,
+        ]
+    );
+    assert_eq!(valid, vec![(raw, ())]);
+    assert_eq!(failures.len(), 1);
+}
+
+#[test]
+fn duplicate_serial_id_remains_ambiguous_and_does_not_open_raw_fallback() {
+    let first = bridge_endpoint("serial:first", "duplicate");
+    let second = bridge_endpoint("serial:second", "duplicate");
+    let raw = BridgeEndpoint::official_linux_usb(3, 4, "duplicate");
+    let mut attempts = Vec::new();
+
+    let (valid, failures) =
+        open_output_candidates_with(vec![raw, first, second], Some("duplicate"), |candidate| {
+            attempts.push(candidate.kind());
+            Ok::<_, &str>(())
+        });
+
+    assert_eq!(
+        attempts,
+        vec![
+            bridge_output::BridgeTransportKind::SerialPort,
+            bridge_output::BridgeTransportKind::SerialPort,
+        ]
+    );
+    assert_eq!(valid.len(), 2);
+    assert!(failures.is_empty());
+    assert!(choose_output_index(&valid, Some("duplicate")).is_err());
+}
+
+#[test]
+fn remembered_output_opens_without_handshaking_unrelated_devices() {
+    let other = bridge_endpoint("serial:other", "other");
+    let preferred = bridge_endpoint("serial:preferred", "preferred");
+    let mut attempts = Vec::new();
+
+    let (valid, failures) =
+        open_output_candidates_with(vec![other, preferred.clone()], Some("preferred"), |candidate| {
+            attempts.push(candidate.stable_id().unwrap().to_owned());
+            Ok::<_, &str>(())
+        });
+
+    assert_eq!(attempts, ["preferred"]);
+    assert_eq!(valid, vec![(preferred, ())]);
+    assert!(failures.is_empty());
 }
 
 #[test]

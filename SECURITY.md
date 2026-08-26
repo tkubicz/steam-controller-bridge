@@ -44,6 +44,8 @@ are the areas most worth scrutiny.
   output, logs, or **Copy Diagnostics**.
 - Anything that lets the firmware accept host frames without a completed
   protocol-v1 Hello handshake.
+- A Linux raw-USB path that fails to apply its documented per-descriptor
+  interface mask before the device handle reaches the transport.
 
 **Out of scope**
 
@@ -58,3 +60,7 @@ are the areas most worth scrutiny.
 - Advisories affecting dependencies that no shipped macOS binary links - the
   Wayland stack behind `eframe`/`winit` and the GTK3 tray backend behind
   `tray-icon`. `deny.toml` scopes the audit to macOS for this reason.
+- Another process running as the active Linux desktop user opening the exact
+  XIAO USB device after the documented `uaccess` rule grants that user
+  whole-node access. `USBDEVFS_DROP_PRIVILEGES` restricts the bridge's own file
+  descriptor, not other descriptors held by the same user.

@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::os::fd::OwnedFd;
@@ -7,11 +6,13 @@ use std::thread;
 use std::time::Duration;
 
 use nusb::descriptors::{ConfigurationDescriptor, TransferType};
-use nusb::transfer::{Buffer, Bulk, ControlOut, ControlType, Direction, In, Out, Recipient};
+use nusb::transfer::{
+    Buffer, Bulk, ControlOut, ControlType, Direction, In, Out, Recipient, TransferError,
+};
 use nusb::{Device, DeviceInfo as NusbDeviceInfo, Endpoint, Interface, MaybeFuture};
 use rustix::fs::{Mode, OFlags};
 
-use crate::{DeviceInfo, Error, Locator, MANUFACTURER, PRODUCT, PRODUCT_ID, VENDOR_ID};
+use crate::{DeviceInfo, Discovery, Error, Locator, MANUFACTURER, PRODUCT, PRODUCT_ID, VENDOR_ID};
 
 const USB_CLASS_COMMUNICATIONS: u8 = 0x02;
 const USB_CLASS_CDC_DATA: u8 = 0x0a;
@@ -20,8 +21,13 @@ const CDC_SUBCLASS_ACM: u8 = 0x02;
 const XINPUT_SUBCLASS: u8 = 0x5d;
 const XINPUT_PROTOCOL: u8 = 0x01;
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(250);
-const BULK_OUT_TIMEOUT: Duration = Duration::from_millis(50);
+// Leave headroom below the firmware's 100 ms watchdog for the 25 ms state
+// refresh interval and the runtime's 10 ms service cadence.
+const BULK_OUT_TOTAL_TIMEOUT: Duration = Duration::from_millis(50);
 const DTR_LOW_INTERVAL: Duration = Duration::from_millis(25);
+const BULK_IN_BUFFER_SIZE: usize = 512;
+const BULK_OUT_BUFFER_SIZE: usize = 512;
+const XPAD_REQUIREMENT: &str = "the bridge's Xbox 360 USB interface requires xpad or xpad-noone; systems using xone must also install xpad-noone";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Topology {
@@ -32,39 +38,33 @@ struct Topology {
     bulk_out: u8,
 }
 
-impl Topology {
-    fn locator(self, info: &NusbDeviceInfo) -> Locator {
-        Locator {
-            bus_number: info.busnum(),
-            device_address: info.device_address(),
-            control_interface: self.control_interface,
-            data_interface: self.data_interface,
-            xinput_interface: self.xinput_interface,
-            bulk_in_endpoint: self.bulk_in,
-            bulk_out_endpoint: self.bulk_out,
-        }
-    }
-}
-
-pub(super) fn discover(excluded_stable_ids: &BTreeSet<String>) -> Result<Vec<DeviceInfo>, Error> {
+pub(super) fn discover() -> Result<Discovery, Error> {
     let mut devices = nusb::list_devices()
         .wait()
         .map_err(|error| Error::Io(error.into()))?
         .filter(is_official_device)
-        .filter(|info| !crate::is_excluded(info.serial_number(), excluded_stable_ids))
         .collect::<Vec<_>>();
     devices.sort_by_key(|info| (info.busnum(), info.device_address()));
-    devices
-        .iter()
-        .map(|info| {
-            let stable_id = required_serial(info)?.to_owned();
-            let (_, topology) = prepare_device(info)?;
-            Ok(DeviceInfo {
-                locator: topology.locator(info),
-                stable_id,
-            })
-        })
-        .collect()
+    let mut discovery = Discovery::default();
+    for info in &devices {
+        match discover_device(info) {
+            Ok(device) => discovery.devices.push(device),
+            Err(error) => discovery.errors.push(error),
+        }
+    }
+    Ok(discovery)
+}
+
+fn discover_device(info: &NusbDeviceInfo) -> Result<DeviceInfo, Error> {
+    let stable_id = required_serial(info)?.to_owned();
+    preflight_topology(info)?;
+    Ok(DeviceInfo {
+        locator: Locator {
+            bus_number: info.busnum(),
+            device_address: info.device_address(),
+        },
+        stable_id,
+    })
 }
 
 pub(super) fn open(stable_id: &str) -> Result<UsbTransport, Error> {
@@ -84,19 +84,19 @@ pub(super) fn open(stable_id: &str) -> Result<UsbTransport, Error> {
     let bulk_out = data
         .endpoint::<Bulk, Out>(topology.bulk_out)
         .map_err(|error| Error::InvalidTopology(error.to_string()))?;
-    let read_size = bulk_in.max_packet_size().max(64);
     let mut transport = UsbTransport {
         control,
         _data: data,
         bulk_in,
         bulk_out,
-        dtr_asserted: false,
+        bulk_out_buffer: Some(Buffer::new(BULK_OUT_BUFFER_SIZE)),
+        bulk_out_poisoned: false,
     };
     set_line_coding(&transport.control, topology.control_interface).map_err(Error::Io)?;
     transport.set_dtr(false).map_err(Error::Io)?;
     thread::sleep(DTR_LOW_INTERVAL);
     transport.set_dtr(true).map_err(Error::Io)?;
-    transport.bulk_in.submit(Buffer::new(read_size));
+    transport.bulk_in.submit(Buffer::new(BULK_IN_BUFFER_SIZE));
     Ok(transport)
 }
 
@@ -105,34 +105,65 @@ pub(super) struct UsbTransport {
     _data: Interface,
     bulk_in: Endpoint<Bulk, In>,
     bulk_out: Endpoint<Bulk, Out>,
-    dtr_asserted: bool,
+    bulk_out_buffer: Option<Buffer>,
+    bulk_out_poisoned: bool,
 }
 
 impl UsbTransport {
     pub(super) fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        let completion = self
-            .bulk_out
-            .transfer_blocking(Buffer::from(bytes), BULK_OUT_TIMEOUT);
-        completion.status.map_err(io::Error::from)?;
-        if completion.actual_len != bytes.len() {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        if self.bulk_out_poisoned {
             return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                format!(
-                    "bulk OUT transferred {} of {} bytes",
-                    completion.actual_len,
-                    bytes.len()
-                ),
+                io::ErrorKind::BrokenPipe,
+                "bulk OUT transport is awaiting cancellation",
             ));
         }
-        Ok(())
+        let mut buffer = self
+            .bulk_out_buffer
+            .take()
+            .unwrap_or_else(|| Buffer::new(bytes.len().max(BULK_OUT_BUFFER_SIZE)));
+        if buffer.capacity() < bytes.len() {
+            buffer = Buffer::new(bytes.len());
+        }
+        buffer.clear();
+        buffer.extend_from_slice(bytes);
+        self.bulk_out.submit(buffer);
+        let Some(mut completion) = self.bulk_out.wait_next_complete(BULK_OUT_TOTAL_TIMEOUT) else {
+            self.bulk_out.cancel_all();
+            self.bulk_out_poisoned = true;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "bulk OUT transfer timed out",
+            ));
+        };
+        let status = completion.status;
+        let actual_len = completion.actual_len;
+        completion.buffer.clear();
+        self.bulk_out_buffer = Some(completion.buffer);
+        match status {
+            Ok(()) | Err(TransferError::Cancelled) if actual_len == bytes.len() => Ok(()),
+            Ok(()) => Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                format!("bulk OUT transferred {actual_len} of {} bytes", bytes.len()),
+            )),
+            Err(error) => Err(map_transfer_error(error)),
+        }
     }
 
     pub(super) fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         let Some(mut completion) = self.bulk_in.wait_next_complete(Duration::ZERO) else {
             return Err(io::ErrorKind::WouldBlock.into());
         };
-        completion.status.map_err(io::Error::from)?;
+        if let Err(error) = completion.status {
+            completion.buffer.clear();
+            self.bulk_in.submit(completion.buffer);
+            return Err(error.into());
+        }
         if completion.actual_len > bytes.len() {
+            completion.buffer.clear();
+            self.bulk_in.submit(completion.buffer);
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "bulk IN completion exceeded the protocol read buffer",
@@ -146,16 +177,11 @@ impl UsbTransport {
     }
 
     fn set_dtr(&mut self, asserted: bool) -> io::Result<()> {
-        set_dtr(&self.control, self.control.interface_number(), asserted)?;
-        self.dtr_asserted = asserted;
-        Ok(())
+        set_dtr(&self.control, self.control.interface_number(), asserted)
     }
 
     fn clear_dtr(&mut self) -> io::Result<()> {
-        if self.dtr_asserted {
-            self.set_dtr(false)?;
-        }
-        Ok(())
+        self.set_dtr(false)
     }
 }
 
@@ -233,6 +259,51 @@ fn prepare_device(info: &NusbDeviceInfo) -> Result<(Device, Topology), Error> {
         )));
     }
     Ok((device, topology))
+}
+
+fn verify_xpad_driver(info: &NusbDeviceInfo, interface: u8) -> Result<(), Error> {
+    let configuration_path = info.sysfs_path().join("bConfigurationValue");
+    let configuration = fs::read_to_string(&configuration_path).map_err(|error| {
+        Error::Io(io::Error::new(
+            error.kind(),
+            format!("cannot read '{}': {error}", configuration_path.display()),
+        ))
+    })?;
+    let interface_path =
+        usb_interface_sysfs_path(info.sysfs_path(), configuration.trim(), interface)?;
+    let driver_path = interface_path.join("driver");
+    let driver = fs::read_link(&driver_path).map_err(|error| {
+        Error::GamepadUnavailable(format!(
+            "{XPAD_REQUIREMENT}; no driver is bound at '{}': {error}",
+            driver_path.display()
+        ))
+    })?;
+    if !is_supported_gamepad_driver(driver.file_name().and_then(|name| name.to_str())) {
+        return Err(Error::GamepadUnavailable(format!(
+            "{XPAD_REQUIREMENT}; found {} at '{}'",
+            driver.display(),
+            driver_path.display(),
+        )));
+    }
+    Ok(())
+}
+
+fn is_supported_gamepad_driver(driver: Option<&str>) -> bool {
+    matches!(driver, Some("xpad" | "xpad-noone"))
+}
+
+fn usb_interface_sysfs_path(
+    device_path: &Path,
+    configuration: &str,
+    interface: u8,
+) -> Result<PathBuf, Error> {
+    let device_name = device_path
+        .file_name()
+        .ok_or_else(|| Error::InvalidTopology("USB sysfs path has no device name".to_owned()))?;
+    Ok(device_path.join(format!(
+        "{}:{configuration}.{interface}",
+        device_name.to_string_lossy()
+    )))
 }
 
 fn preflight_topology(info: &NusbDeviceInfo) -> Result<Topology, Error> {
@@ -478,52 +549,12 @@ fn invalid_topology<T>(message: impl Into<String>) -> Result<T, Error> {
     Err(Error::InvalidTopology(message.into()))
 }
 
-fn verify_xpad_driver(info: &NusbDeviceInfo, interface: u8) -> Result<(), Error> {
-    let configuration_path = info.sysfs_path().join("bConfigurationValue");
-    let configuration = fs::read_to_string(&configuration_path).map_err(|error| {
-        Error::Io(io::Error::new(
-            error.kind(),
-            format!("cannot read '{}': {error}", configuration_path.display()),
-        ))
-    })?;
-    let interface_path =
-        usb_interface_sysfs_path(info.sysfs_path(), configuration.trim(), interface)?;
-    let driver_path = interface_path.join("driver");
-    let driver = fs::read_link(&driver_path).map_err(|error| {
-        Error::InvalidTopology(format!(
-            "Xbox interface has no xpad driver at '{}': {error}",
-            driver_path.display()
-        ))
-    })?;
-    if driver.file_name().and_then(|name| name.to_str()) != Some("xpad") {
-        return invalid_topology(format!(
-            "Xbox interface is owned by {}, not xpad",
-            driver.display()
-        ));
-    }
-    Ok(())
-}
-
-fn usb_interface_sysfs_path(
-    device_path: &Path,
-    configuration: &str,
-    interface: u8,
-) -> Result<PathBuf, Error> {
-    let device_name = device_path
-        .file_name()
-        .ok_or_else(|| Error::InvalidTopology("USB sysfs path has no device name".to_owned()))?;
-    Ok(device_path.join(format!(
-        "{}:{configuration}.{interface}",
-        device_name.to_string_lossy()
-    )))
-}
-
 fn usb_device_node(info: &NusbDeviceInfo) -> PathBuf {
-    PathBuf::from(format!(
-        "/dev/bus/usb/{:03}/{:03}",
-        info.busnum(),
-        info.device_address()
-    ))
+    Locator {
+        bus_number: info.busnum(),
+        device_address: info.device_address(),
+    }
+    .device_node()
 }
 
 fn map_io_error(path: &Path, error: io::Error) -> Error {
@@ -547,6 +578,14 @@ fn map_nusb_error(error: nusb::Error, endpoint: &str) -> Error {
     }
 }
 
+fn map_transfer_error(error: TransferError) -> io::Error {
+    if error == TransferError::Cancelled {
+        io::Error::new(io::ErrorKind::TimedOut, error)
+    } else {
+        error.into()
+    }
+}
+
 fn interface_mask(interfaces: impl IntoIterator<Item = u8>) -> Result<u32, Error> {
     interfaces.into_iter().try_fold(0_u32, |mask, interface| {
         1_u32.checked_shl(u32::from(interface)).map_or_else(
@@ -563,8 +602,12 @@ fn interface_mask(interfaces: impl IntoIterator<Item = u8>) -> Result<u32, Error
 fn retain_interfaces(fd: &OwnedFd, mask: u32) -> io::Result<()> {
     use linux_raw_sys::ioctl::USBDEVFS_DROP_PRIVILEGES;
 
+    // SAFETY: the request number is the kernel USBDEVFS_DROP_PRIVILEGES ABI and
+    // its argument is a valid pointer to the required u32 interface mask.
     let request =
         unsafe { rustix::ioctl::Setter::<{ USBDEVFS_DROP_PRIVILEGES as _ }, u32>::new(mask) };
+    // SAFETY: `fd` is an owned usbfs device descriptor and `request` carries the
+    // only argument type accepted by USBDEVFS_DROP_PRIVILEGES.
     unsafe { rustix::ioctl::ioctl(fd, request) }.map_err(io::Error::from)
 }
 
@@ -664,12 +707,34 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_transfers_are_reported_as_timeouts() {
+        assert_eq!(
+            map_transfer_error(TransferError::Cancelled).kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            map_transfer_error(TransferError::Disconnected).kind(),
+            io::ErrorKind::ConnectionAborted
+        );
+    }
+
+    #[test]
     fn sysfs_interface_path_uses_the_active_configuration() {
         let path = Path::new("/sys/devices/platform/vhci_hcd.0/usb3/3-1");
         assert_eq!(
             usb_interface_sysfs_path(path, "1", 2).unwrap(),
             path.join("3-1:1.2")
         );
+    }
+
+    #[test]
+    fn supported_gamepad_driver_names_match_xbox_360_implementations() {
+        for driver in ["xpad", "xpad-noone"] {
+            assert!(is_supported_gamepad_driver(Some(driver)));
+        }
+        assert!(!is_supported_gamepad_driver(Some("xone")));
+        assert!(!is_supported_gamepad_driver(Some("hid_xpadneo")));
+        assert!(!is_supported_gamepad_driver(None));
     }
 
     fn configuration_descriptor(control: u8, data: u8, xinput: u8) -> Vec<u8> {

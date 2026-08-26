@@ -19,8 +19,8 @@ use portable as platform;
 /// discovery. Vendor, product, and manufacturer IDs remain unrestricted for
 /// independent protocol implementations.
 pub const BRIDGE_DEVICE_USB_PRODUCT: &str = "Steam Controller Bridge";
-pub use linux_bridge_usb::{
-    Locator as LinuxUsbLocator, MANUFACTURER as OFFICIAL_BRIDGE_USB_MANUFACTURER,
+use linux_usb::{
+    LinuxUsbLocator, OFFICIAL_BRIDGE_USB_MANUFACTURER, OFFICIAL_BRIDGE_USB_PRODUCT,
     PRODUCT_ID as OFFICIAL_BRIDGE_USB_PRODUCT_ID, VENDOR_ID as OFFICIAL_BRIDGE_USB_VENDOR_ID,
 };
 pub const DEFAULT_BRIDGE_BAUD_RATE: u32 = 115_200;
@@ -39,8 +39,14 @@ pub struct BridgeUsbIdentity {
     pub product: Option<String>,
 }
 
+#[derive(Debug, Default)]
+pub struct BridgeEndpointDiscovery {
+    pub endpoints: Vec<BridgeEndpoint>,
+    pub warnings: Vec<BridgeTransportError>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BridgeEndpointLocator {
+pub(crate) enum BridgeEndpointLocator {
     SerialPort { path: String, baud_rate: u32 },
     LinuxUsb(LinuxUsbLocator),
 }
@@ -85,15 +91,22 @@ impl BridgeEndpoint {
     }
 
     #[must_use]
-    pub fn official_linux_usb(locator: LinuxUsbLocator, stable_id: impl Into<String>) -> Self {
+    pub fn official_linux_usb(
+        bus_number: u8,
+        device_address: u8,
+        stable_id: impl Into<String>,
+    ) -> Self {
         let usb_identity = BridgeUsbIdentity {
             vendor_id: OFFICIAL_BRIDGE_USB_VENDOR_ID,
             product_id: OFFICIAL_BRIDGE_USB_PRODUCT_ID,
             manufacturer: Some(OFFICIAL_BRIDGE_USB_MANUFACTURER.to_owned()),
-            product: Some(BRIDGE_DEVICE_USB_PRODUCT.to_owned()),
+            product: Some(OFFICIAL_BRIDGE_USB_PRODUCT.to_owned()),
         };
         Self {
-            locator: BridgeEndpointLocator::LinuxUsb(locator),
+            locator: BridgeEndpointLocator::LinuxUsb(LinuxUsbLocator {
+                bus_number,
+                device_address,
+            }),
             stable_id: Some(stable_id.into()),
             display_label: format!("{BRIDGE_DEVICE_USB_PRODUCT} (USB)"),
             usb_identity: Some(usb_identity),
@@ -156,7 +169,7 @@ impl BridgeEndpoint {
     }
 
     #[must_use]
-    pub const fn locator(&self) -> &BridgeEndpointLocator {
+    pub(crate) const fn locator(&self) -> &BridgeEndpointLocator {
         &self.locator
     }
 
@@ -165,6 +178,14 @@ impl BridgeEndpoint {
         match &self.locator {
             BridgeEndpointLocator::SerialPort { path, .. } => Some(path),
             BridgeEndpointLocator::LinuxUsb(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn access_path(&self) -> String {
+        match &self.locator {
+            BridgeEndpointLocator::SerialPort { path, .. } => path.clone(),
+            BridgeEndpointLocator::LinuxUsb(locator) => locator.device_node().display().to_string(),
         }
     }
 
@@ -248,8 +269,17 @@ pub fn available_serial_devices() -> Result<Vec<SerialDeviceInfo>, BridgeTranspo
 /// # Errors
 /// Returns an error when a native transport backend cannot enumerate endpoints.
 pub fn available_bridge_endpoints() -> Result<Vec<BridgeEndpoint>, BridgeTransportError> {
-    let serial = available_serial_endpoints()?;
-    linux_usb::with_official_usb_endpoints(serial)
+    discover_bridge_endpoints().map(|discovery| discovery.endpoints)
+}
+
+/// Enumerates native bridge transport endpoints and retains non-fatal
+/// per-device discovery failures.
+///
+/// # Errors
+/// Returns an error when no transport backend can provide a usable discovery
+/// result.
+pub fn discover_bridge_endpoints() -> Result<BridgeEndpointDiscovery, BridgeTransportError> {
+    linux_usb::with_official_usb_endpoints(available_serial_endpoints())
 }
 
 /// Enumerates native serial bridge transport endpoints.
@@ -305,6 +335,7 @@ mod tests {
 
     #[test]
     fn bridge_device_filter_uses_product_marker() {
+        assert_eq!(OFFICIAL_BRIDGE_USB_PRODUCT, BRIDGE_DEVICE_USB_PRODUCT);
         assert!(bridge_device(BRIDGE_DEVICE_USB_PRODUCT).is_bridge_device());
         assert!(!bridge_device("Steam Controller Puck").is_bridge_device());
     }
@@ -358,14 +389,13 @@ mod tests {
         let locator = LinuxUsbLocator {
             bus_number: 3,
             device_address: 4,
-            control_interface: 0,
-            data_interface: 1,
-            xinput_interface: 2,
-            bulk_in_endpoint: 0x82,
-            bulk_out_endpoint: 0x01,
         };
-        let endpoint = BridgeEndpoint::official_linux_usb(locator, "TESTSERIAL0000")
-            .with_serial_baud_rate(9_600);
+        let endpoint = BridgeEndpoint::official_linux_usb(
+            locator.bus_number,
+            locator.device_address,
+            "TESTSERIAL0000",
+        )
+        .with_serial_baud_rate(9_600);
 
         assert_eq!(endpoint.kind(), BridgeTransportKind::LinuxUsb);
         assert_eq!(endpoint.stable_id(), Some("TESTSERIAL0000"));
@@ -374,6 +404,10 @@ mod tests {
             &BridgeEndpointLocator::LinuxUsb(locator)
         );
         assert_eq!(endpoint.serial_path(), None);
+        assert_eq!(
+            endpoint.access_path(),
+            locator.device_node().display().to_string()
+        );
         assert!(endpoint.is_bridge_device());
     }
 }

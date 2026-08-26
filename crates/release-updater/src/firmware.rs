@@ -578,10 +578,18 @@ fn verify_reconnected_firmware(
     progress(FirmwareFlashProgress::WaitingForApplication);
     let deadline = adapter.elapsed() + APPLICATION_RECONNECT_TIMEOUT;
     let mut last_revision = None;
+    let mut last_discovery_error = None;
     while adapter.elapsed() < deadline {
         adapter.wait(Duration::from_millis(250));
-        let Ok(devices) = adapter.devices() else {
-            continue;
+        let devices = match adapter.devices() {
+            Ok(devices) => {
+                last_discovery_error = None;
+                devices
+            }
+            Err(error) => {
+                last_discovery_error = Some(error);
+                continue;
+            }
         };
         if devices.len() > 1 {
             return Err(FirmwareFlashError::Discovery(format!(
@@ -658,13 +666,32 @@ fn verify_reconnected_firmware(
             Ok(_) | Err(_) => {}
         }
     }
+    Err(reconnect_timeout_error(
+        copy_error,
+        last_discovery_error,
+        release.revision,
+        last_revision,
+    ))
+}
+
+fn reconnect_timeout_error(
+    copy_error: Option<io::Error>,
+    discovery_error: Option<FirmwareFlashError>,
+    expected_revision: u16,
+    actual_revision: Option<u16>,
+) -> FirmwareFlashError {
     if let Some(error) = copy_error {
-        return Err(error.into());
+        return error.into();
     }
-    Err(FirmwareFlashError::Revision {
-        expected: release.revision,
-        actual: last_revision,
-    })
+    if actual_revision.is_none() {
+        if let Some(error) = discovery_error {
+            return error;
+        }
+    }
+    FirmwareFlashError::Revision {
+        expected: expected_revision,
+        actual: actual_revision,
+    }
 }
 
 fn validate_version_policy(
@@ -857,6 +884,7 @@ mod tests {
         now: Duration,
         devices: VecDeque<Vec<FirmwareDevice>>,
         default_devices: Vec<FirmwareDevice>,
+        default_device_error: Option<String>,
         volumes: VecDeque<Vec<BootloaderVolume>>,
         default_volumes: Vec<BootloaderVolume>,
         versions: VecDeque<FirmwareVersion>,
@@ -875,10 +903,13 @@ mod tests {
 
     impl FlashAdapter for FakeAdapter {
         fn devices(&mut self) -> Result<Vec<FirmwareDevice>, FirmwareFlashError> {
-            Ok(self
-                .devices
-                .pop_front()
-                .unwrap_or_else(|| self.default_devices.clone()))
+            if let Some(devices) = self.devices.pop_front() {
+                return Ok(devices);
+            }
+            if let Some(error) = &self.default_device_error {
+                return Err(FirmwareFlashError::Discovery(error.clone()));
+            }
+            Ok(self.default_devices.clone())
         }
 
         fn volumes(&mut self) -> Result<Vec<BootloaderVolume>, FirmwareFlashError> {
@@ -968,6 +999,7 @@ mod tests {
             now: Duration::ZERO,
             devices: VecDeque::new(),
             default_devices: Vec::new(),
+            default_device_error: None,
             volumes: VecDeque::new(),
             default_volumes: Vec::new(),
             versions: VecDeque::new(),
@@ -1621,6 +1653,35 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn persistent_post_flash_discovery_failure_keeps_its_diagnostic() {
+        let mut adapter = fake();
+        adapter.volumes.push_back(Vec::new());
+        adapter.volumes.push_back(vec![volume()]);
+        adapter.devices.push_back(vec![device(true)]);
+        adapter.infos.push_back(info(
+            2,
+            FirmwareCapabilities::ENTER_UF2_BOOTLOADER,
+            FirmwareInstallState::Recorded(FirmwareInstallReceipt {
+                installed_at: 100,
+                install_id: [1; 16],
+                source: FirmwareInstallSource::FirstObserved,
+            }),
+        ));
+        adapter.default_device_error = Some("firmware rediscovery failed".to_owned());
+
+        assert!(matches!(
+            flash_with_adapter(
+                &mut adapter,
+                Path::new("firmware.uf2"),
+                &release(3),
+                &AtomicBool::new(false),
+                |_| {},
+            ),
+            Err(FirmwareFlashError::Discovery(message)) if message == "firmware rediscovery failed"
+        ));
     }
 
     #[test]

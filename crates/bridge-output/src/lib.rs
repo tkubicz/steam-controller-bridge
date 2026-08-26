@@ -19,16 +19,16 @@ pub use bridge_transport::{
 };
 pub use endpoint_discovery::{
     available_bridge_endpoints, available_serial_devices, available_serial_endpoints,
-    available_serial_ports, BridgeEndpoint, BridgeEndpointLocator, BridgeTransportKind,
-    BridgeUsbIdentity, LinuxUsbLocator, SerialDeviceInfo, BRIDGE_DEVICE_USB_PRODUCT,
-    DEFAULT_BRIDGE_BAUD_RATE, OFFICIAL_BRIDGE_USB_MANUFACTURER, OFFICIAL_BRIDGE_USB_PRODUCT_ID,
-    OFFICIAL_BRIDGE_USB_VENDOR_ID,
+    available_serial_ports, discover_bridge_endpoints, BridgeEndpoint, BridgeEndpointDiscovery,
+    BridgeTransportKind, BridgeUsbIdentity, SerialDeviceInfo, BRIDGE_DEVICE_USB_PRODUCT,
+    DEFAULT_BRIDGE_BAUD_RATE,
 };
 
 /// The rendered prefix of [`OutputError::Configuration`]. Callers that only
 /// see a flattened error string classify against this constant, so the wording
 /// and the classification cannot drift apart.
 pub const CONFIGURATION_FAILURE_PREFIX: &str = "output configuration failed";
+pub const BRIDGE_BUSY_ERROR_MARKER: &str = "bridge device or resource busy";
 
 #[derive(Debug)]
 pub enum OutputError {

@@ -75,9 +75,13 @@ Targetless legacy firmware, malformed target identity, and a different valid
 target remain usable for bridging and receive no automatic firmware prompt or
 bootloader command. A user may still choose the explicitly labeled
 **Install or Recover XIAO Firmware** action. For unidentified application
-firmware the app releases the serial device and opens a 60-second manual
+firmware the app releases the bridge endpoint and opens a 60-second manual
 recovery window asking for two quick presses of the reset button beside the
 USB-C connector.
+
+The shipped App Center and removable-volume provider remain macOS-only. Linux
+direct USB supports the running bridge, but Linux firmware installation still
+needs a removable-volume provider and a supported updater entry point.
 
 Before writing, the manual and automatic paths both require exactly one
 accepted XIAO/Sense board ID and the catalog UF2 family. Multiple devices or a
