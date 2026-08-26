@@ -1,5 +1,5 @@
 use crate::bridge_transport::{BridgeTransportError, ByteTransport};
-use crate::endpoint_discovery::BridgeEndpoint;
+use crate::endpoint_discovery::{BridgeEndpoint, BridgeEndpointDiscovery};
 
 pub use linux_bridge_usb::{
     Locator as LinuxUsbLocator, MANUFACTURER as OFFICIAL_BRIDGE_USB_MANUFACTURER,
@@ -8,37 +8,45 @@ pub use linux_bridge_usb::{
 
 pub(crate) fn with_official_usb_endpoints(
     serial_result: Result<Vec<BridgeEndpoint>, BridgeTransportError>,
-) -> Result<Vec<BridgeEndpoint>, BridgeTransportError> {
+) -> Result<BridgeEndpointDiscovery, BridgeTransportError> {
     with_official_usb_endpoints_with(serial_result, linux_bridge_usb::discover)
 }
 
 fn with_official_usb_endpoints_with(
     serial_result: Result<Vec<BridgeEndpoint>, BridgeTransportError>,
     discover: impl FnOnce() -> Result<linux_bridge_usb::Discovery, linux_bridge_usb::Error>,
-) -> Result<Vec<BridgeEndpoint>, BridgeTransportError> {
+) -> Result<BridgeEndpointDiscovery, BridgeTransportError> {
     let (serial_endpoints, serial_error) = match serial_result {
         Ok(endpoints) => (endpoints, None),
         Err(error) => (Vec::new(), Some(error)),
     };
     match discover() {
         Ok(discovery) => {
+            let mut device_errors = discovery.errors;
             if discovery.devices.is_empty() && serial_endpoints.is_empty() {
-                if let Some(error) = discovery.errors.into_iter().next() {
-                    return Err(map_error(error));
+                if !device_errors.is_empty() {
+                    return Err(map_error(device_errors.remove(0)));
                 }
                 if let Some(error) = serial_error {
                     return Err(error);
                 }
             }
-            Ok(merge_official_usb_endpoints(
-                serial_endpoints,
-                discovery.devices,
-            ))
+            let mut warnings = device_errors.into_iter().map(map_error).collect::<Vec<_>>();
+            if let Some(error) = serial_error {
+                warnings.push(error);
+            }
+            Ok(BridgeEndpointDiscovery {
+                endpoints: merge_official_usb_endpoints(serial_endpoints, discovery.devices),
+                warnings,
+            })
         }
         Err(error) if serial_endpoints.is_empty() => {
             Err(serial_error.unwrap_or_else(|| map_error(error)))
         }
-        Err(_) => Ok(serial_endpoints),
+        Err(error) => Ok(BridgeEndpointDiscovery {
+            endpoints: serial_endpoints,
+            warnings: vec![map_error(error)],
+        }),
     }
 }
 
@@ -158,14 +166,18 @@ mod tests {
     fn a_raw_discovery_failure_does_not_discard_serial_fallbacks() {
         let serial = BridgeEndpoint::serial_port("serial:fallback", 115_200);
 
-        let endpoints = with_official_usb_endpoints_with(Ok(vec![serial.clone()]), || {
+        let discovery = with_official_usb_endpoints_with(Ok(vec![serial.clone()]), || {
             Err(linux_bridge_usb::Error::Io(std::io::Error::other(
                 "USB enumeration failed",
             )))
         })
         .unwrap();
 
-        assert_eq!(endpoints, vec![serial]);
+        assert_eq!(discovery.endpoints, vec![serial]);
+        assert_eq!(discovery.warnings.len(), 1);
+        assert!(discovery.warnings[0]
+            .to_string()
+            .contains("USB enumeration failed"));
     }
 
     #[test]
@@ -175,7 +187,7 @@ mod tests {
             device_address: 4,
         };
 
-        let endpoints = with_official_usb_endpoints_with(Ok(Vec::new()), || {
+        let discovery = with_official_usb_endpoints_with(Ok(Vec::new()), || {
             Ok(linux_bridge_usb::Discovery {
                 devices: vec![linux_bridge_usb::DeviceInfo {
                     locator,
@@ -188,7 +200,9 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(endpoints.len(), 1);
-        assert_eq!(endpoints[0].stable_id(), Some("good"));
+        assert_eq!(discovery.endpoints.len(), 1);
+        assert_eq!(discovery.endpoints[0].stable_id(), Some("good"));
+        assert_eq!(discovery.warnings.len(), 1);
+        assert!(discovery.warnings[0].to_string().contains("bad prototype"));
     }
 }

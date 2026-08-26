@@ -436,16 +436,50 @@ fn automatic_output_requires_the_marker_but_an_explicit_port_bypasses_it() {
 
 #[test]
 fn explicit_serial_output_bypasses_raw_usb_discovery() {
-    let endpoints = discover_output_endpoints_with(
+    let enumerated = BridgeEndpoint::serial_port("serial:explicit", 115_200)
+        .with_stable_id("explicit-device")
+        .with_usb_identity(bridge_output::BridgeUsbIdentity {
+            vendor_id: 0xbeef,
+            product_id: 0x1234,
+            manufacturer: Some("Community implementation".to_owned()),
+            product: Some("Custom development firmware".to_owned()),
+        });
+    let discovery = discover_output_endpoints_with(
         &BridgeEndpointSelection::SerialPort("serial:explicit".to_owned()),
-        || -> Result<Vec<BridgeEndpoint>, ()> { panic!("raw USB discovery must not run") },
+        || -> Result<BridgeEndpointDiscovery, BridgeTransportError> {
+            panic!("raw USB discovery must not run")
+        },
+        || Ok(vec![enumerated.clone()]),
+    )
+    .unwrap();
+
+    assert_eq!(discovery.endpoints, vec![enumerated]);
+    assert!(discovery.warnings.is_empty());
+}
+
+#[test]
+fn explicit_serial_output_survives_serial_enumeration_failure() {
+    let discovery = discover_output_endpoints_with(
+        &BridgeEndpointSelection::SerialPort("serial:explicit".to_owned()),
+        || -> Result<BridgeEndpointDiscovery, BridgeTransportError> {
+            panic!("raw USB discovery must not run")
+        },
+        || {
+            Err(BridgeTransportError::InvalidTopology(
+                "serial enumeration failed".to_owned(),
+            ))
+        },
     )
     .unwrap();
 
     assert_eq!(
-        endpoints,
+        discovery.endpoints,
         vec![BridgeEndpoint::serial_port("serial:explicit", 115_200)]
     );
+    assert_eq!(discovery.warnings.len(), 1);
+    assert!(discovery.warnings[0]
+        .to_string()
+        .contains("serial enumeration failed"));
 }
 
 #[test]

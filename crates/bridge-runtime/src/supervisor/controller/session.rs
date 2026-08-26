@@ -282,16 +282,31 @@ pub(crate) fn output_candidates(
     }
 }
 
-pub(crate) fn discover_output_endpoints_with<E>(
+pub(crate) fn discover_output_endpoints_with(
     selection: &BridgeEndpointSelection,
-    discover_all: impl FnOnce() -> Result<Vec<BridgeEndpoint>, E>,
-) -> Result<Vec<BridgeEndpoint>, E> {
+    discover_all: impl FnOnce() -> Result<BridgeEndpointDiscovery, BridgeTransportError>,
+    discover_serial: impl FnOnce() -> Result<Vec<BridgeEndpoint>, BridgeTransportError>,
+) -> Result<BridgeEndpointDiscovery, BridgeTransportError> {
     match selection {
         BridgeEndpointSelection::AutoBridgeDevice => discover_all(),
-        BridgeEndpointSelection::SerialPort(path) => Ok(vec![BridgeEndpoint::serial_port(
-            path,
-            bridge_output::DEFAULT_BRIDGE_BAUD_RATE,
-        )]),
+        BridgeEndpointSelection::SerialPort(path) => {
+            let fallback =
+                BridgeEndpoint::serial_port(path, bridge_output::DEFAULT_BRIDGE_BAUD_RATE);
+            let (endpoint, warnings) = match discover_serial() {
+                Ok(endpoints) => (
+                    endpoints
+                        .into_iter()
+                        .find(|endpoint| endpoint.serial_path() == Some(path))
+                        .unwrap_or(fallback),
+                    Vec::new(),
+                ),
+                Err(error) => (fallback, vec![error]),
+            };
+            Ok(BridgeEndpointDiscovery {
+                endpoints: vec![endpoint],
+                warnings,
+            })
+        }
     }
 }
 

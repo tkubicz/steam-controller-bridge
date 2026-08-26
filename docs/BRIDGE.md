@@ -57,6 +57,15 @@ bypasses only serial marker/path filtering. Linux permission failures point to
 the narrow device rule; third-party serial devices may also use the
 distribution's serial-access group.
 
+The official firmware presents an Xbox 360-compatible USB interface, for which
+Linux's in-tree driver is `xpad`. Installing `xone` alone disables `xpad` and
+does not provide this Xbox 360 path; systems using `xone` must also retain an
+Xbox 360-compatible `xpad` implementation such as `xpad-noone`. `xpadneo` is a
+Bluetooth driver for newer Xbox controllers and is not a USB transport for this
+interface. The bridge reports the bound driver and sysfs path when this output
+interface is unavailable; it does not bypass the check and claim gamepad output
+is ready.
+
 Overrides remain available:
 
 ```bash

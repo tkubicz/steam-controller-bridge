@@ -21,10 +21,13 @@ const CDC_SUBCLASS_ACM: u8 = 0x02;
 const XINPUT_SUBCLASS: u8 = 0x5d;
 const XINPUT_PROTOCOL: u8 = 0x01;
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(250);
-const BULK_OUT_TOTAL_TIMEOUT: Duration = Duration::from_millis(100);
+// Leave headroom below the firmware's 100 ms watchdog for the 25 ms state
+// refresh interval and the runtime's 10 ms service cadence.
+const BULK_OUT_TOTAL_TIMEOUT: Duration = Duration::from_millis(50);
 const DTR_LOW_INTERVAL: Duration = Duration::from_millis(25);
 const BULK_IN_BUFFER_SIZE: usize = 512;
 const BULK_OUT_BUFFER_SIZE: usize = 512;
+const XPAD_REQUIREMENT: &str = "the bridge's Xbox 360 USB interface requires xpad or xpad-noone; systems using xone must also install xpad-noone";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Topology {
@@ -271,18 +274,22 @@ fn verify_xpad_driver(info: &NusbDeviceInfo, interface: u8) -> Result<(), Error>
     let driver_path = interface_path.join("driver");
     let driver = fs::read_link(&driver_path).map_err(|error| {
         Error::GamepadUnavailable(format!(
-            "xpad is not bound at '{}': {error}",
+            "{XPAD_REQUIREMENT}; no driver is bound at '{}': {error}",
             driver_path.display()
         ))
     })?;
-    if driver.file_name().and_then(|name| name.to_str()) != Some("xpad") {
+    if !is_supported_gamepad_driver(driver.file_name().and_then(|name| name.to_str())) {
         return Err(Error::GamepadUnavailable(format!(
-            "expected xpad at '{}', found {}",
+            "{XPAD_REQUIREMENT}; found {} at '{}'",
+            driver.display(),
             driver_path.display(),
-            driver.display()
         )));
     }
     Ok(())
+}
+
+fn is_supported_gamepad_driver(driver: Option<&str>) -> bool {
+    matches!(driver, Some("xpad" | "xpad-noone"))
 }
 
 fn usb_interface_sysfs_path(
@@ -718,6 +725,16 @@ mod tests {
             usb_interface_sysfs_path(path, "1", 2).unwrap(),
             path.join("3-1:1.2")
         );
+    }
+
+    #[test]
+    fn supported_gamepad_driver_names_match_xbox_360_implementations() {
+        for driver in ["xpad", "xpad-noone"] {
+            assert!(is_supported_gamepad_driver(Some(driver)));
+        }
+        assert!(!is_supported_gamepad_driver(Some("xone")));
+        assert!(!is_supported_gamepad_driver(Some("hid_xpadneo")));
+        assert!(!is_supported_gamepad_driver(None));
     }
 
     fn configuration_descriptor(control: u8, data: u8, xinput: u8) -> Vec<u8> {

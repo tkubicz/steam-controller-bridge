@@ -19,8 +19,9 @@ pub use bridge_transport::{
 };
 pub use endpoint_discovery::{
     available_bridge_endpoints, available_serial_devices, available_serial_endpoints,
-    available_serial_ports, BridgeEndpoint, BridgeTransportKind, BridgeUsbIdentity,
-    SerialDeviceInfo, BRIDGE_DEVICE_USB_PRODUCT, DEFAULT_BRIDGE_BAUD_RATE,
+    available_serial_ports, discover_bridge_endpoints, BridgeEndpoint, BridgeEndpointDiscovery,
+    BridgeTransportKind, BridgeUsbIdentity, SerialDeviceInfo, BRIDGE_DEVICE_USB_PRODUCT,
+    DEFAULT_BRIDGE_BAUD_RATE,
 };
 
 /// The rendered prefix of [`OutputError::Configuration`]. Callers that only

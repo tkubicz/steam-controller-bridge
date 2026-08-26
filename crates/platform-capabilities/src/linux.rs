@@ -139,18 +139,30 @@ impl LinuxAccessApi for NativeLinuxAccessApi {
     }
 
     fn bridge_device_access(&self) -> CapabilityState {
-        match bridge_output::available_bridge_endpoints() {
-            Ok(endpoints) => access_state(
-                endpoints
-                    .into_iter()
-                    .filter(bridge_output::BridgeEndpoint::is_bridge_device)
-                    .map(|endpoint| endpoint.access_path()),
-                "bridge-device endpoint",
-                check_path_access,
-            ),
+        match bridge_output::discover_bridge_endpoints() {
+            Ok(discovery) => bridge_device_access_state(discovery, check_path_access),
             Err(error) => bridge_discovery_error_state(error),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn bridge_device_access_state(
+    discovery: bridge_output::BridgeEndpointDiscovery,
+    check: impl FnMut(&str) -> Result<(), PathAccessError>,
+) -> CapabilityState {
+    let paths = discovery
+        .endpoints
+        .into_iter()
+        .filter(bridge_output::BridgeEndpoint::is_bridge_device)
+        .map(|endpoint| endpoint.access_path())
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        if let Some(error) = discovery.warnings.into_iter().next() {
+            return bridge_discovery_error_state(error);
+        }
+    }
+    access_state(paths, "bridge-device endpoint", check)
 }
 
 #[cfg(target_os = "linux")]
@@ -247,6 +259,26 @@ mod tests {
                         .to_owned(),
             }
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bridge_discovery_warning_is_not_hidden_by_unrelated_serial_endpoints() {
+        let discovery = bridge_output::BridgeEndpointDiscovery {
+            endpoints: vec![bridge_output::BridgeEndpoint::serial_port(
+                "/dev/ttyUSB0",
+                115_200,
+            )],
+            warnings: vec![bridge_output::BridgeTransportError::InvalidTopology(
+                "official bridge has no stable USB serial".to_owned(),
+            )],
+        };
+
+        assert!(matches!(
+            bridge_device_access_state(discovery, |_| Ok(())),
+            CapabilityState::Unavailable { reason }
+                if reason.contains("official bridge has no stable USB serial")
+        ));
     }
 
     #[derive(Clone)]

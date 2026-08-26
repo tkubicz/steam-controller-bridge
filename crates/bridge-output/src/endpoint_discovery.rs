@@ -39,6 +39,12 @@ pub struct BridgeUsbIdentity {
     pub product: Option<String>,
 }
 
+#[derive(Debug, Default)]
+pub struct BridgeEndpointDiscovery {
+    pub endpoints: Vec<BridgeEndpoint>,
+    pub warnings: Vec<BridgeTransportError>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BridgeEndpointLocator {
     SerialPort { path: String, baud_rate: u32 },
@@ -263,6 +269,16 @@ pub fn available_serial_devices() -> Result<Vec<SerialDeviceInfo>, BridgeTranspo
 /// # Errors
 /// Returns an error when a native transport backend cannot enumerate endpoints.
 pub fn available_bridge_endpoints() -> Result<Vec<BridgeEndpoint>, BridgeTransportError> {
+    discover_bridge_endpoints().map(|discovery| discovery.endpoints)
+}
+
+/// Enumerates native bridge transport endpoints and retains non-fatal
+/// per-device discovery failures.
+///
+/// # Errors
+/// Returns an error when no transport backend can provide a usable discovery
+/// result.
+pub fn discover_bridge_endpoints() -> Result<BridgeEndpointDiscovery, BridgeTransportError> {
     linux_usb::with_official_usb_endpoints(available_serial_endpoints())
 }
 

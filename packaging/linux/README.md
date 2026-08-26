@@ -69,3 +69,8 @@ Save the group-only policy as
 different name would leave the original `uaccess` tag in place. Reload the
 rules, reconnect the device, and restart the service so its supplementary
 groups are refreshed.
+
+If you previously installed the headless policy as
+`/etc/udev/rules.d/61-steam-controller-bridge-headless.rules`, remove that old
+file before reloading the rules. Leaving both files installed preserves the
+packaged `uaccess` policy.
