@@ -27,7 +27,7 @@ pub(super) fn bundled_virtual_hid_helper_path_from(executable: &Path) -> Result<
 
 pub(super) fn output_selection(preference: OutputPreference) -> Result<OutputSelection, String> {
     match preference {
-        OutputPreference::BridgeDevice => Ok(OutputSelection::Serial),
+        OutputPreference::BridgeDevice => Ok(OutputSelection::BridgeDevice),
         OutputPreference::VirtualHid => bundled_virtual_hid_helper_path()
             .map(VirtualHidConfig::new)
             .map(OutputSelection::VirtualHid),

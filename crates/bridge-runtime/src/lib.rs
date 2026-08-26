@@ -14,11 +14,12 @@ mod runtime;
 mod supervisor;
 
 pub use api::{
-    AutomaticShutdownPhase, AutomaticShutdownStatus, BridgeStatus, ControllerChargeState,
-    ControllerSelection, ControllerSourceStatus, ControllerStatus, DesktopBindingsState,
-    DesktopBindingsStatus, HapticsState, HapticsStatus, LizardMode, LizardStatus, OutputBackend,
-    OutputCapabilities, OutputSelection, OutputStatus, ProfilePickerStatus, PuckDockAction,
-    RuntimeConfig, RuntimeError, RuntimeState, SerialSelection, ShutdownTrigger, VirtualHidStatus,
+    AutomaticShutdownPhase, AutomaticShutdownStatus, BridgeEndpointSelection, BridgeStatus,
+    ControllerChargeState, ControllerSelection, ControllerSourceStatus, ControllerStatus,
+    DesktopBindingsState, DesktopBindingsStatus, HapticsState, HapticsStatus, LizardMode,
+    LizardStatus, OutputBackend, OutputCapabilities, OutputSelection, OutputStatus,
+    ProfilePickerStatus, PuckDockAction, RuntimeConfig, RuntimeError, RuntimeState,
+    ShutdownTrigger, VirtualHidStatus,
 };
 pub(crate) use automatic_shutdown::{
     automatic_shutdown_phase, binding_status_for_profile, validate_idle_shutdown_timeout,
@@ -59,8 +60,8 @@ use std::time::{Duration, Instant};
 
 use bridge_core::{BridgeEngine, ProcessOutcome};
 use bridge_output::{
-    available_serial_devices, DumpOutput, FileOutput, GamepadOutput, MockOutput, OutputError,
-    OutputFeedback, SerialDeviceInfo, SerialOutput,
+    available_bridge_endpoints, BridgeEndpoint, BridgeOutput, DumpOutput, FileOutput,
+    GamepadOutput, MockOutput, OutputError, OutputFeedback,
 };
 use desktop_bindings::{
     bindable_mask, BindingEngine, BindingProfile, DesktopInputSink, DesktopInputSnapshot,

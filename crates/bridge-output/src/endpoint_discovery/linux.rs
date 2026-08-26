@@ -2,7 +2,7 @@ use std::io;
 
 #[cfg(test)]
 use super::SerialDeviceInfo;
-use super::{generic_open_error, SerialError};
+use super::{generic_open_error, BridgeTransportError};
 
 pub(super) fn is_callout_port(path: &str) -> bool {
     numbered_device(path, "/dev/ttyACM") || numbered_device(path, "/dev/ttyUSB")
@@ -14,10 +14,10 @@ fn numbered_device(path: &str, prefix: &str) -> bool {
     })
 }
 
-pub(super) fn open_error(path: &str, error: serialport::Error) -> SerialError {
+pub(super) fn open_error(path: &str, error: serialport::Error) -> BridgeTransportError {
     match error.kind() {
         serialport::ErrorKind::Io(io::ErrorKind::PermissionDenied) => {
-            SerialError::Io(io::Error::new(
+            BridgeTransportError::Io(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
                     "cannot open Linux serial endpoint {path}: permission denied; grant this device read/write access with a narrowly matched udev rule or the distribution's serial-access group (commonly dialout). Reconnect after changing udev rules, or start a new login or service after changing groups"
@@ -25,7 +25,7 @@ pub(super) fn open_error(path: &str, error: serialport::Error) -> SerialError {
             ))
         }
         serialport::ErrorKind::NoDevice
-        | serialport::ErrorKind::Io(io::ErrorKind::NotFound) => SerialError::Io(io::Error::new(
+        | serialport::ErrorKind::Io(io::ErrorKind::NotFound) => BridgeTransportError::Io(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
                 "cannot open Linux serial endpoint {path}: the device is unavailable; it may have disconnected or another process may hold exclusive access. Reconnect it, close serial monitors, or, if ModemManager is probing this endpoint, configure a narrowly matched ID_MM_DEVICE_IGNORE rule, then retry"
@@ -41,7 +41,7 @@ pub(super) const TEST_CALLOUT_PORT: &str = "/dev/ttyACM0";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serial_discovery::BRIDGE_DEVICE_USB_PRODUCT;
+    use crate::endpoint_discovery::BRIDGE_DEVICE_USB_PRODUCT;
 
     fn device(path: &str, product: &str) -> SerialDeviceInfo {
         SerialDeviceInfo {
@@ -80,7 +80,7 @@ mod tests {
                 "Permission denied",
             ),
         );
-        let SerialError::Io(permission) = permission else {
+        let BridgeTransportError::Io(permission) = permission else {
             panic!("permission failure must remain an I/O error");
         };
         assert_eq!(permission.kind(), io::ErrorKind::PermissionDenied);
@@ -96,7 +96,7 @@ mod tests {
             ),
         ] {
             let unavailable = open_error("/dev/ttyUSB2", error);
-            let SerialError::Io(unavailable) = unavailable else {
+            let BridgeTransportError::Io(unavailable) = unavailable else {
                 panic!("unavailable device must remain an I/O error");
             };
             assert_eq!(unavailable.kind(), io::ErrorKind::NotFound);
@@ -112,7 +112,7 @@ mod tests {
                 serialport::Error::new(serialport::ErrorKind::InvalidInput, "invalid baud rate"),
             )
             .to_string(),
-            "serial I/O failed: invalid baud rate"
+            "bridge transport I/O failed: invalid baud rate"
         );
     }
 }

@@ -330,7 +330,7 @@ impl BridgeHandle {
             .map(PendingOutputChange::new)
     }
 
-    /// Queues a binding-profile switch without restarting HID or serial.
+    /// Queues a binding-profile switch without restarting HID or bridge output.
     ///
     /// # Errors
     /// Returns an error if the runtime thread has stopped.
@@ -372,11 +372,11 @@ impl BridgeHandle {
         self.command(|ack| RuntimeCommand::SetPickerRoster(roster, ack))
     }
 
-    /// Parks the controller at neutral, closes the serial port and HID
+    /// Parks the controller at neutral, closes the bridge endpoint and HID
     /// handles, and returns only once that teardown has completed.
     ///
     /// For the frontend's system-sleep hook. The port must be **closed before
-    /// the machine sleeps**: serial I/O left in flight across a sleep/wake
+    /// the machine sleeps**: bridge I/O left in flight across a sleep/wake
     /// transition has panicked macOS's USB CDC driver while the bridge device
     /// re-enumerated. The bridge stays suspended - regardless of its
     /// start/stop setting - until [`BridgeHandle::request_resume_from_wake`].
@@ -450,7 +450,7 @@ impl BridgeHandle {
         self.command(RuntimeCommand::Stop)
     }
 
-    /// Updates the idle-shutdown timeout without restarting HID or serial.
+    /// Updates the idle-shutdown timeout without restarting HID or bridge output.
     ///
     /// # Errors
     /// Returns an error if the runtime thread has stopped.
@@ -458,7 +458,7 @@ impl BridgeHandle {
         self.command(|ack| RuntimeCommand::SetIdleShutdown(timeout, ack))
     }
 
-    /// Updates the immediate Puck-dock action without restarting HID or serial.
+    /// Updates the immediate Puck-dock action without restarting HID or bridge output.
     ///
     /// # Errors
     /// Returns an error if the runtime thread has stopped.
@@ -466,7 +466,7 @@ impl BridgeHandle {
         self.command(|ack| RuntimeCommand::SetPuckDockAction(action, ack))
     }
 
-    /// Switches the active binding profile without restarting HID or serial.
+    /// Switches the active binding profile without restarting HID or bridge output.
     ///
     /// # Errors
     /// Returns an error when profile cleanup fails or the runtime has stopped.

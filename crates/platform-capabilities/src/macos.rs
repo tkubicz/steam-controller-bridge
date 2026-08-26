@@ -166,7 +166,7 @@ impl PlatformCapabilities for MacOsCapabilities {
                 reason: "the macOS provider requires a macOS desktop session".to_owned(),
             },
             CapabilityId::ControllerHidAccess
-            | CapabilityId::SerialPortAccess
+            | CapabilityId::BridgeDeviceAccess
             | CapabilityId::VirtualGamepadAccess => CapabilityState::NotRequired,
         }
     }
@@ -180,7 +180,7 @@ impl PlatformCapabilities for MacOsCapabilities {
                 reason: "the macOS provider requires a macOS desktop session".to_owned(),
             },
             CapabilityId::ControllerHidAccess
-            | CapabilityId::SerialPortAccess
+            | CapabilityId::BridgeDeviceAccess
             | CapabilityId::VirtualGamepadAccess => CapabilityState::NotRequired,
         })
     }
@@ -194,7 +194,7 @@ impl PlatformCapabilities for MacOsCapabilities {
                 Some(Remedy::OpenUrl(ACCESSIBILITY_SETTINGS_URL.to_owned()))
             }
             CapabilityId::ControllerHidAccess
-            | CapabilityId::SerialPortAccess
+            | CapabilityId::BridgeDeviceAccess
             | CapabilityId::VirtualGamepadAccess
             | CapabilityId::DesktopInputAccess => None,
         }

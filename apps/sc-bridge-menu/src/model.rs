@@ -19,7 +19,7 @@ const COPY_DIAGNOSTICS_ID: &str = "copy-diagnostics";
 const INPUT_MONITORING_ID: &str = "input-monitoring";
 const ACCESSIBILITY_ID: &str = "accessibility";
 const CONTROLLER_HID_ACCESS_ID: &str = "capability-controller-hid-access";
-const SERIAL_PORT_ACCESS_ID: &str = "capability-serial-port-access";
+const BRIDGE_DEVICE_ACCESS_ID: &str = "capability-bridge-device-access";
 const VIRTUAL_GAMEPAD_ACCESS_ID: &str = "capability-virtual-gamepad-access";
 const DESKTOP_INPUT_ACCESS_ID: &str = "capability-desktop-input-access";
 const POST_EVENT_ID: &str = "capability-post-event";
@@ -61,7 +61,7 @@ macro_rules! capability_action_mappings {
 
 capability_action_mappings! {
     CapabilityId::ControllerHidAccess => CONTROLLER_HID_ACCESS_ID,
-    CapabilityId::SerialPortAccess => SERIAL_PORT_ACCESS_ID,
+    CapabilityId::BridgeDeviceAccess => BRIDGE_DEVICE_ACCESS_ID,
     CapabilityId::VirtualGamepadAccess => VIRTUAL_GAMEPAD_ACCESS_ID,
     CapabilityId::DesktopInputAccess => DESKTOP_INPUT_ACCESS_ID,
     CapabilityId::InputMonitoring => INPUT_MONITORING_ID,
@@ -519,9 +519,9 @@ fn firmware_label(status: &BridgeStatus) -> String {
 
 fn output_label(status: &BridgeStatus) -> String {
     let output = match status.output.backend {
-        OutputBackend::SerialBridge if status.output.ready => serial_output_name(status),
-        OutputBackend::SerialBridge if status.output.endpoint.is_some() => "Connecting",
-        OutputBackend::SerialBridge => "Not Detected",
+        OutputBackend::BridgeDevice if status.output.ready => bridge_output_name(status),
+        OutputBackend::BridgeDevice if status.output.endpoint.is_some() => "Connecting",
+        OutputBackend::BridgeDevice => "Not Detected",
         OutputBackend::VirtualHid if status.output.ready => "Virtual Gamepad",
         OutputBackend::VirtualHid => "Virtual Gamepad (Not Ready)",
         OutputBackend::Dump => "Diagnostic Dump",
@@ -532,7 +532,7 @@ fn output_label(status: &BridgeStatus) -> String {
 }
 
 #[cfg(feature = "updater")]
-fn serial_output_name(status: &BridgeStatus) -> &'static str {
+fn bridge_output_name(status: &BridgeStatus) -> &'static str {
     if let Some(name) = status
         .output
         .firmware
@@ -550,7 +550,7 @@ fn serial_output_name(status: &BridgeStatus) -> &'static str {
 }
 
 #[cfg(not(feature = "updater"))]
-fn serial_output_name(_status: &BridgeStatus) -> &'static str {
+fn bridge_output_name(_status: &BridgeStatus) -> &'static str {
     "Bridge Device"
 }
 
@@ -677,7 +677,7 @@ fn friendly_error(error: &str) -> String {
         return "Controller is already in use".to_owned();
     }
     if lower.contains("device or resource busy") {
-        return "Bridge-device serial port is busy".to_owned();
+        return "Bridge device is busy".to_owned();
     }
     if lower.contains("multiple active steam controller") {
         return "Multiple active controllers found".to_owned();
@@ -787,7 +787,7 @@ mod tests {
                     ),
                     ..bridge_runtime::FirmwareInfo::default()
                 }),
-                ..OutputStatus::configured(&bridge_runtime::OutputSelection::Serial)
+                ..OutputStatus::configured(&bridge_runtime::OutputSelection::BridgeDevice)
             },
             ..BridgeStatus::default()
         }
@@ -855,7 +855,7 @@ mod tests {
         actions.extend(
             [
                 CapabilityId::ControllerHidAccess,
-                CapabilityId::SerialPortAccess,
+                CapabilityId::BridgeDeviceAccess,
                 CapabilityId::VirtualGamepadAccess,
                 CapabilityId::DesktopInputAccess,
                 CapabilityId::InputMonitoring,

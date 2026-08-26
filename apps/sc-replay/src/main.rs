@@ -6,7 +6,8 @@ use std::thread;
 use std::time::Duration;
 
 use bridge_output::{
-    DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput, SerialConfig, SerialOutput,
+    BridgeOutput, BridgeTransportConfig, DumpFormat, DumpOutput, FileOutput, GamepadOutput,
+    MockOutput,
 };
 use clap::{Parser, ValueEnum};
 use recording::{ReplayOptions, ReplaySession, ReplayTiming, KIND_MAPPED_GAMEPAD_STATE};
@@ -228,14 +229,14 @@ fn make_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
             .map_err(|error| error.to_string())?,
         ),
         OutputArg::Serial => Box::new(
-            SerialOutput::open(
+            BridgeOutput::open_serial(
                 cli.port
                     .as_deref()
                     .ok_or("--output serial requires --port PATH")?,
                 cli.baud,
-                SerialConfig {
+                BridgeTransportConfig {
                     packet_logging: cli.serial_log,
-                    ..SerialConfig::default()
+                    ..BridgeTransportConfig::default()
                 },
             )
             .map_err(|error| error.to_string())?,

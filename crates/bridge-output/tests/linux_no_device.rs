@@ -1,12 +1,12 @@
-use bridge_output::{SerialDeviceInfo, SerialError};
+use bridge_output::{BridgeEndpoint, BridgeTransportError};
 
 #[test]
-#[ignore = "requires a Linux runner with no attached bridge serial device"]
-fn native_serial_discovery_handles_an_empty_bridge_scan() -> Result<(), SerialError> {
-    let bridge_devices = bridge_output::available_serial_devices()?
+#[ignore = "requires a Linux runner with no attached bridge device"]
+fn native_endpoint_discovery_handles_an_empty_bridge_scan() -> Result<(), BridgeTransportError> {
+    let bridge_devices = bridge_output::available_bridge_endpoints()?
         .into_iter()
-        .filter(SerialDeviceInfo::is_bridge_device)
+        .filter(BridgeEndpoint::is_bridge_device)
         .count();
-    assert_eq!(bridge_devices, 0, "runner exposed a bridge serial device");
+    assert_eq!(bridge_devices, 0, "runner exposed a bridge device");
     Ok(())
 }

@@ -105,7 +105,7 @@ pub(crate) struct ActiveControllerSource {
 
 pub(crate) struct OutputSession {
     pub(crate) output: Box<dyn GamepadOutput>,
-    pub(crate) serial_device: Option<SerialDeviceInfo>,
+    pub(crate) bridge_endpoint: Option<BridgeEndpoint>,
     pub(crate) capabilities: OutputCapabilities,
     pub(crate) first_observed_receipt: FirstObservedReceiptState,
 }
@@ -196,7 +196,7 @@ impl ActiveExit {
 }
 
 /// Enforces the public command contract: no acknowledgement can become
-/// observable until both the output (and therefore the serial port) and every
+/// observable until both the bridge output and every
 /// controller-discovery session have been dropped.
 pub(crate) fn acknowledge_after_hardware_release(
     output: OutputSession,
@@ -209,7 +209,7 @@ pub(crate) fn acknowledge_after_hardware_release(
     let _ = acknowledgement.send(result);
 }
 
-pub(crate) struct OpenedNonserialOutput {
+pub(crate) struct OpenedNonBridgeOutput {
     pub(crate) output: Box<dyn GamepadOutput>,
     pub(crate) virtual_hid: Option<crate::VirtualHidStatus>,
 }
@@ -224,17 +224,17 @@ pub(crate) enum OutputOpenError {
     Permanent(String),
 }
 
-pub(crate) fn make_nonserial_output(
+pub(crate) fn make_non_bridge_output(
     selection: &OutputSelection,
-) -> Result<OpenedNonserialOutput, OutputOpenError> {
+) -> Result<OpenedNonBridgeOutput, OutputOpenError> {
     match selection {
-        OutputSelection::Serial => Err(OutputOpenError::Permanent(
-            "serial output requires bridge-device discovery".to_owned(),
+        OutputSelection::BridgeDevice => Err(OutputOpenError::Permanent(
+            "bridge-device output requires endpoint discovery".to_owned(),
         )),
         OutputSelection::VirtualHid(config) => VirtualGamepad::open_macos_helper(config)
             .map(|output| {
                 let virtual_hid = output.macos_helper_metadata();
-                OpenedNonserialOutput {
+                OpenedNonBridgeOutput {
                     output: Box::new(output),
                     virtual_hid,
                 }
@@ -249,17 +249,17 @@ pub(crate) fn make_nonserial_output(
                     }
                 }
             }),
-        OutputSelection::Dump(format) => Ok(OpenedNonserialOutput {
+        OutputSelection::Dump(format) => Ok(OpenedNonBridgeOutput {
             output: Box::new(DumpOutput::new(io::stdout(), *format)),
             virtual_hid: None,
         }),
         OutputSelection::File(path) => FileOutput::create(path)
-            .map(|output| OpenedNonserialOutput {
+            .map(|output| OpenedNonBridgeOutput {
                 output: Box::new(output),
                 virtual_hid: None,
             })
             .map_err(|error| OutputOpenError::Permanent(error.to_string())),
-        OutputSelection::Mock => Ok(OpenedNonserialOutput {
+        OutputSelection::Mock => Ok(OpenedNonBridgeOutput {
             output: Box::new(MockOutput::default()),
             virtual_hid: None,
         }),
@@ -267,33 +267,33 @@ pub(crate) fn make_nonserial_output(
 }
 
 pub(crate) fn output_candidates(
-    devices: Vec<SerialDeviceInfo>,
-    selection: &SerialSelection,
-) -> Vec<SerialDeviceInfo> {
+    devices: Vec<BridgeEndpoint>,
+    selection: &BridgeEndpointSelection,
+) -> Vec<BridgeEndpoint> {
     match selection {
-        SerialSelection::AutoBridgeDevice => devices
+        BridgeEndpointSelection::AutoBridgeDevice => devices
             .into_iter()
-            .filter(SerialDeviceInfo::is_bridge_device)
+            .filter(BridgeEndpoint::is_bridge_device)
             .collect(),
-        SerialSelection::Port(path) => devices
+        BridgeEndpointSelection::SerialPort(path) => devices
             .into_iter()
-            .filter(|device| device.path == *path)
+            .filter(|endpoint| endpoint.serial_path() == Some(path))
             .collect(),
     }
 }
 
 pub(crate) fn choose_output_index<T>(
-    valid: &[(SerialDeviceInfo, T)],
-    preferred_serial: Option<&str>,
+    valid: &[(BridgeEndpoint, T)],
+    preferred_stable_id: Option<&str>,
 ) -> Result<usize, String> {
     if valid.len() == 1 {
         return Ok(0);
     }
-    if let Some(preferred) = preferred_serial {
+    if let Some(preferred) = preferred_stable_id {
         let preferred_matches: Vec<_> = valid
             .iter()
             .enumerate()
-            .filter(|(_, (info, _))| info.serial_number.as_deref() == Some(preferred))
+            .filter(|(_, (endpoint, _))| endpoint.stable_id() == Some(preferred))
             .map(|(index, _)| index)
             .collect();
         if preferred_matches.len() == 1 {
@@ -303,19 +303,27 @@ pub(crate) fn choose_output_index<T>(
     Err(output_ambiguity_message(valid))
 }
 
-pub(crate) fn output_ambiguity_message<T>(valid: &[(SerialDeviceInfo, T)]) -> String {
-    let ports = valid
+pub(crate) fn output_ambiguity_message<T>(valid: &[(BridgeEndpoint, T)]) -> String {
+    let devices = valid
         .iter()
-        .map(|(info, _)| {
+        .map(|(endpoint, _)| {
             format!(
-                "{} (serial {})",
-                info.path,
-                masked_serial(info.serial_number.as_deref())
+                "{} (device {})",
+                endpoint.display_label(),
+                masked_serial(endpoint.stable_id())
             )
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!("multiple valid bridge devices found: {ports}; restart with --port PATH")
+    let remedy = if valid
+        .iter()
+        .all(|(endpoint, _)| endpoint.serial_path().is_some())
+    {
+        "restart with --port PATH"
+    } else {
+        "disconnect all but one bridge device and retry"
+    };
+    format!("multiple valid bridge devices found: {devices}; {remedy}")
 }
 
 pub(crate) fn controller_source_description(

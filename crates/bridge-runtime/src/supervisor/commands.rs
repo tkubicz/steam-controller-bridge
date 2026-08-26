@@ -414,10 +414,10 @@ impl Supervisor {
 
     /// Copies the output's current firmware report into `OutputStatus`, logging
     /// each transition once. Skips backends without a live device connection,
-    /// so a torn-down serial session keeps the last known value until the
+    /// so a torn-down bridge session keeps the last known value until the
     /// existing output-lost reset clears it.
     pub(crate) fn refresh_output_firmware(&self, output: &mut OutputSession) {
-        if !output.capabilities.firmware || output.serial_device.is_none() {
+        if !output.capabilities.firmware || output.bridge_endpoint.is_none() {
             return;
         }
         let Some(mut reported) = output.output.firmware_info() else {

@@ -6,8 +6,8 @@ use super::*;
 
 impl Supervisor {
     pub(super) fn discover_output(&mut self) -> OutputDiscovery {
-        if self.config.output != OutputSelection::Serial {
-            return match make_nonserial_output(&self.config.output) {
+        if self.config.output != OutputSelection::BridgeDevice {
+            return match make_non_bridge_output(&self.config.output) {
                 Ok(opened) => {
                     self.update_status(|status| {
                         status.output = OutputStatus {
@@ -18,7 +18,7 @@ impl Supervisor {
                     });
                     OutputDiscovery::Ready(OutputSession {
                         output: opened.output,
-                        serial_device: None,
+                        bridge_endpoint: None,
                         capabilities: OutputCapabilities::for_selection(&self.config.output),
                         first_observed_receipt: FirstObservedReceiptState::Idle,
                     })
@@ -30,22 +30,22 @@ impl Supervisor {
             };
         }
 
-        let devices = match available_serial_devices() {
-            Ok(devices) => devices,
+        let endpoints = match available_bridge_endpoints() {
+            Ok(endpoints) => endpoints,
             Err(error) => {
                 return OutputDiscovery::Wait {
-                    detail: "Cannot enumerate serial ports".to_owned(),
+                    detail: "Cannot enumerate bridge-device endpoints".to_owned(),
                     error: Some(error.to_string()),
                 };
             }
         };
-        let candidates = output_candidates(devices, &self.config.serial);
+        let candidates = output_candidates(endpoints, &self.config.bridge_endpoint);
         if candidates.is_empty() {
-            let detail = match &self.config.serial {
-                SerialSelection::AutoBridgeDevice => {
+            let detail = match &self.config.bridge_endpoint {
+                BridgeEndpointSelection::AutoBridgeDevice => {
                     "Waiting for a Steam Controller Bridge protocol device".to_owned()
                 }
-                SerialSelection::Port(path) => {
+                BridgeEndpointSelection::SerialPort(path) => {
                     format!("Waiting for bridge-device serial port {path}")
                 }
             };
@@ -58,13 +58,12 @@ impl Supervisor {
         let mut valid = Vec::new();
         let mut failures = Vec::new();
         for candidate in candidates {
-            match SerialOutput::open(
-                &candidate.path,
-                self.config.baud_rate,
-                self.config.serial_config,
-            ) {
+            let candidate = candidate.with_serial_baud_rate(self.config.serial_baud_rate);
+            match BridgeOutput::open(candidate.clone(), self.config.bridge_transport_config) {
                 Ok(output) => valid.push((candidate, output)),
-                Err(error) => failures.push(format!("{}: {error}", candidate.path)),
+                Err(error) => {
+                    failures.push(format!("{}: {error}", candidate.display_label()));
+                }
             }
         }
         if valid.is_empty() {
@@ -77,20 +76,20 @@ impl Supervisor {
         }
 
         let selected_index =
-            match choose_output_index(&valid, self.preferred_output_serial.as_deref()) {
+            match choose_output_index(&valid, self.preferred_output_stable_id.as_deref()) {
                 Ok(index) => index,
                 Err(message) => return OutputDiscovery::Error(message),
             };
-        let (info, output) = valid.swap_remove(selected_index);
-        self.preferred_output_serial.clone_from(&info.serial_number);
+        let (endpoint, output) = valid.swap_remove(selected_index);
+        self.preferred_output_stable_id = endpoint.stable_id().map(str::to_owned);
         // DeviceInfo can land in the same read burst as the HelloResponse
         // during the blocking handshake, so read it rather than assume
         // Pending.
         let firmware = output.firmware_info().unwrap_or_default();
         self.update_status(|status| {
             status.output = OutputStatus {
-                endpoint: Some(info.path.clone()),
-                stable_id: info.serial_number.clone(),
+                endpoint: Some(endpoint.display_label().to_owned()),
+                stable_id: endpoint.stable_id().map(str::to_owned),
                 ready: true,
                 firmware: Some(firmware),
                 ..OutputStatus::configured(&self.config.output)
@@ -98,12 +97,12 @@ impl Supervisor {
         });
         eprintln!(
             "level=info event=output_device_ready endpoint={:?} stable_id={} protocol=1",
-            info.path,
-            masked_serial(info.serial_number.as_deref())
+            endpoint.display_label(),
+            masked_serial(endpoint.stable_id())
         );
         OutputDiscovery::Ready(OutputSession {
             output: Box::new(output),
-            serial_device: Some(info),
+            bridge_endpoint: Some(endpoint),
             capabilities: OutputCapabilities::for_selection(&self.config.output),
             first_observed_receipt: FirstObservedReceiptState::Idle,
         })

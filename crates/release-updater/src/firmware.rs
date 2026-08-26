@@ -6,9 +6,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bridge_output::{
-    available_serial_devices, new_firmware_install_receipt, random_firmware_request_id,
-    FirmwareCapabilities, FirmwareInfo, FirmwareInstallReceipt, FirmwareInstallSource,
-    FirmwareInstallState, FirmwareVersion, SerialConfig, SerialDeviceInfo, SerialOutput,
+    available_serial_endpoints, new_firmware_install_receipt, random_firmware_request_id,
+    BridgeEndpoint, BridgeOutput, BridgeTransportConfig, FirmwareCapabilities, FirmwareInfo,
+    FirmwareInstallReceipt, FirmwareInstallSource, FirmwareInstallState, FirmwareVersion,
 };
 
 use crate::{
@@ -28,9 +28,8 @@ const UF2_FLAG_FAMILY_ID: u32 = 0x0000_2000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirmwareDevice {
-    pub path: String,
+    pub endpoint: BridgeEndpoint,
     pub kind: FirmwareDeviceKind,
-    pub serial_number: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,22 +124,17 @@ pub enum FirmwareFlashError {
 pub fn discover_firmware_devices(
     target: &FirmwareTargetDescriptor,
 ) -> Result<Vec<FirmwareDevice>, FirmwareFlashError> {
-    let devices = available_serial_devices()
+    let devices = available_serial_endpoints()
         .map_err(|error| FirmwareFlashError::Discovery(error.to_string()))?
         .into_iter()
-        .filter_map(|device| {
-            if device.is_bridge_device() {
+        .filter_map(|endpoint| {
+            if endpoint.is_bridge_device() {
                 Some(FirmwareDevice {
-                    path: device.path,
+                    endpoint,
                     kind: FirmwareDeviceKind::BridgeApplication,
-                    serial_number: device.serial_number,
                 })
             } else {
-                target_device_kind(&device, target).map(|kind| FirmwareDevice {
-                    path: device.path,
-                    kind,
-                    serial_number: device.serial_number,
-                })
+                target_device_kind(&endpoint, target).map(|kind| FirmwareDevice { endpoint, kind })
             }
         })
         .collect();
@@ -148,15 +142,13 @@ pub fn discover_firmware_devices(
 }
 
 fn target_device_kind(
-    device: &SerialDeviceInfo,
+    endpoint: &BridgeEndpoint,
     target: &FirmwareTargetDescriptor,
 ) -> Option<FirmwareDeviceKind> {
-    if !device.is_callout_port() {
-        return None;
-    }
+    let endpoint = endpoint.usb_identity()?;
     let identity = crate::UsbIdentity {
-        vendor_id: device.vendor_id?,
-        product_id: device.product_id?,
+        vendor_id: endpoint.vendor_id,
+        product_id: endpoint.product_id,
     };
 
     target_usb_device_kind(identity, target)
@@ -260,8 +252,12 @@ pub fn flash_firmware(
 trait FlashAdapter {
     fn devices(&mut self) -> Result<Vec<FirmwareDevice>, FirmwareFlashError>;
     fn volumes(&mut self) -> Result<Vec<BootloaderVolume>, FirmwareFlashError>;
-    fn firmware_info(&mut self, path: &str) -> Result<FirmwareInfo, FirmwareFlashError>;
-    fn enter_uf2_bootloader(&mut self, path: &str) -> Result<(), FirmwareFlashError>;
+    fn firmware_info(
+        &mut self,
+        endpoint: &BridgeEndpoint,
+    ) -> Result<FirmwareInfo, FirmwareFlashError>;
+    fn enter_uf2_bootloader(&mut self, endpoint: &BridgeEndpoint)
+        -> Result<(), FirmwareFlashError>;
     fn release_device(&mut self) {}
     fn new_receipt(
         &mut self,
@@ -269,7 +265,7 @@ trait FlashAdapter {
     ) -> Result<FirmwareInstallReceipt, FirmwareFlashError>;
     fn record_install_receipt(
         &mut self,
-        path: &str,
+        endpoint: &BridgeEndpoint,
         receipt: FirmwareInstallReceipt,
     ) -> Result<FirmwareInstallReceipt, FirmwareFlashError>;
     fn copy_and_flush(&mut self, source: &Path, destination: &Path) -> Result<(), io::Error>;
@@ -279,26 +275,28 @@ trait FlashAdapter {
 
 struct NativeFlashAdapter {
     started: Instant,
-    firmware_session: Option<(String, SerialOutput)>,
+    firmware_session: Option<BridgeOutput>,
     target: &'static FirmwareTargetDescriptor,
     volume_locator: Box<dyn RemovableVolumeLocator>,
 }
 
 impl NativeFlashAdapter {
-    fn take_firmware_session(&mut self, path: &str) -> Result<SerialOutput, FirmwareFlashError> {
+    fn take_firmware_session(
+        &mut self,
+        endpoint: &BridgeEndpoint,
+    ) -> Result<BridgeOutput, FirmwareFlashError> {
         if self
             .firmware_session
             .as_ref()
-            .is_some_and(|(session_path, _)| session_path == path)
+            .is_some_and(|session| session.endpoint() == endpoint)
         {
             return Ok(self
                 .firmware_session
                 .take()
-                .expect("matching firmware session was present")
-                .1);
+                .expect("matching firmware session was present"));
         }
         self.firmware_session = None;
-        let mut output = open_firmware(path)?;
+        let mut output = open_firmware(endpoint)?;
         output
             .wait_for_firmware_info(AUTOMATIC_BOOTLOADER_RESPONSE_TIMEOUT)
             .map_err(|error| FirmwareFlashError::Discovery(error.to_string()))?;
@@ -315,18 +313,24 @@ impl FlashAdapter for NativeFlashAdapter {
         discover_bootloader_volumes_with(self.volume_locator.as_ref())
     }
 
-    fn firmware_info(&mut self, path: &str) -> Result<FirmwareInfo, FirmwareFlashError> {
+    fn firmware_info(
+        &mut self,
+        endpoint: &BridgeEndpoint,
+    ) -> Result<FirmwareInfo, FirmwareFlashError> {
         self.firmware_session = None;
-        let mut output = open_firmware(path)?;
+        let mut output = open_firmware(endpoint)?;
         let info = output
             .wait_for_firmware_info(Duration::from_secs(3))
             .map_err(|error| FirmwareFlashError::Discovery(error.to_string()))?;
-        self.firmware_session = Some((path.to_owned(), output));
+        self.firmware_session = Some(output);
         Ok(info)
     }
 
-    fn enter_uf2_bootloader(&mut self, path: &str) -> Result<(), FirmwareFlashError> {
-        let mut output = self.take_firmware_session(path)?;
+    fn enter_uf2_bootloader(
+        &mut self,
+        endpoint: &BridgeEndpoint,
+    ) -> Result<(), FirmwareFlashError> {
+        let mut output = self.take_firmware_session(endpoint)?;
         output
             .enter_uf2_bootloader(random_request_id()?, AUTOMATIC_BOOTLOADER_RESPONSE_TIMEOUT)
             .map_err(|error| FirmwareFlashError::Discovery(error.to_string()))
@@ -345,11 +349,11 @@ impl FlashAdapter for NativeFlashAdapter {
 
     fn record_install_receipt(
         &mut self,
-        path: &str,
+        endpoint: &BridgeEndpoint,
         receipt: FirmwareInstallReceipt,
     ) -> Result<FirmwareInstallReceipt, FirmwareFlashError> {
         let mut output = self
-            .take_firmware_session(path)
+            .take_firmware_session(endpoint)
             .map_err(|error| FirmwareFlashError::ReceiptRecording(error.to_string()))?;
         output
             .record_install_receipt_and_wait(
@@ -399,7 +403,7 @@ fn flash_with_adapter(
         adapter,
         target,
         release,
-        prepared.expected_serial.as_deref(),
+        prepared.expected_stable_id.as_deref(),
         prepared.pre_flash_state,
         copy_result,
         &mut progress,
@@ -444,7 +448,7 @@ impl PreFlashState {
 
 struct PreparedFlash {
     volume: BootloaderVolume,
-    expected_serial: Option<String>,
+    expected_stable_id: Option<String>,
     pre_flash_state: PreFlashState,
 }
 
@@ -457,7 +461,7 @@ fn prepare_flash_target(
 ) -> Result<PreparedFlash, FirmwareFlashError> {
     let mounted = select_supported_volume(adapter.volumes()?, target)?;
     let devices = adapter.devices()?;
-    let mut expected_serial = None;
+    let mut expected_stable_id = None;
     let mut automatic_entry_may_have_started = false;
     let mut pre_flash_state = PreFlashState::Unknown;
     let volume = if let Some(volume) = mounted {
@@ -471,9 +475,9 @@ fn prepare_flash_target(
                 target.display_name
             )));
         }
-        expected_serial = devices
+        expected_stable_id = devices
             .first()
-            .and_then(|device| device.serial_number.clone());
+            .and_then(|device| device.endpoint.stable_id().map(str::to_owned));
         volume
     } else {
         if devices.len() != 1 {
@@ -486,7 +490,7 @@ fn prepare_flash_target(
         }
         let device = &devices[0];
         let info = if device.kind == FirmwareDeviceKind::BridgeApplication {
-            let info = adapter.firmware_info(&device.path)?;
+            let info = adapter.firmware_info(&device.endpoint)?;
             // Even an unidentified or different target is valuable evidence
             // after manual recovery: a newly matching target or changed
             // revision proves that the image started despite an expected UF2
@@ -494,7 +498,7 @@ fn prepare_flash_target(
             pre_flash_state = PreFlashState::Bridge(info);
             if firmware_matches_target(info, target) {
                 validate_version_policy(info.version, release.revision)?;
-                expected_serial.clone_from(&device.serial_number);
+                expected_stable_id = device.endpoint.stable_id().map(str::to_owned);
                 Some(info)
             } else {
                 adapter.release_device();
@@ -504,7 +508,7 @@ fn prepare_flash_target(
             if device.kind == FirmwareDeviceKind::FactoryApplication {
                 pre_flash_state = PreFlashState::FactoryApplication;
             }
-            expected_serial.clone_from(&device.serial_number);
+            expected_stable_id = device.endpoint.stable_id().map(str::to_owned);
             None
         };
 
@@ -520,7 +524,7 @@ fn prepare_flash_target(
             // Once the request is sent, a lost acknowledgement cannot tell us
             // whether the board stayed in application mode or entered UF2.
             automatic_entry_may_have_started = true;
-            match adapter.enter_uf2_bootloader(&device.path) {
+            match adapter.enter_uf2_bootloader(&device.endpoint) {
                 Ok(()) => {
                     progress(FirmwareFlashProgress::WaitingForBootloader);
                     match wait_for_volume(
@@ -556,7 +560,7 @@ fn prepare_flash_target(
     };
     Ok(PreparedFlash {
         volume,
-        expected_serial,
+        expected_stable_id,
         pre_flash_state,
     })
 }
@@ -565,7 +569,7 @@ fn verify_reconnected_firmware(
     adapter: &mut impl FlashAdapter,
     target: &FirmwareTargetDescriptor,
     release: &FirmwareRelease,
-    expected_serial: Option<&str>,
+    expected_stable_id: Option<&str>,
     pre_flash_state: PreFlashState,
     copy_result: Result<(), io::Error>,
     progress: &mut impl FnMut(FirmwareFlashProgress),
@@ -589,15 +593,15 @@ fn verify_reconnected_firmware(
             .into_iter()
             .filter(|device| {
                 device.kind == FirmwareDeviceKind::BridgeApplication
-                    && expected_serial
-                        .is_none_or(|serial| device.serial_number.as_deref() == Some(serial))
+                    && expected_stable_id
+                        .is_none_or(|serial| device.endpoint.stable_id() == Some(serial))
             })
             .collect();
         if matching.len() != 1 {
             continue;
         }
-        let path = &matching[0].path;
-        match adapter.firmware_info(path) {
+        let endpoint = &matching[0].endpoint;
+        match adapter.firmware_info(endpoint) {
             Ok(info)
                 if firmware_matches_target(info, target)
                     && info.version == FirmwareVersion::Reported(release.revision) =>
@@ -630,13 +634,13 @@ fn verify_reconnected_firmware(
                     return Err(FirmwareFlashError::ReceiptMismatch);
                 }
                 progress(FirmwareFlashProgress::RecordingReceipt);
-                let acknowledged = adapter.record_install_receipt(path, requested)?;
+                let acknowledged = adapter.record_install_receipt(endpoint, requested)?;
                 if acknowledged != requested {
                     return Err(FirmwareFlashError::ReceiptMismatch);
                 }
                 progress(FirmwareFlashProgress::VerifyingReceipt);
                 let verified = adapter
-                    .firmware_info(path)
+                    .firmware_info(endpoint)
                     .map_err(|error| FirmwareFlashError::ReceiptRecording(error.to_string()))?;
                 if !firmware_matches_target(verified, target)
                     || verified.version != FirmwareVersion::Reported(release.revision)
@@ -674,8 +678,8 @@ fn validate_version_policy(
     }
 }
 
-fn open_firmware(path: &str) -> Result<SerialOutput, FirmwareFlashError> {
-    SerialOutput::open(path, 115_200, SerialConfig::default())
+fn open_firmware(endpoint: &BridgeEndpoint) -> Result<BridgeOutput, FirmwareFlashError> {
+    BridgeOutput::open(endpoint.clone(), BridgeTransportConfig::default())
         .map_err(|error| FirmwareFlashError::Discovery(error.to_string()))
 }
 
@@ -766,7 +770,9 @@ fn copy_and_flush(source: &Path, destination: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bridge_output::{FirmwareTarget, FirmwareTargetId};
+    use bridge_output::{
+        FirmwareTarget, FirmwareTargetId, SerialDeviceInfo, DEFAULT_BRIDGE_BAUD_RATE,
+    };
     use std::collections::VecDeque;
 
     fn uf2_block(family: u32) -> [u8; UF2_BLOCK_SIZE] {
@@ -794,22 +800,50 @@ mod tests {
 
     fn device(bridge_firmware: bool) -> FirmwareDevice {
         FirmwareDevice {
-            path: "/dev/cu.fixture".to_owned(),
+            endpoint: fixture_endpoint(),
             kind: if bridge_firmware {
                 FirmwareDeviceKind::BridgeApplication
             } else {
                 FirmwareDeviceKind::FactoryApplication
             },
-            serial_number: Some("fixture-serial".to_owned()),
         }
     }
 
     fn bootloader_device() -> FirmwareDevice {
         FirmwareDevice {
-            path: "/dev/cu.fixture".to_owned(),
+            endpoint: fixture_endpoint(),
             kind: FirmwareDeviceKind::Uf2Bootloader,
-            serial_number: Some("fixture-serial".to_owned()),
         }
+    }
+
+    fn fixture_endpoint() -> BridgeEndpoint {
+        BridgeEndpoint::from_serial_device(
+            SerialDeviceInfo {
+                path: fixture_serial_path().to_owned(),
+                vendor_id: Some(0x2886),
+                product_id: Some(0x8044),
+                serial_number: Some("fixture-serial".to_owned()),
+                manufacturer: Some("Seeed".to_owned()),
+                product: None,
+            },
+            DEFAULT_BRIDGE_BAUD_RATE,
+        )
+        .expect("fixture uses a valid callout endpoint")
+    }
+
+    #[cfg(target_os = "macos")]
+    fn fixture_serial_path() -> &'static str {
+        "/dev/cu.fixture"
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fixture_serial_path() -> &'static str {
+        "/dev/ttyACM42"
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn fixture_serial_path() -> &'static str {
+        "fixture-serial-port"
     }
 
     fn volume() -> BootloaderVolume {
@@ -854,7 +888,10 @@ mod tests {
                 .unwrap_or_else(|| self.default_volumes.clone()))
         }
 
-        fn firmware_info(&mut self, _path: &str) -> Result<FirmwareInfo, FirmwareFlashError> {
+        fn firmware_info(
+            &mut self,
+            _endpoint: &BridgeEndpoint,
+        ) -> Result<FirmwareInfo, FirmwareFlashError> {
             if let Some(info) = self.infos.pop_front() {
                 return Ok(info);
             }
@@ -868,7 +905,10 @@ mod tests {
             })
         }
 
-        fn enter_uf2_bootloader(&mut self, _path: &str) -> Result<(), FirmwareFlashError> {
+        fn enter_uf2_bootloader(
+            &mut self,
+            _endpoint: &BridgeEndpoint,
+        ) -> Result<(), FirmwareFlashError> {
             self.automatic_entry_requests += 1;
             if self.automatic_entry_error {
                 Err(FirmwareFlashError::Discovery(
@@ -892,7 +932,7 @@ mod tests {
 
         fn record_install_receipt(
             &mut self,
-            _path: &str,
+            _endpoint: &BridgeEndpoint,
             receipt: FirmwareInstallReceipt,
         ) -> Result<FirmwareInstallReceipt, FirmwareFlashError> {
             if self.receipt_recording_error {
@@ -1594,7 +1634,10 @@ mod tests {
             product: None,
         };
 
-        assert_eq!(target_device_kind(&device, test_target()), None);
+        assert_eq!(
+            BridgeEndpoint::from_serial_device(device, DEFAULT_BRIDGE_BAUD_RATE),
+            None
+        );
     }
 
     #[test]

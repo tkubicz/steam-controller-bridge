@@ -79,9 +79,9 @@ impl Supervisor {
             worker.device_info().product,
             masked_serial(worker.device_info().serial_number.as_deref()),
             output
-                .serial_device
+                .bridge_endpoint
                 .as_ref()
-                .map(|info| info.path.as_str()),
+                .map(BridgeEndpoint::display_label),
             output.capabilities.live,
             self.config.lizard_mode
         );
@@ -405,7 +405,7 @@ impl Supervisor {
                         controller_connected.then_some(controller_age);
                     status.automatic_shutdown = automatic;
                 });
-                // Internal serial reconnects restart firmware reporting at
+                // Internal bridge reconnects restart firmware reporting at
                 // Pending without the supervisor noticing; this re-resolves
                 // the report on the same cadence.
                 self.refresh_output_firmware(&mut output);

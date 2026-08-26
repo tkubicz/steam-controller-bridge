@@ -523,8 +523,8 @@ fn pending_manual_firmware_gets_one_first_observed_receipt() {
             recorded: Arc::clone(&recorded),
             pending_response: None,
         }),
-        serial_device: Some(serial_info("serial:test", "TESTSERIAL")),
-        capabilities: OutputCapabilities::for_selection(&OutputSelection::Serial),
+        bridge_endpoint: Some(bridge_endpoint("serial:test", "TESTSERIAL")),
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::BridgeDevice),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
 
@@ -604,8 +604,8 @@ fn a_lost_receipt_ack_retries_the_same_receipt_after_backoff() {
         output: Box::new(DroppedReceiptAckOutput {
             attempts: Arc::clone(&attempts),
         }),
-        serial_device: Some(serial_info("serial:test", "TESTSERIAL")),
-        capabilities: OutputCapabilities::for_selection(&OutputSelection::Serial),
+        bridge_endpoint: Some(bridge_endpoint("serial:test", "TESTSERIAL")),
+        capabilities: OutputCapabilities::for_selection(&OutputSelection::BridgeDevice),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
 
@@ -636,7 +636,7 @@ fn hardware_release_finishes_before_command_acknowledgement() {
     let order = Arc::new(Mutex::new(Vec::new()));
     let output = OutputSession {
         output: Box::new(DropOrderOutput(Arc::clone(&order))),
-        serial_device: None,
+        bridge_endpoint: None,
         capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
@@ -663,7 +663,7 @@ fn ordinary_stop_disconnects_virtual_hid_before_acknowledgement() {
     let order = Arc::new(Mutex::new(Vec::new()));
     let output = OutputSession {
         output: Box::new(DropOrderOutput(Arc::clone(&order))),
-        serial_device: None,
+        bridge_endpoint: None,
         capabilities: OutputCapabilities::for_selection(&OutputSelection::VirtualHid(
             VirtualHidConfig::new(std::path::PathBuf::from("helper")),
         )),
@@ -697,7 +697,7 @@ fn a_slow_desktop_operation_is_preceded_by_neutral_on_the_wire() {
     let states = Arc::new(Mutex::new(Vec::new()));
     let mut session = OutputSession {
         output: Box::new(SharedOutput(Arc::clone(&states))),
-        serial_device: None,
+        bridge_endpoint: None,
         capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };
