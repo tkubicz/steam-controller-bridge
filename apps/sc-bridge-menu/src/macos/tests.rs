@@ -43,17 +43,17 @@ fn menu_context_preserves_the_selected_output_and_desktop_requirements() {
     let bridge = menu_capability_context(OutputPreference::BridgeDevice, true);
     assert_ne!(
         bridge.virtual_output_enabled,
-        bridge.serial_output_or_firmware_enabled,
+        bridge.bridge_device_or_firmware_enabled,
     );
     assert!(bridge.controller_input_enabled);
-    assert!(bridge.serial_output_or_firmware_enabled);
+    assert!(bridge.bridge_device_or_firmware_enabled);
     assert!(!bridge.virtual_output_enabled);
     assert!(bridge.desktop_bindings_enabled);
     assert_eq!(bridge.desktop_session, Some(DesktopSession::MacOs));
 
     let virtual_hid = menu_capability_context(OutputPreference::VirtualHid, true);
     assert_eq!(
-        virtual_hid.serial_output_or_firmware_enabled,
+        virtual_hid.bridge_device_or_firmware_enabled,
         cfg!(feature = "updater"),
     );
     assert!(virtual_hid.virtual_output_enabled);
@@ -346,7 +346,9 @@ fn diagnostics_never_expose_a_whole_device_serial() {
                 version: bridge_runtime::FirmwareVersion::Reported(1),
                 ..bridge_runtime::FirmwareInfo::default()
             }),
-            ..bridge_runtime::OutputStatus::configured(&bridge_runtime::OutputSelection::Serial)
+            ..bridge_runtime::OutputStatus::configured(
+                &bridge_runtime::OutputSelection::BridgeDevice,
+            )
         },
         ..BridgeStatus::default()
     });

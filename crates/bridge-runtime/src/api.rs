@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bridge_core::{BridgeConfig, BridgeMetrics};
-use bridge_output::{DumpFormat, FirmwareInfo, OutputDiagnostics, SerialConfig};
+use bridge_output::{BridgeTransportConfig, DumpFormat, FirmwareInfo, OutputDiagnostics};
 use controller_mapper::MapperConfig;
 use desktop_bindings::BindingProfile;
 use profile_picker::{PickerConfig, PickerRoster};
@@ -18,9 +18,9 @@ pub enum ControllerSelection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SerialSelection {
+pub enum BridgeEndpointSelection {
     AutoBridgeDevice,
-    Port(String),
+    SerialPort(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +63,7 @@ impl ControllerChargeState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputSelection {
-    Serial,
+    BridgeDevice,
     VirtualHid(VirtualHidConfig),
     Dump(DumpFormat),
     File(PathBuf),
@@ -73,7 +73,7 @@ pub enum OutputSelection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputBackend {
     #[default]
-    SerialBridge,
+    BridgeDevice,
     VirtualHid,
     Dump,
     File,
@@ -83,7 +83,7 @@ pub enum OutputBackend {
 impl From<&OutputSelection> for OutputBackend {
     fn from(selection: &OutputSelection) -> Self {
         match selection {
-            OutputSelection::Serial => Self::SerialBridge,
+            OutputSelection::BridgeDevice => Self::BridgeDevice,
             OutputSelection::VirtualHid(_) => Self::VirtualHid,
             OutputSelection::Dump(_) => Self::Dump,
             OutputSelection::File(_) => Self::File,
@@ -95,13 +95,13 @@ impl From<&OutputSelection> for OutputBackend {
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub controller: ControllerSelection,
-    pub serial: SerialSelection,
+    pub bridge_endpoint: BridgeEndpointSelection,
     pub output: OutputSelection,
     pub lizard_mode: LizardMode,
     pub bridge: BridgeConfig,
     pub mapper: MapperConfig,
-    pub serial_config: SerialConfig,
-    pub baud_rate: u32,
+    pub bridge_transport_config: BridgeTransportConfig,
+    pub serial_baud_rate: u32,
     pub recording_path: Option<PathBuf>,
     pub idle_shutdown_timeout: Option<Duration>,
     pub puck_dock_action: PuckDockAction,
@@ -120,13 +120,13 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             controller: ControllerSelection::AutoActive,
-            serial: SerialSelection::AutoBridgeDevice,
-            output: OutputSelection::Serial,
+            bridge_endpoint: BridgeEndpointSelection::AutoBridgeDevice,
+            output: OutputSelection::BridgeDevice,
             lizard_mode: LizardMode::Suppress,
             bridge: BridgeConfig::default(),
             mapper: MapperConfig::default(),
-            serial_config: SerialConfig::default(),
-            baud_rate: 115_200,
+            bridge_transport_config: BridgeTransportConfig::default(),
+            serial_baud_rate: 115_200,
             recording_path: None,
             idle_shutdown_timeout: Some(DEFAULT_IDLE_SHUTDOWN_TIMEOUT),
             puck_dock_action: PuckDockAction::LeaveOn,
@@ -176,7 +176,7 @@ impl OutputCapabilities {
     #[must_use]
     pub const fn for_selection(selection: &OutputSelection) -> Self {
         match selection {
-            OutputSelection::Serial => Self {
+            OutputSelection::BridgeDevice => Self {
                 live: true,
                 firmware: true,
             },
@@ -217,7 +217,7 @@ impl OutputStatus {
             OutputSelection::Dump(_) => Some("stdout".to_owned()),
             OutputSelection::File(path) => Some(path.display().to_string()),
             OutputSelection::VirtualHid(_) => Some("macOS virtual gamepad".to_owned()),
-            OutputSelection::Serial | OutputSelection::Mock => None,
+            OutputSelection::BridgeDevice | OutputSelection::Mock => None,
         };
         Self {
             backend: OutputBackend::from(selection),

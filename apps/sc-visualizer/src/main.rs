@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
-use bridge_output::{GamepadOutput, SerialOutput};
+use bridge_output::{BridgeOutput, GamepadOutput};
 use controller_mapper::{ControllerMapper, MapperConfig};
 use eframe::egui::{self, RichText};
 use gamepad_state::GamepadState;
@@ -137,10 +137,10 @@ struct Visualizer {
     packets_sent: u64,
     /// The full serial metric set, kept whole so nothing is silently dropped
     /// and so it can be cleared when the backend is no longer Serial.
-    serial_metrics: Option<bridge_output::SerialMetrics>,
+    serial_metrics: Option<bridge_output::BridgeTransportMetrics>,
     last_output: Option<GamepadState>,
     output: OutputChoice,
-    serial: Option<SerialOutput>,
+    serial: Option<BridgeOutput>,
     serial_config: SerialUiConfig,
     recording: Option<RecordingSession>,
     /// Preserved while an overloaded or failed recording drains accepted

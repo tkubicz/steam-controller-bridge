@@ -7,11 +7,12 @@ use std::time::{Duration, Instant};
 
 use bridge_core::BridgeConfig;
 use bridge_output::{
-    DumpFormat, DumpOutput, FileOutput, GamepadOutput, MockOutput, SerialConfig, SerialOutput,
+    BridgeOutput, BridgeTransportConfig, DumpFormat, DumpOutput, FileOutput, GamepadOutput,
+    MockOutput,
 };
 use bridge_runtime::{
-    BridgeRuntime, ControllerSelection, LizardMode, OutputSelection, PuckDockAction, RuntimeConfig,
-    RuntimeState, SerialSelection, StatusLogTracker,
+    BridgeEndpointSelection, BridgeRuntime, ControllerSelection, LizardMode, OutputSelection,
+    PuckDockAction, RuntimeConfig, RuntimeState, StatusLogTracker,
 };
 use clap::Parser;
 use desktop_bindings::load_store;
@@ -75,9 +76,9 @@ fn live_config(cli: &Cli) -> Result<RuntimeConfig, String> {
     let controller = cli
         .index
         .map_or(ControllerSelection::AutoActive, ControllerSelection::Index);
-    let serial = match cli.port.as_deref() {
-        None | Some("auto") => SerialSelection::AutoBridgeDevice,
-        Some(path) => SerialSelection::Port(path.to_owned()),
+    let bridge_endpoint = match cli.port.as_deref() {
+        None | Some("auto") => BridgeEndpointSelection::AutoBridgeDevice,
+        Some(path) => BridgeEndpointSelection::SerialPort(path.to_owned()),
     };
     let output = live_output(cli)?;
     let lizard_mode = match cli.lizard_mode {
@@ -96,18 +97,18 @@ fn live_config(cli: &Cli) -> Result<RuntimeConfig, String> {
     };
     Ok(RuntimeConfig {
         controller,
-        serial,
+        bridge_endpoint,
         output,
         lizard_mode,
         bridge: BridgeConfig {
             input_timeout: Duration::from_millis(cli.input_timeout_ms),
             decode_failure_limit: cli.decode_failure_limit,
         },
-        serial_config: SerialConfig {
+        bridge_transport_config: BridgeTransportConfig {
             packet_logging: cli.serial_log,
-            ..SerialConfig::default()
+            ..BridgeTransportConfig::default()
         },
-        baud_rate: cli.baud,
+        serial_baud_rate: cli.baud,
         recording_path: cli.record.clone(),
         idle_shutdown_timeout,
         puck_dock_action,
@@ -118,7 +119,7 @@ fn live_config(cli: &Cli) -> Result<RuntimeConfig, String> {
 
 fn live_output(cli: &Cli) -> Result<OutputSelection, String> {
     Ok(match cli.output() {
-        OutputArg::Serial => OutputSelection::Serial,
+        OutputArg::Serial => OutputSelection::BridgeDevice,
         OutputArg::VirtualHid => OutputSelection::VirtualHid(cli.virtual_hid().config()?),
         OutputArg::Dump => OutputSelection::Dump(DumpFormat::Compact),
         OutputArg::Pretty => OutputSelection::Dump(DumpFormat::Pretty),
@@ -205,12 +206,12 @@ fn make_replay_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
                 .replay_port()
                 .ok_or("serial replay requires an explicit --port PATH")?;
             Box::new(
-                SerialOutput::open(
+                BridgeOutput::open_serial(
                     port,
                     cli.baud,
-                    SerialConfig {
+                    BridgeTransportConfig {
                         packet_logging: cli.serial_log,
-                        ..SerialConfig::default()
+                        ..BridgeTransportConfig::default()
                     },
                 )
                 .map_err(|error| error.to_string())?,
@@ -245,8 +246,11 @@ mod tests {
     fn zero_arguments_select_zero_configuration_live_bridge() {
         let config = live(&[]).unwrap();
         assert_eq!(config.controller, ControllerSelection::AutoActive);
-        assert_eq!(config.serial, SerialSelection::AutoBridgeDevice);
-        assert_eq!(config.output, OutputSelection::Serial);
+        assert_eq!(
+            config.bridge_endpoint,
+            BridgeEndpointSelection::AutoBridgeDevice
+        );
+        assert_eq!(config.output, OutputSelection::BridgeDevice);
         assert_eq!(config.idle_shutdown_timeout, Some(Duration::from_mins(15)));
         assert_eq!(config.puck_dock_action, PuckDockAction::LeaveOn);
     }
@@ -256,8 +260,8 @@ mod tests {
         let config = live(&["--index", "43", "--port", "/dev/cu.test"]).unwrap();
         assert_eq!(config.controller, ControllerSelection::Index(43));
         assert_eq!(
-            config.serial,
-            SerialSelection::Port("/dev/cu.test".to_owned())
+            config.bridge_endpoint,
+            BridgeEndpointSelection::SerialPort("/dev/cu.test".to_owned())
         );
     }
 
@@ -265,7 +269,10 @@ mod tests {
     fn explicit_auto_forms_match_defaults() {
         let config = live(&["--controller", "auto", "--port", "auto"]).unwrap();
         assert_eq!(config.controller, ControllerSelection::AutoActive);
-        assert_eq!(config.serial, SerialSelection::AutoBridgeDevice);
+        assert_eq!(
+            config.bridge_endpoint,
+            BridgeEndpointSelection::AutoBridgeDevice
+        );
     }
 
     #[test]

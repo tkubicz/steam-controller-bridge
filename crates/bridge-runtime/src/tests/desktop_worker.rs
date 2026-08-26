@@ -417,15 +417,15 @@ impl PowerOffWriter for FakePowerOffWriter {
     }
 }
 
-fn serial_info(path: &str, serial: &str) -> SerialDeviceInfo {
-    SerialDeviceInfo {
-        path: path.to_owned(),
-        vendor_id: Some(0x1209),
-        product_id: Some(0x0001),
-        serial_number: Some(serial.to_owned()),
+fn bridge_endpoint(path: &str, serial: &str) -> BridgeEndpoint {
+    BridgeEndpoint::serial_port(path, 115_200)
+        .with_stable_id(serial)
+        .with_usb_identity(bridge_output::BridgeUsbIdentity {
+        vendor_id: 0x1209,
+        product_id: 0x0001,
         manufacturer: Some("Independent implementer".to_owned()),
         product: Some(bridge_output::BRIDGE_DEVICE_USB_PRODUCT.to_owned()),
-    }
+    })
 }
 
 fn controller_info(product_id: u16, interface_number: i32, transport: &str) -> HidDeviceInfo {
@@ -474,8 +474,8 @@ fn a_unique_active_source_is_required() {
 fn runtime_defaults_to_zero_configuration_serial_bridge() {
     let config = RuntimeConfig::default();
     assert_eq!(config.controller, ControllerSelection::AutoActive);
-    assert_eq!(config.serial, SerialSelection::AutoBridgeDevice);
-    assert_eq!(config.output, OutputSelection::Serial);
+    assert_eq!(config.bridge_endpoint, BridgeEndpointSelection::AutoBridgeDevice);
+    assert_eq!(config.output, OutputSelection::BridgeDevice);
     assert_eq!(config.lizard_mode, LizardMode::Suppress);
     assert_eq!(config.idle_shutdown_timeout, Some(Duration::from_mins(15)));
     assert_eq!(config.puck_dock_action, PuckDockAction::LeaveOn);
@@ -483,10 +483,10 @@ fn runtime_defaults_to_zero_configuration_serial_bridge() {
 }
 
 #[test]
-fn output_capabilities_come_from_the_selection_not_from_a_serial_device() {
-    let serial = OutputCapabilities::for_selection(&OutputSelection::Serial);
+fn output_capabilities_come_from_the_selection_not_from_a_bridge_endpoint() {
+    let bridge_endpoint = OutputCapabilities::for_selection(&OutputSelection::BridgeDevice);
     assert_eq!(
-        serial,
+        bridge_endpoint,
         OutputCapabilities {
             live: true,
             firmware: true,
@@ -514,8 +514,8 @@ fn output_capabilities_come_from_the_selection_not_from_a_serial_device() {
     }
     // And the published status carries the same answer the supervisor uses.
     assert_eq!(
-        OutputStatus::configured(&OutputSelection::Serial).capabilities,
-        serial
+        OutputStatus::configured(&OutputSelection::BridgeDevice).capabilities,
+        bridge_endpoint
     );
 }
 
@@ -559,7 +559,7 @@ impl GamepadOutput for ConfigurationFailureOutput {
 fn waiting_output_service_preserves_permanent_failure_classification() {
     let mut output = OutputSession {
         output: Box::new(ConfigurationFailureOutput),
-        serial_device: None,
+        bridge_endpoint: None,
         capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
         first_observed_receipt: FirstObservedReceiptState::Idle,
     };

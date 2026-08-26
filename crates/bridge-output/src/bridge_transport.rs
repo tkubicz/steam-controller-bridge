@@ -8,7 +8,10 @@ use bridge_protocol::{
 };
 use gamepad_state::GamepadState;
 
-use crate::{GamepadOutput, OutputDiagnostics, OutputError, OutputFeedback};
+use crate::{
+    endpoint_discovery::open_error, BridgeEndpoint, BridgeEndpointLocator, GamepadOutput,
+    OutputDiagnostics, OutputError, OutputFeedback,
+};
 /// How long after Ready the firmware gets to deliver its `DeviceInfo` report
 /// before the connection is classified as pre-versioning firmware.
 const FIRMWARE_REPORT_GRACE: Duration = Duration::from_secs(2);
@@ -17,7 +20,7 @@ const DEVICE_INFO_EXTENSION_SIZE: usize = 8;
 const DEVICE_INFO_RECORDED_SIZE: usize = 33;
 const FIRMWARE_TARGET_TLV: u8 = 1;
 pub const MAX_FIRMWARE_TARGET_ID_LEN: usize = 64;
-const SERIAL_SERVICE_MIN_INTERVAL: Duration = Duration::from_millis(10);
+const TRANSPORT_SERVICE_MIN_INTERVAL: Duration = Duration::from_millis(10);
 const HANDSHAKE_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -117,8 +120,18 @@ pub trait ByteTransport {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize>;
 }
 
+impl<T: ByteTransport + ?Sized> ByteTransport for Box<T> {
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        (**self).write_all(bytes)
+    }
+
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        (**self).read(buffer)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SerialConfig {
+pub struct BridgeTransportConfig {
     pub queue_capacity: usize,
     pub handshake_timeout: Duration,
     pub ping_interval: Duration,
@@ -127,7 +140,7 @@ pub struct SerialConfig {
     pub packet_logging: bool,
 }
 
-impl Default for SerialConfig {
+impl Default for BridgeTransportConfig {
     fn default() -> Self {
         Self {
             queue_capacity: 8,
@@ -141,7 +154,7 @@ impl Default for SerialConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SerialStatus {
+pub enum BridgeConnectionStatus {
     Handshaking,
     Ready,
     Unhealthy,
@@ -332,15 +345,15 @@ fn validate_receipt_response(
     expected_receipt: FirmwareInstallReceipt,
     actual_request_id: u32,
     actual_receipt: FirmwareInstallReceipt,
-) -> Result<FirmwareInstallReceipt, SerialError> {
+) -> Result<FirmwareInstallReceipt, BridgeTransportError> {
     if actual_request_id != expected_request_id {
-        return Err(SerialError::RequestMismatch {
+        return Err(BridgeTransportError::RequestMismatch {
             expected: expected_request_id,
             actual: actual_request_id,
         });
     }
     if actual_receipt != expected_receipt {
-        return Err(SerialError::ReceiptMismatch);
+        return Err(BridgeTransportError::ReceiptMismatch);
     }
     Ok(actual_receipt)
 }
@@ -448,7 +461,7 @@ fn parse_firmware_target(mut extensions: &[u8]) -> FirmwareTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct SerialMetrics {
+pub struct BridgeTransportMetrics {
     pub packets_sent: u64,
     pub packets_received: u64,
     pub framing_failures: u64,
@@ -461,7 +474,7 @@ pub struct SerialMetrics {
 }
 
 #[derive(Debug)]
-pub enum SerialError {
+pub enum BridgeTransportError {
     Io(io::Error),
     Protocol(bridge_protocol::ProtocolError),
     InvalidState(gamepad_state::InvalidState),
@@ -477,20 +490,22 @@ pub enum SerialError {
     ReceiptMismatch,
 }
 
-impl std::fmt::Display for SerialError {
+impl std::fmt::Display for BridgeTransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(error) => write!(f, "serial I/O failed: {error}"),
-            Self::Protocol(error) => write!(f, "serial protocol failed: {error}"),
+            Self::Io(error) => write!(f, "bridge transport I/O failed: {error}"),
+            Self::Protocol(error) => write!(f, "bridge protocol failed: {error}"),
             Self::InvalidState(error) => write!(f, "invalid gamepad state: {error}"),
-            Self::InvalidConfig(field) => write!(f, "invalid serial configuration field {field}"),
-            Self::HandshakeTimeout => write!(f, "serial hello handshake timed out"),
+            Self::InvalidConfig(field) => {
+                write!(f, "invalid bridge transport configuration field {field}")
+            }
+            Self::HandshakeTimeout => write!(f, "bridge hello handshake timed out"),
             Self::VersionRejected(version) => write!(
                 f,
                 "firmware selected unsupported protocol version {version}"
             ),
-            Self::PongTimeout => write!(f, "serial pong timed out"),
-            Self::NotReady => write!(f, "serial session is not ready"),
+            Self::PongTimeout => write!(f, "bridge pong timed out"),
+            Self::NotReady => write!(f, "bridge session is not ready"),
             Self::UnsupportedCapability(capability) => {
                 write!(f, "firmware does not support {capability}")
             }
@@ -510,32 +525,32 @@ impl std::fmt::Display for SerialError {
     }
 }
 
-impl std::error::Error for SerialError {}
-impl From<io::Error> for SerialError {
+impl std::error::Error for BridgeTransportError {}
+impl From<io::Error> for BridgeTransportError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
     }
 }
-impl From<serialport::Error> for SerialError {
+impl From<serialport::Error> for BridgeTransportError {
     fn from(value: serialport::Error) -> Self {
         Self::Io(io::Error::other(value.to_string()))
     }
 }
-impl From<bridge_protocol::ProtocolError> for SerialError {
+impl From<bridge_protocol::ProtocolError> for BridgeTransportError {
     fn from(value: bridge_protocol::ProtocolError) -> Self {
         Self::Protocol(value)
     }
 }
-impl From<gamepad_state::InvalidState> for SerialError {
+impl From<gamepad_state::InvalidState> for BridgeTransportError {
     fn from(value: gamepad_state::InvalidState) -> Self {
         Self::InvalidState(value)
     }
 }
 
-pub struct SerialConnection<T> {
+pub struct BridgeConnection<T> {
     transport: T,
-    config: SerialConfig,
-    status: SerialStatus,
+    config: BridgeTransportConfig,
+    status: BridgeConnectionStatus,
     decoder: StreamDecoder,
     sequence: u16,
     queued: VecDeque<GamepadState>,
@@ -550,28 +565,34 @@ pub struct SerialConnection<T> {
     uf2_bootloader_ready: Option<u32>,
     install_receipt_recorded: Option<(u32, FirmwareInstallReceipt)>,
     control_error: Option<(u32, u16)>,
-    metrics: SerialMetrics,
+    metrics: BridgeTransportMetrics,
 }
 
-impl<T: ByteTransport> SerialConnection<T> {
+impl<T: ByteTransport> BridgeConnection<T> {
     /// Starts a session and immediately transmits the version-negotiation hello.
     ///
     /// # Errors
     /// Returns an error for invalid configuration, framing, or transport writes.
-    pub fn new(transport: T, config: SerialConfig, now: Duration) -> Result<Self, SerialError> {
+    pub fn new(
+        transport: T,
+        config: BridgeTransportConfig,
+        now: Duration,
+    ) -> Result<Self, BridgeTransportError> {
         if config.queue_capacity == 0 {
-            return Err(SerialError::InvalidConfig("queue_capacity"));
+            return Err(BridgeTransportError::InvalidConfig("queue_capacity"));
         }
         if config.handshake_timeout.is_zero() {
-            return Err(SerialError::InvalidConfig("handshake_timeout"));
+            return Err(BridgeTransportError::InvalidConfig("handshake_timeout"));
         }
         if config.state_refresh_interval.is_zero() {
-            return Err(SerialError::InvalidConfig("state_refresh_interval"));
+            return Err(BridgeTransportError::InvalidConfig(
+                "state_refresh_interval",
+            ));
         }
         let mut connection = Self {
             transport,
             config,
-            status: SerialStatus::Handshaking,
+            status: BridgeConnectionStatus::Handshaking,
             decoder: StreamDecoder::new(),
             sequence: 0,
             queued: VecDeque::new(),
@@ -586,7 +607,7 @@ impl<T: ByteTransport> SerialConnection<T> {
             uf2_bootloader_ready: None,
             install_receipt_recorded: None,
             control_error: None,
-            metrics: SerialMetrics::default(),
+            metrics: BridgeTransportMetrics::default(),
         };
         connection.write_message(Message::Hello {
             minimum_version: PROTOCOL_VERSION,
@@ -596,7 +617,7 @@ impl<T: ByteTransport> SerialConnection<T> {
     }
 
     #[must_use]
-    pub const fn status(&self) -> SerialStatus {
+    pub const fn status(&self) -> BridgeConnectionStatus {
         self.status
     }
     #[must_use]
@@ -608,7 +629,7 @@ impl<T: ByteTransport> SerialConnection<T> {
         self.firmware
     }
     #[must_use]
-    pub const fn metrics(&self) -> SerialMetrics {
+    pub const fn metrics(&self) -> BridgeTransportMetrics {
         self.metrics
     }
     pub fn into_inner(self) -> T {
@@ -623,7 +644,7 @@ impl<T: ByteTransport> SerialConnection<T> {
     ///
     /// # Errors
     /// Returns an error unless negotiation is complete and the capability was reported.
-    pub fn request_uf2_bootloader(&mut self, request_id: u32) -> Result<(), SerialError> {
+    pub fn request_uf2_bootloader(&mut self, request_id: u32) -> Result<(), BridgeTransportError> {
         self.require_capability(
             FirmwareCapabilities::ENTER_UF2_BOOTLOADER,
             "automatic UF2 bootloader entry",
@@ -645,7 +666,7 @@ impl<T: ByteTransport> SerialConnection<T> {
         &mut self,
         request_id: u32,
         receipt: FirmwareInstallReceipt,
-    ) -> Result<(), SerialError> {
+    ) -> Result<(), BridgeTransportError> {
         self.require_capability(
             FirmwareCapabilities::INSTALL_RECEIPT,
             "installation receipts",
@@ -662,12 +683,12 @@ impl<T: ByteTransport> SerialConnection<T> {
         self.install_receipt_recorded.take()
     }
 
-    fn take_control_error(&mut self, expected: u32) -> Option<SerialError> {
+    fn take_control_error(&mut self, expected: u32) -> Option<BridgeTransportError> {
         self.control_error.take().map(|(request_id, code)| {
             if request_id == expected {
-                SerialError::ControlRejected { request_id, code }
+                BridgeTransportError::ControlRejected { request_id, code }
             } else {
-                SerialError::RequestMismatch {
+                BridgeTransportError::RequestMismatch {
                     expected,
                     actual: request_id,
                 }
@@ -679,12 +700,12 @@ impl<T: ByteTransport> SerialConnection<T> {
         &self,
         capability: FirmwareCapabilities,
         name: &'static str,
-    ) -> Result<(), SerialError> {
-        if self.status != SerialStatus::Ready {
-            return Err(SerialError::NotReady);
+    ) -> Result<(), BridgeTransportError> {
+        if self.status != BridgeConnectionStatus::Ready {
+            return Err(BridgeTransportError::NotReady);
         }
         if !self.firmware.capabilities.contains(capability) {
-            return Err(SerialError::UnsupportedCapability(name));
+            return Err(BridgeTransportError::UnsupportedCapability(name));
         }
         Ok(())
     }
@@ -693,7 +714,7 @@ impl<T: ByteTransport> SerialConnection<T> {
     ///
     /// # Errors
     /// Returns an error when the state cannot be represented on the wire.
-    pub fn queue_state(&mut self, state: GamepadState) -> Result<(), SerialError> {
+    pub fn queue_state(&mut self, state: GamepadState) -> Result<(), BridgeTransportError> {
         state.validate()?;
         if self.queued.len() == self.config.queue_capacity {
             self.queued.pop_front();
@@ -707,13 +728,13 @@ impl<T: ByteTransport> SerialConnection<T> {
     ///
     /// # Errors
     /// Returns protocol, transport, handshake, or health-check failures.
-    pub fn poll(&mut self, now: Duration) -> Result<(), SerialError> {
+    pub fn poll(&mut self, now: Duration) -> Result<(), BridgeTransportError> {
         let mut bytes = [0_u8; 512];
         match self.transport.read(&mut bytes) {
             Ok(0) => {}
             Ok(count) => {
                 if self.config.packet_logging {
-                    eprintln!("serial rx: {}", hex_bytes(&bytes[..count]));
+                    eprintln!("bridge rx: {}", hex_bytes(&bytes[..count]));
                 }
                 for decoded in self.decoder.push(&bytes[..count]) {
                     match decoded {
@@ -739,17 +760,19 @@ impl<T: ByteTransport> SerialConnection<T> {
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) => {}
             Err(error) => {
-                self.status = SerialStatus::Disconnected;
+                self.status = BridgeConnectionStatus::Disconnected;
                 return Err(error.into());
             }
         }
-        if self.status == SerialStatus::Handshaking
+        if self.status == BridgeConnectionStatus::Handshaking
             && now.saturating_sub(self.started) >= self.config.handshake_timeout
         {
-            self.status = SerialStatus::Disconnected;
-            return Err(SerialError::HandshakeTimeout);
+            self.status = BridgeConnectionStatus::Disconnected;
+            return Err(BridgeTransportError::HandshakeTimeout);
         }
-        if self.firmware.version == FirmwareVersion::Pending && self.status == SerialStatus::Ready {
+        if self.firmware.version == FirmwareVersion::Pending
+            && self.status == BridgeConnectionStatus::Ready
+        {
             if let Some(ready_at) = self.ready_at {
                 if now.saturating_sub(ready_at) >= FIRMWARE_REPORT_GRACE {
                     self.firmware.version = FirmwareVersion::Unreported;
@@ -758,11 +781,11 @@ impl<T: ByteTransport> SerialConnection<T> {
         }
         if let Some((_, sent)) = self.pending_ping {
             if now.saturating_sub(sent) >= self.config.pong_timeout {
-                self.status = SerialStatus::Unhealthy;
-                return Err(SerialError::PongTimeout);
+                self.status = BridgeConnectionStatus::Unhealthy;
+                return Err(BridgeTransportError::PongTimeout);
             }
         }
-        if self.status == SerialStatus::Ready
+        if self.status == BridgeConnectionStatus::Ready
             && self.pending_ping.is_none()
             && now.saturating_sub(self.last_ping) >= self.config.ping_interval
         {
@@ -772,7 +795,7 @@ impl<T: ByteTransport> SerialConnection<T> {
             self.last_ping = now;
         }
         self.flush_states(now)?;
-        if self.status == SerialStatus::Ready
+        if self.status == BridgeConnectionStatus::Ready
             && self.queued.is_empty()
             && self
                 .last_state_sent
@@ -790,10 +813,10 @@ impl<T: ByteTransport> SerialConnection<T> {
     /// Immediately sends the dedicated neutral message on a ready connection.
     ///
     /// # Errors
-    /// Returns [`SerialError::NotReady`] or a protocol/transport failure.
-    pub fn send_neutral_now(&mut self) -> Result<(), SerialError> {
-        if self.status != SerialStatus::Ready {
-            return Err(SerialError::NotReady);
+    /// Returns [`BridgeTransportError::NotReady`] or a protocol/transport failure.
+    pub fn send_neutral_now(&mut self) -> Result<(), BridgeTransportError> {
+        if self.status != BridgeConnectionStatus::Ready {
+            return Err(BridgeTransportError::NotReady);
         }
         self.queued.clear();
         self.last_state = None;
@@ -801,17 +824,21 @@ impl<T: ByteTransport> SerialConnection<T> {
         self.write_message(Message::Neutral)
     }
 
-    fn handle_message(&mut self, message: &Message, now: Duration) -> Result<(), SerialError> {
+    fn handle_message(
+        &mut self,
+        message: &Message,
+        now: Duration,
+    ) -> Result<(), BridgeTransportError> {
         match message {
             Message::HelloResponse { selected_version }
                 if *selected_version == PROTOCOL_VERSION =>
             {
-                self.status = SerialStatus::Ready;
+                self.status = BridgeConnectionStatus::Ready;
                 self.ready_at = Some(now);
             }
             Message::HelloResponse { selected_version } => {
-                self.status = SerialStatus::Disconnected;
-                return Err(SerialError::VersionRejected(*selected_version));
+                self.status = BridgeConnectionStatus::Disconnected;
+                return Err(BridgeTransportError::VersionRejected(*selected_version));
             }
             Message::Ping { nonce } => self.write_message(Message::Pong { nonce: *nonce })?,
             Message::Pong { nonce }
@@ -824,18 +851,20 @@ impl<T: ByteTransport> SerialConnection<T> {
             Message::DeviceInfo(payload) => {
                 self.firmware = parse_device_info(payload);
             }
-            Message::Uf2BootloaderReady { request_id } if self.status == SerialStatus::Ready => {
+            Message::Uf2BootloaderReady { request_id }
+                if self.status == BridgeConnectionStatus::Ready =>
+            {
                 self.uf2_bootloader_ready = Some(*request_id);
             }
             Message::InstallReceiptRecorded {
                 request_id,
                 receipt,
-            } if self.status == SerialStatus::Ready => {
+            } if self.status == BridgeConnectionStatus::Ready => {
                 let recorded: FirmwareInstallReceipt = (*receipt).into();
                 self.install_receipt_recorded = Some((*request_id, recorded));
             }
             Message::Error { code, detail }
-                if self.status == SerialStatus::Ready && detail.len() == 4 =>
+                if self.status == BridgeConnectionStatus::Ready && detail.len() == 4 =>
             {
                 self.control_error = Some((
                     u32::from_le_bytes(detail[..4].try_into().expect("length checked")),
@@ -845,7 +874,7 @@ impl<T: ByteTransport> SerialConnection<T> {
             Message::Rumble {
                 low_frequency,
                 high_frequency,
-            } if self.status == SerialStatus::Ready => {
+            } if self.status == BridgeConnectionStatus::Ready => {
                 self.metrics.rumble_commands_received += 1;
                 if self
                     .pending_feedback
@@ -863,8 +892,8 @@ impl<T: ByteTransport> SerialConnection<T> {
         Ok(())
     }
 
-    fn flush_states(&mut self, now: Duration) -> Result<(), SerialError> {
-        if self.status != SerialStatus::Ready {
+    fn flush_states(&mut self, now: Duration) -> Result<(), BridgeTransportError> {
+        if self.status != BridgeConnectionStatus::Ready {
             return Ok(());
         }
         let Some(state) = self.queued.pop_back() else {
@@ -883,10 +912,10 @@ impl<T: ByteTransport> SerialConnection<T> {
         Ok(())
     }
 
-    fn write_message(&mut self, message: Message) -> Result<(), SerialError> {
+    fn write_message(&mut self, message: Message) -> Result<(), BridgeTransportError> {
         let bytes = Frame::new(self.sequence, message).encode()?;
         if self.config.packet_logging {
-            eprintln!("serial tx: {}", hex_bytes(&bytes));
+            eprintln!("bridge tx: {}", hex_bytes(&bytes));
         }
         self.transport.write_all(&bytes)?;
         self.sequence = self.sequence.wrapping_add(1);
@@ -903,8 +932,8 @@ fn hex_bytes(bytes: &[u8]) -> String {
         .join(" ")
 }
 
-struct NativeTransport(Box<dyn serialport::SerialPort>);
-impl ByteTransport for NativeTransport {
+struct SerialPortTransport(Box<dyn serialport::SerialPort>);
+impl ByteTransport for SerialPortTransport {
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
         Write::write_all(&mut self.0, bytes)
     }
@@ -926,32 +955,88 @@ impl ByteTransport for NativeTransport {
     }
 }
 
-pub struct SerialOutput {
-    path: String,
-    baud_rate: u32,
-    config: SerialConfig,
-    connection: Option<SerialConnection<NativeTransport>>,
+trait TransportFactory {
+    fn open(
+        &mut self,
+        endpoint: &BridgeEndpoint,
+    ) -> Result<Box<dyn ByteTransport>, BridgeTransportError>;
+}
+
+#[derive(Default)]
+struct NativeTransportFactory;
+
+impl TransportFactory for NativeTransportFactory {
+    fn open(
+        &mut self,
+        endpoint: &BridgeEndpoint,
+    ) -> Result<Box<dyn ByteTransport>, BridgeTransportError> {
+        match endpoint.locator() {
+            BridgeEndpointLocator::SerialPort { path, baud_rate } => {
+                let port = serialport::new(path, *baud_rate)
+                    .timeout(Duration::from_millis(1))
+                    .open()
+                    .map_err(|error| open_error(path, error))?;
+                Ok(Box::new(SerialPortTransport(port)))
+            }
+        }
+    }
+}
+
+pub struct BridgeOutput {
+    endpoint: BridgeEndpoint,
+    factory: Box<dyn TransportFactory>,
+    config: BridgeTransportConfig,
+    connection: Option<BridgeConnection<Box<dyn ByteTransport>>>,
     clock: Instant,
-    completed: SerialMetrics,
+    completed: BridgeTransportMetrics,
     connected_once: bool,
     desired_state: Option<GamepadState>,
     last_poll: Option<Duration>,
     bootloader_transition: bool,
 }
 
-impl SerialOutput {
-    /// Opens a native serial port and completes the protocol hello handshake.
+impl BridgeOutput {
+    /// Opens a native bridge endpoint and completes the protocol hello handshake.
     ///
     /// # Errors
     /// Returns an error when opening, negotiation, framing, or I/O fails.
-    pub fn open(path: &str, baud_rate: u32, config: SerialConfig) -> Result<Self, SerialError> {
+    pub fn open(
+        endpoint: BridgeEndpoint,
+        config: BridgeTransportConfig,
+    ) -> Result<Self, BridgeTransportError> {
+        Self::open_with_factory(endpoint, config, Box::<NativeTransportFactory>::default())
+    }
+
+    /// Opens an explicitly selected native serial port.
+    ///
+    /// # Errors
+    /// Returns an error when opening, negotiation, framing, or I/O fails.
+    pub fn open_serial(
+        path: &str,
+        baud_rate: u32,
+        config: BridgeTransportConfig,
+    ) -> Result<Self, BridgeTransportError> {
+        Self::open(BridgeEndpoint::serial_port(path, baud_rate), config)
+    }
+
+    /// Returns the endpoint used for the current session and reconnects.
+    #[must_use]
+    pub const fn endpoint(&self) -> &BridgeEndpoint {
+        &self.endpoint
+    }
+
+    fn open_with_factory(
+        endpoint: BridgeEndpoint,
+        config: BridgeTransportConfig,
+        factory: Box<dyn TransportFactory>,
+    ) -> Result<Self, BridgeTransportError> {
         let mut output = Self {
-            path: path.to_owned(),
-            baud_rate,
+            endpoint,
+            factory,
             config,
             connection: None,
             clock: Instant::now(),
-            completed: SerialMetrics::default(),
+            completed: BridgeTransportMetrics::default(),
             connected_once: false,
             desired_state: None,
             last_poll: None,
@@ -965,7 +1050,7 @@ impl SerialOutput {
     ///
     /// # Errors
     /// Returns protocol, transport, handshake, or health-check failures.
-    pub fn poll(&mut self) -> Result<(), SerialError> {
+    pub fn poll(&mut self) -> Result<(), BridgeTransportError> {
         if self.connection.is_none() {
             self.connect()?;
         }
@@ -979,7 +1064,7 @@ impl SerialOutput {
     pub fn wait_for_firmware_info(
         &mut self,
         timeout: Duration,
-    ) -> Result<FirmwareInfo, SerialError> {
+    ) -> Result<FirmwareInfo, BridgeTransportError> {
         self.wait_for_control_response(timeout, "waiting for firmware information", |connection| {
             let info = connection.firmware_info();
             (info.version != FirmwareVersion::Pending).then_some(Ok(info))
@@ -994,10 +1079,10 @@ impl SerialOutput {
         &mut self,
         request_id: u32,
         timeout: Duration,
-    ) -> Result<(), SerialError> {
+    ) -> Result<(), BridgeTransportError> {
         self.connection
             .as_mut()
-            .ok_or(SerialError::NotReady)?
+            .ok_or(BridgeTransportError::NotReady)?
             .request_uf2_bootloader(request_id)?;
         let actual = self.wait_for_control_response(
             timeout,
@@ -1010,7 +1095,7 @@ impl SerialOutput {
             },
         )?;
         if actual != request_id {
-            return Err(SerialError::RequestMismatch {
+            return Err(BridgeTransportError::RequestMismatch {
                 expected: request_id,
                 actual,
             });
@@ -1028,10 +1113,10 @@ impl SerialOutput {
         request_id: u32,
         receipt: FirmwareInstallReceipt,
         timeout: Duration,
-    ) -> Result<FirmwareInstallReceipt, SerialError> {
+    ) -> Result<FirmwareInstallReceipt, BridgeTransportError> {
         self.connection
             .as_mut()
-            .ok_or(SerialError::NotReady)?
+            .ok_or(BridgeTransportError::NotReady)?
             .record_install_receipt(request_id, receipt)?;
         let (actual, recorded) = self.wait_for_control_response(
             timeout,
@@ -1050,18 +1135,19 @@ impl SerialOutput {
         Ok(recorded)
     }
     #[must_use]
-    pub fn status(&self) -> SerialStatus {
-        self.connection
-            .as_ref()
-            .map_or(SerialStatus::Disconnected, SerialConnection::status)
+    pub fn status(&self) -> BridgeConnectionStatus {
+        self.connection.as_ref().map_or(
+            BridgeConnectionStatus::Disconnected,
+            BridgeConnection::status,
+        )
     }
     #[must_use]
-    pub fn metrics(&self) -> SerialMetrics {
+    pub fn metrics(&self) -> BridgeTransportMetrics {
         let active = self
             .connection
             .as_ref()
-            .map_or(SerialMetrics::default(), SerialConnection::metrics);
-        SerialMetrics {
+            .map_or(BridgeTransportMetrics::default(), BridgeConnection::metrics);
+        BridgeTransportMetrics {
             packets_sent: self.completed.packets_sent + active.packets_sent,
             packets_received: self.completed.packets_received + active.packets_received,
             framing_failures: self.completed.framing_failures + active.framing_failures,
@@ -1076,21 +1162,14 @@ impl SerialOutput {
         }
     }
 
-    fn connect(&mut self) -> Result<(), SerialError> {
-        let port = serialport::new(&self.path, self.baud_rate)
-            // Idle reads must not consume a large part of the host service
-            // cadence; otherwise state refreshes can approach the firmware's
-            // 100 ms controller-data watchdog after USB/CDC scheduling.
-            .timeout(Duration::from_millis(1))
-            .open()
-            .map_err(|error| crate::serial_discovery::open_error(&self.path, error))?;
+    fn connect(&mut self) -> Result<(), BridgeTransportError> {
+        let transport = self.factory.open(&self.endpoint)?;
         self.clock = Instant::now();
         self.last_poll = None;
-        let mut connection =
-            SerialConnection::new(NativeTransport(port), self.config, Duration::ZERO)?;
-        while connection.status() == SerialStatus::Handshaking {
+        let mut connection = BridgeConnection::new(transport, self.config, Duration::ZERO)?;
+        while connection.status() == BridgeConnectionStatus::Handshaking {
             connection.poll(self.clock.elapsed())?;
-            if connection.status() == SerialStatus::Handshaking {
+            if connection.status() == BridgeConnectionStatus::Handshaking {
                 // NativeTransport deliberately avoids a blocking read during
                 // normal service. Yield here so an unresponsive exact-match
                 // device cannot spin a core for the handshake timeout.
@@ -1109,12 +1188,12 @@ impl SerialOutput {
         Ok(())
     }
 
-    fn poll_existing(&mut self) -> Result<(), SerialError> {
+    fn poll_existing(&mut self) -> Result<(), BridgeTransportError> {
         let now = self.clock.elapsed();
         let result = self
             .connection
             .as_mut()
-            .ok_or(SerialError::NotReady)?
+            .ok_or(BridgeTransportError::NotReady)?
             .poll(now);
         self.last_poll = Some(now);
         if result.is_err() {
@@ -1128,9 +1207,9 @@ impl SerialOutput {
         timeout: Duration,
         stage: &'static str,
         mut take_response: impl FnMut(
-            &mut SerialConnection<NativeTransport>,
-        ) -> Option<Result<T, SerialError>>,
-    ) -> Result<T, SerialError> {
+            &mut BridgeConnection<Box<dyn ByteTransport>>,
+        ) -> Option<Result<T, BridgeTransportError>>,
+    ) -> Result<T, BridgeTransportError> {
         let deadline = Instant::now() + timeout;
         loop {
             self.poll_existing()?;
@@ -1138,7 +1217,7 @@ impl SerialOutput {
                 return response;
             }
             if Instant::now() >= deadline {
-                return Err(SerialError::ControlTimeout(stage));
+                return Err(BridgeTransportError::ControlTimeout(stage));
             }
             std::thread::sleep(HANDSHAKE_POLL_INTERVAL);
         }
@@ -1159,7 +1238,7 @@ impl SerialOutput {
     }
 }
 
-impl GamepadOutput for SerialOutput {
+impl GamepadOutput for BridgeOutput {
     fn send_state(&mut self, state: &GamepadState) -> Result<(), OutputError> {
         state.validate()?;
         self.desired_state = Some(*state);
@@ -1175,7 +1254,9 @@ impl GamepadOutput for SerialOutput {
                 connected_here = true;
             }
             let Some(connection) = self.connection.as_mut() else {
-                return Err(OutputError::Transport(SerialError::NotReady.to_string()));
+                return Err(OutputError::Transport(
+                    BridgeTransportError::NotReady.to_string(),
+                ));
             };
             if !connected_here {
                 connection
@@ -1196,12 +1277,12 @@ impl GamepadOutput for SerialOutput {
         self.desired_state = None;
         self.connection
             .as_mut()
-            .ok_or_else(|| OutputError::Transport(SerialError::NotReady.to_string()))?
+            .ok_or_else(|| OutputError::Transport(BridgeTransportError::NotReady.to_string()))?
             .send_neutral_now()
             .map_err(|error| OutputError::Transport(error.to_string()))
     }
     fn service(&mut self) -> Result<(), OutputError> {
-        if !serial_service_due(self.clock.elapsed(), self.last_poll) {
+        if !transport_service_due(self.clock.elapsed(), self.last_poll) {
             return Ok(());
         }
         for attempt in 0..2 {
@@ -1219,13 +1300,13 @@ impl GamepadOutput for SerialOutput {
     fn take_feedback(&mut self) -> Option<OutputFeedback> {
         self.connection
             .as_mut()
-            .and_then(SerialConnection::take_feedback)
+            .and_then(BridgeConnection::take_feedback)
     }
 
     fn firmware_info(&self) -> Option<FirmwareInfo> {
         self.connection
             .as_ref()
-            .map(SerialConnection::firmware_info)
+            .map(BridgeConnection::firmware_info)
     }
 
     fn request_firmware_install_receipt(
@@ -1235,7 +1316,7 @@ impl GamepadOutput for SerialOutput {
     ) -> Result<(), OutputError> {
         self.connection
             .as_mut()
-            .ok_or_else(|| OutputError::Transport(SerialError::NotReady.to_string()))?
+            .ok_or_else(|| OutputError::Transport(BridgeTransportError::NotReady.to_string()))?
             .record_install_receipt(request_id, receipt)
             .map_err(|error| OutputError::Transport(error.to_string()))
     }
@@ -1264,7 +1345,7 @@ impl GamepadOutput for SerialOutput {
     fn diagnostics(&self) -> OutputDiagnostics {
         let metrics = self.metrics();
         OutputDiagnostics {
-            serial_reconnects: metrics.reconnects,
+            bridge_reconnects: metrics.reconnects,
             framing_failures: metrics.framing_failures,
             checksum_failures: metrics.checksum_failures,
             state_refreshes: metrics.state_refreshes,
@@ -1275,7 +1356,7 @@ impl GamepadOutput for SerialOutput {
     }
 }
 
-impl Drop for SerialOutput {
+impl Drop for BridgeOutput {
     fn drop(&mut self) {
         if !self.bootloader_transition {
             if let Some(connection) = &mut self.connection {
@@ -1285,13 +1366,15 @@ impl Drop for SerialOutput {
     }
 }
 
-fn serial_service_due(now: Duration, last_poll: Option<Duration>) -> bool {
-    last_poll.is_none_or(|last_poll| now.saturating_sub(last_poll) >= SERIAL_SERVICE_MIN_INTERVAL)
+fn transport_service_due(now: Duration, last_poll: Option<Duration>) -> bool {
+    last_poll
+        .is_none_or(|last_poll| now.saturating_sub(last_poll) >= TRANSPORT_SERVICE_MIN_INTERVAL)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     struct MockTransport {
@@ -1315,24 +1398,101 @@ mod tests {
         Frame::new(90, message).encode().unwrap()
     }
 
+    #[derive(Debug, PartialEq)]
+    enum LifecycleEvent {
+        Open,
+        Write(Message),
+        ReadFailure,
+        TransportDrop,
+    }
+
+    enum OpenStep {
+        Fail(&'static str),
+        Transport(VecDeque<io::Result<Vec<u8>>>),
+    }
+
+    struct ScriptedFactory {
+        steps: VecDeque<OpenStep>,
+        events: Arc<Mutex<Vec<LifecycleEvent>>>,
+    }
+
+    impl TransportFactory for ScriptedFactory {
+        fn open(
+            &mut self,
+            _endpoint: &BridgeEndpoint,
+        ) -> Result<Box<dyn ByteTransport>, BridgeTransportError> {
+            self.events.lock().unwrap().push(LifecycleEvent::Open);
+            match self.steps.pop_front().expect("scripted open step") {
+                OpenStep::Fail(message) => Err(io::Error::other(message).into()),
+                OpenStep::Transport(reads) => Ok(Box::new(LifecycleTransport {
+                    reads,
+                    events: Arc::clone(&self.events),
+                })),
+            }
+        }
+    }
+
+    struct LifecycleTransport {
+        reads: VecDeque<io::Result<Vec<u8>>>,
+        events: Arc<Mutex<Vec<LifecycleEvent>>>,
+    }
+
+    impl ByteTransport for LifecycleTransport {
+        fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+            for message in messages(bytes) {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(LifecycleEvent::Write(message));
+            }
+            Ok(())
+        }
+
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            match self.reads.pop_front() {
+                Some(Ok(bytes)) => {
+                    buffer[..bytes.len()].copy_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+                Some(Err(error)) => {
+                    self.events
+                        .lock()
+                        .unwrap()
+                        .push(LifecycleEvent::ReadFailure);
+                    Err(error)
+                }
+                None => Err(io::ErrorKind::WouldBlock.into()),
+            }
+        }
+    }
+
+    impl Drop for LifecycleTransport {
+        fn drop(&mut self) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(LifecycleEvent::TransportDrop);
+        }
+    }
+
     #[test]
-    fn serial_service_cadence_avoids_redundant_polls_without_missing_deadlines() {
-        assert!(serial_service_due(Duration::ZERO, None));
-        assert!(!serial_service_due(
-            SERIAL_SERVICE_MIN_INTERVAL
+    fn transport_service_cadence_avoids_redundant_polls_without_missing_deadlines() {
+        assert!(transport_service_due(Duration::ZERO, None));
+        assert!(!transport_service_due(
+            TRANSPORT_SERVICE_MIN_INTERVAL
                 .checked_sub(Duration::from_nanos(1))
                 .unwrap(),
             Some(Duration::ZERO)
         ));
-        assert!(serial_service_due(
-            SERIAL_SERVICE_MIN_INTERVAL,
+        assert!(transport_service_due(
+            TRANSPORT_SERVICE_MIN_INTERVAL,
             Some(Duration::ZERO)
         ));
-        assert!(!serial_service_due(
+        assert!(!transport_service_due(
             Duration::from_millis(105),
             Some(Duration::from_millis(100))
         ));
-        assert!(serial_service_due(
+        assert!(transport_service_due(
             Duration::from_millis(110),
             Some(Duration::from_millis(100))
         ));
@@ -1347,6 +1507,100 @@ mod tests {
             .collect()
     }
 
+    fn output_with_script(
+        steps: impl IntoIterator<Item = OpenStep>,
+        events: Arc<Mutex<Vec<LifecycleEvent>>>,
+    ) -> Result<BridgeOutput, BridgeTransportError> {
+        BridgeOutput::open_with_factory(
+            BridgeEndpoint::serial_port("fixture", 115_200),
+            BridgeTransportConfig::default(),
+            Box::new(ScriptedFactory {
+                steps: steps.into_iter().collect(),
+                events,
+            }),
+        )
+    }
+
+    #[test]
+    fn endpoint_open_failure_is_returned_without_starting_a_session() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+
+        let error =
+            output_with_script([OpenStep::Fail("fixture open failed")], Arc::clone(&events))
+                .err()
+                .expect("open must fail");
+
+        assert!(error.to_string().contains("fixture open failed"));
+        assert_eq!(*events.lock().unwrap(), [LifecycleEvent::Open]);
+    }
+
+    #[test]
+    fn reconnect_reopens_the_endpoint_and_replays_the_desired_state() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let handshake = || {
+            Ok(response(Message::HelloResponse {
+                selected_version: PROTOCOL_VERSION,
+            }))
+        };
+        let mut output = output_with_script(
+            [
+                OpenStep::Transport(VecDeque::from([
+                    handshake(),
+                    Err(io::Error::new(io::ErrorKind::BrokenPipe, "disconnected")),
+                ])),
+                OpenStep::Transport(VecDeque::from([handshake()])),
+            ],
+            Arc::clone(&events),
+        )
+        .unwrap();
+        let mut state = GamepadState::neutral();
+        state.left_y = 1.0;
+
+        output.send_state(&state).unwrap();
+
+        assert_eq!(output.metrics().reconnects, 1);
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LifecycleEvent::Open))
+                .count(),
+            2
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            LifecycleEvent::Write(Message::GamepadState(wire))
+                if *wire == WireGamepadState::try_from(state).unwrap()
+        )));
+    }
+
+    #[test]
+    fn shutdown_sends_neutral_before_releasing_the_transport() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let output = output_with_script(
+            [OpenStep::Transport(VecDeque::from([Ok(response(
+                Message::HelloResponse {
+                    selected_version: PROTOCOL_VERSION,
+                },
+            ))]))],
+            Arc::clone(&events),
+        )
+        .unwrap();
+
+        drop(output);
+
+        let events = events.lock().unwrap();
+        let neutral = events
+            .iter()
+            .position(|event| matches!(event, LifecycleEvent::Write(Message::Neutral)))
+            .expect("neutral write");
+        let released = events
+            .iter()
+            .position(|event| matches!(event, LifecycleEvent::TransportDrop))
+            .expect("transport drop");
+        assert!(neutral < released);
+    }
+
     #[test]
     fn handshake_flushes_only_the_latest_queued_snapshot() {
         let transport = MockTransport {
@@ -1356,7 +1610,8 @@ mod tests {
             writes: Vec::new(),
         };
         let mut connection =
-            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+            BridgeConnection::new(transport, BridgeTransportConfig::default(), Duration::ZERO)
+                .unwrap();
         connection.queue_state(GamepadState::neutral()).unwrap();
         let mut stale = GamepadState::neutral();
         stale.left_y = -1.0;
@@ -1365,7 +1620,7 @@ mod tests {
         latest.left_y = 1.0;
         connection.queue_state(latest).unwrap();
         connection.poll(Duration::from_millis(1)).unwrap();
-        assert_eq!(connection.status(), SerialStatus::Ready);
+        assert_eq!(connection.status(), BridgeConnectionStatus::Ready);
         assert_eq!(connection.metrics().states_dropped, 2);
         assert_eq!(
             messages(&connection.into_inner().writes),
@@ -1388,30 +1643,31 @@ mod tests {
             writes: Vec::new(),
         };
         let mut connection =
-            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+            BridgeConnection::new(transport, BridgeTransportConfig::default(), Duration::ZERO)
+                .unwrap();
         assert!(matches!(
             connection.poll(Duration::ZERO),
-            Err(SerialError::VersionRejected(2))
+            Err(BridgeTransportError::VersionRejected(2))
         ));
-        let mut connection = SerialConnection::new(
+        let mut connection = BridgeConnection::new(
             MockTransport::default(),
-            SerialConfig::default(),
+            BridgeTransportConfig::default(),
             Duration::ZERO,
         )
         .unwrap();
         assert!(matches!(
             connection.poll(Duration::from_secs(1)),
-            Err(SerialError::HandshakeTimeout)
+            Err(BridgeTransportError::HandshakeTimeout)
         ));
     }
 
     #[test]
     fn bounded_queue_drops_oldest_and_health_check_requires_matching_pong() {
-        let config = SerialConfig {
+        let config = BridgeTransportConfig {
             queue_capacity: 1,
             ping_interval: Duration::from_millis(10),
             pong_timeout: Duration::from_millis(20),
-            ..SerialConfig::default()
+            ..BridgeTransportConfig::default()
         };
         let transport = MockTransport {
             reads: VecDeque::from([response(Message::HelloResponse {
@@ -1419,7 +1675,7 @@ mod tests {
             })]),
             writes: Vec::new(),
         };
-        let mut connection = SerialConnection::new(transport, config, Duration::ZERO).unwrap();
+        let mut connection = BridgeConnection::new(transport, config, Duration::ZERO).unwrap();
         connection.queue_state(GamepadState::neutral()).unwrap();
         let mut active = GamepadState::neutral();
         active.left_x = 1.0;
@@ -1429,7 +1685,7 @@ mod tests {
         assert_eq!(connection.metrics().states_dropped, 1);
         assert!(matches!(
             connection.poll(Duration::from_millis(30)),
-            Err(SerialError::PongTimeout)
+            Err(BridgeTransportError::PongTimeout)
         ));
     }
 
@@ -1443,7 +1699,8 @@ mod tests {
             writes: Vec::new(),
         };
         let mut connection =
-            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+            BridgeConnection::new(transport, BridgeTransportConfig::default(), Duration::ZERO)
+                .unwrap();
         connection.poll(Duration::ZERO).unwrap();
         connection.poll(Duration::ZERO).unwrap();
         assert_eq!(connection.metrics().framing_failures, 1);
@@ -1474,7 +1731,8 @@ mod tests {
             writes: Vec::new(),
         };
         let mut connection =
-            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+            BridgeConnection::new(transport, BridgeTransportConfig::default(), Duration::ZERO)
+                .unwrap();
         connection.poll(Duration::ZERO).unwrap();
         assert_eq!(connection.take_feedback(), None);
         connection.poll(Duration::ZERO).unwrap();
@@ -1500,7 +1758,8 @@ mod tests {
             writes: Vec::new(),
         };
         let mut connection =
-            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+            BridgeConnection::new(transport, BridgeTransportConfig::default(), Duration::ZERO)
+                .unwrap();
         let mut active = GamepadState::neutral();
         active.left_x = 0.5;
         connection.queue_state(active).unwrap();
@@ -1535,7 +1794,8 @@ mod tests {
             writes: Vec::new(),
         };
         let mut connection =
-            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+            BridgeConnection::new(transport, BridgeTransportConfig::default(), Duration::ZERO)
+                .unwrap();
         assert_eq!(connection.firmware(), FirmwareVersion::Pending);
         connection.poll(Duration::ZERO).unwrap();
         connection.poll(Duration::ZERO).unwrap();
@@ -1712,7 +1972,8 @@ mod tests {
             writes: Vec::new(),
         };
         let mut connection =
-            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+            BridgeConnection::new(transport, BridgeTransportConfig::default(), Duration::ZERO)
+                .unwrap();
         connection.poll(Duration::ZERO).unwrap();
         connection.poll(Duration::ZERO).unwrap();
         connection.request_uf2_bootloader(42).unwrap();
@@ -1742,12 +2003,13 @@ mod tests {
             writes: Vec::new(),
         };
         let mut old =
-            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+            BridgeConnection::new(transport, BridgeTransportConfig::default(), Duration::ZERO)
+                .unwrap();
         old.poll(Duration::ZERO).unwrap();
         old.poll(Duration::ZERO).unwrap();
         assert!(matches!(
             old.request_uf2_bootloader(1),
-            Err(SerialError::UnsupportedCapability(_))
+            Err(BridgeTransportError::UnsupportedCapability(_))
         ));
     }
 
@@ -1775,7 +2037,8 @@ mod tests {
                 ]),
                 writes: Vec::new(),
             };
-            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap()
+            BridgeConnection::new(transport, BridgeTransportConfig::default(), Duration::ZERO)
+                .unwrap()
         };
 
         let mut matching = connection_with_error(42);
@@ -1785,7 +2048,7 @@ mod tests {
         matching.poll(Duration::ZERO).unwrap();
         assert!(matches!(
             matching.take_control_error(42),
-            Some(SerialError::ControlRejected {
+            Some(BridgeTransportError::ControlRejected {
                 request_id: 42,
                 code
             }) if code == bridge_protocol::ControlErrorCode::InstallReceiptRejected as u16
@@ -1798,7 +2061,7 @@ mod tests {
         stale.poll(Duration::ZERO).unwrap();
         assert!(matches!(
             stale.take_control_error(42),
-            Some(SerialError::RequestMismatch {
+            Some(BridgeTransportError::RequestMismatch {
                 expected: 42,
                 actual: 41
             })
@@ -1810,7 +2073,7 @@ mod tests {
         };
         assert!(matches!(
             validate_receipt_response(42, receipt, 42, different_receipt),
-            Err(SerialError::ReceiptMismatch)
+            Err(BridgeTransportError::ReceiptMismatch)
         ));
     }
 
@@ -1823,7 +2086,8 @@ mod tests {
             writes: Vec::new(),
         };
         let mut connection =
-            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+            BridgeConnection::new(transport, BridgeTransportConfig::default(), Duration::ZERO)
+                .unwrap();
         // The grace clock starts at Ready, not at connection creation.
         connection.poll(Duration::from_millis(500)).unwrap();
         assert_eq!(connection.firmware(), FirmwareVersion::Pending);
@@ -1846,7 +2110,8 @@ mod tests {
             writes: Vec::new(),
         };
         let mut connection =
-            SerialConnection::new(transport, SerialConfig::default(), Duration::ZERO).unwrap();
+            BridgeConnection::new(transport, BridgeTransportConfig::default(), Duration::ZERO)
+                .unwrap();
         connection.poll(Duration::ZERO).unwrap();
         connection.poll(FIRMWARE_REPORT_GRACE).unwrap();
         assert_eq!(connection.firmware(), FirmwareVersion::Unreported);
@@ -1860,13 +2125,15 @@ mod tests {
 
     #[test]
     fn rejects_zero_refresh_interval() {
-        let config = SerialConfig {
+        let config = BridgeTransportConfig {
             state_refresh_interval: Duration::ZERO,
-            ..SerialConfig::default()
+            ..BridgeTransportConfig::default()
         };
         assert!(matches!(
-            SerialConnection::new(MockTransport::default(), config, Duration::ZERO),
-            Err(SerialError::InvalidConfig("state_refresh_interval"))
+            BridgeConnection::new(MockTransport::default(), config, Duration::ZERO),
+            Err(BridgeTransportError::InvalidConfig(
+                "state_refresh_interval"
+            ))
         ));
     }
 }

@@ -7,17 +7,20 @@ use std::path::Path;
 use bridge_protocol::{Frame, Message, WireGamepadState};
 use gamepad_state::GamepadState;
 
-mod serial;
-mod serial_discovery;
-pub use serial::{
-    new_firmware_install_receipt, random_firmware_request_id, ByteTransport, FirmwareCapabilities,
-    FirmwareInfo, FirmwareInstallReceipt, FirmwareInstallSource, FirmwareInstallState,
+mod bridge_transport;
+mod endpoint_discovery;
+pub use bridge_transport::{
+    new_firmware_install_receipt, random_firmware_request_id, BridgeConnection,
+    BridgeConnectionStatus, BridgeOutput, BridgeTransportConfig, BridgeTransportError,
+    BridgeTransportMetrics, ByteTransport, FirmwareCapabilities, FirmwareInfo,
+    FirmwareInstallReceipt, FirmwareInstallSource, FirmwareInstallState,
     FirmwareReceiptCreationError, FirmwareTarget, FirmwareTargetId, FirmwareTargetIdError,
-    FirmwareVersion, SerialConfig, SerialConnection, SerialError, SerialMetrics, SerialOutput,
-    SerialStatus, MAX_FIRMWARE_TARGET_ID_LEN,
+    FirmwareVersion, MAX_FIRMWARE_TARGET_ID_LEN,
 };
-pub use serial_discovery::{
-    available_serial_devices, available_serial_ports, SerialDeviceInfo, BRIDGE_DEVICE_USB_PRODUCT,
+pub use endpoint_discovery::{
+    available_bridge_endpoints, available_serial_devices, available_serial_endpoints,
+    available_serial_ports, BridgeEndpoint, BridgeEndpointLocator, BridgeTransportKind,
+    BridgeUsbIdentity, SerialDeviceInfo, BRIDGE_DEVICE_USB_PRODUCT, DEFAULT_BRIDGE_BAUD_RATE,
 };
 
 /// The rendered prefix of [`OutputError::Configuration`]. Callers that only
@@ -151,7 +154,7 @@ pub enum OutputFeedback {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OutputDiagnostics {
-    pub serial_reconnects: u64,
+    pub bridge_reconnects: u64,
     pub framing_failures: u64,
     pub checksum_failures: u64,
     pub state_refreshes: u64,

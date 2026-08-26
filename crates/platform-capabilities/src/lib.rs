@@ -19,7 +19,7 @@ pub use macos::MacOsCapabilities;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CapabilityId {
     ControllerHidAccess,
-    SerialPortAccess,
+    BridgeDeviceAccess,
     VirtualGamepadAccess,
     DesktopInputAccess,
     InputMonitoring,
@@ -35,7 +35,7 @@ pub enum CapabilityId {
 )]
 pub struct CapabilityContext {
     pub controller_input_enabled: bool,
-    pub serial_output_or_firmware_enabled: bool,
+    pub bridge_device_or_firmware_enabled: bool,
     pub virtual_output_enabled: bool,
     pub desktop_bindings_enabled: bool,
     pub desktop_session: Option<DesktopSession>,
@@ -378,14 +378,14 @@ mod tests {
     fn independent_groups_report_every_unsatisfied_capability() {
         let provider = ScriptedProvider::new(vec![RequirementGroup::Independent(vec![
             CapabilityId::ControllerHidAccess,
-            CapabilityId::SerialPortAccess,
+            CapabilityId::BridgeDeviceAccess,
         ])])
         .with_state(
             CapabilityId::ControllerHidAccess,
             blocked("hidraw is unavailable"),
         )
         .with_state(
-            CapabilityId::SerialPortAccess,
+            CapabilityId::BridgeDeviceAccess,
             blocked("serial access is unavailable"),
         );
 
@@ -399,12 +399,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 CapabilityId::ControllerHidAccess,
-                CapabilityId::SerialPortAccess,
+                CapabilityId::BridgeDeviceAccess,
             ]
         );
         assert!(provider
             .calls()
-            .contains(&CapabilityCall::Probe(CapabilityId::SerialPortAccess)));
+            .contains(&CapabilityCall::Probe(CapabilityId::BridgeDeviceAccess)));
     }
 
     #[test]

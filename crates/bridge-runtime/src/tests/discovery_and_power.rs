@@ -383,33 +383,38 @@ fn ambiguity_descriptions_retain_global_indices_and_transports() {
 #[test]
 fn remembered_output_serial_survives_a_changed_port_path() {
     let valid = vec![
-        (serial_info("serial:new", "remembered"), ()),
-        (serial_info("serial:other", "other"), ()),
+        (bridge_endpoint("serial:new", "remembered"), ()),
+        (bridge_endpoint("serial:other", "other"), ()),
     ];
-    assert!(choose_output_index(&valid, None).is_err());
+    let ambiguity = choose_output_index(&valid, None).unwrap_err();
+    assert!(ambiguity.contains("device ****ered"));
+    assert!(ambiguity.contains("restart with --port PATH"));
     assert_eq!(choose_output_index(&valid, Some("remembered")), Ok(0));
     assert_eq!(choose_output_index(&valid, Some("other")), Ok(1));
 }
 
 #[test]
 fn automatic_output_requires_the_marker_but_an_explicit_port_bypasses_it() {
-    let mut explicit_only = serial_info("serial:explicit", "explicit");
-    explicit_only.product = Some("Custom development firmware".to_owned());
-    explicit_only.vendor_id = Some(0xbeef);
-    explicit_only.product_id = Some(0x1234);
-    explicit_only.manufacturer = Some("Community implementation".to_owned());
+    let explicit_only = BridgeEndpoint::serial_port("serial:explicit", 115_200)
+        .with_stable_id("explicit")
+        .with_usb_identity(bridge_output::BridgeUsbIdentity {
+            vendor_id: 0xbeef,
+            product_id: 0x1234,
+            manufacturer: Some("Community implementation".to_owned()),
+            product: Some("Custom development firmware".to_owned()),
+        });
 
     assert_eq!(
         output_candidates(
             vec![explicit_only.clone()],
-            &SerialSelection::AutoBridgeDevice,
+            &BridgeEndpointSelection::AutoBridgeDevice,
         ),
         Vec::new()
     );
     assert_eq!(
         output_candidates(
             vec![explicit_only.clone()],
-            &SerialSelection::Port(explicit_only.path.clone()),
+            &BridgeEndpointSelection::SerialPort("serial:explicit".to_owned()),
         ),
         vec![explicit_only]
     );

@@ -11,10 +11,10 @@ const DEVICE_ACCESS_DOCUMENTATION: &str = concat!(
 
 trait LinuxAccessApi {
     fn controller_hid_access(&self) -> CapabilityState;
-    fn serial_port_access(&self) -> CapabilityState;
+    fn bridge_device_access(&self) -> CapabilityState;
 }
 
-/// Linux capability provider for controller HID and bridge serial access.
+/// Linux capability provider for controller HID and bridge-device access.
 pub struct LinuxCapabilities {
     api: Box<dyn LinuxAccessApi>,
 }
@@ -42,8 +42,8 @@ impl PlatformCapabilities for LinuxCapabilities {
         if context.controller_input_enabled {
             independent.push(CapabilityId::ControllerHidAccess);
         }
-        if context.serial_output_or_firmware_enabled {
-            independent.push(CapabilityId::SerialPortAccess);
+        if context.bridge_device_or_firmware_enabled {
+            independent.push(CapabilityId::BridgeDeviceAccess);
         }
         if independent.is_empty() {
             Vec::new()
@@ -55,7 +55,7 @@ impl PlatformCapabilities for LinuxCapabilities {
     fn probe(&self, id: CapabilityId) -> CapabilityState {
         match id {
             CapabilityId::ControllerHidAccess => self.api.controller_hid_access(),
-            CapabilityId::SerialPortAccess => self.api.serial_port_access(),
+            CapabilityId::BridgeDeviceAccess => self.api.bridge_device_access(),
             CapabilityId::VirtualGamepadAccess | CapabilityId::DesktopInputAccess => {
                 CapabilityState::Unavailable {
                     reason: "the selected Linux provider is not implemented yet".to_owned(),
@@ -76,7 +76,7 @@ impl PlatformCapabilities for LinuxCapabilities {
             CapabilityId::ControllerHidAccess => format!(
                 "For an active desktop session, install the narrowly matched {DEVICE_RULE_NAME} under /etc/udev/rules.d, or use the copy installed by your package under /usr/lib/udev/rules.d. Follow {DEVICE_ACCESS_DOCUMENTATION}. For a headless service, use the documented dedicated-group fallback. Reload udev rules and reconnect the controller, or restart the service after changing groups"
             ),
-            CapabilityId::SerialPortAccess => format!(
+            CapabilityId::BridgeDeviceAccess => format!(
                 "For an active desktop session with the official XIAO bridge, install the narrowly matched {DEVICE_RULE_NAME} under /etc/udev/rules.d, or use the copy installed by your package under /usr/lib/udev/rules.d. Follow {DEVICE_ACCESS_DOCUMENTATION}. For a third-party bridge, add an equally narrow rule for its USB identity or use the distribution's serial-access group. For a headless service, use the documented dedicated-group fallback with an exact device match. Reload udev rules and reconnect the bridge, or start a new login or restart the service after changing groups"
             ),
             CapabilityId::VirtualGamepadAccess
@@ -138,18 +138,18 @@ impl LinuxAccessApi for NativeLinuxAccessApi {
         }
     }
 
-    fn serial_port_access(&self) -> CapabilityState {
-        match bridge_output::available_serial_devices() {
-            Ok(devices) => access_state(
-                devices
+    fn bridge_device_access(&self) -> CapabilityState {
+        match bridge_output::available_bridge_endpoints() {
+            Ok(endpoints) => access_state(
+                endpoints
                     .into_iter()
-                    .filter(bridge_output::SerialDeviceInfo::is_bridge_device)
-                    .map(|device| device.path),
-                "bridge serial endpoint",
+                    .filter(bridge_output::BridgeEndpoint::is_bridge_device)
+                    .filter_map(|endpoint| endpoint.serial_path().map(str::to_owned)),
+                "bridge-device endpoint",
                 check_path_access,
             ),
             Err(error) => CapabilityState::Unavailable {
-                reason: format!("cannot enumerate Linux bridge serial endpoints: {error}"),
+                reason: format!("cannot enumerate Linux bridge-device endpoints: {error}"),
             },
         }
     }
@@ -227,7 +227,7 @@ mod tests {
     #[derive(Clone)]
     struct FakeApi {
         controller: CapabilityState,
-        serial: CapabilityState,
+        bridge: CapabilityState,
         probes: Rc<RefCell<Vec<CapabilityId>>>,
     }
 
@@ -239,24 +239,24 @@ mod tests {
             self.controller.clone()
         }
 
-        fn serial_port_access(&self) -> CapabilityState {
+        fn bridge_device_access(&self) -> CapabilityState {
             self.probes
                 .borrow_mut()
-                .push(CapabilityId::SerialPortAccess);
-            self.serial.clone()
+                .push(CapabilityId::BridgeDeviceAccess);
+            self.bridge.clone()
         }
     }
 
     fn provider(
         controller: CapabilityState,
-        serial: CapabilityState,
+        bridge: CapabilityState,
     ) -> (LinuxCapabilities, Rc<RefCell<Vec<CapabilityId>>>) {
         let probes = Rc::new(RefCell::new(Vec::new()));
         (
             LinuxCapabilities {
                 api: Box::new(FakeApi {
                     controller,
-                    serial,
+                    bridge,
                     probes: Rc::clone(&probes),
                 }),
             },
@@ -265,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn requirements_follow_active_linux_hid_and_serial_features() {
+    fn requirements_follow_active_linux_hid_and_bridge_features() {
         let (provider, probes) = provider(CapabilityState::Satisfied, CapabilityState::Satisfied);
 
         assert!(provider
@@ -282,22 +282,22 @@ mod tests {
         );
         assert_eq!(
             provider.requirements(&CapabilityContext {
-                serial_output_or_firmware_enabled: true,
+                bridge_device_or_firmware_enabled: true,
                 ..CapabilityContext::default()
             }),
             [RequirementGroup::Independent(vec![
-                CapabilityId::SerialPortAccess,
+                CapabilityId::BridgeDeviceAccess,
             ])]
         );
         assert_eq!(
             provider.requirements(&CapabilityContext {
                 controller_input_enabled: true,
-                serial_output_or_firmware_enabled: true,
+                bridge_device_or_firmware_enabled: true,
                 ..CapabilityContext::default()
             }),
             [RequirementGroup::Independent(vec![
                 CapabilityId::ControllerHidAccess,
-                CapabilityId::SerialPortAccess,
+                CapabilityId::BridgeDeviceAccess,
             ])]
         );
         assert!(probes.borrow().is_empty());
@@ -310,12 +310,12 @@ mod tests {
                 reason: "hidraw denied".to_owned(),
             },
             CapabilityState::Blocked {
-                reason: "serial denied".to_owned(),
+                reason: "bridge denied".to_owned(),
             },
         );
         let context = CapabilityContext {
             controller_input_enabled: true,
-            serial_output_or_firmware_enabled: true,
+            bridge_device_or_firmware_enabled: true,
             ..CapabilityContext::default()
         };
 
@@ -326,7 +326,7 @@ mod tests {
             probes.borrow().as_slice(),
             [
                 CapabilityId::ControllerHidAccess,
-                CapabilityId::SerialPortAccess,
+                CapabilityId::BridgeDeviceAccess,
             ]
         );
         assert!(report.unsatisfied.iter().all(|requirement| matches!(
@@ -334,9 +334,9 @@ mod tests {
             Some(Remedy::Instructions { command: None, .. })
         )));
         let Some(Remedy::Instructions { text, .. }) =
-            provider.remedy(CapabilityId::SerialPortAccess)
+            provider.remedy(CapabilityId::BridgeDeviceAccess)
         else {
-            panic!("serial access must provide instructions");
+            panic!("bridge-device access must provide instructions");
         };
         assert!(!text.contains("rule in packaging/linux/"));
         assert!(text.contains("/etc/udev/rules.d"));
@@ -362,12 +362,15 @@ mod tests {
             provider(CapabilityState::Satisfied, CapabilityState::Satisfied);
 
         assert_eq!(
-            provider.request(CapabilityId::SerialPortAccess).unwrap(),
+            provider.request(CapabilityId::BridgeDeviceAccess).unwrap(),
             CapabilityState::Satisfied
         );
-        assert_eq!(probes.borrow().as_slice(), [CapabilityId::SerialPortAccess]);
+        assert_eq!(
+            probes.borrow().as_slice(),
+            [CapabilityId::BridgeDeviceAccess]
+        );
         assert!(!matches!(
-            provider.remedy(CapabilityId::SerialPortAccess),
+            provider.remedy(CapabilityId::BridgeDeviceAccess),
             Some(Remedy::RequestFromSystem)
         ));
     }

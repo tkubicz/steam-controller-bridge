@@ -17,7 +17,7 @@ pub(super) fn menu_capability_context(
     let output = output.when_virtual_hid_enabled(virtual_hid_enabled);
     CapabilityContext {
         controller_input_enabled: true,
-        serial_output_or_firmware_enabled: output == OutputPreference::BridgeDevice
+        bridge_device_or_firmware_enabled: output == OutputPreference::BridgeDevice
             || cfg!(feature = "updater"),
         virtual_output_enabled: output == OutputPreference::VirtualHid,
         desktop_bindings_enabled: true,
@@ -108,7 +108,7 @@ impl MenuApp {
                 self.activate_desktop_bindings_after_permission();
             }
             CapabilityId::ControllerHidAccess
-            | CapabilityId::SerialPortAccess
+            | CapabilityId::BridgeDeviceAccess
             | CapabilityId::VirtualGamepadAccess
             | CapabilityId::DesktopInputAccess => {
                 self.request_permissions_in_order(false);

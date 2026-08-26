@@ -25,10 +25,10 @@ PORTABLE_CRATES = (
 )
 
 FACADE_ROOTS = {
-    PurePosixPath("crates/bridge-output/src/serial_discovery.rs"),
+    PurePosixPath("crates/bridge-output/src/endpoint_discovery.rs"),
 }
 FACADE_DIRECTORIES = {
-    PurePosixPath("crates/bridge-output/src/serial_discovery"),
+    PurePosixPath("crates/bridge-output/src/endpoint_discovery"),
 }
 
 PLATFORM_CFG = re.compile(
@@ -1394,16 +1394,16 @@ def self_test() -> None:
 
     allowed = '#[cfg(target_os = "macos")]\n'
     assert file_errors(
-        PurePosixPath("crates/bridge-output/src/serial_discovery.rs"), allowed
+        PurePosixPath("crates/bridge-output/src/endpoint_discovery.rs"), allowed
     ) == []
     assert len(
         file_errors(
-            PurePosixPath("crates/bridge-output/src/serial_discovery.rs"),
+            PurePosixPath("crates/bridge-output/src/endpoint_discovery.rs"),
             "use objc2::MainThreadMarker;\n",
         )
     ) == 1
     assert file_errors(
-        PurePosixPath("crates/bridge-output/src/serial_discovery/macos.rs"),
+        PurePosixPath("crates/bridge-output/src/endpoint_discovery/macos.rs"),
         allowed + 'const DATA: &str = "/dev/cu.test";\nuse objc2::MainThreadMarker;\n',
     ) == []
     assert file_errors(PurePosixPath("crates/menu-shell/src/lib.rs"), allowed) == []

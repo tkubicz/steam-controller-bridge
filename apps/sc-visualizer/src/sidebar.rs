@@ -2,7 +2,7 @@
 
 use eframe::egui;
 
-use bridge_output::{SerialConfig, SerialOutput};
+use bridge_output::{BridgeOutput, BridgeTransportConfig};
 use controller_mapper::RightAxisSource;
 use recording::{RecordingEvent, KIND_MARKER};
 use serde_json::json;
@@ -190,7 +190,7 @@ impl Visualizer {
             labelled(ui, "Baud", |ui| {
                 ui.text_edit_singleline(&mut self.serial_config.baud);
             });
-            // Only read by `SerialOutput::open`, so toggling it mid-session
+            // Only read by `BridgeOutput::open_serial`, so toggling it mid-session
             // would silently do nothing.
             let connected = self.serial.is_some();
             ui.add_enabled_ui(!connected, |ui| {
@@ -208,12 +208,12 @@ impl Visualizer {
                         .parse()
                         .map_err(|_| "invalid baud rate".to_owned())
                         .and_then(|baud| {
-                            SerialOutput::open(
+                            BridgeOutput::open_serial(
                                 &self.serial_config.path,
                                 baud,
-                                SerialConfig {
+                                BridgeTransportConfig {
                                     packet_logging: self.serial_config.packet_logging,
-                                    ..SerialConfig::default()
+                                    ..BridgeTransportConfig::default()
                                 },
                             )
                             .map_err(|error| error.to_string())

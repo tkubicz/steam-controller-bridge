@@ -1,10 +1,10 @@
-use super::{generic_open_error, SerialError};
+use super::{generic_open_error, BridgeTransportError};
 
 pub(super) fn is_callout_port(path: &str) -> bool {
     path.starts_with("/dev/cu.")
 }
 
-pub(super) fn open_error(_path: &str, error: serialport::Error) -> SerialError {
+pub(super) fn open_error(_path: &str, error: serialport::Error) -> BridgeTransportError {
     generic_open_error(error)
 }
 
@@ -14,7 +14,7 @@ pub(super) const TEST_CALLOUT_PORT: &str = "/dev/cu.usbmodem11201";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::serial_discovery::{SerialDeviceInfo, BRIDGE_DEVICE_USB_PRODUCT};
+    use crate::endpoint_discovery::{SerialDeviceInfo, BRIDGE_DEVICE_USB_PRODUCT};
 
     #[test]
     fn excludes_dial_in_ports() {
