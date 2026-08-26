@@ -2,6 +2,7 @@
 
 use std::error::Error;
 use std::io;
+use std::path::{Path, PathBuf};
 
 use nusb::descriptors::{ConfigurationDescriptor, TransferType};
 use nusb::transfer::Direction;
@@ -51,6 +52,18 @@ fn masked_serial(serial: Option<&str>) -> String {
         .skip(serial.chars().count().saturating_sub(4))
         .collect();
     format!("****{suffix}")
+}
+
+fn usb_interface_sysfs_path(
+    device_path: &Path,
+    configuration: &str,
+    interface: u8,
+) -> SpikeResult<PathBuf> {
+    let device_name = device_path
+        .file_name()
+        .ok_or_else(|| spike_error("USB sysfs device path has no file name"))?
+        .to_string_lossy();
+    Ok(device_path.join(format!("{device_name}:{configuration}.{interface}")))
 }
 
 fn discover_topology(configuration: ConfigurationDescriptor<'_>) -> SpikeResult<Topology> {
@@ -269,7 +282,8 @@ mod linux {
     use rustix::fs::{Mode, OFlags};
 
     use super::{
-        discover_topology, masked_serial, spike_error, FeedbackObservation, SpikeResult, Topology,
+        discover_topology, masked_serial, spike_error, usb_interface_sysfs_path,
+        FeedbackObservation, SpikeResult, Topology,
     };
 
     const VENDOR_ID: u16 = 0x045e;
@@ -1032,19 +1046,22 @@ mod linux {
     }
 
     fn verify_xpad_driver(info: &DeviceInfo, interface: u8) -> SpikeResult<()> {
-        let configuration = fs::read_to_string(info.sysfs_path().join("bConfigurationValue"))?;
+        let configuration_path = info.sysfs_path().join("bConfigurationValue");
+        let configuration = fs::read_to_string(&configuration_path).map_err(|error| {
+            spike_error(format!(
+                "cannot read active USB configuration from '{}': {error}",
+                configuration_path.display()
+            ))
+        })?;
         let configuration = configuration.trim();
-        let device_name = info
-            .sysfs_path()
-            .file_name()
-            .ok_or_else(|| spike_error("USB sysfs device path has no file name"))?
-            .to_string_lossy();
-        let interface_path = info
-            .sysfs_path()
-            .parent()
-            .ok_or_else(|| spike_error("USB sysfs device path has no parent"))?
-            .join(format!("{device_name}:{configuration}.{interface}"));
-        let driver = fs::read_link(interface_path.join("driver"))?;
+        let interface_path = usb_interface_sysfs_path(info.sysfs_path(), configuration, interface)?;
+        let driver_path = interface_path.join("driver");
+        let driver = fs::read_link(&driver_path).map_err(|error| {
+            spike_error(format!(
+                "cannot read the Xbox interface driver from '{}': {error}",
+                driver_path.display()
+            ))
+        })?;
         if driver.file_name().and_then(|name| name.to_str()) != Some("xpad") {
             return Err(spike_error(format!(
                 "Xbox interface is not owned by xpad: {}",
@@ -1177,6 +1194,15 @@ mod tests {
         assert_eq!(masked_serial(None), "<none>");
         assert_eq!(masked_serial(Some("abcd")), "****");
         assert_eq!(masked_serial(Some("5E6EF905E5468F85")), "****8F85");
+    }
+
+    #[test]
+    fn interface_sysfs_path_is_a_child_of_the_canonical_device_path() {
+        let device = Path::new("/sys/devices/platform/vhci_hcd.0/usb3/3-1");
+        assert_eq!(
+            usb_interface_sysfs_path(device, "1", 2).unwrap(),
+            device.join("3-1:1.2")
+        );
     }
 
     fn configuration_descriptor(control: u8, data: u8, xinput: u8) -> Vec<u8> {
