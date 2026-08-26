@@ -25,6 +25,7 @@
     { "type": "toml", "path": "crates/desktop-input/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/platform-capabilities/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/gamepad-state/Cargo.toml", "jsonpath": "$.package.version" },
+    { "type": "toml", "path": "crates/linux-bridge-usb/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/menu-shell/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/power-monitor/Cargo.toml", "jsonpath": "$.package.version" },
     { "type": "toml", "path": "crates/virtual-gamepad/Cargo.toml", "jsonpath": "$.package.version" },

@@ -20,7 +20,9 @@ pub use bridge_transport::{
 pub use endpoint_discovery::{
     available_bridge_endpoints, available_serial_devices, available_serial_endpoints,
     available_serial_ports, BridgeEndpoint, BridgeEndpointLocator, BridgeTransportKind,
-    BridgeUsbIdentity, SerialDeviceInfo, BRIDGE_DEVICE_USB_PRODUCT, DEFAULT_BRIDGE_BAUD_RATE,
+    BridgeUsbIdentity, LinuxUsbLocator, SerialDeviceInfo, BRIDGE_DEVICE_USB_PRODUCT,
+    DEFAULT_BRIDGE_BAUD_RATE, OFFICIAL_BRIDGE_USB_MANUFACTURER, OFFICIAL_BRIDGE_USB_PRODUCT_ID,
+    OFFICIAL_BRIDGE_USB_VENDOR_ID,
 };
 
 /// The rendered prefix of [`OutputError::Configuration`]. Callers that only

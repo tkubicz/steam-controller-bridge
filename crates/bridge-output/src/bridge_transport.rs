@@ -476,6 +476,10 @@ pub struct BridgeTransportMetrics {
 #[derive(Debug)]
 pub enum BridgeTransportError {
     Io(io::Error),
+    AccessDenied(String),
+    DeviceBusy(String),
+    InvalidTopology(String),
+    Disconnected(String),
     Protocol(bridge_protocol::ProtocolError),
     InvalidState(gamepad_state::InvalidState),
     InvalidConfig(&'static str),
@@ -488,12 +492,27 @@ pub enum BridgeTransportError {
     ControlRejected { request_id: u32, code: u16 },
     RequestMismatch { expected: u32, actual: u32 },
     ReceiptMismatch,
+    UnsupportedTransport(&'static str),
 }
 
 impl std::fmt::Display for BridgeTransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(error) => write!(f, "bridge transport I/O failed: {error}"),
+            Self::AccessDenied(endpoint) => write!(
+                f,
+                "access to bridge endpoint {endpoint} was denied; install the narrowly matched Linux device-access rule and reconnect the bridge"
+            ),
+            Self::DeviceBusy(endpoint) => write!(
+                f,
+                "bridge endpoint {endpoint} is already owned by another process or driver"
+            ),
+            Self::InvalidTopology(reason) => {
+                write!(f, "official bridge USB topology is invalid: {reason}")
+            }
+            Self::Disconnected(endpoint) => {
+                write!(f, "bridge transport disconnected: {endpoint}")
+            }
             Self::Protocol(error) => write!(f, "bridge protocol failed: {error}"),
             Self::InvalidState(error) => write!(f, "invalid gamepad state: {error}"),
             Self::InvalidConfig(field) => {
@@ -521,6 +540,9 @@ impl std::fmt::Display for BridgeTransportError {
             Self::ReceiptMismatch => {
                 write!(f, "firmware acknowledged a different installation receipt")
             }
+            Self::UnsupportedTransport(transport) => {
+                write!(f, "bridge transport {transport} is unsupported on this platform")
+            }
         }
     }
 }
@@ -528,7 +550,17 @@ impl std::fmt::Display for BridgeTransportError {
 impl std::error::Error for BridgeTransportError {}
 impl From<io::Error> for BridgeTransportError {
     fn from(value: io::Error) -> Self {
-        Self::Io(value)
+        if matches!(
+            value.kind(),
+            io::ErrorKind::NotConnected
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::UnexpectedEof
+        ) {
+            Self::Disconnected(value.to_string())
+        } else {
+            Self::Io(value)
+        }
     }
 }
 impl From<serialport::Error> for BridgeTransportError {
@@ -978,6 +1010,10 @@ impl TransportFactory for NativeTransportFactory {
                     .map_err(|error| open_error(path, error))?;
                 Ok(Box::new(SerialPortTransport(port)))
             }
+            BridgeEndpointLocator::LinuxUsb(_) => {
+                crate::endpoint_discovery::linux_usb::open(endpoint)
+                    .map(|transport| Box::new(transport) as Box<dyn ByteTransport>)
+            }
         }
     }
 }
@@ -1375,6 +1411,25 @@ fn transport_service_due(now: Duration, last_poll: Option<Duration>) -> bool {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn transport_disconnects_keep_a_distinct_error_class() {
+        for kind in [
+            io::ErrorKind::NotConnected,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(matches!(
+                BridgeTransportError::from(io::Error::from(kind)),
+                BridgeTransportError::Disconnected(_)
+            ));
+        }
+        assert!(matches!(
+            BridgeTransportError::from(io::Error::from(io::ErrorKind::InvalidData)),
+            BridgeTransportError::Io(_)
+        ));
+    }
 
     #[derive(Default)]
     struct MockTransport {

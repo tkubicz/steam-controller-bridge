@@ -20,7 +20,7 @@ simulator/replay ------------> GamepadState  macOS  finite pad tick
                                    |
                    +---------------+---------------+
                    |               |               |
-             serial bridge      dump/file         mock
+            bridge device      dump/file         mock
                    |
                    v
               gamepad-facing HID
@@ -35,7 +35,8 @@ game/browser -> gamepad feedback -> bridge device -> protocol feedback
 | --- | --- |
 | `gamepad-state` | Platform-neutral gamepad state and validation. |
 | `bridge-protocol` | Integer wire format, framing, CRC, and stream recovery. |
-| `bridge-output` | Output backends and the negotiated serial session. |
+| `bridge-output` | Output backends and the negotiated transport-neutral bridge session. |
+| `linux-bridge-usb` | Exact official-bridge USB discovery, descriptor validation, and CDC interface transport. |
 | `recording` | Versioned JSONL recording and deterministic or timed replay. |
 | `steam-controller-device` | HID metadata, sessions, lifecycle events, and the exact write allowlist. |
 | `steam-controller-protocol` | Steam Controller 2 report layouts and typed decode errors. |
@@ -101,15 +102,16 @@ recovery.
 
 Live controller HID is implemented on macOS and Linux. Desktop integration and
 the shipped application remain macOS-specific; unsupported providers return
-explicit errors instead of pretending live access exists. All project-authored
-crates forbid unsafe code except `power-monitor`, whose documented IOKit/Core
-Foundation ownership is isolated behind a safe typed API.
+explicit errors instead of pretending live access exists. Unsafe platform code
+is isolated behind safe typed APIs in `power-monitor` and the single
+`USBDEVFS_DROP_PRIVILEGES` wrapper in `linux-bridge-usb`; other authored crates
+retain the workspace prohibition.
 
-Linux capability policy derives controller HID and bridge serial requirements
-independently from the active features. Its probes filter native enumeration
-results to supported endpoints before inspecting read/write access without
-opening or retaining a device; an absent device is left to normal discovery
-rather than reported as a permission failure.
+Linux capability policy derives controller HID and bridge-device requirements
+independently from active features. Its bridge probe checks an eligible serial
+node or briefly opens the exact raw USB node to validate access and topology;
+it claims no interface and retains no handle. An absent device is left to
+normal discovery rather than reported as a permission failure.
 
 The portable-core allowlist is enforced by
 [`tools/check-portable-core.py`](../tools/check-portable-core.py). Platform
@@ -121,12 +123,12 @@ data-path literals.
 The Linux HID backend choice, VM evidence, and deferred hardware paths are
 recorded in [the S0 Linux hardware-path decision](decisions/s0-linux-vm-hardware-path.md).
 
-The core host depends on the public bridge-device contract, not a board model.
-Zero-configuration serial discovery uses the exact USB product marker
-`Steam Controller Bridge`, followed by a required protocol-v1 Hello handshake;
-host providers restrict automatic candidates to safe endpoint names. An
-explicit port bypasses the marker and automatic path policy, but not the Hello
-handshake. The contract is documented in
+The core host depends on the public bridge-device protocol, not a board model.
+Zero-configuration serial discovery uses the product marker
+`Steam Controller Bridge`; Linux raw-USB discovery separately requires the
+exact official identity and descriptor topology. Both paths require a
+protocol-v1 Hello handshake. An explicit port bypasses serial marker and path
+policy, but not Hello. The contract is documented in
 [SERIAL_TRANSPORT.md](SERIAL_TRANSPORT.md) and
 [GAMEPAD_PROTOCOL.md](GAMEPAD_PROTOCOL.md).
 

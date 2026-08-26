@@ -77,7 +77,7 @@ impl PlatformCapabilities for LinuxCapabilities {
                 "For an active desktop session, install the narrowly matched {DEVICE_RULE_NAME} under /etc/udev/rules.d, or use the copy installed by your package under /usr/lib/udev/rules.d. Follow {DEVICE_ACCESS_DOCUMENTATION}. For a headless service, use the documented dedicated-group fallback. Reload udev rules and reconnect the controller, or restart the service after changing groups"
             ),
             CapabilityId::BridgeDeviceAccess => format!(
-                "For an active desktop session with the official XIAO bridge, install the narrowly matched {DEVICE_RULE_NAME} under /etc/udev/rules.d, or use the copy installed by your package under /usr/lib/udev/rules.d. Follow {DEVICE_ACCESS_DOCUMENTATION}. For a third-party bridge, add an equally narrow rule for its USB identity or use the distribution's serial-access group. For a headless service, use the documented dedicated-group fallback with an exact device match. Reload udev rules and reconnect the bridge, or start a new login or restart the service after changing groups"
+                "For an active desktop session with the official XIAO bridge, install the narrowly matched raw-USB and serial-fallback rules from {DEVICE_RULE_NAME} under /etc/udev/rules.d, or use the copy installed by your package under /usr/lib/udev/rules.d. Follow {DEVICE_ACCESS_DOCUMENTATION}. For a third-party bridge using serial, add an equally narrow rule for its USB identity or use the distribution's serial-access group. For a headless service, use the documented dedicated-group fallback with an exact device match. Reload udev rules and reconnect the bridge, or start a new login or restart the service after changing groups"
             ),
             CapabilityId::VirtualGamepadAccess
             | CapabilityId::DesktopInputAccess
@@ -148,10 +148,20 @@ impl LinuxAccessApi for NativeLinuxAccessApi {
                 "bridge-device endpoint",
                 check_path_access,
             ),
-            Err(error) => CapabilityState::Unavailable {
-                reason: format!("cannot enumerate Linux bridge-device endpoints: {error}"),
-            },
+            Err(error) => bridge_discovery_error_state(error),
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bridge_discovery_error_state(error: bridge_output::BridgeTransportError) -> CapabilityState {
+    match error {
+        bridge_output::BridgeTransportError::AccessDenied(endpoint) => CapabilityState::Blocked {
+            reason: format!("Linux bridge USB endpoint {endpoint} is not readable and writable"),
+        },
+        other => CapabilityState::Unavailable {
+            reason: format!("cannot enumerate Linux bridge-device endpoints: {other}"),
+        },
     }
 }
 
@@ -223,6 +233,21 @@ mod tests {
     use crate::evaluate_requirements;
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn raw_usb_permission_failures_are_blocked_not_unavailable() {
+        assert_eq!(
+            bridge_discovery_error_state(bridge_output::BridgeTransportError::AccessDenied(
+                "/dev/bus/usb/003/004".to_owned(),
+            )),
+            CapabilityState::Blocked {
+                reason:
+                    "Linux bridge USB endpoint /dev/bus/usb/003/004 is not readable and writable"
+                        .to_owned(),
+            }
+        );
+    }
 
     #[derive(Clone)]
     struct FakeApi {

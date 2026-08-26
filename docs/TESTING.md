@@ -27,8 +27,8 @@ cargo build --workspace --all-targets
 make -C firmware/xiao-nrf52840 test
 ```
 
-On a Linux runner with no attached supported controller or bridge serial
-device, also run the explicitly ignored native smoke targets:
+On a Linux runner with no attached supported controller or bridge device, also
+run the explicitly ignored native smoke targets:
 
 ```bash
 cargo test -p steam-controller-device --test linux_no_device -- --ignored

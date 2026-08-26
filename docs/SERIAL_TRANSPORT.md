@@ -6,6 +6,12 @@ independent implementation does not need Seeed USB identifiers, a Lynxware
 manufacturer string, or XIAO hardware. Protocol v1 and its framing remain
 unchanged.
 
+On Linux, the official XIAO firmware may instead be opened directly through its
+CDC USB interfaces. That native backend is restricted to the exact official
+identity and validated CDC/XInput topology, then exposes the same byte stream
+to the shared protocol session. Third-party implementations continue using the
+serial contract below.
+
 ## Discovery and opt-in identity
 
 Zero-configuration discovery considers macOS callout ports (`/dev/cu.*`) and
@@ -21,9 +27,10 @@ Hello exchange. A marker is not proof of protocol compatibility. With
 product marker but never bypasses Hello negotiation or protocol validation.
 
 The runtime remembers the stable USB serial identity of the selected bridge
-device and prefers it after the host assigns a different port path. If multiple
+device and prefers it after the host assigns a different locator. If multiple
 candidates complete Hello and no remembered identity selects exactly one, the
-runtime reports an ambiguity and requires `--port PATH`.
+runtime reports an ambiguity. `--port PATH` can select among serial candidates;
+a raw-USB ambiguity requires disconnecting the unused bridge.
 
 Implementers who cannot or do not want to publish the discovery marker can
 therefore remain fully usable through the explicit-port path.

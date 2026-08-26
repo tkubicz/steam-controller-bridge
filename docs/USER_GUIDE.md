@@ -549,10 +549,10 @@ needed. Live mode automatically:
 - observes candidates without feature writes until exactly one emits a complete
   valid `0x42` or `0x45` controller-state report;
 - filters macOS `/dev/cu.*` callout ports or Linux `/dev/ttyACM<N>` and
-  `/dev/ttyUSB<N>` endpoints by the exact USB product marker
-  `Steam Controller Bridge`, regardless of VID, PID, or manufacturer;
+  `/dev/ttyUSB<N>` endpoints by the board-neutral product marker, and on Linux
+  also validates the exact official bridge as a direct raw-USB candidate;
 - completes the protocol-v1 Hello handshake before selecting a bridge device;
-- remembers its stable USB serial number across a changed host port path; and
+- remembers its stable USB serial number across a changed host locator; and
 - waits and rescans every 500 ms when hardware is absent. Once supported
   collections are already open, report queues are still checked every 500 ms
   while unchanged metadata scans back off from two to at most ten seconds.
@@ -560,9 +560,10 @@ needed. Live mode automatically:
 If more than one supported source produces controller states, the bridge
 refuses the ambiguity, lists transport/product/serial/index, and asks for
 `--index N`. An idle connected Puck does not conflict with an active Bluetooth
-controller. If more than one bridge device completes Hello, use `--port PATH`.
-An explicit port bypasses the USB product marker and automatic path policy but
-still requires Hello.
+controller. If more than one bridge device completes Hello, disconnect the
+unused device. When every candidate is serial, `--port PATH` can select one.
+An explicit port bypasses the serial product marker and automatic path policy
+but still requires Hello.
 Explicit forms are:
 
 ```bash
@@ -929,8 +930,8 @@ The bridge intentionally does not prefer Puck or Bluetooth and does not pick
 the first device. Quit the bridge, run `target/release/sc-probe list`, identify
 the intended active `ff00:0001` collection from the listed transport, product,
 serial, and index, then restart with `./sc-bridge --index N`. For gamepad-output
-ambiguity, disconnect the unused device or restart with
-`./sc-bridge --port PATH`.
+ambiguity, disconnect the unused device. If the listed candidates are serial
+endpoints, `./sc-bridge --port PATH` can select one.
 
 ### The bridge stays in `Waiting`
 
@@ -939,9 +940,10 @@ connection` means no exact supported collection is enumerated. `waiting for
 valid controller state` means collections opened but no complete state stream
 was observed; wake the controller and verify its solid white Puck LED or solid
 blue Bluetooth LED. `Waiting for a Steam Controller Bridge protocol device`
-means no eligible host serial endpoint has the exact USB product marker. A
-Hello-handshake message means a candidate port exists but protocol negotiation
-failed; close other serial tools and reflash current firmware if needed.
+means no eligible marked serial endpoint or exact official raw-USB endpoint was
+found. A Hello-handshake message means a candidate exists but protocol
+negotiation failed; close competing tools and reflash current firmware if
+needed.
 
 ### `A` still types Space or a touchpad moves the pointer
 
@@ -957,8 +959,10 @@ failed; close other serial tools and reflash current firmware if needed.
 If a refresh fails, the bridge intentionally neutralizes gamepad output and exits
 rather than continuing with duplicate keyboard/gamepad input.
 
-### No XIAO serial port appears
+### No XIAO bridge endpoint appears
 
+- On Linux, no `/dev/ttyACM*` is required; install the checked-in device-access
+  rule, reconnect the XIAO, and use automatic discovery.
 - Use a known data-capable cable and approve the USB accessory in macOS.
 - Quickly press the tiny reset button beside the USB-C connector twice, then
   check `arduino-cli board list` again.
