@@ -43,17 +43,18 @@ identity and backs the global lookup off from two seconds to a ten-second
 ceiling while it is waiting to open the collection; open retries continue every
 500 ms. It does not rebuild the full-system HID metadata on every retry.
 
-Bridge-device discovery enumerates serial metadata rather than relying on a
-specific board identity. An automatic candidate must be a macOS `/dev/cu.*`
-callout port or a Linux `/dev/ttyACM<N>` or `/dev/ttyUSB<N>` endpoint with the
-exact USB product marker `Steam Controller Bridge`, then complete the
-protocol-v1 Hello handshake. VID, PID, manufacturer, and board model are not
-part of this core contract. This rejects the Puck's own `usbmodem` port without
-excluding independent implementations. The runtime remembers the stable USB
-serial number so it can prefer the same implementation after its path changes.
-Multiple Hello-valid devices require `--port PATH`. An explicit port bypasses
-the product marker and automatic path policy, but still requires a valid Hello
-handshake. Linux permission failures point to a narrow device udev rule or the
+Bridge-device discovery accepts serial endpoints with the board-neutral product
+marker `Steam Controller Bridge`. These are macOS `/dev/cu.*` callout ports or
+Linux `/dev/ttyACM<N>` and `/dev/ttyUSB<N>` endpoints; VID, PID, manufacturer,
+and board model are not part of that contract. Linux additionally recognizes
+the exact official `045e:028e`, `Lynxware`, `Steam Controller Bridge` USB
+identity, validates its CDC/XInput descriptor topology, preserves `xpad`
+ownership, and uses the CDC interfaces directly when no tty exists. A matching
+serial endpoint is preferred over the raw candidate with the same stable
+serial. Every candidate must complete protocol-v1 Hello. The runtime remembers
+the stable serial across path or USB-address changes. An explicit `--port`
+bypasses only serial marker/path filtering. Linux permission failures point to
+the narrow device rule; third-party serial devices may also use the
 distribution's serial-access group.
 
 Overrides remain available:
@@ -65,7 +66,7 @@ Overrides remain available:
 ./sc-bridge --output dump
 ```
 
-Automatic shutdown is available only with live serial output to a ready bridge
+Automatic shutdown is available only with live output to a ready bridge
 device:
 
 ```bash

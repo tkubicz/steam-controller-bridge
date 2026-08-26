@@ -60,8 +60,8 @@ use std::time::{Duration, Instant};
 
 use bridge_core::{BridgeEngine, ProcessOutcome};
 use bridge_output::{
-    available_bridge_endpoints, BridgeEndpoint, BridgeOutput, DumpOutput, FileOutput,
-    GamepadOutput, MockOutput, OutputError, OutputFeedback,
+    available_bridge_endpoints, available_serial_endpoints, BridgeEndpoint, BridgeOutput,
+    DumpOutput, FileOutput, GamepadOutput, MockOutput, OutputError, OutputFeedback,
 };
 use desktop_bindings::{
     bindable_mask, BindingEngine, BindingProfile, DesktopInputSink, DesktopInputSnapshot,

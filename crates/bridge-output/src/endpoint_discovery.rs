@@ -2,6 +2,7 @@ use crate::bridge_transport::BridgeTransportError;
 
 #[cfg(target_os = "linux")]
 mod linux;
+pub(crate) mod linux_usb;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -18,11 +19,16 @@ use portable as platform;
 /// discovery. Vendor, product, and manufacturer IDs remain unrestricted for
 /// independent protocol implementations.
 pub const BRIDGE_DEVICE_USB_PRODUCT: &str = "Steam Controller Bridge";
+pub use linux_bridge_usb::{
+    Locator as LinuxUsbLocator, MANUFACTURER as OFFICIAL_BRIDGE_USB_MANUFACTURER,
+    PRODUCT_ID as OFFICIAL_BRIDGE_USB_PRODUCT_ID, VENDOR_ID as OFFICIAL_BRIDGE_USB_VENDOR_ID,
+};
 pub const DEFAULT_BRIDGE_BAUD_RATE: u32 = 115_200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeTransportKind {
     SerialPort,
+    LinuxUsb,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +42,7 @@ pub struct BridgeUsbIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeEndpointLocator {
     SerialPort { path: String, baud_rate: u32 },
+    LinuxUsb(LinuxUsbLocator),
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -78,6 +85,22 @@ impl BridgeEndpoint {
     }
 
     #[must_use]
+    pub fn official_linux_usb(locator: LinuxUsbLocator, stable_id: impl Into<String>) -> Self {
+        let usb_identity = BridgeUsbIdentity {
+            vendor_id: OFFICIAL_BRIDGE_USB_VENDOR_ID,
+            product_id: OFFICIAL_BRIDGE_USB_PRODUCT_ID,
+            manufacturer: Some(OFFICIAL_BRIDGE_USB_MANUFACTURER.to_owned()),
+            product: Some(BRIDGE_DEVICE_USB_PRODUCT.to_owned()),
+        };
+        Self {
+            locator: BridgeEndpointLocator::LinuxUsb(locator),
+            stable_id: Some(stable_id.into()),
+            display_label: format!("{BRIDGE_DEVICE_USB_PRODUCT} (USB)"),
+            usb_identity: Some(usb_identity),
+        }
+    }
+
+    #[must_use]
     pub fn with_usb_identity(mut self, usb_identity: BridgeUsbIdentity) -> Self {
         self.usb_identity = Some(usb_identity);
         self
@@ -113,6 +136,7 @@ impl BridgeEndpoint {
     pub const fn kind(&self) -> BridgeTransportKind {
         match self.locator {
             BridgeEndpointLocator::SerialPort { .. } => BridgeTransportKind::SerialPort,
+            BridgeEndpointLocator::LinuxUsb(_) => BridgeTransportKind::LinuxUsb,
         }
     }
 
@@ -140,16 +164,19 @@ impl BridgeEndpoint {
     pub fn serial_path(&self) -> Option<&str> {
         match &self.locator {
             BridgeEndpointLocator::SerialPort { path, .. } => Some(path),
+            BridgeEndpointLocator::LinuxUsb(_) => None,
         }
     }
 
     #[must_use]
     pub fn with_serial_baud_rate(mut self, baud_rate: u32) -> Self {
-        let BridgeEndpointLocator::SerialPort {
+        if let BridgeEndpointLocator::SerialPort {
             baud_rate: endpoint_baud_rate,
             ..
-        } = &mut self.locator;
-        *endpoint_baud_rate = baud_rate;
+        } = &mut self.locator
+        {
+            *endpoint_baud_rate = baud_rate;
+        }
         self
     }
 
@@ -221,7 +248,8 @@ pub fn available_serial_devices() -> Result<Vec<SerialDeviceInfo>, BridgeTranspo
 /// # Errors
 /// Returns an error when a native transport backend cannot enumerate endpoints.
 pub fn available_bridge_endpoints() -> Result<Vec<BridgeEndpoint>, BridgeTransportError> {
-    available_serial_endpoints()
+    let serial = available_serial_endpoints()?;
+    linux_usb::with_official_usb_endpoints(serial)
 }
 
 /// Enumerates native serial bridge transport endpoints.
@@ -323,5 +351,29 @@ mod tests {
 
         assert!(debug.contains("stable_id_present: true"));
         assert!(!debug.contains("TESTSERIAL0000"));
+    }
+
+    #[test]
+    fn raw_usb_endpoint_keeps_identity_separate_from_its_ephemeral_locator() {
+        let locator = LinuxUsbLocator {
+            bus_number: 3,
+            device_address: 4,
+            control_interface: 0,
+            data_interface: 1,
+            xinput_interface: 2,
+            bulk_in_endpoint: 0x82,
+            bulk_out_endpoint: 0x01,
+        };
+        let endpoint = BridgeEndpoint::official_linux_usb(locator, "TESTSERIAL0000")
+            .with_serial_baud_rate(9_600);
+
+        assert_eq!(endpoint.kind(), BridgeTransportKind::LinuxUsb);
+        assert_eq!(endpoint.stable_id(), Some("TESTSERIAL0000"));
+        assert_eq!(
+            endpoint.locator(),
+            &BridgeEndpointLocator::LinuxUsb(locator)
+        );
+        assert_eq!(endpoint.serial_path(), None);
+        assert!(endpoint.is_bridge_device());
     }
 }

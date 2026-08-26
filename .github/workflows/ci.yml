@@ -36,8 +36,8 @@ jobs:
 
   test:
     # macOS is the shipped product target. Ubuntu is intentionally retained as
-    # a portability gate and now builds the Linux controller-HID provider;
-    # passing it does not claim that the complete bridge or menu supports Linux.
+    # a portability gate and builds the Linux controller-HID and bridge-device
+    # providers; passing it does not replace live Linux hardware acceptance.
     strategy:
       # Never let one platform's failure hide the other platform's result.
       fail-fast: false
@@ -98,7 +98,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Audit shipped macOS dependency graph
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
-      - name: Audit Linux HID and serial capability dependency graph
+      - name: Audit Linux HID and bridge-device capability dependency graph
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           manifest-path: crates/platform-capabilities/Cargo.toml

@@ -15,8 +15,13 @@ RULE_FILENAME = "60-steam-controller-bridge.rules"
 README_PATH = ROOT / "packaging/linux/README.md"
 IDENTITY_PATH = ROOT / "crates/steam-controller-device/src/lib.rs"
 FIRMWARE_TARGETS_PATH = ROOT / "crates/release-updater/firmware-targets.json"
+BRIDGE_BACKEND_PATH = ROOT / "crates/linux-bridge-usb/src/lib.rs"
 RUST_U16_CONSTANT = re.compile(
     r"^pub const (?P<name>[A-Z0-9_]+): u16 = 0x(?P<value>[0-9a-fA-F]+);$",
+    re.MULTILINE,
+)
+RUST_STRING_CONSTANT = re.compile(
+    r'^pub const (?P<name>[A-Z0-9_]+): &str = "(?P<value>[^"]+)";$',
     re.MULTILINE,
 )
 REQUIRED_IDENTITIES = (
@@ -70,15 +75,54 @@ def bridge_identity(source: str) -> tuple[int, int, str, str]:
         raise ValueError(f"invalid application identity for {BRIDGE_TARGET_ID}") from error
 
 
-def bridge_rule(source: str, assignment: str) -> str:
+def bridge_backend_identity(source: str) -> tuple[int, int, str, str]:
+    numbers = {
+        match.group("name"): int(match.group("value"), 16)
+        for match in RUST_U16_CONSTANT.finditer(source)
+    }
+    strings = {
+        match.group("name"): match.group("value")
+        for match in RUST_STRING_CONSTANT.finditer(source)
+    }
+    try:
+        return (
+            numbers["VENDOR_ID"],
+            numbers["PRODUCT_ID"],
+            strings["MANUFACTURER"],
+            strings["PRODUCT"],
+        )
+    except KeyError as error:
+        raise ValueError(f"missing Linux bridge USB identity constant: {error.args[0]}") from error
+
+
+def bridge_backend_errors(backend_source: str, firmware_targets: str) -> list[str]:
+    try:
+        backend = bridge_backend_identity(backend_source)
+        catalog = bridge_identity(firmware_targets)
+    except (ValueError, json.JSONDecodeError) as error:
+        return [str(error)]
+    if backend != catalog:
+        return [f"Linux bridge USB identity {backend!r} does not match catalog {catalog!r}"]
+    return []
+
+
+def bridge_rules(source: str, assignment: str) -> tuple[str, str]:
     vendor, product, manufacturer, product_name = bridge_identity(source)
-    return (
+    raw_usb = (
+        f'SUBSYSTEM=="usb", ENV{{DEVTYPE}}=="usb_device", '
+        f'ATTR{{idVendor}}=="{vendor:04x}", '
+        f'ATTR{{idProduct}}=="{product:04x}", '
+        f'ATTR{{manufacturer}}=="{manufacturer}", '
+        f'ATTR{{product}}=="{product_name}", {assignment}'
+    )
+    serial = (
         f'SUBSYSTEM=="tty", ATTRS{{idVendor}}=="{vendor:04x}", '
         f'ATTRS{{idProduct}}=="{product:04x}", '
         f'ATTRS{{manufacturer}}=="{manufacturer}", '
         f'ATTRS{{product}}=="{product_name}", {assignment}, '
         'ENV{ID_MM_DEVICE_IGNORE}="1"'
     )
+    return raw_usb, serial
 
 
 def expected_rules(
@@ -88,7 +132,7 @@ def expected_rules(
 ) -> tuple[str, ...]:
     return (
         *controller_rules(identity_source, assignment),
-        bridge_rule(firmware_targets, assignment),
+        *bridge_rules(firmware_targets, assignment),
     )
 
 
@@ -194,6 +238,18 @@ def self_test() -> None:
             ]
         }
     )
+    backend_source = "\n".join(
+        (
+            "pub const VENDOR_ID: u16 = 0x045e;",
+            "pub const PRODUCT_ID: u16 = 0x028e;",
+            'pub const MANUFACTURER: &str = "Lynxware";',
+            'pub const PRODUCT: &str = "Steam Controller Bridge";',
+        )
+    )
+    assert bridge_backend_errors(backend_source, firmware_targets) == []
+    assert bridge_backend_errors(
+        backend_source.replace("0x028e", "0x028f"), firmware_targets
+    )
     expected = expected_rules(
         identities,
         firmware_targets,
@@ -207,8 +263,8 @@ def self_test() -> None:
     )
     assert duplicate == [f"duplicate device access rule: {expected[0]}"]
 
-    missing = policy_errors("\n".join(expected[:2]), identities, firmware_targets)
-    assert missing == [f"missing device access rule: {expected[2]}"]
+    missing = policy_errors("\n".join(expected[:3]), identities, firmware_targets)
+    assert missing == [f"missing device access rule: {expected[3]}"]
 
     broad = policy_errors(
         "\n".join(
@@ -243,11 +299,11 @@ def self_test() -> None:
     assert policy_errors(exact, drifted, firmware_targets)
 
     broad_bridge = expected[2].replace(
-        ', ATTRS{manufacturer}=="Lynxware", ATTRS{product}=="Steam Controller Bridge"',
+        ', ATTR{manufacturer}=="Lynxware", ATTR{product}=="Steam Controller Bridge"',
         "",
     )
     assert policy_errors(
-        "\n".join((*expected[:2], broad_bridge)), identities, firmware_targets
+        "\n".join((*expected[:2], broad_bridge, expected[3])), identities, firmware_targets
     )
     assert policy_errors(
         exact.replace(', ENV{ID_MM_DEVICE_IGNORE}="1"', ""),
@@ -307,6 +363,11 @@ def main() -> int:
             README_PATH.read_text(encoding="utf-8"),
             identity_source,
             firmware_targets,
+        )
+    )
+    errors.extend(
+        bridge_backend_errors(
+            BRIDGE_BACKEND_PATH.read_text(encoding="utf-8"), firmware_targets
         )
     )
     if errors:

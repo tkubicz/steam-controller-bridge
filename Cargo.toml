@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/app-paths",
     "crates/gamepad-state",
+    "crates/linux-bridge-usb",
     "crates/menu-shell",
     "crates/power-monitor",
     "crates/virtual-gamepad",
@@ -63,6 +64,8 @@ tiny-skia = { version = "0.12.0", default-features = false, features = ["simd", 
 winit = "0.30.13"
 serialport = { version = "4.9.0", default-features = false }
 getrandom = "0.4.3"
+nusb = "0.2.7"
+linux-raw-sys = { version = "0.12.1", features = ["ioctl"] }
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 block2 = "0.6.2"
 dispatch2 = "0.3.1"

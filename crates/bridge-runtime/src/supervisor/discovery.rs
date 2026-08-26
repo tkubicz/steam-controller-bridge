@@ -30,7 +30,11 @@ impl Supervisor {
             };
         }
 
-        let endpoints = match available_bridge_endpoints() {
+        let endpoints = match discover_output_endpoints_with(
+            &self.config.bridge_endpoint,
+            available_bridge_endpoints,
+            available_serial_endpoints,
+        ) {
             Ok(endpoints) => endpoints,
             Err(error) => {
                 return OutputDiscovery::Wait {

@@ -81,15 +81,15 @@ devices can implement the bridge contract without inheriting XIAO identity.
 - macOS 13 or later
 - a Steam Controller 2
 - the official Puck **or** a direct Bluetooth connection to the Mac
-- a protocol-compatible serial bridge device connected by USB; today the
-  project supplies firmware for XIAO nRF52840 and XIAO nRF52840 Sense
+- a protocol-compatible bridge device connected by USB; today the project
+  supplies firmware for XIAO nRF52840 and XIAO nRF52840 Sense
 
 The bridge device makes the controller visible through Apple's normal
 game-controller stack and keeps the current output independent of macOS
 virtual-device entitlements. Zero-configuration implementations use the exact
 USB product marker `Steam Controller Bridge` and complete the protocol-v1 Hello
-handshake; implementations without the marker can be selected with an explicit
-serial port.
+handshake. Linux opens the official XIAO directly through USB when no CDC tty
+exists; serial implementations without the marker can be selected explicitly.
 
 ## Get started
 

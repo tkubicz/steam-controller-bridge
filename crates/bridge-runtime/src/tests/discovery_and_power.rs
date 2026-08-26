@@ -394,6 +394,31 @@ fn remembered_output_serial_survives_a_changed_port_path() {
 }
 
 #[test]
+fn raw_usb_output_ambiguity_never_recommends_a_serial_only_selector() {
+    let raw = BridgeEndpoint::official_linux_usb(
+        bridge_output::LinuxUsbLocator {
+            bus_number: 3,
+            device_address: 4,
+            control_interface: 0,
+            data_interface: 1,
+            xinput_interface: 2,
+            bulk_in_endpoint: 0x82,
+            bulk_out_endpoint: 0x01,
+        },
+        "raw-device",
+    );
+    let valid = vec![
+        (bridge_endpoint("serial:one", "serial-device"), ()),
+        (raw, ()),
+    ];
+
+    let message = output_ambiguity_message(&valid);
+
+    assert!(message.contains("disconnect all but one bridge device"));
+    assert!(!message.contains("--port"));
+}
+
+#[test]
 fn automatic_output_requires_the_marker_but_an_explicit_port_bypasses_it() {
     let explicit_only = BridgeEndpoint::serial_port("serial:explicit", 115_200)
         .with_stable_id("explicit")
@@ -418,6 +443,20 @@ fn automatic_output_requires_the_marker_but_an_explicit_port_bypasses_it() {
         ),
         vec![explicit_only]
     );
+}
+
+#[test]
+fn explicit_serial_output_bypasses_raw_usb_discovery() {
+    let explicit = BridgeEndpoint::serial_port("serial:explicit", 115_200);
+
+    let endpoints = discover_output_endpoints_with(
+        &BridgeEndpointSelection::SerialPort("serial:explicit".to_owned()),
+        || -> Result<Vec<BridgeEndpoint>, ()> { panic!("raw USB discovery must not run") },
+        || Ok(vec![explicit.clone()]),
+    )
+    .unwrap();
+
+    assert_eq!(endpoints, vec![explicit]);
 }
 
 #[test]

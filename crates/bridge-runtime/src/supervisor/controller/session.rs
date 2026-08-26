@@ -282,6 +282,17 @@ pub(crate) fn output_candidates(
     }
 }
 
+pub(crate) fn discover_output_endpoints_with<E>(
+    selection: &BridgeEndpointSelection,
+    discover_all: impl FnOnce() -> Result<Vec<BridgeEndpoint>, E>,
+    discover_serial: impl FnOnce() -> Result<Vec<BridgeEndpoint>, E>,
+) -> Result<Vec<BridgeEndpoint>, E> {
+    match selection {
+        BridgeEndpointSelection::AutoBridgeDevice => discover_all(),
+        BridgeEndpointSelection::SerialPort(_) => discover_serial(),
+    }
+}
+
 pub(crate) fn choose_output_index<T>(
     valid: &[(BridgeEndpoint, T)],
     preferred_stable_id: Option<&str>,
