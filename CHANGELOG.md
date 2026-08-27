@@ -5,6 +5,30 @@ Published history may be corrected directly when this file and the matching
 GitHub Release are updated together. Versions follow [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.9.0...v1.10.0) (2026-08-27)
+
+
+### Features
+
+* **caps:** map Linux HID and serial requirements from active features ([#73](https://github.com/tkubicz/steam-controller-bridge/issues/73)) ([7c68a8f](https://github.com/tkubicz/steam-controller-bridge/commit/7c68a8fee8f48ea04a610f15faaa7fa80221ed0e))
+* configurable trackpad motion and user-defined pad regions ([1c01758](https://github.com/tkubicz/steam-controller-bridge/commit/1c01758ff143e45253e3b8e4dc0c06b1c6e7c20b))
+* **device:** enable the hidapi linux-native backend ([#67](https://github.com/tkubicz/steam-controller-bridge/issues/67)) ([66d5dc3](https://github.com/tkubicz/steam-controller-bridge/commit/66d5dc3785875f3fceb52a1213e2371098690528))
+* **device:** report conflicting Linux kernel HID ownership ([#69](https://github.com/tkubicz/steam-controller-bridge/issues/69)) ([2915c3b](https://github.com/tkubicz/steam-controller-bridge/commit/2915c3bb9d769be8ddd903438151db68de04668d))
+* **menu:** offer recovery when the profile store cannot be read ([1c01758](https://github.com/tkubicz/steam-controller-bridge/commit/1c01758ff143e45253e3b8e4dc0c06b1c6e7c20b))
+* **output:** add direct Linux USB bridge transport ([#77](https://github.com/tkubicz/steam-controller-bridge/issues/77)) ([31dd7a9](https://github.com/tkubicz/steam-controller-bridge/commit/31dd7a911cf6487f13d68ca3ef4111fdc65c3ef1))
+* **packaging:** add narrowly matched Linux controller udev rules ([#68](https://github.com/tkubicz/steam-controller-bridge/issues/68)) ([d0e70e2](https://github.com/tkubicz/steam-controller-bridge/commit/d0e70e2d2de1d1c06793aa6dc606fd39b6c73238))
+* **packaging:** add narrowly matched official bridge-device serial rules ([#72](https://github.com/tkubicz/steam-controller-bridge/issues/72)) ([ecfdb99](https://github.com/tkubicz/steam-controller-bridge/commit/ecfdb99b3c740a80db3fb6eed29afd946ccd8ec7))
+* **serial:** add Linux bridge-port discovery and diagnostics ([#70](https://github.com/tkubicz/steam-controller-bridge/issues/70)) ([d7ebeb1](https://github.com/tkubicz/steam-controller-bridge/commit/d7ebeb19832eae143f70bfe9d644eee906eab320))
+* **updater:** support Linux raw USB firmware updates ([5b89080](https://github.com/tkubicz/steam-controller-bridge/commit/5b89080ceb1b30b5568a3d76da2223015fa4167c))
+
+
+### Bug Fixes
+
+* **firmware:** bound stale rumble feedback ([5c9265e](https://github.com/tkubicz/steam-controller-bridge/commit/5c9265ecca77fed0833a754bbed5739c05c8dcb4))
+* **linux:** preserve watchdog-safe USB writes and Xbox 360 driver compatibility ([5b89080](https://github.com/tkubicz/steam-controller-bridge/commit/5b89080ceb1b30b5568a3d76da2223015fa4167c))
+* proper color scheme when macOS light mode is enabled ([#41](https://github.com/tkubicz/steam-controller-bridge/issues/41)) ([a68a2f8](https://github.com/tkubicz/steam-controller-bridge/commit/a68a2f83527a94f63f5a3e2561791a28415ac0d8))
+* **updater:** gate local update sources explicitly ([#55](https://github.com/tkubicz/steam-controller-bridge/issues/55)) ([7578549](https://github.com/tkubicz/steam-controller-bridge/commit/757854924d40fe3a97cb30baad7d7d3b0df66ae2))
+
 ## [1.9.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.8.0...v1.9.0) (2026-08-13)
 
 
