@@ -6,9 +6,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
-app-paths = { path = "../app-paths" }
+app-paths = { path = "../../host/app-paths" }
 base64.workspace = true
-bridge-output = { path = "../bridge-output" }
+bridge-output = { path = "../../bridge/bridge-output" }
 clap.workspace = true
 ed25519-dalek.workspace = true
 fs4.workspace = true

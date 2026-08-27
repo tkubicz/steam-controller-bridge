@@ -133,7 +133,7 @@ and exactly one marker.
 
 Bump `kFirmwareRevision` in the same commit as any behavior-affecting firmware
 change. Revision and compatibility policy belongs to this target's descriptor
-in `crates/release-updater/src/targets.rs`; the board-neutral protocol and
+in `crates/app/release-updater/src/targets.rs`; the board-neutral protocol and
 runtime do not apply a global minimum revision.
 
 The active-low RGB LED indicates:

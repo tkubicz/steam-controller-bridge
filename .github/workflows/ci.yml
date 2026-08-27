@@ -101,7 +101,7 @@ jobs:
       - name: Audit Linux HID and bridge-device capability dependency graph
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
-          manifest-path: crates/platform-capabilities/Cargo.toml
+          manifest-path: crates/host/platform-capabilities/Cargo.toml
           arguments: >-
             --all-features
             --target x86_64-unknown-linux-gnu

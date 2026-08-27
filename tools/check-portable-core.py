@@ -10,25 +10,25 @@ import tempfile
 from pathlib import Path, PurePosixPath
 
 
-PORTABLE_CRATES = (
-    "bridge-core",
-    "bridge-output",
-    "bridge-protocol",
-    "bridge-runtime",
-    "controller-mapper",
-    "desktop-bindings",
-    "gamepad-state",
-    "profile-picker",
-    "recording",
-    "steam-controller-discovery",
-    "steam-controller-protocol",
+PORTABLE_CRATE_DIRECTORIES = (
+    PurePosixPath("crates/bridge/bridge-core"),
+    PurePosixPath("crates/bridge/bridge-output"),
+    PurePosixPath("crates/bridge/bridge-protocol"),
+    PurePosixPath("crates/bridge/bridge-runtime"),
+    PurePosixPath("crates/bridge/gamepad-state"),
+    PurePosixPath("crates/controller/controller-mapper"),
+    PurePosixPath("crates/controller/steam-controller-discovery"),
+    PurePosixPath("crates/controller/steam-controller-protocol"),
+    PurePosixPath("crates/app/desktop-bindings"),
+    PurePosixPath("crates/app/profile-picker"),
+    PurePosixPath("crates/app/recording"),
 )
 
 FACADE_ROOTS = {
-    PurePosixPath("crates/bridge-output/src/endpoint_discovery.rs"),
+    PurePosixPath("crates/bridge/bridge-output/src/endpoint_discovery.rs"),
 }
 FACADE_DIRECTORIES = {
-    PurePosixPath("crates/bridge-output/src/endpoint_discovery"),
+    PurePosixPath("crates/bridge/bridge-output/src/endpoint_discovery"),
 }
 
 PLATFORM_CFG = re.compile(
@@ -130,9 +130,7 @@ def is_native_package(package: str) -> bool:
 def is_portable_file(path: PurePosixPath) -> bool:
     """Return whether a source or manifest belongs to the portable allowlist."""
     return (
-        len(path.parts) >= 3
-        and path.parts[0] == "crates"
-        and path.parts[1] in PORTABLE_CRATES
+        any(directory in path.parents for directory in PORTABLE_CRATE_DIRECTORIES)
         and (path.name == "Cargo.toml" or path.suffix == ".rs")
     )
 
@@ -942,7 +940,7 @@ def manifest_policy_errors(
         if not table and key and key[0] == "target":
             errors.append(f"{path}:{line_number}: platform cfg: {source}")
         allowed_facade = (
-            path == PurePosixPath("crates/bridge-output/Cargo.toml")
+            path == PurePosixPath("crates/bridge/bridge-output/Cargo.toml")
             and table == ("dependencies",)
             and key == ("linux-bridge-usb",)
             and not any(
@@ -1038,8 +1036,8 @@ def file_errors(
 
 def source_files(root: Path) -> list[Path]:
     files: list[Path] = []
-    for crate in PORTABLE_CRATES:
-        directory = root / "crates" / crate
+    for crate in PORTABLE_CRATE_DIRECTORIES:
+        directory = root / crate
         files.append(directory / "Cargo.toml")
         files.extend(sorted(directory.rglob("*.rs")))
     return files
@@ -1059,7 +1057,7 @@ def validate(root: Path) -> list[str]:
 
 
 def self_test() -> None:
-    core = PurePosixPath("crates/bridge-runtime/src/runtime.rs")
+    core = PurePosixPath("crates/bridge/bridge-runtime/src/runtime.rs")
     errors = file_errors(
         core,
         '#[cfg(target_os = "macos")]\n'
@@ -1184,7 +1182,7 @@ def self_test() -> None:
     assert file_errors(core, 'let text = ["a", "b"].join("Library");\n') == []
 
     manifest_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '[target.\'cfg(target_os = "windows")\'.dependencies]\nwindows-sys = "0.60"\n',
     )
     assert len(manifest_errors) == 2
@@ -1194,17 +1192,17 @@ def self_test() -> None:
             f'["target" . "{target}" . "dependencies"]',
         ):
             target_errors = file_errors(
-                PurePosixPath("crates/bridge-core/Cargo.toml"),
+                PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
                 f'{table}\nserde = "1"\n',
             )
             assert len(target_errors) == 1
             assert "platform cfg" in target_errors[0]
     assert file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '# cfg(target_os = "windows")\n',
     ) == []
     assert file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         'description = "cfg(target_os = windows) is unsupported"\n',
     ) == []
 
@@ -1223,96 +1221,96 @@ def self_test() -> None:
         "zbus",
     ):
         dependency_errors = file_errors(
-            PurePosixPath("crates/bridge-core/Cargo.toml"),
+            PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
             f'[dependencies]\n{dependency} = "1"\n',
         )
         assert len(dependency_errors) == 1
         assert "native backend detail" in dependency_errors[0]
     alias_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '[dependencies]\nnative = { package = "windows", version = "1" }\n',
     )
     assert len(alias_errors) == 1
     assert "native backend detail" in alias_errors[0]
     single_quote_alias_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         "[dependencies]\nnative = { package = 'windows', version = '1' }\n",
     )
     assert len(single_quote_alias_errors) == 1
     assert "native backend detail" in single_quote_alias_errors[0]
     quoted_key_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '[dependencies]\n"windows" = "1"\n',
     )
     assert len(quoted_key_errors) == 1
     assert "native backend detail" in quoted_key_errors[0]
     direct_workspace_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         "[dependencies]\nwindows . workspace = true\n",
     )
     assert len(direct_workspace_errors) == 1
     direct_table_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         "[dependencies . windows]\nworkspace = true\n",
     )
     assert len(direct_table_errors) == 1
     quoted_direct_table_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '["dependencies" . "windows"]\nworkspace = true\n',
     )
     assert len(quoted_direct_table_errors) == 1
     spaced_direct_table_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '[ "dependencies" . "windows" ]\nworkspace = true\n',
     )
     assert len(spaced_direct_table_errors) == 1
     dotted_direct_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         'dependencies.windows = "1"\n',
     )
     assert len(dotted_direct_errors) == 1
     inline_direct_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         'dependencies = { windows = "0.60" }\n',
     )
     assert len(inline_direct_errors) == 1
     inline_alias_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         'dependencies = { native = { package = "windows", version = "0.60" } }\n',
     )
     assert len(inline_alias_errors) == 1
     assert file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '[package.metadata.docs]\nwindows = "not a dependency"\n'
         'package = "windows"\ntarget.windows = "not target cfg"\n',
     ) == []
     assert file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '[package.metadata.dependencies]\nwindows = "documentation label"\n'
         '\n[package.metadata.dependencies.windows]\nnote = "not a dependency"\n',
     ) == []
     assert file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '[package]\ndescription = """\n[dependencies]\n'
         'windows = "not a dependency"\n"""\n',
     ) == []
     assert file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '[package]\ndescription = """\nLiteral triple quote: \\"""\n'
         '[dependencies]\nwindows = "not a dependency"\n"""\n',
     ) == []
     escaped_dependency = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '[dependencies]\n"wind\\u006fws" = "1"\n',
     )
     assert len(escaped_dependency) == 1
     escaped_package = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '[dependencies]\nnative = { package = "wind\\u006fws", version = "1" }\n',
     )
     assert len(escaped_package) == 1
     multiline_package = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         '[dependencies.native]\npackage = """\nwindows"""\nversion = "1"\n',
     )
     assert len(multiline_package) == 1
@@ -1371,39 +1369,39 @@ def self_test() -> None:
     ) == set()
     native_aliases = frozenset(aliases)
     alias_manifest_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         "[dependencies]\nnative_059.workspace = true\n",
         native_aliases,
     )
     assert len(alias_manifest_errors) == 1
     assert "native backend detail" in alias_manifest_errors[0]
     dotted_alias_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         "[dependencies]\nnative_win.workspace = true\n",
         native_aliases,
     )
     assert len(dotted_alias_errors) == 1
     assert "native backend detail" in dotted_alias_errors[0]
     spaced_alias_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         "[dependencies]\nnative_win . workspace = true\n",
         native_aliases,
     )
     assert len(spaced_alias_errors) == 1
     spaced_alias_table_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         "[dependencies . native_win]\nworkspace = true\n",
         native_aliases,
     )
     assert len(spaced_alias_table_errors) == 1
     full_dotted_alias_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         "dependencies.native_win.workspace = true\n",
         native_aliases,
     )
     assert len(full_dotted_alias_errors) == 1
     alias_table_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
         "[dependencies.native_059]\nworkspace = true\n",
         native_aliases,
     )
@@ -1413,43 +1411,43 @@ def self_test() -> None:
 
     allowed = '#[cfg(target_os = "macos")]\n'
     assert file_errors(
-        PurePosixPath("crates/bridge-output/src/endpoint_discovery.rs"), allowed
+        PurePosixPath("crates/bridge/bridge-output/src/endpoint_discovery.rs"), allowed
     ) == []
     assert len(
         file_errors(
-            PurePosixPath("crates/bridge-output/src/endpoint_discovery.rs"),
+            PurePosixPath("crates/bridge/bridge-output/src/endpoint_discovery.rs"),
             "use objc2::MainThreadMarker;\n",
         )
     ) == 1
     assert file_errors(
-        PurePosixPath("crates/bridge-output/src/endpoint_discovery/macos.rs"),
+        PurePosixPath("crates/bridge/bridge-output/src/endpoint_discovery/macos.rs"),
         allowed + 'const DATA: &str = "/dev/cu.test";\nuse objc2::MainThreadMarker;\n',
     ) == []
     assert file_errors(
-        PurePosixPath("crates/bridge-output/Cargo.toml"),
-        '[dependencies]\nlinux-bridge-usb = { path = "../linux-bridge-usb" }\n',
+        PurePosixPath("crates/bridge/bridge-output/Cargo.toml"),
+        '[dependencies]\nlinux-bridge-usb = { path = "../../host/linux-bridge-usb" }\n',
     ) == []
     renamed_facade_errors = file_errors(
-        PurePosixPath("crates/bridge-output/Cargo.toml"),
-        '[dependencies]\nusb = { package = "linux-bridge-usb", path = "../linux-bridge-usb" }\n',
+        PurePosixPath("crates/bridge/bridge-output/Cargo.toml"),
+        '[dependencies]\nusb = { package = "linux-bridge-usb", path = "../../host/linux-bridge-usb" }\n',
     )
     assert len(renamed_facade_errors) == 1
     assert "native backend detail" in renamed_facade_errors[0]
     direct_facade_errors = file_errors(
-        PurePosixPath("crates/bridge-core/Cargo.toml"),
-        '[dependencies]\nlinux-bridge-usb = { path = "../linux-bridge-usb" }\n',
+        PurePosixPath("crates/bridge/bridge-core/Cargo.toml"),
+        '[dependencies]\nlinux-bridge-usb = { path = "../../host/linux-bridge-usb" }\n',
     )
     assert len(direct_facade_errors) == 1
     assert "native backend detail" in direct_facade_errors[0]
     assert len(file_errors(core, "use linux_bridge_usb::DeviceInfo;\n")) == 1
     assert file_errors(
-        PurePosixPath("crates/bridge-output/src/endpoint_discovery/linux_usb.rs"),
+        PurePosixPath("crates/bridge/bridge-output/src/endpoint_discovery/linux_usb.rs"),
         "use linux_bridge_usb::DeviceInfo;\n",
     ) == []
-    assert file_errors(PurePosixPath("crates/menu-shell/src/lib.rs"), allowed) == []
+    assert file_errors(PurePosixPath("crates/host/menu-shell/src/lib.rs"), allowed) == []
 
-    build_script = PurePosixPath("crates/bridge-core/build.rs")
-    integration_test = PurePosixPath("crates/bridge-core/tests/native.rs")
+    build_script = PurePosixPath("crates/bridge/bridge-core/build.rs")
+    integration_test = PurePosixPath("crates/bridge/bridge-core/tests/native.rs")
     assert is_portable_file(build_script)
     assert is_portable_file(integration_test)
     for target_access in (

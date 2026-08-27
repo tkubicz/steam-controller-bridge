@@ -4,7 +4,7 @@
 //! filled, so under pressure the display could sit on a stale press while the
 //! controller had already moved on. This keeps the newest instead.
 //!
-//! The shape mirrors `TransitionReportMailbox` in `crates/bridge-runtime`
+//! The shape mirrors `TransitionReportMailbox` in `crates/bridge/bridge-runtime`
 //! (see its `transition_mailbox_*` tests). It is not shared code: the runtime
 //! coalesces on an 8-bit desktop-bindings mask, and the visualizer has to see
 //! every one of the 32 Steam button bits.

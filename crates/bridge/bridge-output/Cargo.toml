@@ -9,7 +9,7 @@ publish = false
 bridge-protocol = { path = "../bridge-protocol" }
 gamepad-state = { path = "../gamepad-state" }
 getrandom.workspace = true
-linux-bridge-usb = { path = "../linux-bridge-usb" }
+linux-bridge-usb = { path = "../../host/linux-bridge-usb" }
 serialport.workspace = true
 
 [lints]

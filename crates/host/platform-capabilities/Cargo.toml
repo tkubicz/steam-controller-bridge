@@ -11,9 +11,9 @@ desktop-input = { path = "../desktop-input" }
 thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-bridge-output = { path = "../bridge-output" }
+bridge-output = { path = "../../bridge/bridge-output" }
 rustix.workspace = true
-steam-controller-device = { path = "../steam-controller-device" }
+steam-controller-device = { path = "../../controller/steam-controller-device" }
 
 [lints]
 workspace = true

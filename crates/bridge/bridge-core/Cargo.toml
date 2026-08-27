@@ -7,9 +7,9 @@ publish = false
 
 [dependencies]
 bridge-output = { path = "../bridge-output" }
-controller-mapper = { path = "../controller-mapper" }
+controller-mapper = { path = "../../controller/controller-mapper" }
 gamepad-state = { path = "../gamepad-state" }
-steam-controller-protocol = { path = "../steam-controller-protocol" }
+steam-controller-protocol = { path = "../../controller/steam-controller-protocol" }
 
 [lints]
 workspace = true
