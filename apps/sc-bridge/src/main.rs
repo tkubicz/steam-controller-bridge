@@ -266,15 +266,19 @@ mod tests {
 
     #[test]
     fn live_virtual_gamepad_uses_the_platform_selection() {
-        let mut arguments = vec!["--output", "virtual-gamepad"];
-        #[cfg(target_os = "macos")]
-        arguments.extend([
-            "--enable-virtual-hid",
-            "--virtual-hid-helper",
-            "/tmp/helper",
-        ]);
+        let arguments: &[&str] = if cfg!(target_os = "macos") {
+            &[
+                "--output",
+                "virtual-gamepad",
+                "--enable-virtual-hid",
+                "--virtual-hid-helper",
+                "/tmp/helper",
+            ]
+        } else {
+            &["--output", "virtual-gamepad"]
+        };
 
-        let config = live(&arguments).unwrap();
+        let config = live(arguments).unwrap();
         let OutputSelection::VirtualGamepad(gamepad_config) = config.output else {
             panic!("virtual-gamepad did not map to the canonical runtime selection");
         };
