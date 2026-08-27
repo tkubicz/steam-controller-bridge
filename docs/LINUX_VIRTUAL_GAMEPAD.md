@@ -10,6 +10,11 @@ The virtual controller uses the Xbox-compatible identity `045e:028e`, version
 It exposes the standard 11 Xbox buttons, two sticks, two triggers, and one
 D-pad. Grip and extra buttons are intentionally omitted.
 
+The backend advertises 16 `FF_RUMBLE` slots. It services upload, update, erase,
+play, and stop requests without blocking; applies replay delay and duration;
+and combines overlapping effects by taking the strongest magnitude on each
+motor. Zero-length effects continue until stopped.
+
 ## S2 spike status
 
 Source and API review passed. Live S2 verification on Ubuntu is still required
