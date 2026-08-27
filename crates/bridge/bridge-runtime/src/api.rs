@@ -7,7 +7,7 @@ use controller_mapper::MapperConfig;
 use desktop_bindings::BindingProfile;
 use profile_picker::{PickerConfig, PickerRoster};
 use steam_controller_device::{masked_serial, ControllerTransport, HidDeviceInfo};
-use virtual_gamepad::VirtualHidConfig;
+use virtual_gamepad::{VirtualGamepadConfig, VirtualHidConfig};
 
 use crate::DEFAULT_IDLE_SHUTDOWN_TIMEOUT;
 
@@ -64,6 +64,7 @@ impl ControllerChargeState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutputSelection {
     BridgeDevice,
+    VirtualGamepad(VirtualGamepadConfig),
     VirtualHid(VirtualHidConfig),
     Dump(DumpFormat),
     File(PathBuf),
@@ -74,6 +75,7 @@ pub enum OutputSelection {
 pub enum OutputBackend {
     #[default]
     BridgeDevice,
+    VirtualGamepad,
     VirtualHid,
     Dump,
     File,
@@ -84,6 +86,7 @@ impl From<&OutputSelection> for OutputBackend {
     fn from(selection: &OutputSelection) -> Self {
         match selection {
             OutputSelection::BridgeDevice => Self::BridgeDevice,
+            OutputSelection::VirtualGamepad(_) => Self::VirtualGamepad,
             OutputSelection::VirtualHid(_) => Self::VirtualHid,
             OutputSelection::Dump(_) => Self::Dump,
             OutputSelection::File(_) => Self::File,
@@ -180,7 +183,7 @@ impl OutputCapabilities {
                 live: true,
                 firmware: true,
             },
-            OutputSelection::VirtualHid(_) => Self {
+            OutputSelection::VirtualGamepad(_) | OutputSelection::VirtualHid(_) => Self {
                 live: true,
                 firmware: false,
             },
@@ -216,6 +219,20 @@ impl OutputStatus {
         let endpoint = match selection {
             OutputSelection::Dump(_) => Some("stdout".to_owned()),
             OutputSelection::File(path) => Some(path.display().to_string()),
+            OutputSelection::VirtualGamepad(config) => Some(match config.backend {
+                virtual_gamepad::VirtualGamepadBackendKind::Automatic => {
+                    "platform virtual gamepad".to_owned()
+                }
+                virtual_gamepad::VirtualGamepadBackendKind::MacOsHelper => {
+                    "macOS virtual gamepad".to_owned()
+                }
+                virtual_gamepad::VirtualGamepadBackendKind::LinuxUinput => {
+                    "Linux uinput virtual gamepad".to_owned()
+                }
+                virtual_gamepad::VirtualGamepadBackendKind::WindowsProvider => {
+                    "Windows virtual gamepad".to_owned()
+                }
+            }),
             OutputSelection::VirtualHid(_) => Some("macOS virtual gamepad".to_owned()),
             OutputSelection::BridgeDevice | OutputSelection::Mock => None,
         };

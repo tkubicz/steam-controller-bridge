@@ -522,8 +522,10 @@ fn output_label(status: &BridgeStatus) -> String {
         OutputBackend::BridgeDevice if status.output.ready => bridge_output_name(status),
         OutputBackend::BridgeDevice if status.output.endpoint.is_some() => "Connecting",
         OutputBackend::BridgeDevice => "Not Detected",
-        OutputBackend::VirtualHid if status.output.ready => "Virtual Gamepad",
-        OutputBackend::VirtualHid => "Virtual Gamepad (Not Ready)",
+        OutputBackend::VirtualGamepad | OutputBackend::VirtualHid if status.output.ready => {
+            "Virtual Gamepad"
+        }
+        OutputBackend::VirtualGamepad | OutputBackend::VirtualHid => "Virtual Gamepad (Not Ready)",
         OutputBackend::Dump => "Diagnostic Dump",
         OutputBackend::File => "File",
         OutputBackend::Mock => "Mock",

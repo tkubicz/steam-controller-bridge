@@ -18,7 +18,22 @@ motor. Zero-length effects continue until stopped.
 ## S2 spike status
 
 Source and API review passed. Live S2 verification on Ubuntu is still required
-before the Linux backend can be selected by production code. The device-backed
-acceptance harness added later in Track C will verify state readback, force
-feedback upload/play/stop/erase, callback magnitudes, and event-node removal.
-No macOS-hosted check is counted as that evidence.
+before the Linux CLI can make virtual output its default. The runtime exposes
+the platform-neutral virtual-gamepad selection, but the command-line tools are
+not routed to it until the next Track C change. The device-backed acceptance
+harness added later in Track C will verify state readback, force-feedback
+upload/play/stop/erase, callback magnitudes, and event-node removal. No
+macOS-hosted check is counted as that evidence.
+
+Linux capability probing distinguishes a missing `/dev/uinput` device from
+denied read/write access. Until the packaging policy lands, development setup
+is temporary:
+
+```sh
+sudo modprobe uinput
+sudo setfacl -m u:$USER:rw /dev/uinput
+```
+
+The ACL lasts only until `/dev/uinput` is recreated or the machine reboots.
+Access permits the user to create arbitrary virtual input devices, not only
+gamepads for this application. Do not run the application as root.

@@ -4,6 +4,7 @@ use crate::{
 };
 
 const DEVICE_RULE_NAME: &str = "60-steam-controller-bridge.rules";
+const UINPUT_PATH: &str = "/dev/uinput";
 const DEVICE_ACCESS_DOCUMENTATION: &str = concat!(
     env!("CARGO_PKG_REPOSITORY"),
     "/blob/main/packaging/linux/README.md"
@@ -12,9 +13,10 @@ const DEVICE_ACCESS_DOCUMENTATION: &str = concat!(
 trait LinuxAccessApi {
     fn controller_hid_access(&self) -> CapabilityState;
     fn bridge_device_access(&self) -> CapabilityState;
+    fn virtual_gamepad_access(&self) -> CapabilityState;
 }
 
-/// Linux capability provider for controller HID and bridge-device access.
+/// Linux capability provider for controller, bridge-device, and uinput access.
 pub struct LinuxCapabilities {
     api: Box<dyn LinuxAccessApi>,
 }
@@ -45,6 +47,9 @@ impl PlatformCapabilities for LinuxCapabilities {
         if context.bridge_device_or_firmware_enabled {
             independent.push(CapabilityId::BridgeDeviceAccess);
         }
+        if context.virtual_output_enabled {
+            independent.push(CapabilityId::VirtualGamepadAccess);
+        }
         if independent.is_empty() {
             Vec::new()
         } else {
@@ -56,11 +61,10 @@ impl PlatformCapabilities for LinuxCapabilities {
         match id {
             CapabilityId::ControllerHidAccess => self.api.controller_hid_access(),
             CapabilityId::BridgeDeviceAccess => self.api.bridge_device_access(),
-            CapabilityId::VirtualGamepadAccess | CapabilityId::DesktopInputAccess => {
-                CapabilityState::Unavailable {
-                    reason: "the selected Linux provider is not implemented yet".to_owned(),
-                }
-            }
+            CapabilityId::VirtualGamepadAccess => self.api.virtual_gamepad_access(),
+            CapabilityId::DesktopInputAccess => CapabilityState::Unavailable {
+                reason: "the selected Linux provider is not implemented yet".to_owned(),
+            },
             CapabilityId::InputMonitoring
             | CapabilityId::PostEvent
             | CapabilityId::Accessibility => CapabilityState::NotRequired,
@@ -79,8 +83,10 @@ impl PlatformCapabilities for LinuxCapabilities {
             CapabilityId::BridgeDeviceAccess => format!(
                 "For an active desktop session with the official XIAO bridge, install the narrowly matched raw-USB and serial-fallback rules from {DEVICE_RULE_NAME} under /etc/udev/rules.d, or use the copy installed by your package under /usr/lib/udev/rules.d. Follow {DEVICE_ACCESS_DOCUMENTATION}. For a third-party bridge using serial, add an equally narrow rule for its USB identity or use the distribution's serial-access group. For a headless service, use the documented dedicated-group fallback with an exact device match. Reload udev rules and reconnect the bridge, or start a new login or restart the service after changing groups"
             ),
-            CapabilityId::VirtualGamepadAccess
-            | CapabilityId::DesktopInputAccess
+            CapabilityId::VirtualGamepadAccess => format!(
+                "For development, run `sudo modprobe uinput`, then grant the current user temporary read/write access with `sudo setfacl -m u:$USER:rw {UINPUT_PATH}`. This access lasts only until the device is recreated or the machine reboots. Do not run Steam Controller Bridge as root. Persistent active-user and headless policies will be provided with Linux packaging"
+            ),
+            CapabilityId::DesktopInputAccess
             | CapabilityId::InputMonitoring
             | CapabilityId::PostEvent
             | CapabilityId::Accessibility => return None,
@@ -143,6 +149,27 @@ impl LinuxAccessApi for NativeLinuxAccessApi {
             Ok(discovery) => bridge_device_access_state(discovery, check_path_access),
             Err(error) => bridge_discovery_error_state(error),
         }
+    }
+
+    fn virtual_gamepad_access(&self) -> CapabilityState {
+        virtual_gamepad_access_state(check_path_access(UINPUT_PATH))
+    }
+}
+
+fn virtual_gamepad_access_state(access: Result<(), PathAccessError>) -> CapabilityState {
+    match access {
+        Ok(()) => CapabilityState::Satisfied,
+        Err(PathAccessError::Denied) => CapabilityState::Blocked {
+            reason: format!("Linux uinput device {UINPUT_PATH} is not readable and writable"),
+        },
+        Err(PathAccessError::Missing) => CapabilityState::Unavailable {
+            reason: format!(
+                "Linux uinput device {UINPUT_PATH} does not exist; the uinput kernel module may not be loaded"
+            ),
+        },
+        Err(PathAccessError::Other(error)) => CapabilityState::Unavailable {
+            reason: format!("cannot inspect Linux uinput device {UINPUT_PATH}: {error}"),
+        },
     }
 }
 
@@ -285,6 +312,7 @@ mod tests {
     struct FakeApi {
         controller: CapabilityState,
         bridge: CapabilityState,
+        virtual_gamepad: CapabilityState,
         probes: Rc<RefCell<Vec<CapabilityId>>>,
     }
 
@@ -302,11 +330,19 @@ mod tests {
                 .push(CapabilityId::BridgeDeviceAccess);
             self.bridge.clone()
         }
+
+        fn virtual_gamepad_access(&self) -> CapabilityState {
+            self.probes
+                .borrow_mut()
+                .push(CapabilityId::VirtualGamepadAccess);
+            self.virtual_gamepad.clone()
+        }
     }
 
     fn provider(
         controller: CapabilityState,
         bridge: CapabilityState,
+        virtual_gamepad: CapabilityState,
     ) -> (LinuxCapabilities, Rc<RefCell<Vec<CapabilityId>>>) {
         let probes = Rc::new(RefCell::new(Vec::new()));
         (
@@ -314,6 +350,7 @@ mod tests {
                 api: Box::new(FakeApi {
                     controller,
                     bridge,
+                    virtual_gamepad,
                     probes: Rc::clone(&probes),
                 }),
             },
@@ -322,8 +359,12 @@ mod tests {
     }
 
     #[test]
-    fn requirements_follow_active_linux_hid_and_bridge_features() {
-        let (provider, probes) = provider(CapabilityState::Satisfied, CapabilityState::Satisfied);
+    fn requirements_follow_active_linux_hardware_features() {
+        let (provider, probes) = provider(
+            CapabilityState::Satisfied,
+            CapabilityState::Satisfied,
+            CapabilityState::Satisfied,
+        );
 
         assert!(provider
             .requirements(&CapabilityContext::default())
@@ -335,6 +376,15 @@ mod tests {
             }),
             [RequirementGroup::Independent(vec![
                 CapabilityId::ControllerHidAccess,
+            ])]
+        );
+        assert_eq!(
+            provider.requirements(&CapabilityContext {
+                virtual_output_enabled: true,
+                ..CapabilityContext::default()
+            }),
+            [RequirementGroup::Independent(vec![
+                CapabilityId::VirtualGamepadAccess,
             ])]
         );
         assert_eq!(
@@ -369,6 +419,7 @@ mod tests {
             CapabilityState::Blocked {
                 reason: "bridge denied".to_owned(),
             },
+            CapabilityState::Satisfied,
         );
         let context = CapabilityContext {
             controller_input_enabled: true,
@@ -415,8 +466,11 @@ mod tests {
 
     #[test]
     fn request_rechecks_access_without_claiming_a_system_prompt() {
-        let (mut provider, probes) =
-            provider(CapabilityState::Satisfied, CapabilityState::Satisfied);
+        let (mut provider, probes) = provider(
+            CapabilityState::Satisfied,
+            CapabilityState::Satisfied,
+            CapabilityState::Satisfied,
+        );
 
         assert_eq!(
             provider.request(CapabilityId::BridgeDeviceAccess).unwrap(),
@@ -430,6 +484,53 @@ mod tests {
             provider.remedy(CapabilityId::BridgeDeviceAccess),
             Some(Remedy::RequestFromSystem)
         ));
+    }
+
+    #[test]
+    fn virtual_gamepad_access_distinguishes_missing_denied_and_probe_errors() {
+        assert_eq!(
+            virtual_gamepad_access_state(Ok(())),
+            CapabilityState::Satisfied
+        );
+        assert!(matches!(
+            virtual_gamepad_access_state(Err(PathAccessError::Missing)),
+            CapabilityState::Unavailable { reason }
+                if reason.contains("/dev/uinput") && reason.contains("kernel module")
+        ));
+        assert!(matches!(
+            virtual_gamepad_access_state(Err(PathAccessError::Denied)),
+            CapabilityState::Blocked { reason }
+                if reason.contains("/dev/uinput") && reason.contains("readable and writable")
+        ));
+        assert!(matches!(
+            virtual_gamepad_access_state(Err(PathAccessError::Other("I/O error".to_owned()))),
+            CapabilityState::Unavailable { reason }
+                if reason.contains("/dev/uinput") && reason.contains("I/O error")
+        ));
+
+        let (provider, _) = provider(
+            CapabilityState::Satisfied,
+            CapabilityState::Satisfied,
+            CapabilityState::Blocked {
+                reason: "uinput denied".to_owned(),
+            },
+        );
+        let report = evaluate_requirements(
+            &provider,
+            &CapabilityContext {
+                virtual_output_enabled: true,
+                ..CapabilityContext::default()
+            },
+        );
+        assert_eq!(report.unsatisfied.len(), 1);
+        let Some(Remedy::Instructions { text, command }) = &report.unsatisfied[0].remedy else {
+            panic!("virtual-gamepad access must provide instructions");
+        };
+        assert!(text.contains("/dev/uinput"));
+        assert!(text.contains("sudo modprobe uinput"));
+        assert!(text.contains("sudo setfacl"));
+        assert!(text.contains("temporary"));
+        assert!(command.is_none());
     }
 
     #[test]

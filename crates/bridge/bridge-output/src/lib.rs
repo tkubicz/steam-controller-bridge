@@ -96,6 +96,13 @@ pub trait GamepadOutput {
         Ok(())
     }
 
+    /// Declares how feedback returned by [`Self::take_feedback`] remains valid.
+    /// The value must not change during this output's lifetime.
+    #[must_use]
+    fn feedback_semantics(&self) -> OutputFeedbackSemantics {
+        OutputFeedbackSemantics::Leased
+    }
+
     /// Takes the latest device-to-host feedback request, if the backend
     /// supports bidirectional output.
     fn take_feedback(&mut self) -> Option<OutputFeedback> {
@@ -144,6 +151,16 @@ pub trait GamepadOutput {
     ) -> Option<Result<FirmwareInstallReceipt, OutputError>> {
         None
     }
+}
+
+/// Lifetime contract for feedback consumed by the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFeedbackSemantics {
+    /// Each feedback value is one lease; continued output requires new values.
+    #[default]
+    Leased,
+    /// The latest value remains active until the producer reports a change.
+    Stateful,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,6 +338,9 @@ impl<O: GamepadOutput> GamepadOutput for ChangedOnly<O> {
     fn service(&mut self) -> Result<(), OutputError> {
         self.inner.service()
     }
+    fn feedback_semantics(&self) -> OutputFeedbackSemantics {
+        self.inner.feedback_semantics()
+    }
     fn take_feedback(&mut self) -> Option<OutputFeedback> {
         self.inner.take_feedback()
     }
@@ -373,6 +393,26 @@ mod tests {
         changed.buttons.set(Button::South, true);
         output.send_state(&changed).unwrap();
         assert_eq!(output.into_inner().states.len(), 2);
+    }
+
+    #[test]
+    fn changed_only_preserves_feedback_semantics() {
+        struct StatefulOutput;
+
+        impl GamepadOutput for StatefulOutput {
+            fn send_state(&mut self, _state: &GamepadState) -> Result<(), OutputError> {
+                Ok(())
+            }
+
+            fn feedback_semantics(&self) -> OutputFeedbackSemantics {
+                OutputFeedbackSemantics::Stateful
+            }
+        }
+
+        assert_eq!(
+            ChangedOnly::new(StatefulOutput).feedback_semantics(),
+            OutputFeedbackSemantics::Stateful
+        );
     }
 
     #[test]

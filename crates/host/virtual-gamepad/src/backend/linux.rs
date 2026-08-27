@@ -2,7 +2,7 @@ use std::io;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use bridge_output::{OutputDiagnostics, OutputFeedback};
+use bridge_output::{OutputDiagnostics, OutputFeedback, OutputFeedbackSemantics};
 use evdevil::event::{
     Abs, AbsEvent, EventKind, ForceFeedbackCode, InputEvent, Key, KeyEvent, KeyState, UinputCode,
 };
@@ -187,6 +187,10 @@ impl Backend for LinuxUinputOutput {
         }
         self.rumble.refresh(Instant::now());
         Ok(())
+    }
+
+    fn feedback_semantics(&self) -> OutputFeedbackSemantics {
+        OutputFeedbackSemantics::Stateful
     }
 
     fn take_feedback(&mut self) -> Option<OutputFeedback> {
