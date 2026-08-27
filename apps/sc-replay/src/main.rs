@@ -6,8 +6,8 @@ use std::thread;
 use std::time::Duration;
 
 use bridge_output::{
-    BridgeOutput, BridgeTransportConfig, DumpFormat, DumpOutput, FileOutput, GamepadOutput,
-    MockOutput,
+    BridgeOutput, BridgeTransportConfig, DumpFormat, DumpOutput, FeedbackObserverOutput,
+    FileOutput, GamepadOutput, MockOutput,
 };
 use clap::{Parser, ValueEnum};
 use recording::{ReplayOptions, ReplaySession, ReplayTiming, KIND_MAPPED_GAMEPAD_STATE};
@@ -64,15 +64,15 @@ struct Cli {
     #[arg(long)]
     serial_log: bool,
 
-    /// Rust `IOHIDUserDevice` helper executable; required by virtual-gamepad output.
+    /// Rust `IOHIDUserDevice` helper executable; required by virtual-gamepad output on macOS.
     #[arg(long, value_name = "PATH")]
     virtual_hid_helper: Option<PathBuf>,
 
-    /// Override the virtual controller vendor ID (decimal or 0x-prefixed hex).
+    /// Override the macOS virtual controller vendor ID (decimal or 0x-prefixed hex).
     #[arg(long, value_name = "VID", value_parser = parse_usb_id, requires = "virtual_hid_product_id")]
     virtual_hid_vendor_id: Option<u16>,
 
-    /// Override the virtual controller product ID (decimal or 0x-prefixed hex).
+    /// Override the macOS virtual controller product ID (decimal or 0x-prefixed hex).
     #[arg(long, value_name = "PID", value_parser = parse_usb_id, requires = "virtual_hid_vendor_id")]
     virtual_hid_product_id: Option<u16>,
 }
@@ -89,7 +89,7 @@ enum OutputArg {
     Mock,
     Serial,
     #[value(name = "virtual-gamepad", alias = "virtual-hid")]
-    VirtualHid,
+    VirtualGamepad,
 }
 
 fn main() {
@@ -112,6 +112,7 @@ fn run() -> Result<(), String> {
 
     if cli.step {
         play_step(&session, &mut *output, seek_timestamp_us)?;
+        output.service().map_err(|error| error.to_string())?;
         return Ok(());
     }
 
@@ -129,6 +130,7 @@ fn run() -> Result<(), String> {
         let stats = session
             .play_once(&mut *output, options)
             .map_err(|error| error.to_string())?;
+        output.service().map_err(|error| error.to_string())?;
         eprintln!(
             "processed {} events, sent {} states, ignored {} events",
             stats.events_processed, stats.states_sent, stats.events_ignored
@@ -137,7 +139,8 @@ fn run() -> Result<(), String> {
             break;
         }
     }
-    output.send_neutral().map_err(|error| error.to_string())
+    output.send_neutral().map_err(|error| error.to_string())?;
+    output.service().map_err(|error| error.to_string())
 }
 
 fn validate_cli(cli: &Cli) -> Result<(), String> {
@@ -152,7 +155,7 @@ fn validate_cli(cli: &Cli) -> Result<(), String> {
             Err("--output serial requires --port PATH".to_owned())
         }
         OutputArg::Serial if cli.baud == 0 => Err("--baud must be greater than zero".to_owned()),
-        _ => virtual_hid_options(cli).validate(cli.output == OutputArg::VirtualHid),
+        _ => virtual_hid_options(cli).validate_platform(cli.output == OutputArg::VirtualGamepad),
     }
 }
 
@@ -241,7 +244,10 @@ fn make_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
             )
             .map_err(|error| error.to_string())?,
         ),
-        OutputArg::VirtualHid => Box::new(virtual_hid_options(cli).open()?),
+        OutputArg::VirtualGamepad => Box::new(FeedbackObserverOutput::new(
+            virtual_hid_options(cli).open_virtual_gamepad()?,
+            |feedback| eprintln!("level=info event=output_{feedback}"),
+        )),
     })
 }
 
@@ -301,11 +307,16 @@ mod tests {
     }
 
     #[test]
-    fn identity_override_is_paired_and_requires_virtual_hid_output() {
+    fn virtual_hid_remains_an_alias_for_virtual_gamepad() {
         assert_eq!(
             OutputArg::from_str("virtual-hid", false).unwrap(),
-            OutputArg::VirtualHid
+            OutputArg::VirtualGamepad
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn identity_override_is_paired_and_requires_virtual_gamepad_output() {
         assert!(Cli::try_parse_from([
             "sc-replay",
             "recording.jsonl",
@@ -337,5 +348,27 @@ mod tests {
         assert_eq!(cli.virtual_hid_vendor_id, Some(0xcafe));
         assert_eq!(cli.virtual_hid_product_id, Some(0x4001));
         assert!(validate_cli(&cli).is_ok());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn virtual_gamepad_uses_platform_backend_without_macos_options() {
+        let cli = parse(&[
+            "sc-replay",
+            "recording.jsonl",
+            "--output",
+            "virtual-gamepad",
+        ]);
+        assert!(validate_cli(&cli).is_ok());
+
+        let cli = parse(&[
+            "sc-replay",
+            "recording.jsonl",
+            "--output",
+            "virtual-gamepad",
+            "--virtual-hid-helper",
+            "/tmp/helper",
+        ]);
+        assert!(validate_cli(&cli).is_err());
     }
 }

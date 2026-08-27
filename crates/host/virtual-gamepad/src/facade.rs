@@ -27,6 +27,7 @@ pub enum VirtualGamepadBackendKind {
 pub struct VirtualGamepadConfig {
     pub backend: VirtualGamepadBackendKind,
     pub macos_helper_path: Option<PathBuf>,
+    pub macos_identity: Option<(u16, u16)>,
     pub linux_device_path: Option<PathBuf>,
 }
 
@@ -36,8 +37,15 @@ impl VirtualGamepadConfig {
         Self {
             backend: VirtualGamepadBackendKind::MacOsHelper,
             macos_helper_path: Some(path),
+            macos_identity: None,
             linux_device_path: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_macos_identity(mut self, vendor_id: u16, product_id: u16) -> Self {
+        self.macos_identity = Some((vendor_id, product_id));
+        self
     }
 }
 
@@ -55,12 +63,10 @@ impl VirtualGamepad {
     ///
     /// Returns an actionable error when the requested backend is unavailable
     /// or its configuration is incomplete.
-    pub fn open(config: VirtualGamepadConfig) -> Result<Self, VirtualGamepadError> {
+    pub fn open(config: &VirtualGamepadConfig) -> Result<Self, VirtualGamepadError> {
         match config.backend {
-            VirtualGamepadBackendKind::Automatic => Self::open_automatic(&config),
-            VirtualGamepadBackendKind::MacOsHelper => {
-                Self::open_macos_path(config.macos_helper_path)
-            }
+            VirtualGamepadBackendKind::Automatic => Self::open_automatic(config),
+            VirtualGamepadBackendKind::MacOsHelper => Self::open_macos_config(config),
             VirtualGamepadBackendKind::LinuxUinput => {
                 Self::open_linux_path(config.linux_device_path.as_deref())
             }
@@ -122,7 +128,7 @@ impl VirtualGamepad {
 
     #[cfg(target_os = "macos")]
     fn open_automatic(config: &VirtualGamepadConfig) -> Result<Self, VirtualGamepadError> {
-        Self::open_macos_path(config.macos_helper_path.clone())
+        Self::open_macos_config(config)
     }
 
     #[cfg(target_os = "linux")]
@@ -138,18 +144,23 @@ impl VirtualGamepad {
     }
 
     #[cfg(target_os = "macos")]
-    fn open_macos_path(path: Option<PathBuf>) -> Result<Self, VirtualGamepadError> {
-        let path = path.ok_or_else(|| {
+    fn open_macos_config(config: &VirtualGamepadConfig) -> Result<Self, VirtualGamepadError> {
+        let path = config.macos_helper_path.clone().ok_or_else(|| {
             VirtualGamepadError::new(
                 VirtualGamepadErrorClass::MissingHelper,
                 "--output virtual-hid requires --virtual-hid-helper PATH",
             )
         })?;
-        Self::open_macos_helper(&VirtualHidConfig::new(path))
+        let helper = VirtualHidConfig::new(path);
+        let helper = match config.macos_identity {
+            Some((vendor_id, product_id)) => helper.with_identity(vendor_id, product_id),
+            None => helper,
+        };
+        Self::open_macos_helper(&helper)
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn open_macos_path(_path: Option<PathBuf>) -> Result<Self, VirtualGamepadError> {
+    fn open_macos_config(_config: &VirtualGamepadConfig) -> Result<Self, VirtualGamepadError> {
         Err(backend_unavailable(
             "the macOS helper backend is only available on macOS; select a backend supported by this host",
         ))
@@ -361,9 +372,10 @@ mod tests {
 
     #[test]
     fn unavailable_windows_backend_never_substitutes_another_provider() {
-        let result = VirtualGamepad::open(VirtualGamepadConfig {
+        let result = VirtualGamepad::open(&VirtualGamepadConfig {
             backend: VirtualGamepadBackendKind::WindowsProvider,
             macos_helper_path: Some(PathBuf::from("helper")),
+            macos_identity: None,
             linux_device_path: Some(PathBuf::from("uinput")),
         });
         let Err(error) = result else {
@@ -376,9 +388,10 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn unavailable_linux_backend_never_substitutes_another_provider() {
-        let result = VirtualGamepad::open(VirtualGamepadConfig {
+        let result = VirtualGamepad::open(&VirtualGamepadConfig {
             backend: VirtualGamepadBackendKind::LinuxUinput,
             macos_helper_path: None,
+            macos_identity: None,
             linux_device_path: None,
         });
         let Err(error) = result else {
@@ -394,9 +407,10 @@ mod tests {
             VirtualGamepadBackendKind::Automatic,
             VirtualGamepadBackendKind::LinuxUinput,
         ] {
-            let result = VirtualGamepad::open(VirtualGamepadConfig {
+            let result = VirtualGamepad::open(&VirtualGamepadConfig {
                 backend,
                 macos_helper_path: None,
+                macos_identity: None,
                 linux_device_path: Some(PathBuf::from("/tmp/not-uinput")),
             });
             let Err(error) = result else {
@@ -416,9 +430,10 @@ mod tests {
             VirtualGamepadBackendKind::Automatic,
             VirtualGamepadBackendKind::MacOsHelper,
         ] {
-            let result = VirtualGamepad::open(VirtualGamepadConfig {
+            let result = VirtualGamepad::open(&VirtualGamepadConfig {
                 backend,
                 macos_helper_path: Some(PathBuf::from("helper")),
+                macos_identity: None,
                 linux_device_path: None,
             });
             let Err(error) = result else {
@@ -431,7 +446,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn automatic_selection_requires_the_macos_helper_configuration() {
-        let result = VirtualGamepad::open(VirtualGamepadConfig::default());
+        let result = VirtualGamepad::open(&VirtualGamepadConfig::default());
         let Err(error) = result else {
             panic!("automatic backend opened without its helper path")
         };

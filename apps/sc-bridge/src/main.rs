@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use bridge_core::BridgeConfig;
 use bridge_output::{
-    BridgeOutput, BridgeTransportConfig, DumpFormat, DumpOutput, FileOutput, GamepadOutput,
-    MockOutput,
+    BridgeOutput, BridgeTransportConfig, DumpFormat, DumpOutput, FeedbackObserverOutput,
+    FileOutput, GamepadOutput, MockOutput,
 };
 use bridge_runtime::{
     BridgeEndpointSelection, BridgeRuntime, ControllerSelection, LizardMode, OutputSelection,
@@ -31,7 +31,10 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let cli = Cli::parse();
+    #[cfg(target_os = "macos")]
     let virtual_hid_enabled = virtual_gamepad::virtual_hid_enabled(cli.enable_virtual_hid)?;
+    #[cfg(not(target_os = "macos"))]
+    let virtual_hid_enabled = true;
     // Every cross-field rule is checked before a backend is built, so a bad
     // combination cannot leave a truncated output file behind.
     cli.validate(virtual_hid_enabled)?;
@@ -120,7 +123,9 @@ fn live_config(cli: &Cli) -> Result<RuntimeConfig, String> {
 fn live_output(cli: &Cli) -> Result<OutputSelection, String> {
     Ok(match cli.output() {
         OutputArg::Serial => OutputSelection::BridgeDevice,
-        OutputArg::VirtualHid => OutputSelection::VirtualHid(cli.virtual_hid().config()?),
+        OutputArg::VirtualGamepad => {
+            OutputSelection::VirtualGamepad(cli.virtual_hid().virtual_gamepad_config()?)
+        }
         OutputArg::Dump => OutputSelection::Dump(DumpFormat::Compact),
         OutputArg::Pretty => OutputSelection::Dump(DumpFormat::Pretty),
         OutputArg::Json => OutputSelection::Dump(DumpFormat::Json),
@@ -161,6 +166,7 @@ fn run_replay(cli: &Cli) -> Result<(), String> {
         .play_once(&mut *output, options)
         .map_err(|error| error.to_string())?;
     output.send_neutral().map_err(|error| error.to_string())?;
+    output.service().map_err(|error| error.to_string())?;
     eprintln!(
         "level=info event=replay_complete events={} states={} ignored={}",
         stats.events_processed, stats.states_sent, stats.events_ignored
@@ -217,7 +223,10 @@ fn make_replay_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
                 .map_err(|error| error.to_string())?,
             )
         }
-        OutputArg::VirtualHid => Box::new(cli.virtual_hid().open()?),
+        OutputArg::VirtualGamepad => Box::new(FeedbackObserverOutput::new(
+            cli.virtual_hid().open_virtual_gamepad()?,
+            |feedback| eprintln!("level=info event=output_{feedback}"),
+        )),
     })
 }
 
@@ -253,6 +262,36 @@ mod tests {
         assert_eq!(config.output, OutputSelection::BridgeDevice);
         assert_eq!(config.idle_shutdown_timeout, Some(Duration::from_mins(15)));
         assert_eq!(config.puck_dock_action, PuckDockAction::LeaveOn);
+    }
+
+    #[test]
+    fn live_virtual_gamepad_uses_the_platform_selection() {
+        let mut arguments = vec!["--output", "virtual-gamepad"];
+        #[cfg(target_os = "macos")]
+        arguments.extend([
+            "--enable-virtual-hid",
+            "--virtual-hid-helper",
+            "/tmp/helper",
+        ]);
+
+        let config = live(&arguments).unwrap();
+        let OutputSelection::VirtualGamepad(gamepad_config) = config.output else {
+            panic!("virtual-gamepad did not map to the canonical runtime selection");
+        };
+        assert_eq!(
+            gamepad_config.backend,
+            virtual_gamepad::VirtualGamepadBackendKind::Automatic
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            gamepad_config.macos_helper_path.as_deref(),
+            Some(std::path::Path::new("/tmp/helper"))
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            gamepad_config,
+            virtual_gamepad::VirtualGamepadConfig::default()
+        );
     }
 
     #[test]

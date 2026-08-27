@@ -572,6 +572,7 @@ impl ReplaySession {
         let events = &self.events[self.seek_index(options.seek_timestamp_us)..];
         let mut stats = ReplayStats::default();
         let mut previous_timestamp = events.first().map(|event| event.timestamp_us);
+        let mut last_service = Instant::now();
         for event in events {
             if options.timing == ReplayTiming::RealTime {
                 let delta_us = event
@@ -582,6 +583,7 @@ impl ReplaySession {
                 );
                 if !scaled.is_zero() {
                     service_sleep(output, scaled)?;
+                    last_service = Instant::now();
                 }
             }
             previous_timestamp = Some(event.timestamp_us);
@@ -592,16 +594,30 @@ impl ReplaySession {
             } else {
                 stats.events_ignored += 1;
             }
+            service_if_due(output, &mut last_service, Instant::now())?;
         }
         Ok(stats)
     }
+}
+
+const REPLAY_SERVICE_INTERVAL: Duration = Duration::from_millis(25);
+
+fn service_if_due<O: GamepadOutput + ?Sized>(
+    output: &mut O,
+    last_service: &mut Instant,
+    now: Instant,
+) -> Result<(), RecordingError> {
+    if now.saturating_duration_since(*last_service) >= REPLAY_SERVICE_INTERVAL {
+        output.service()?;
+        *last_service = now;
+    }
+    Ok(())
 }
 
 fn service_sleep<O: GamepadOutput + ?Sized>(
     output: &mut O,
     duration: Duration,
 ) -> Result<(), RecordingError> {
-    const SERVICE_INTERVAL: Duration = Duration::from_millis(25);
     let deadline = Instant::now() + duration;
     loop {
         output.service()?;
@@ -609,7 +625,7 @@ fn service_sleep<O: GamepadOutput + ?Sized>(
         if remaining.is_zero() {
             return Ok(());
         }
-        thread::sleep(remaining.min(SERVICE_INTERVAL));
+        thread::sleep(remaining.min(REPLAY_SERVICE_INTERVAL));
     }
 }
 
@@ -848,6 +864,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(output.states, vec![changed]);
+    }
+
+    #[test]
+    fn replay_service_cadence_is_time_bounded() {
+        struct ServiceCounter(usize);
+
+        impl GamepadOutput for ServiceCounter {
+            fn send_state(&mut self, _state: &GamepadState) -> Result<(), OutputError> {
+                Ok(())
+            }
+
+            fn service(&mut self) -> Result<(), OutputError> {
+                self.0 += 1;
+                Ok(())
+            }
+        }
+
+        let mut output = ServiceCounter(0);
+        let start = Instant::now();
+        let mut last_service = start;
+        service_if_due(
+            &mut output,
+            &mut last_service,
+            start + REPLAY_SERVICE_INTERVAL,
+        )
+        .unwrap();
+        service_if_due(
+            &mut output,
+            &mut last_service,
+            start + REPLAY_SERVICE_INTERVAL,
+        )
+        .unwrap();
+        assert_eq!(output.0, 1);
     }
 
     #[test]

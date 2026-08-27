@@ -6,8 +6,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bridge_output::{
-    BridgeOutput, BridgeTransportConfig, DumpFormat, DumpOutput, FileOutput, GamepadOutput,
-    MockOutput,
+    BridgeOutput, BridgeTransportConfig, DumpFormat, DumpOutput, FeedbackObserverOutput,
+    FileOutput, GamepadOutput, MockOutput,
 };
 use clap::{Parser, ValueEnum};
 use gamepad_simulator::{apply_keyboard_command, automated_sequence};
@@ -44,12 +44,12 @@ struct Cli {
     #[arg(long)]
     serial_log: bool,
 
-    /// Rust `IOHIDUserDevice` helper executable; required by virtual-gamepad output.
+    /// Rust `IOHIDUserDevice` helper executable; required by virtual-gamepad output on macOS.
     /// Example: gamepad-simulator automated --output virtual-gamepad --virtual-hid-helper ./sc-virtual-hid-helper
     #[arg(long, value_name = "PATH")]
     virtual_hid_helper: Option<PathBuf>,
 
-    /// Override the virtual controller vendor ID (decimal or 0x-prefixed hex).
+    /// Override the macOS virtual controller vendor ID (decimal or 0x-prefixed hex).
     #[arg(
         long,
         value_name = "VID",
@@ -58,7 +58,7 @@ struct Cli {
     )]
     virtual_hid_vendor_id: Option<u16>,
 
-    /// Override the virtual controller product ID (decimal or 0x-prefixed hex).
+    /// Override the macOS virtual controller product ID (decimal or 0x-prefixed hex).
     #[arg(
         long,
         value_name = "PID",
@@ -101,7 +101,7 @@ enum OutputArg {
     Mock,
     Serial,
     #[value(name = "virtual-gamepad", alias = "virtual-hid")]
-    VirtualHid,
+    VirtualGamepad,
 }
 
 fn main() {
@@ -120,6 +120,7 @@ fn run() -> Result<(), String> {
     match cli.mode {
         Mode::Automated => {
             let interval_ms = cli.interval_ms;
+            let mut last_service = Instant::now();
             for _ in 0..cli.cycles {
                 for state in automated_states(cli.include_guide_button) {
                     output
@@ -127,6 +128,8 @@ fn run() -> Result<(), String> {
                         .map_err(|error| error.to_string())?;
                     if interval_ms > 0 {
                         service_delay(&mut *output, Duration::from_millis(interval_ms))?;
+                    } else {
+                        service_if_due(&mut *output, &mut last_service, Instant::now())?;
                     }
                 }
             }
@@ -134,7 +137,7 @@ fn run() -> Result<(), String> {
         }
         Mode::Keyboard => keyboard_mode(&mut *output)?,
     }
-    Ok(())
+    output.service().map_err(|error| error.to_string())
 }
 
 fn automated_states(include_guide_button: bool) -> Vec<GamepadState> {
@@ -148,7 +151,7 @@ fn automated_states(include_guide_button: bool) -> Vec<GamepadState> {
 }
 
 fn validate_cli(cli: &Cli) -> Result<(), String> {
-    virtual_hid_options(cli).validate(cli.output == OutputArg::VirtualHid)
+    virtual_hid_options(cli).validate_platform(cli.output == OutputArg::VirtualGamepad)
 }
 
 fn virtual_hid_options(cli: &Cli) -> VirtualHidOptions {
@@ -162,7 +165,7 @@ fn virtual_hid_options(cli: &Cli) -> VirtualHidOptions {
 fn keyboard_mode(output: &mut dyn GamepadOutput) -> Result<(), String> {
     eprintln!("Enter a control name (w/a/s/d, up/left/down/right, q/e, i/j/k/l, space, 1-9, r, exit). Each line is one state.");
     let mut state = GamepadState::neutral();
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
         for line in io::stdin().lock().lines() {
             if sender.send(line).is_err() {
@@ -170,11 +173,13 @@ fn keyboard_mode(output: &mut dyn GamepadOutput) -> Result<(), String> {
             }
         }
     });
+    let mut last_service = Instant::now();
     loop {
         let line = match receiver.recv_timeout(Duration::from_millis(25)) {
             Ok(line) => line.map_err(|error| error.to_string())?,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 output.service().map_err(|error| error.to_string())?;
+                last_service = Instant::now();
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -186,8 +191,23 @@ fn keyboard_mode(output: &mut dyn GamepadOutput) -> Result<(), String> {
             Ok(false) => break,
             Err(error) => eprintln!("{error}"),
         }
+        service_if_due(output, &mut last_service, Instant::now())?;
     }
     output.send_neutral().map_err(|error| error.to_string())
+}
+
+const TOOL_SERVICE_INTERVAL: Duration = Duration::from_millis(25);
+
+fn service_if_due(
+    output: &mut dyn GamepadOutput,
+    last_service: &mut Instant,
+    now: Instant,
+) -> Result<(), String> {
+    if now.saturating_duration_since(*last_service) >= TOOL_SERVICE_INTERVAL {
+        output.service().map_err(|error| error.to_string())?;
+        *last_service = now;
+    }
+    Ok(())
 }
 
 fn service_delay(output: &mut dyn GamepadOutput, duration: Duration) -> Result<(), String> {
@@ -199,7 +219,7 @@ fn service_delay(output: &mut dyn GamepadOutput, duration: Duration) -> Result<(
         if remaining.is_zero() {
             return Ok(());
         }
-        next_service += Duration::from_millis(25);
+        next_service += TOOL_SERVICE_INTERVAL;
         let until_service = next_service.saturating_duration_since(Instant::now());
         thread::sleep(remaining.min(until_service));
     }
@@ -234,7 +254,10 @@ fn make_output(cli: &Cli) -> Result<Box<dyn GamepadOutput>, String> {
             )
             .map_err(|error| error.to_string())?,
         ),
-        OutputArg::VirtualHid => Box::new(virtual_hid_options(cli).open()?),
+        OutputArg::VirtualGamepad => Box::new(FeedbackObserverOutput::new(
+            virtual_hid_options(cli).open_virtual_gamepad()?,
+            |feedback| eprintln!("level=info event=output_{feedback}"),
+        )),
     })
 }
 
@@ -243,11 +266,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn identity_override_is_paired_and_requires_virtual_hid_output() {
+    fn virtual_hid_remains_an_alias_for_virtual_gamepad() {
         assert_eq!(
             OutputArg::from_str("virtual-hid", false).unwrap(),
-            OutputArg::VirtualHid
+            OutputArg::VirtualGamepad
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn identity_override_is_paired_and_requires_virtual_gamepad_output() {
         assert!(Cli::try_parse_from([
             "gamepad-simulator",
             "automated",
@@ -285,6 +313,30 @@ mod tests {
         assert!(validate_cli(&cli).is_ok());
     }
 
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn virtual_gamepad_uses_platform_backend_without_macos_options() {
+        let cli = Cli::try_parse_from([
+            "gamepad-simulator",
+            "automated",
+            "--output",
+            "virtual-gamepad",
+        ])
+        .unwrap();
+        assert!(validate_cli(&cli).is_ok());
+
+        let cli = Cli::try_parse_from([
+            "gamepad-simulator",
+            "automated",
+            "--output",
+            "virtual-gamepad",
+            "--virtual-hid-helper",
+            "/tmp/helper",
+        ])
+        .unwrap();
+        assert!(validate_cli(&cli).is_err());
+    }
+
     #[test]
     fn automated_runs_omit_the_system_guide_button_by_default() {
         let default = Cli::try_parse_from(["gamepad-simulator", "automated"]).unwrap();
@@ -299,5 +351,41 @@ mod tests {
         assert!(automated_states(true)
             .iter()
             .any(|state| state.buttons.contains(Button::Guide)));
+    }
+
+    #[test]
+    fn no_delay_mode_services_on_the_fixed_cadence() {
+        struct ServiceCounter(usize);
+
+        impl GamepadOutput for ServiceCounter {
+            fn send_state(
+                &mut self,
+                _state: &GamepadState,
+            ) -> Result<(), bridge_output::OutputError> {
+                Ok(())
+            }
+
+            fn service(&mut self) -> Result<(), bridge_output::OutputError> {
+                self.0 += 1;
+                Ok(())
+            }
+        }
+
+        let mut output = ServiceCounter(0);
+        let start = Instant::now();
+        let mut last_service = start;
+        service_if_due(
+            &mut output,
+            &mut last_service,
+            start + TOOL_SERVICE_INTERVAL,
+        )
+        .unwrap();
+        service_if_due(
+            &mut output,
+            &mut last_service,
+            start + TOOL_SERVICE_INTERVAL,
+        )
+        .unwrap();
+        assert_eq!(output.0, 1);
     }
 }

@@ -171,6 +171,20 @@ pub enum OutputFeedback {
     },
 }
 
+impl std::fmt::Display for OutputFeedback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rumble {
+                low_frequency,
+                high_frequency,
+            } => write!(
+                f,
+                "rumble low_frequency={low_frequency} high_frequency={high_frequency}"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct OutputDiagnostics {
     pub bridge_reconnects: u64,
@@ -368,6 +382,100 @@ impl<O: GamepadOutput> GamepadOutput for ChangedOnly<O> {
     }
 }
 
+/// Observes feedback produced while servicing an output and retains the latest
+/// value for an outer consumer.
+pub struct FeedbackObserverOutput<O, F> {
+    inner: O,
+    observer: F,
+    pending_feedback: Option<OutputFeedback>,
+}
+
+impl<O, F> FeedbackObserverOutput<O, F> {
+    pub fn new(inner: O, observer: F) -> Self {
+        Self {
+            inner,
+            observer,
+            pending_feedback: None,
+        }
+    }
+
+    pub fn into_inner(self) -> O {
+        self.inner
+    }
+}
+
+impl<O, F> FeedbackObserverOutput<O, F>
+where
+    O: GamepadOutput,
+    F: FnMut(OutputFeedback),
+{
+    fn capture_feedback(&mut self) {
+        if let Some(feedback) = self.inner.take_feedback() {
+            (self.observer)(feedback);
+            self.pending_feedback = Some(feedback);
+        }
+    }
+}
+
+impl<O, F> GamepadOutput for FeedbackObserverOutput<O, F>
+where
+    O: GamepadOutput,
+    F: FnMut(OutputFeedback),
+{
+    fn send_state(&mut self, state: &GamepadState) -> Result<(), OutputError> {
+        self.inner.send_state(state)?;
+        self.capture_feedback();
+        Ok(())
+    }
+
+    fn send_neutral(&mut self) -> Result<(), OutputError> {
+        self.inner.send_neutral()?;
+        self.capture_feedback();
+        Ok(())
+    }
+
+    fn service(&mut self) -> Result<(), OutputError> {
+        self.inner.service()?;
+        self.capture_feedback();
+        Ok(())
+    }
+
+    fn feedback_semantics(&self) -> OutputFeedbackSemantics {
+        self.inner.feedback_semantics()
+    }
+
+    fn take_feedback(&mut self) -> Option<OutputFeedback> {
+        self.capture_feedback();
+        self.pending_feedback.take()
+    }
+
+    fn diagnostics(&self) -> OutputDiagnostics {
+        self.inner.diagnostics()
+    }
+
+    fn firmware_info(&self) -> Option<FirmwareInfo> {
+        self.inner.firmware_info()
+    }
+
+    fn request_firmware_install_receipt(
+        &mut self,
+        request_id: u32,
+        receipt: FirmwareInstallReceipt,
+    ) -> Result<(), OutputError> {
+        self.inner
+            .request_firmware_install_receipt(request_id, receipt)
+    }
+
+    fn poll_firmware_install_receipt(
+        &mut self,
+        request_id: u32,
+        receipt: FirmwareInstallReceipt,
+    ) -> Option<Result<FirmwareInstallReceipt, OutputError>> {
+        self.inner
+            .poll_firmware_install_receipt(request_id, receipt)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,6 +521,66 @@ mod tests {
             ChangedOnly::new(StatefulOutput).feedback_semantics(),
             OutputFeedbackSemantics::Stateful
         );
+    }
+
+    #[test]
+    fn feedback_observer_services_and_retains_feedback() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        struct FeedbackOutput {
+            service_calls: usize,
+            feedback: Option<OutputFeedback>,
+        }
+
+        impl GamepadOutput for FeedbackOutput {
+            fn send_state(&mut self, _state: &GamepadState) -> Result<(), OutputError> {
+                self.feedback = Some(OutputFeedback::Rumble {
+                    low_frequency: 1,
+                    high_frequency: 2,
+                });
+                Ok(())
+            }
+
+            fn service(&mut self) -> Result<(), OutputError> {
+                self.service_calls += 1;
+                Ok(())
+            }
+
+            fn feedback_semantics(&self) -> OutputFeedbackSemantics {
+                OutputFeedbackSemantics::Stateful
+            }
+
+            fn take_feedback(&mut self) -> Option<OutputFeedback> {
+                self.feedback.take()
+            }
+        }
+
+        let first = OutputFeedback::Rumble {
+            low_frequency: 1,
+            high_frequency: 2,
+        };
+        assert_eq!(first.to_string(), "rumble low_frequency=1 high_frequency=2");
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let captured = Rc::clone(&observed);
+        let mut output = FeedbackObserverOutput::new(
+            FeedbackOutput {
+                service_calls: 0,
+                feedback: None,
+            },
+            move |feedback| captured.borrow_mut().push(feedback),
+        );
+
+        output.send_neutral().unwrap();
+        assert_eq!(output.take_feedback(), Some(first));
+        output.service().unwrap();
+        assert_eq!(*observed.borrow(), vec![first]);
+        assert_eq!(output.take_feedback(), None);
+        assert_eq!(
+            output.feedback_semantics(),
+            OutputFeedbackSemantics::Stateful
+        );
+        assert_eq!(output.into_inner().service_calls, 1);
     }
 
     #[test]
