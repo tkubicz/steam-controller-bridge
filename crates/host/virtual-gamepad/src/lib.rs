@@ -19,6 +19,7 @@ pub use facade::{VirtualGamepad, VirtualGamepadBackendKind, VirtualGamepadConfig
 use serde::{Deserialize, Serialize};
 
 pub const VIRTUAL_GAMEPAD_NAME: &str = "Steam Controller Bridge Virtual Gamepad";
+pub const LINUX_VIRTUAL_GAMEPAD_VERSION: u16 = 0x0114;
 
 /// Runtime opt-in used by release binaries before they expose or open the
 /// entitlement-gated virtual-HID backend.
@@ -428,6 +429,7 @@ mod tests {
         let config = VirtualHidConfig::new(PathBuf::from("helper"));
         assert_eq!(config.vendor_id, 0x045e);
         assert_eq!(config.product_id, 0x028e);
+        assert_eq!(LINUX_VIRTUAL_GAMEPAD_VERSION, 0x0114);
         let custom = config.with_identity(0xcafe, 0x4001);
         assert_eq!((custom.vendor_id, custom.product_id), (0xcafe, 0x4001));
     }

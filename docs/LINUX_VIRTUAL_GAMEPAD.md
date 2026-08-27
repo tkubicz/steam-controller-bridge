@@ -17,16 +17,23 @@ motor. Zero-length effects continue until stopped.
 
 ## S2 spike status
 
-Source and API review passed. Live S2 verification on Ubuntu is still required
-before the Linux CLI can make virtual output its default. The runtime exposes
-the platform-neutral virtual-gamepad selection. `sc-bridge`, `sc-replay`, and
-`gamepad-simulator` select it with `--output virtual-gamepad`; the `virtual-hid`
-spelling remains an alias. Linux does not require the macOS experimental opt-in
-or helper path. Live `sc-bridge` still defaults to serial, and replay still
-defaults to diagnostic output. The device-backed acceptance harness added later
-in Track C will verify state readback, force-feedback upload/play/stop/erase,
-callback magnitudes, and event-node removal. No macOS-hosted check is counted as
-that evidence.
+Source and API review passed. An ignored, device-backed acceptance harness now
+covers state readback, force-feedback upload/play/stop/erase, callback
+magnitudes, neutralization, and event-node removal. Live S2 verification on
+Ubuntu is still required before the Linux CLI can make virtual output its
+default. Run it as the ordinary active desktop user after installing the Linux
+access policy:
+
+```sh
+cargo test -p virtual-gamepad --test linux_uinput_roundtrip -- --ignored --nocapture
+```
+
+The runtime exposes the platform-neutral virtual-gamepad selection.
+`sc-bridge`, `sc-replay`, and `gamepad-simulator` select it with `--output
+virtual-gamepad`; the `virtual-hid` spelling remains an alias. Linux does not
+require the macOS experimental opt-in or helper path. Live `sc-bridge` still
+defaults to serial, and replay still defaults to diagnostic output. No
+macOS-hosted check is counted as Linux device evidence.
 
 ```sh
 cargo run -p gamepad-simulator -- automated --output virtual-gamepad
@@ -48,3 +55,21 @@ configure the dedicated-group headless alternative.
 Access permits the user to create arbitrary virtual input devices, including
 keyboards and pointers. It cannot be restricted to this application or to
 gamepads alone. Do not run the application as root.
+
+## Acceptance record
+
+The normal test suite compiles the Linux harness but does not execute the
+ignored `/dev/uinput` test. These live checks remain pending until their output
+is recorded from the Ubuntu VM:
+
+| Check | Status |
+| --- | --- |
+| Ordinary-user uinput round-trip harness | Pending |
+| Automated simulator state inspection in evdev | Pending |
+| Recorded replay state inspection in evdev | Pending |
+| SDL identity and complete control inspection | Pending |
+| Steam identity and complete control inspection | Pending |
+| Synthetic force-feedback round trip | Pending |
+| USB-over-IP Puck input and physical rumble | Pending |
+| Missing-device and denied-access diagnostics without serial fallback | Pending |
+| Existing macOS helper, alias, settings, and package checks | Pending |
