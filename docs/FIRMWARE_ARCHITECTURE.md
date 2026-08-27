@@ -37,6 +37,9 @@ Required behavior:
   two 8-bit channels to `u16`, and return protocol message type 8 over CDC.
 - Refresh nonzero rumble feedback every 25 ms and prioritize a safety zero
   across USB/CDC/session resets without feeding the input watchdog.
+- Expire nonzero rumble 250 ms after the last nonzero Xbox OUT packet, a lease
+  those refreshes never renew, and quarantine nonzero output after each HID
+  mount, CDC connection, and Hello until a zero arrives or 250 ms pass quietly.
 - Reset the HID report to neutral after a host-data watchdog timeout (initial target: 100 ms).
 - Reset immediately on CDC disconnect, protocol uncertainty, or parser failure threshold.
 - Use an LED for disconnected, negotiating, active, and fault states without affecting timing.

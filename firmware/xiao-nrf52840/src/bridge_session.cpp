@@ -522,6 +522,8 @@ void BridgeSession::service_rumble(uint32_t now_ms) {
           kRumbleStartupQuietMs) {
     rumble_quarantine_active_ = false;
   }
+  // Only a real Xbox OUT packet renews this lease. The refresh below is
+  // firmware-generated, so it must not keep a dead source's effect running.
   if (rumble_source_lease_armed_ &&
       static_cast<uint32_t>(now_ms - last_rumble_source_ms_) >=
           kRumbleSourceLeaseMs) {

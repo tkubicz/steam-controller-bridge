@@ -145,9 +145,13 @@ four-byte payload is:
 
 Both values are little-endian. Firmware scales the Xbox driver's 8-bit values
 linearly with `value * 257`, sends changes immediately, and refreshes a nonzero
-request every 25 ms. A zero command ends that lease. Firmware transmit sequence
-numbers are independent wrapping `u16` values; an older host safely ignores
-message type 8 as an unknown message.
+request every 25 ms. A zero command ends that lease. From revision 4 those
+refreshes cannot outlive their source: a nonzero request also expires 250 ms
+after the last nonzero Xbox OUT packet, and nonzero output is quarantined
+after each HID mount, CDC connection, and Hello until a zero arrives or the
+source stays quiet for 250 ms. Firmware transmit sequence numbers are
+independent wrapping `u16` values; an older host safely ignores message type 8
+as an unknown message.
 
 ## Stream recovery
 

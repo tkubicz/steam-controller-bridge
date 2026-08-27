@@ -862,6 +862,13 @@ void test_rumble_startup_quarantine_requires_quiet_or_zero() {
   session.tick(703);
   assert(captured_rumble(sink).back() == fresh);
   assert(session.diagnostics().rumble_quarantine_suppressions == 4);
+
+  // A USB remount quarantines without a CDC edge or a new Hello.
+  session.on_hid_mounted(704);
+  session.on_xinput_rumble(stale, 705);
+  session.tick(705);
+  assert(captured_rumble(sink).back() == RumbleFeedback{});
+  assert(session.diagnostics().rumble_quarantine_suppressions == 5);
 }
 
 void test_rumble_safety_timers_handle_millis_wraparound() {
