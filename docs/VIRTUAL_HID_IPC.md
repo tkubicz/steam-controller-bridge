@@ -1,8 +1,8 @@
 # Virtual HID helper protocol
 
 The Rust parent and Rust helper share the types in
-`crates/virtual-gamepad/src/contract.rs`. Checked-in golden messages live in
-`crates/virtual-gamepad/fixtures`. Protocol version 4 uses compact UTF-8 JSON,
+`crates/host/virtual-gamepad/src/contract.rs`. Checked-in golden messages live in
+`crates/host/virtual-gamepad/fixtures`. Protocol version 4 uses compact UTF-8 JSON,
 one object per line, over inherited stdin/stdout. Stderr is human diagnostics.
 
 Lines are limited to 65,536 bytes including the newline. Unknown fields,

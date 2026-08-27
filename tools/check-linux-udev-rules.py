@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parents[1]
 RULE_DIRECTORY = ROOT / "packaging/linux"
 RULE_FILENAME = "60-steam-controller-bridge.rules"
 README_PATH = ROOT / "packaging/linux/README.md"
-IDENTITY_PATH = ROOT / "crates/steam-controller-device/src/lib.rs"
-FIRMWARE_TARGETS_PATH = ROOT / "crates/release-updater/firmware-targets.json"
-BRIDGE_BACKEND_PATH = ROOT / "crates/linux-bridge-usb/src/lib.rs"
+IDENTITY_PATH = ROOT / "crates/controller/steam-controller-device/src/lib.rs"
+FIRMWARE_TARGETS_PATH = ROOT / "crates/app/release-updater/firmware-targets.json"
+BRIDGE_BACKEND_PATH = ROOT / "crates/host/linux-bridge-usb/src/lib.rs"
 RUST_U16_CONSTANT = re.compile(
     r"^pub const (?P<name>[A-Z0-9_]+): u16 = 0x(?P<value>[0-9a-fA-F]+);$",
     re.MULTILINE,

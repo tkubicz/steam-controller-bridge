@@ -18,29 +18,29 @@ updater = ["dep:chrono", "dep:eframe", "dep:ui-theme", "dep:release-updater", "d
 local-update-source = ["updater", "release-updater?/local-update-source"]
 
 [dependencies]
-app-paths = { path = "../../crates/app-paths" }
-bridge-runtime = { path = "../../crates/bridge-runtime" }
+app-paths = { path = "../../crates/host/app-paths" }
+bridge-runtime = { path = "../../crates/bridge/bridge-runtime" }
 clap.workspace = true
-desktop-bindings = { path = "../../crates/desktop-bindings" }
-menu-shell = { path = "../../crates/menu-shell" }
-platform-capabilities = { path = "../../crates/platform-capabilities" }
-profile-picker = { path = "../../crates/profile-picker" }
-release-updater = { path = "../../crates/release-updater", optional = true }
+desktop-bindings = { path = "../../crates/app/desktop-bindings" }
+menu-shell = { path = "../../crates/host/menu-shell" }
+platform-capabilities = { path = "../../crates/host/platform-capabilities" }
+profile-picker = { path = "../../crates/app/profile-picker" }
+release-updater = { path = "../../crates/app/release-updater", optional = true }
 semver = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-steam-controller-device = { path = "../../crates/steam-controller-device" }
+steam-controller-device = { path = "../../crates/controller/steam-controller-device" }
 tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-desktop-input = { path = "../../crates/desktop-input" }
-virtual-gamepad = { path = "../../crates/virtual-gamepad" }
+desktop-input = { path = "../../crates/host/desktop-input" }
+virtual-gamepad = { path = "../../crates/host/virtual-gamepad" }
 eframe = { workspace = true, optional = true }
-ui-theme = { path = "../../crates/ui-theme", optional = true }
+ui-theme = { path = "../../crates/app/ui-theme", optional = true }
 # Only the editor draws a controller; the overlay does not.
-controller-art = { path = "../../crates/controller-art", optional = true }
+controller-art = { path = "../../crates/app/controller-art", optional = true }
 tiny-skia.workspace = true
 tray-icon.workspace = true
 winit.workspace = true

@@ -7,11 +7,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
-bridge-output = { path = "../../crates/bridge-output" }
+bridge-output = { path = "../../crates/bridge/bridge-output" }
 clap.workspace = true
-gamepad-state = { path = "../../crates/gamepad-state" }
-virtual-gamepad = { path = "../../crates/virtual-gamepad" }
-recording = { path = "../../crates/recording" }
+gamepad-state = { path = "../../crates/bridge/gamepad-state" }
+virtual-gamepad = { path = "../../crates/host/virtual-gamepad" }
+recording = { path = "../../crates/app/recording" }
 
 [lints]
 workspace = true

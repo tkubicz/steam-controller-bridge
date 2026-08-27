@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-app-paths = { path = "../app-paths" }
+app-paths = { path = "../../host/app-paths" }
 fs4.workspace = true
 steam-controller-protocol = { path = "../steam-controller-protocol" }
 

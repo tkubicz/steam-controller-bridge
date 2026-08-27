@@ -7,23 +7,23 @@ license.workspace = true
 publish = false
 
 [dependencies]
-controller-mapper = { path = "../../crates/controller-mapper" }
-bridge-output = { path = "../../crates/bridge-output" }
+controller-mapper = { path = "../../crates/controller/controller-mapper" }
+bridge-output = { path = "../../crates/bridge/bridge-output" }
 clap.workspace = true
 ctrlc.workspace = true
-desktop-bindings = { path = "../../crates/desktop-bindings" }
-desktop-input = { path = "../../crates/desktop-input" }
+desktop-bindings = { path = "../../crates/app/desktop-bindings" }
+desktop-input = { path = "../../crates/host/desktop-input" }
 eframe = { workspace = true, features = ["wayland", "x11"] }
-gamepad-state = { path = "../../crates/gamepad-state" }
-recording = { path = "../../crates/recording" }
+gamepad-state = { path = "../../crates/bridge/gamepad-state" }
+recording = { path = "../../crates/app/recording" }
 rfd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-steam-controller-discovery = { path = "../../crates/steam-controller-discovery" }
-steam-controller-device = { path = "../../crates/steam-controller-device" }
-steam-controller-protocol = { path = "../../crates/steam-controller-protocol" }
-controller-art = { path = "../../crates/controller-art" }
-ui-theme = { path = "../../crates/ui-theme" }
+steam-controller-discovery = { path = "../../crates/controller/steam-controller-discovery" }
+steam-controller-device = { path = "../../crates/controller/steam-controller-device" }
+steam-controller-protocol = { path = "../../crates/controller/steam-controller-protocol" }
+controller-art = { path = "../../crates/app/controller-art" }
+ui-theme = { path = "../../crates/app/ui-theme" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation.workspace = true

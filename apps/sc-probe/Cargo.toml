@@ -9,10 +9,10 @@ publish = false
 [dependencies]
 ctrlc.workspace = true
 clap.workspace = true
-recording = { path = "../../crates/recording" }
+recording = { path = "../../crates/app/recording" }
 serde_json.workspace = true
-steam-controller-device = { path = "../../crates/steam-controller-device" }
-steam-controller-protocol = { path = "../../crates/steam-controller-protocol" }
+steam-controller-device = { path = "../../crates/controller/steam-controller-device" }
+steam-controller-protocol = { path = "../../crates/controller/steam-controller-protocol" }
 
 [lints]
 workspace = true

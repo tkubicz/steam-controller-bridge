@@ -22,7 +22,7 @@ const CAPTION_ROW: f32 = 18.0;
 /// that the source-bit names are reversed against the physical buttons:
 /// `SteamButton::View` is the physical Menu/Start button on the right, and
 /// `SteamButton::Menu` is the physical View/Back button on the left.
-/// `crates/controller-mapper` encodes the same crossover (`View => Start`,
+/// `crates/controller/controller-mapper` encodes the same crossover (`View => Start`,
 /// `Menu => Back`) and tests it in
 /// `view_and_menu_follow_sdl_xbox_button_semantics`.
 ///

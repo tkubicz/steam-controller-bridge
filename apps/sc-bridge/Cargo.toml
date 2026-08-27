@@ -7,14 +7,14 @@ license.workspace = true
 publish = false
 
 [dependencies]
-bridge-core = { path = "../../crates/bridge-core" }
+bridge-core = { path = "../../crates/bridge/bridge-core" }
 clap.workspace = true
-bridge-output = { path = "../../crates/bridge-output" }
-bridge-runtime = { path = "../../crates/bridge-runtime" }
-virtual-gamepad = { path = "../../crates/virtual-gamepad" }
+bridge-output = { path = "../../crates/bridge/bridge-output" }
+bridge-runtime = { path = "../../crates/bridge/bridge-runtime" }
+virtual-gamepad = { path = "../../crates/host/virtual-gamepad" }
 ctrlc.workspace = true
-desktop-bindings = { path = "../../crates/desktop-bindings" }
-recording = { path = "../../crates/recording" }
+desktop-bindings = { path = "../../crates/app/desktop-bindings" }
+recording = { path = "../../crates/app/recording" }
 
 [lints]
 workspace = true

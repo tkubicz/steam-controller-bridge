@@ -7,11 +7,11 @@ publish = false
 
 [dependencies]
 base64.workspace = true
-bridge-output = { path = "../bridge-output" }
-gamepad-state = { path = "../gamepad-state" }
+bridge-output = { path = "../../bridge/bridge-output" }
+gamepad-state = { path = "../../bridge/gamepad-state" }
 serde.workspace = true
 serde_json.workspace = true
-steam-controller-protocol = { path = "../steam-controller-protocol" }
+steam-controller-protocol = { path = "../../controller/steam-controller-protocol" }
 
 [lints]
 workspace = true

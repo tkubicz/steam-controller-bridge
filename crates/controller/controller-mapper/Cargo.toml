@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-gamepad-state = { path = "../gamepad-state" }
+gamepad-state = { path = "../../bridge/gamepad-state" }
 steam-controller-protocol = { path = "../steam-controller-protocol" }
 
 [lints]

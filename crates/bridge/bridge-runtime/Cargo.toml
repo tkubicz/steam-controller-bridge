@@ -1,0 +1,26 @@
+[package]
+name = "bridge-runtime"
+version = "1.10.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+
+[dependencies]
+bridge-core = { path = "../bridge-core" }
+bridge-output = { path = "../bridge-output" }
+controller-mapper = { path = "../../controller/controller-mapper" }
+desktop-bindings = { path = "../../app/desktop-bindings" }
+desktop-input = { path = "../../host/desktop-input" }
+gamepad-state = { path = "../gamepad-state" }
+virtual-gamepad = { path = "../../host/virtual-gamepad" }
+profile-picker = { path = "../../app/profile-picker" }
+power-monitor = { path = "../../host/power-monitor" }
+recording = { path = "../../app/recording" }
+serde_json.workspace = true
+steam-controller-discovery = { path = "../../controller/steam-controller-discovery" }
+steam-controller-device = { path = "../../controller/steam-controller-device" }
+steam-controller-protocol = { path = "../../controller/steam-controller-protocol" }
+
+[lints]
+workspace = true

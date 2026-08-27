@@ -140,11 +140,11 @@ suppression   profile-picker: hold timing, angle to sector, commit
                                               overlay process (eframe)
 ```
 
-- **`crates/profile-picker`** is pure: hold timing, wheel geometry, paging, and
+- **`crates/app/profile-picker`** is pure: hold timing, wheel geometry, paging, and
   the suppression set. It has no platform dependency and carries the bulk of the
   tests. It also reports `Preparing` halfway through a hold, so a host with
   something expensive to build can start before the wheel is wanted.
-- **`crates/bridge-runtime`** drives it once per controller report, applies the
+- **`crates/bridge/bridge-runtime`** drives it once per controller report, applies the
   suppression to `bridge-core`, masks the trigger out of the snapshot handed to
   `desktop-bindings`, and streams `PickerEvent`s to the frontend through the
   sink given to `BridgeRuntime::spawn_with_picker`.

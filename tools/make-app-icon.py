@@ -15,7 +15,7 @@ same shape. Keep the two in sync if either changes.
 The colours below are the app's own: the tile runs SURFACE_RAISED to SUNKEN and
 the glyph is ACCENT, so the icon reads as the app window in miniature. Python
 cannot import Rust constants, so the three values are duplicated here and
-checked against crates/ui-theme at startup rather than left to drift.
+checked against crates/app/ui-theme at startup rather than left to drift.
 """
 
 from __future__ import annotations
@@ -246,13 +246,13 @@ def render(size):
 
 
 def check_palette():
-    """Fail if the colours here have drifted from crates/ui-theme.
+    """Fail if the colours here have drifted from crates/app/ui-theme.
 
     The icon is the one place the palette is duplicated across languages. A
     silent mismatch is exactly how the icon ended up violet while every window
     was cyan, so the duplication is checked rather than trusted.
     """
-    source = REPO / "crates" / "ui-theme" / "src" / "lib.rs"
+    source = REPO / "crates" / "app" / "ui-theme" / "src" / "lib.rs"
     if not source.exists():
         sys.exit(f"cannot verify palette: {source.relative_to(REPO)} is missing")
     text = source.read_text(encoding="utf-8")
@@ -280,7 +280,7 @@ def check_palette():
 
     if problems:
         sys.exit(
-            "palette drift between this script and crates/ui-theme:\n"
+            "palette drift between this script and crates/app/ui-theme:\n"
             + "\n".join(problems)
             + "\n\nUpdate GRADIENT_FROM / GRADIENT_TO / GLYPH to match, then rerun."
         )

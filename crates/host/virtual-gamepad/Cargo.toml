@@ -7,8 +7,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-bridge-output = { path = "../bridge-output" }
-gamepad-state = { path = "../gamepad-state" }
+bridge-output = { path = "../../bridge/bridge-output" }
+gamepad-state = { path = "../../bridge/gamepad-state" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
