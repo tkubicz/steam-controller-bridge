@@ -39,14 +39,12 @@ each observed aggregate as `event=output_rumble` with its low- and
 high-frequency magnitudes.
 
 Linux capability probing distinguishes a missing `/dev/uinput` device from
-denied read/write access. Until the packaging policy lands, development setup
-is temporary:
+denied read/write access. The checked-in Linux policy loads `uinput` during boot
+and grants `/dev/uinput` access to the active local session. Follow the
+[Linux device-access instructions](../packaging/linux/README.md) to install the
+udev and modules-load files for development, apply them without rebooting, or
+configure the dedicated-group headless alternative.
 
-```sh
-sudo modprobe uinput
-sudo setfacl -m u:$USER:rw /dev/uinput
-```
-
-The ACL lasts only until `/dev/uinput` is recreated or the machine reboots.
-Access permits the user to create arbitrary virtual input devices, not only
-gamepads for this application. Do not run the application as root.
+Access permits the user to create arbitrary virtual input devices, including
+keyboards and pointers. It cannot be restricted to this application or to
+gamepads alone. Do not run the application as root.
