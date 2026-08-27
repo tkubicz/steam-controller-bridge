@@ -110,7 +110,8 @@ Frame decode_single(const std::vector<uint8_t>& bytes) {
   return events.frames[0];
 }
 
-void negotiate(BridgeSession& session, uint16_t sequence = 0) {
+void negotiate_at(BridgeSession& session, uint32_t now_ms,
+                  uint16_t sequence = 0) {
   Frame hello{};
   hello.version = 1;
   hello.message_type = static_cast<uint8_t>(MessageType::Hello);
@@ -118,9 +119,33 @@ void negotiate(BridgeSession& session, uint16_t sequence = 0) {
   hello.payload_length = 2;
   hello.payload[0] = 1;
   hello.payload[1] = 1;
-  session.on_frame(hello, 0);
+  session.on_frame(hello, now_ms);
   assert(session.negotiated());
   session.mark_hid_report_sent();
+}
+
+void negotiate(BridgeSession& session, uint16_t sequence = 0) {
+  negotiate_at(session, 0, sequence);
+}
+
+std::vector<RumbleFeedback> captured_rumble(const CapturingSink& sink) {
+  std::vector<RumbleFeedback> feedback;
+  for (const auto& bytes : sink.writes) {
+    const Frame frame = decode_single(bytes);
+    if (frame.message_type != static_cast<uint8_t>(MessageType::Rumble)) {
+      continue;
+    }
+    assert(frame.payload_length == 4);
+    feedback.push_back(RumbleFeedback{
+        static_cast<uint16_t>(
+            static_cast<uint16_t>(frame.payload[0]) |
+            static_cast<uint16_t>(frame.payload[1] << 8U)),
+        static_cast<uint16_t>(
+            static_cast<uint16_t>(frame.payload[2]) |
+            static_cast<uint16_t>(frame.payload[3] << 8U)),
+    });
+  }
+  return feedback;
 }
 
 Frame state_frame(uint16_t sequence, uint16_t buttons = 1, int16_t x = 1234) {
@@ -699,15 +724,17 @@ void test_rumble_latest_refresh_and_safety_zero() {
   session.on_cdc_connected(0);
   session.mark_hid_report_sent();
   negotiate(session);
-  session.on_xinput_rumble(RumbleFeedback{0x1111, 0x2222}, 0);
-  session.on_xinput_rumble(RumbleFeedback{0x1234, 0xabcd}, 0);
-
+  // An explicit upstream zero establishes a clean baseline immediately.
+  session.on_xinput_rumble(RumbleFeedback{0, 0}, 0);
   session.tick(0);
   Frame frame = decode_single(sink.writes.back());
   assert(frame.message_type == static_cast<uint8_t>(MessageType::Rumble));
   assert(frame.payload_length == 4);
   assert(frame.payload[0] == 0 && frame.payload[1] == 0);
   assert(frame.payload[2] == 0 && frame.payload[3] == 0);
+
+  session.on_xinput_rumble(RumbleFeedback{0x1111, 0x2222}, 1);
+  session.on_xinput_rumble(RumbleFeedback{0x1234, 0xabcd}, 1);
 
   session.tick(1);
   frame = decode_single(sink.writes.back());
@@ -740,6 +767,133 @@ void test_rumble_latest_refresh_and_safety_zero() {
   session.on_xinput_rumble(RumbleFeedback{0xffff, 0xffff}, 103);
   session.tick(103);
   assert(sink.writes.size() == writes_after_rejection + 1);
+}
+
+void test_rumble_source_lease_requires_real_xinput_packets() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session);
+  session.on_xinput_rumble(RumbleFeedback{0, 0}, 0);
+  session.tick(0);
+
+  const RumbleFeedback active{0x1234, 0xabcd};
+  session.on_xinput_rumble(active, 1);
+  session.tick(1);
+  session.tick(250);
+  assert(captured_rumble(sink).back() == active);
+  assert(session.diagnostics().rumble_source_lease_expirations == 0);
+
+  // Cached 25 ms feedback refreshes do not renew the real-source lease.
+  session.tick(251);
+  assert(captured_rumble(sink).back() == RumbleFeedback{});
+  assert(session.diagnostics().rumble_source_lease_expirations == 1);
+  const size_t writes_after_expiry = sink.writes.size();
+  session.tick(1000);
+  assert(sink.writes.size() == writes_after_expiry);
+}
+
+void test_real_xinput_packets_renew_rumble_source_lease() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(0);
+  session.mark_hid_report_sent();
+  negotiate(session);
+  session.on_xinput_rumble(RumbleFeedback{0, 0}, 0);
+  session.tick(0);
+
+  const RumbleFeedback active{0x4567, 0x89ab};
+  session.on_xinput_rumble(active, 1);
+  session.tick(1);
+  session.on_xinput_rumble(active, 200);
+  session.tick(200);
+  session.tick(449);
+  assert(captured_rumble(sink).back() == active);
+  assert(session.diagnostics().rumble_source_lease_expirations == 0);
+
+  session.tick(450);
+  assert(captured_rumble(sink).back() == RumbleFeedback{});
+  assert(session.diagnostics().rumble_source_lease_expirations == 1);
+}
+
+void test_rumble_startup_quarantine_requires_quiet_or_zero() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  session.on_cdc_connected(100);
+  session.mark_hid_report_sent();
+  negotiate_at(session, 100);
+
+  const RumbleFeedback stale{0xffff, 0x2222};
+  session.on_xinput_rumble(stale, 100);
+  session.tick(100);
+  assert(captured_rumble(sink).back() == RumbleFeedback{});
+  assert(session.diagnostics().rumble_quarantine_suppressions == 1);
+
+  session.tick(349);
+  session.on_xinput_rumble(stale, 349);
+  session.tick(598);
+  assert(captured_rumble(sink).back() == RumbleFeedback{});
+  assert(session.diagnostics().rumble_quarantine_suppressions == 2);
+
+  // Exactly 250 ms without an Xbox OUT packet establishes a clean baseline.
+  session.tick(599);
+  const RumbleFeedback fresh{0x3456, 0x789a};
+  session.on_xinput_rumble(fresh, 600);
+  session.tick(600);
+  assert(captured_rumble(sink).back() == fresh);
+
+  // Re-negotiation without a CDC edge also re-establishes the quarantine.
+  negotiate_at(session, 650, 10);
+  session.on_xinput_rumble(stale, 651);
+  session.tick(651);
+  assert(captured_rumble(sink).back() == RumbleFeedback{});
+
+  // A reconnect starts a new quarantine, while an explicit zero releases it.
+  session.on_cdc_disconnected();
+  session.on_cdc_connected(700);
+  session.mark_hid_report_sent();
+  negotiate_at(session, 700);
+  session.on_xinput_rumble(stale, 701);
+  session.on_xinput_rumble(RumbleFeedback{0, 0}, 702);
+  session.tick(702);
+  assert(captured_rumble(sink).back() == RumbleFeedback{});
+  session.on_xinput_rumble(fresh, 703);
+  session.tick(703);
+  assert(captured_rumble(sink).back() == fresh);
+  assert(session.diagnostics().rumble_quarantine_suppressions == 4);
+
+  // A USB remount quarantines without a CDC edge or a new Hello.
+  session.on_hid_mounted(704);
+  session.on_xinput_rumble(stale, 705);
+  session.tick(705);
+  assert(captured_rumble(sink).back() == RumbleFeedback{});
+  assert(session.diagnostics().rumble_quarantine_suppressions == 5);
+}
+
+void test_rumble_safety_timers_handle_millis_wraparound() {
+  CapturingSink sink;
+  BridgeSession session(sink);
+  constexpr uint32_t start = UINT32_MAX - 100U;
+  session.on_cdc_connected(start);
+  session.mark_hid_report_sent();
+  negotiate_at(session, start);
+
+  const RumbleFeedback active{0x1357, 0x2468};
+  session.on_xinput_rumble(active, start);
+  session.tick(start + scbridge::kRumbleSourceLeaseMs - 1U);
+  assert(captured_rumble(sink).back() == RumbleFeedback{});
+  session.tick(start + scbridge::kRumbleSourceLeaseMs);
+  session.on_xinput_rumble(active,
+                           start + scbridge::kRumbleSourceLeaseMs + 1U);
+  session.tick(start + scbridge::kRumbleSourceLeaseMs + 1U);
+  assert(captured_rumble(sink).back() == active);
+
+  session.tick(start + 2U * scbridge::kRumbleSourceLeaseMs);
+  assert(captured_rumble(sink).back() == active);
+  session.tick(start + 2U * scbridge::kRumbleSourceLeaseMs + 1U);
+  assert(captured_rumble(sink).back() == RumbleFeedback{});
+  assert(session.diagnostics().rumble_source_lease_expirations == 1);
 }
 
 void test_fault_and_disconnect_neutralize() {
@@ -863,12 +1017,12 @@ void test_usb_remount_retransmits_the_safety_neutral() {
   // Identical bytes, but a re-enumerated host has seen nothing: every mount
   // must put the baseline neutral back on the wire so the driver publishes
   // the controller.
-  session.on_hid_mounted();
+  session.on_hid_mounted(1);
   assert(session.hid_report_pending());
   assert(session.pending_hid_report().buttons == 0);
   assert(session.pending_hid_report().hat == 8);
   session.mark_hid_report_sent();
-  session.on_hid_mounted();
+  session.on_hid_mounted(2);
   assert(session.hid_report_pending());
   session.mark_hid_report_sent();
 }
@@ -1086,6 +1240,10 @@ int main() {
   test_invalid_receipt_page_is_rejected_not_mismatched();
   test_session_negotiation_sequence_and_watchdog();
   test_rumble_latest_refresh_and_safety_zero();
+  test_rumble_source_lease_requires_real_xinput_packets();
+  test_real_xinput_packets_renew_rumble_source_lease();
+  test_rumble_startup_quarantine_requires_quiet_or_zero();
+  test_rumble_safety_timers_handle_millis_wraparound();
   test_fault_and_disconnect_neutralize();
   test_active_cdc_disconnect_queues_safety_neutral();
   test_identical_refreshes_suppress_hid_but_feed_watchdog();

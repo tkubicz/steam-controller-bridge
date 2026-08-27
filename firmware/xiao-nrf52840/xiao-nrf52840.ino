@@ -412,7 +412,7 @@ void feed_hardware_watchdog() { NRF_WDT->RR[0] = WDT_RR_RR_Reload; }
 void service_connection(uint32_t now_ms) {
   const bool mounted = TinyUSBDevice.mounted();
   if (mounted && !previous_usb_mounted) {
-    session.on_hid_mounted();
+    session.on_hid_mounted(now_ms);
   } else if (!mounted && previous_usb_mounted) {
     session.on_cdc_disconnected();
     decoder.reset();

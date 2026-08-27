@@ -173,9 +173,10 @@ worker ends, and status becomes an actionable error. No lizard-on command is
 sent; the controller watchdog restores desktop mode after heartbeats stop.
 
 Rumble travels in the opposite direction. The bridge device validates its
-gamepad OUT packet and renews a protocol lease every 25 ms. The HID worker applies changed
-values immediately, refreshes nonzero actuator output at 40 ms, and expires the
-lease at 100 ms. Only the newest command is retained. A write failure marks
+gamepad OUT packet and renews a protocol lease every 25 ms, stopping 250 ms
+after the last nonzero OUT packet. The HID worker applies changed values
+immediately, refreshes nonzero actuator output at 40 ms, and expires the lease
+at 100 ms. Only the newest command is retained. A write failure marks
 haptics `Degraded`, leaves input running, and retries no more often than every
 500 ms while fresh lease frames continue. Reconnect requires a new
 post-reconnect lease.

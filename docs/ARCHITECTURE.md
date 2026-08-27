@@ -80,8 +80,8 @@ recovery.
 - Outputs reject invalid values; they do not serialize Rust object memory.
 - Stop, timeout, disconnect, decode failure, and shutdown neutralize output
   before releasing hardware.
-- Rumble uses a bounded host lease and an explicit safety zero. Pad haptics are
-  finite ticks and failure degrades feedback without disabling input.
+- Rumble uses bounded source and host leases and an explicit safety zero. Pad
+  haptics are finite ticks and failure degrades feedback without disabling input.
 - Controller writes are limited to the exact supported Puck or Bluetooth
   collection and the fixed lizard, rumble, pad-tick, and power-off operations.
 - Discovery preserves button and touch transitions under pressure and treats

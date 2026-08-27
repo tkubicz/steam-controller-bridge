@@ -121,7 +121,7 @@ already reports the signed revision. A board reporting a newer revision is never
 downgraded.
 
 The app verifies the cached or downloaded UF2 and asks the running bridge to
-neutralize output and release hardware. Current revision 3 reports the XIAO
+neutralize output and release hardware. Current revision 4 reports the XIAO
 firmware target and can enter its UF2 bootloader automatically. Targetless
 revision 2 and other unidentified firmware receive no automatic update prompt
 or bootloader command; choose **Install or Recover XIAO Firmware** explicitly,
@@ -170,7 +170,7 @@ tools/prepare-local-update.py
 ```
 
 Save the launch command printed at the end, but do not run it yet. The helper
-builds firmware revision 3 from the current source and stores the catalog below
+builds firmware revision 4 from the current source and stores the catalog below
 `temp/steam-controller-bridge-local-update`.
 
 This works only in a build compiled with the non-default
@@ -248,12 +248,12 @@ UF2 mode automatically through its verified update protocol.
 
 Accept the first installation only when all of these checks pass:
 
-1. The temporary `XIAO-SENSE` UF2 drive appears and revision 3 is written.
+1. The temporary `XIAO-SENSE` UF2 drive appears and revision 4 is written.
 2. The board reconnects as Steam Controller Bridge without manual unplugging.
-3. App Center reports firmware revision 3 and an `AppCenter` installation
+3. App Center reports firmware revision 4 and an `AppCenter` installation
    receipt with a date and installation ID.
 4. **Reinstall Firmware** completes without pressing the reset button.
-5. The reinstall keeps revision 3 but produces a different date and
+5. The reinstall keeps revision 4 but produces a different date and
    installation ID.
 6. Unplugging and reconnecting the board does not change the second receipt.
 
@@ -1020,8 +1020,11 @@ device independently with the simulator.
   one-second vibration before infinite vibration.
 
 Stopping the effect, closing the browser, disconnecting either endpoint, or
-stopping the bridge must stop rumble. Do not continue using a build that can
-leave an actuator latched.
+stopping the bridge must stop rumble. Revision 4 also expires nonzero rumble
+once 250 ms pass without a real Xbox output packet; its internal 25 ms
+refreshes cannot extend that lease. Restarting the bridge or controller must
+not resurrect an expired effect. Do not continue using a build that can leave
+an actuator latched.
 
 ### Mapping is wrong
 

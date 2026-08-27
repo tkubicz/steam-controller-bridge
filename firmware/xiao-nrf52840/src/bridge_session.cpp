@@ -59,6 +59,8 @@ BridgeSession::BridgeSession(SessionSink& sink)
       rumble_pending_is_refresh_(false),
       deferred_rumble_pending_(false),
       rumble_refresh_armed_(false),
+      rumble_source_lease_armed_(false),
+      rumble_quarantine_active_(false),
       uf2_bootloader_requested_(false),
       uf2_bootloader_ready_pending_(false),
       uf2_bootloader_ready_(false),
@@ -68,6 +70,8 @@ BridgeSession::BridgeSession(SessionSink& sink)
       transmit_sequence_(0),
       last_data_ms_(0),
       last_rumble_tx_ms_(0),
+      last_rumble_source_ms_(0),
+      rumble_quarantine_quiet_since_ms_(0),
       uf2_bootloader_request_id_(0),
       install_receipt_request_id_(0),
       requested_install_receipt_{},
@@ -83,6 +87,7 @@ void BridgeSession::on_cdc_connected(uint32_t now_ms) {
   cdc_connected_ = true;
   last_data_ms_ = now_ms;
   reset_session(true);
+  begin_rumble_quarantine(now_ms);
 }
 
 void BridgeSession::on_cdc_disconnected() {
@@ -90,13 +95,13 @@ void BridgeSession::on_cdc_disconnected() {
   reset_session(false);
 }
 
-void BridgeSession::on_hid_mounted() {
+void BridgeSession::on_hid_mounted(uint32_t now_ms) {
   // A freshly (re)mounted USB host has accepted no report, so the queue cache
   // no longer describes its endpoint and the neutral below must reach the wire
   // for the driver to publish the controller.
   last_queued_hid_valid_ = false;
   force_neutral(true);
-  force_rumble_zero();
+  begin_rumble_quarantine(now_ms);
 }
 
 void BridgeSession::on_frame(const Frame& frame, uint32_t now_ms) {
@@ -114,6 +119,9 @@ void BridgeSession::on_frame(const Frame& frame, uint32_t now_ms) {
       const uint8_t selected = kProtocolVersion;
       negotiated_ =
           send_message(MessageType::HelloResponse, &selected, 1);
+      if (negotiated_) {
+        begin_rumble_quarantine(now_ms);
+      }
     }
     // Queued behind the HelloResponse rather than sent inline: the CDC TX
     // queue is shallow, and the loop's tick retries until it accepts.
@@ -184,7 +192,7 @@ void BridgeSession::on_decode_error(DecodeError) {
 }
 
 void BridgeSession::on_xinput_rumble(const RumbleFeedback& rumble,
-                                     uint32_t) {
+                                     uint32_t now_ms) {
   if (!negotiated_) {
     return;
   }
@@ -194,6 +202,18 @@ void BridgeSession::on_xinput_rumble(const RumbleFeedback& rumble,
   if (install_receipt_requested_) {
     return;
   }
+  if (!rumble_is_active(rumble)) {
+    rumble_quarantine_active_ = false;
+    force_rumble_zero();
+    return;
+  }
+  if (rumble_quarantine_active_) {
+    rumble_quarantine_quiet_since_ms_ = now_ms;
+    ++diagnostics_.rumble_quarantine_suppressions;
+    return;
+  }
+  last_rumble_source_ms_ = now_ms;
+  rumble_source_lease_armed_ = true;
   queue_rumble(rumble, false);
 }
 
@@ -246,6 +266,7 @@ void BridgeSession::reset_session(bool keep_connection) {
   install_receipt_requested_ = false;
   install_receipt_request_id_ = 0;
   requested_install_receipt_ = InstallReceiptData{};
+  rumble_quarantine_active_ = false;
   force_rumble_zero();
   if (!keep_connection) {
     transmit_sequence_ = 0;
@@ -284,8 +305,15 @@ void BridgeSession::force_neutral(bool safety) {
 }
 
 void BridgeSession::force_rumble_zero() {
+  rumble_source_lease_armed_ = false;
   rumble_refresh_armed_ = false;
   queue_rumble(zero_rumble(), true);
+}
+
+void BridgeSession::begin_rumble_quarantine(uint32_t now_ms) {
+  rumble_quarantine_active_ = true;
+  rumble_quarantine_quiet_since_ms_ = now_ms;
+  force_rumble_zero();
 }
 
 void BridgeSession::queue_hid(const CanonicalGamepadReport& report,
@@ -489,9 +517,22 @@ void BridgeSession::service_rumble(uint32_t now_ms) {
   if (!negotiated_) {
     return;
   }
+  if (rumble_quarantine_active_ &&
+      static_cast<uint32_t>(now_ms - rumble_quarantine_quiet_since_ms_) >=
+          kRumbleStartupQuietMs) {
+    rumble_quarantine_active_ = false;
+  }
+  // Only a real Xbox OUT packet renews this lease. The refresh below is
+  // firmware-generated, so it must not keep a dead source's effect running.
+  if (rumble_source_lease_armed_ &&
+      static_cast<uint32_t>(now_ms - last_rumble_source_ms_) >=
+          kRumbleSourceLeaseMs) {
+    ++diagnostics_.rumble_source_lease_expirations;
+    force_rumble_zero();
+  }
   if (!rumble_pending_ && rumble_refresh_armed_ &&
       static_cast<uint32_t>(now_ms - last_rumble_tx_ms_) >=
-          kRumbleLeaseRefreshMs) {
+          kRumbleFeedbackRefreshMs) {
     pending_rumble_ = desired_rumble_;
     rumble_pending_ = true;
     rumble_pending_is_safety_zero_ = false;

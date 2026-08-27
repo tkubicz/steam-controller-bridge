@@ -44,7 +44,7 @@ arduino-cli board list
 make flash PORT=/dev/cu.usbmodemXXXX
 ```
 
-App Center is the normal update path. Firmware revision 3 reports updater
+App Center is the normal update path. Firmware revision 4 reports updater
 target `seeed-xiao-nrf52840` and acknowledges a
 correlated bootloader request, drains CDC, waits 100 ms, and enters the Adafruit
 UF2 bootloader automatically. Targetless revision 2, factory firmware, and
@@ -104,11 +104,15 @@ is invalidated on every USB mount, so a freshly enumerated host always gets a
 new baseline neutral. This behavior lives in firmware: XIAOs flashed before it
 must be reflashed to pick it up.
 
-Nonzero rumble changes are returned immediately and refreshed every 25 ms as a
-host-side lease. HID mount, CDC DTR loss, USB unmount, a new Hello, parser/session
-reset, watchdog expiry, and reboot clear rumble and prioritize a zero feedback
-command after negotiation. Rumble never refreshes the 100 ms controller-input
-watchdog and does not compete with a pending neutral input report.
+Each HID mount, CDC connection, and Hello negotiation starts from zero and
+quarantines nonzero Xbox output until an explicit zero arrives or Xbox output
+stays quiet for 250 ms. After that baseline, real Xbox output packets renew a
+250 ms source lease. Accepted nonzero values are returned immediately and
+refreshed every 25 ms, but those firmware-generated refreshes never renew the
+source lease. Expiry sends one zero and stops refreshing. CDC DTR loss, USB
+unmount, parser/session reset, watchdog expiry, and reboot also clear rumble.
+Rumble never refreshes the 100 ms controller-input watchdog and does not compete
+with a pending neutral input report.
 
 ## Firmware revision
 
@@ -163,7 +167,10 @@ For rumble acceptance, first flash this updated firmware, start `./sc-bridge`,
 and use GamepadTester's one-second and infinite vibration actions. Verify
 unequal strong/weak values and that stopping the effect, closing the browser,
 unplugging either endpoint, or stopping the bridge cannot leave an actuator
-running. Test the Puck path independently with:
+running. Force-quit a client during infinite vibration and verify rumble stops
+within 350 ms of the last Xbox output packet. Then restart the bridge and power
+the controller off and on; neither reconnection may resurrect that stale
+effect. Test the Puck path independently with:
 
 ```bash
 cargo run -p sc-probe -- rumble --index N --low 32768 --high 0
