@@ -1171,6 +1171,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "evdevil"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c643614ef96f3638548743f7d04cd94b0290146bf5d95f3838e0876379cb05"
+dependencies = [
+ "libc",
+ "uoctl",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4670,6 +4680,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "uoctl"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82a1984060a018034bd16642b1c25a2178cf211c3930abb0099f01e995b38eeb"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4745,6 +4764,7 @@ dependencies = [
  "block2 0.6.2",
  "bridge-output",
  "dispatch2",
+ "evdevil",
  "gamepad-state",
  "objc2-core-foundation",
  "objc2-io-kit",

@@ -32,6 +32,7 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",
+    "0BSD",
     "Zlib",
     # serialport is linked into every binary. File-level copyleft only, so
     # distributing this MIT workspace is fine as long as those files are not

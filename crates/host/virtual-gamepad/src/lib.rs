@@ -5,6 +5,9 @@ mod client;
 pub mod contract;
 mod facade;
 pub mod helper;
+#[cfg(any(target_os = "linux", test))]
+mod linux_mapping;
+mod state_encoding;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -16,6 +19,8 @@ pub use contract::{
 };
 pub use facade::{VirtualGamepad, VirtualGamepadBackendKind, VirtualGamepadConfig};
 use serde::{Deserialize, Serialize};
+
+pub const VIRTUAL_GAMEPAD_NAME: &str = "Steam Controller Bridge Virtual Gamepad";
 
 /// Runtime opt-in used by release binaries before they expose or open the
 /// entitlement-gated virtual-HID backend.

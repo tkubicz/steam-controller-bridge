@@ -206,7 +206,7 @@ fn device_properties(vendor_id: u16, product_id: u16) -> CFRetained<CFDictionary
         ),
         (
             kIOHIDProductKey,
-            CFString::from_str("Steam Controller Bridge Virtual Gamepad").into(),
+            CFString::from_str(crate::VIRTUAL_GAMEPAD_NAME).into(),
         ),
         (kIOHIDManufacturerKey, CFString::from_str("Lynxware").into()),
         (

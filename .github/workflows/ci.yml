@@ -105,6 +105,13 @@ jobs:
           arguments: >-
             --all-features
             --target x86_64-unknown-linux-gnu
+      - name: Audit Linux virtual-gamepad dependency graph
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          manifest-path: crates/host/virtual-gamepad/Cargo.toml
+          arguments: >-
+            --all-features
+            --target x86_64-unknown-linux-gnu
 
   firmware-tests:
     # Host-native parser/session tests. No Arduino toolchain required, so this

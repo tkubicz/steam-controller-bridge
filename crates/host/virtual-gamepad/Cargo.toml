@@ -19,6 +19,9 @@ dispatch2.workspace = true
 objc2-core-foundation = { workspace = true, features = ["CFBundle", "CFData", "CFDictionary", "CFNumber", "CFString"] }
 objc2-io-kit = { workspace = true, features = ["block2", "dispatch2", "hid"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+evdevil.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

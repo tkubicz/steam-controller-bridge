@@ -12,6 +12,8 @@ pub(crate) trait Backend: Send {
     fn shutdown(&mut self) -> Result<(), VirtualGamepadError>;
 }
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(not(target_os = "macos"))]
