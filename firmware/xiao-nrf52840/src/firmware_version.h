@@ -9,7 +9,7 @@ namespace scbridge {
 // numbering. Bump it in the same commit as any behavior-affecting firmware
 // change. Host update policy is owned by the matching firmware-target catalog
 // entry rather than by this board-neutral protocol.
-constexpr uint16_t kFirmwareRevision = 3;
+constexpr uint16_t kFirmwareRevision = 4;
 
 // DeviceInfo payload: format, revision, capability flags, receipt state, and
 // recorded receipt fields when present. A three-byte revision 1 payload stays

@@ -87,7 +87,7 @@ physical Puck or XIAO access.
 | Recording and replay | Typed round trips, ordering, unknown events, seeking, malformed input, and deterministic replay. |
 | Updater | Signature-before-parse, rollback prevention, exact artifact verification, retry/cache semantics, concurrent temporaries, UF2 validation, automatic entry, cancellation, and receipt verification. |
 | Menu and child processes | Settings migration, status rendering, bounded IPC, request correlation, stale-generation rejection, process reaping, diagnostics, and feature gates. |
-| Firmware native tests | Parser/session recovery, handshake gating, watchdog behavior, rumble feedback, and malformed-frame handling without hardware. |
+| Firmware native tests | Parser/session recovery, handshake gating, watchdog behavior, rumble source leasing, reconnect quarantine, timer wraparound, and malformed-frame handling without hardware. |
 
 Test names and fixtures are the source of truth for individual cases. This file
 records maintained contracts rather than duplicating every assertion.
@@ -129,6 +129,9 @@ Run these on the exact packaged candidate; automated results are not substitutes
   contention. Direct USB-C input remains unsupported.
 - Verify left/right actuator orientation, unequal magnitudes, continuous and
   rapid effects, and zero after effect stop, process exit, or either disconnect.
+  Force-quit a continuous source, require zero within 350 ms of its last Xbox
+  output packet, then restart the bridge and controller and confirm the expired
+  effect does not return.
 - Verify pad pointer/scroll behavior on either pad, click edges, feedback
   strength and side, stationary noise, profile changes, and permission
   revocation.
@@ -139,8 +142,8 @@ Run these on the exact packaged candidate; automated results are not substitutes
   switch, Stop, and disconnect.
 - Exercise idle and fresh-Puck-dock power-off, charging behavior, wake, one-shot
   latching, and injected failure recovery.
-- Install revision 3 once through manual reset-button recovery. Save its
-  displayed timestamp and installation ID, then reinstall revision 3 without
+- Install revision 4 once through manual reset-button recovery. Save its
+  displayed timestamp and installation ID, then reinstall revision 4 without
   pressing the reset button. Confirm automatic UF2 entry, the same revision,
   and a changed timestamp and installation ID. Power-cycle without flashing
   and confirm the receipt does not change. Also verify wrong/multiple-board
@@ -150,7 +153,7 @@ Run these on the exact packaged candidate; automated results are not substitutes
   local-source build with the printed command, and confirm the Updates page
   names the local development source. Restore Seeed Blink before the first
   installation so factory VID/PID detection, the manual recovery window, the
-  revision-3 receipt, and the following automatic reinstall are exercised in
+  revision-4 receipt, and the following automatic reinstall are exercised in
   one sequence. Then launch with the same environment but without
   `--features local-update-source` and confirm the app stays on the stable
   GitHub source.

@@ -6,7 +6,9 @@
 namespace scbridge {
 
 constexpr uint32_t kDataWatchdogMs = 100;
-constexpr uint32_t kRumbleLeaseRefreshMs = 25;
+constexpr uint32_t kRumbleFeedbackRefreshMs = 25;
+constexpr uint32_t kRumbleSourceLeaseMs = 250;
+constexpr uint32_t kRumbleStartupQuietMs = 250;
 constexpr uint32_t kEnterUf2BootloaderCapability = 1U << 0U;
 constexpr uint32_t kInstallReceiptCapability = 1U << 1U;
 constexpr uint32_t kFirmwareCapabilities =
@@ -55,6 +57,8 @@ struct SessionDiagnostics {
   uint32_t watchdog_neutrals;
   uint32_t rumble_feedback_frames;
   uint32_t rumble_feedback_refreshes;
+  uint32_t rumble_source_lease_expirations;
+  uint32_t rumble_quarantine_suppressions;
   uint32_t suppressed_hid_duplicates;
 };
 
@@ -72,7 +76,7 @@ class BridgeSession {
 
   void on_cdc_connected(uint32_t now_ms);
   void on_cdc_disconnected();
-  void on_hid_mounted();
+  void on_hid_mounted(uint32_t now_ms);
   void on_frame(const Frame& frame, uint32_t now_ms);
   void on_decode_error(DecodeError error);
   void on_xinput_rumble(const RumbleFeedback& rumble, uint32_t now_ms);
@@ -99,6 +103,7 @@ class BridgeSession {
   void apply_gamepad(const Frame& frame, uint32_t now_ms);
   void force_neutral(bool safety);
   void force_rumble_zero();
+  void begin_rumble_quarantine(uint32_t now_ms);
   void queue_hid(const CanonicalGamepadReport& report, bool safety);
   void queue_rumble(const RumbleFeedback& rumble, bool safety);
   void service_device_info();
@@ -134,6 +139,8 @@ class BridgeSession {
   bool rumble_pending_is_refresh_;
   bool deferred_rumble_pending_;
   bool rumble_refresh_armed_;
+  bool rumble_source_lease_armed_;
+  bool rumble_quarantine_active_;
   bool uf2_bootloader_requested_;
   bool uf2_bootloader_ready_pending_;
   bool uf2_bootloader_ready_;
@@ -143,6 +150,8 @@ class BridgeSession {
   uint16_t transmit_sequence_;
   uint32_t last_data_ms_;
   uint32_t last_rumble_tx_ms_;
+  uint32_t last_rumble_source_ms_;
+  uint32_t rumble_quarantine_quiet_since_ms_;
   uint32_t uf2_bootloader_request_id_;
   uint32_t install_receipt_request_id_;
   InstallReceiptData requested_install_receipt_;

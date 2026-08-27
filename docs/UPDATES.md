@@ -64,7 +64,7 @@ DFU zip remains an internal developer and CI artifact produced by
 
 ## Firmware installation
 
-The current XIAO firmware is revision 3 and reports target
+The current XIAO firmware is revision 4 and reports target
 `seeed-xiao-nrf52840`. Revision 2 introduced automatic UF2 entry and
 installation receipts but did not report a target. App Center uses automatic
 UF2 entry and target-specific update recommendations only when the running
