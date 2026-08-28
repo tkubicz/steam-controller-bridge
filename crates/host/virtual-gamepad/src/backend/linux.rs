@@ -1,18 +1,24 @@
 use std::io;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use bridge_output::{OutputDiagnostics, OutputFeedback};
-use evdevil::event::{Abs, AbsEvent, InputEvent, Key, KeyEvent, KeyState};
+use evdevil::event::{
+    Abs, AbsEvent, EventKind, ForceFeedbackCode, InputEvent, Key, KeyEvent, KeyState, UinputCode,
+};
+use evdevil::ff::{self, EffectKind};
 use evdevil::uinput::{AbsSetup, UinputDevice};
 use evdevil::{AbsInfo, Bus, InputId};
 use gamepad_state::{Button, GamepadState};
 
+use super::linux_feedback::{RumbleEffects, RumbleParameters, MAX_EFFECTS};
 use super::linux_mapping::{self, LinuxGamepadState};
 use super::Backend;
 use crate::contract::{DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID};
 use crate::{VirtualGamepadError, VirtualGamepadErrorClass, VIRTUAL_GAMEPAD_NAME};
 
 const UINPUT_PATH: &str = "/dev/uinput";
+const MAX_SERVICE_EVENTS: usize = 64;
 const DEVICE_ID: InputId = InputId::new(Bus::USB, DEFAULT_VENDOR_ID, DEFAULT_PRODUCT_ID, 0x0114);
 const BUTTON_KEYS: [(Button, Key); 11] = [
     (Button::South, Key::BTN_SOUTH),
@@ -31,6 +37,8 @@ pub struct LinuxUinputOutput {
     device: Option<UinputDevice>,
     previous: Option<LinuxGamepadState>,
     events: Vec<InputEvent>,
+    service_events: [InputEvent; MAX_SERVICE_EVENTS],
+    rumble: RumbleEffects,
     diagnostics: OutputDiagnostics,
 }
 
@@ -45,6 +53,8 @@ impl LinuxUinputOutput {
             device: Some(device),
             previous: None,
             events: Vec::with_capacity(BUTTON_KEYS.len() + 8),
+            service_events: [InputEvent::zeroed(); MAX_SERVICE_EVENTS],
+            rumble: RumbleEffects::default(),
             diagnostics: OutputDiagnostics::default(),
         };
         output.send_neutral()?;
@@ -148,11 +158,39 @@ impl Backend for LinuxUinputOutput {
     }
 
     fn service(&mut self) -> Result<(), VirtualGamepadError> {
+        let Some(device) = self.device.as_ref() else {
+            self.rumble.clear();
+            return Err(VirtualGamepadError::new(
+                VirtualGamepadErrorClass::DispatchFailed,
+                "the Linux virtual gamepad has already shut down",
+            ));
+        };
+        let count = match device.read_events(&mut self.service_events) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => 0,
+            Err(error) => {
+                self.rumble.clear();
+                return Err(runtime_error(
+                    "failed to read Linux force-feedback events",
+                    &error,
+                ));
+            }
+        };
+        for event in self.service_events[..count].iter().copied() {
+            if let Err(error) = process_event(device, &mut self.rumble, event) {
+                self.rumble.clear();
+                return Err(runtime_error(
+                    "failed to service Linux force feedback",
+                    &error,
+                ));
+            }
+        }
+        self.rumble.refresh(Instant::now());
         Ok(())
     }
 
     fn take_feedback(&mut self) -> Option<OutputFeedback> {
-        None
+        self.rumble.take_feedback()
     }
 
     fn diagnostics(&self) -> OutputDiagnostics {
@@ -164,6 +202,7 @@ impl Backend for LinuxUinputOutput {
             return Ok(());
         }
         let neutral_result = self.send_neutral();
+        self.rumble.clear();
         self.device.take();
         neutral_result
     }
@@ -183,6 +222,8 @@ fn build_device() -> Result<UinputDevice, VirtualGamepadError> {
         .map_err(|error| initialization_error("failed to initialize Linux uinput", &error))?
         .with_input_id(DEVICE_ID)
         .and_then(|builder| builder.with_keys(BUTTON_KEYS.map(|(_, key)| key)))
+        .and_then(|builder| builder.with_ff_features([ff::Feature::RUMBLE]))
+        .and_then(|builder| builder.with_ff_effects_max(u32::from(MAX_EFFECTS)))
         .and_then(|builder| {
             builder.with_abs_axes([
                 AbsSetup::new(Abs::X, stick),
@@ -198,6 +239,96 @@ fn build_device() -> Result<UinputDevice, VirtualGamepadError> {
         .and_then(|builder| builder.build(VIRTUAL_GAMEPAD_NAME))
         .map_err(|error| initialization_error("failed to create the Linux virtual gamepad", &error))
 }
+
+fn process_event(
+    device: &UinputDevice,
+    rumble: &mut RumbleEffects,
+    event: InputEvent,
+) -> io::Result<()> {
+    match event.kind() {
+        EventKind::Uinput(event) => match event.code() {
+            UinputCode::FF_UPLOAD => handle_upload(device, rumble, &event),
+            UinputCode::FF_ERASE => handle_erase(device, rumble, &event),
+            _ => Ok(()),
+        },
+        EventKind::ForceFeedback(event) => {
+            if let ForceFeedbackCode::ControlEffect(id) = event.code() {
+                let count = u32::try_from(event.raw_value()).unwrap_or(0);
+                let _ = rumble.control(id.raw(), count, Instant::now());
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn handle_upload(
+    device: &UinputDevice,
+    rumble: &mut RumbleEffects,
+    event: &evdevil::event::UinputEvent,
+) -> io::Result<()> {
+    let result = device.ff_upload(event, |upload| {
+        let parameters = effect_parameters(upload.effect())?;
+        rumble
+            .upload(upload.effect_id().raw(), parameters, Instant::now())
+            .map_err(invalid_effect_request)
+    });
+    match result {
+        Err(error) if is_effect_rejection(&error) => Ok(()),
+        result => result,
+    }
+}
+
+fn effect_parameters(effect: &ff::Effect<'_>) -> io::Result<RumbleParameters> {
+    let EffectKind::Rumble(rumble) = effect.kind() else {
+        return Err(invalid_effect_request(
+            "only FF_RUMBLE effects are supported",
+        ));
+    };
+    let replay = effect.replay();
+    Ok(RumbleParameters {
+        strong: rumble.strong_magnitude(),
+        weak: rumble.weak_magnitude(),
+        delay: Duration::from_millis(u64::from(replay.delay())),
+        length: Duration::from_millis(u64::from(replay.length())),
+    })
+}
+
+fn handle_erase(
+    device: &UinputDevice,
+    rumble: &mut RumbleEffects,
+    event: &evdevil::event::UinputEvent,
+) -> io::Result<()> {
+    device.ff_erase(event, |erase| {
+        rumble
+            .erase(erase.effect_id().raw())
+            .map_err(invalid_effect_request)
+    })
+}
+
+fn invalid_effect_request(error: impl std::fmt::Display) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        EffectRequestRejected(error.to_string()),
+    )
+}
+
+fn is_effect_rejection(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.downcast_ref::<EffectRequestRejected>().is_some())
+}
+
+#[derive(Debug)]
+struct EffectRequestRejected(String);
+
+impl std::fmt::Display for EffectRequestRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for EffectRequestRejected {}
 
 fn append_button_events(
     previous: Option<gamepad_state::GamepadButtons>,
@@ -431,6 +562,8 @@ mod tests {
             device: None,
             previous: Some(state),
             events: Vec::new(),
+            service_events: [InputEvent::zeroed(); MAX_SERVICE_EVENTS],
+            rumble: RumbleEffects::default(),
             diagnostics: OutputDiagnostics::default(),
         };
 
@@ -442,5 +575,27 @@ mod tests {
         assert_eq!(output.diagnostics.virtual_reports_coalesced, 2);
         assert_eq!(output.diagnostics.virtual_reports_dispatched, 0);
         assert_eq!(output.previous, Some(extension_only));
+    }
+
+    #[test]
+    fn accepts_rumble_parameters_and_rejects_other_effect_types() {
+        let effect = ff::Effect::from(ff::Rumble::new(10, 20)).with_replay(ff::Replay::new(30, 40));
+        assert_eq!(
+            effect_parameters(&effect).unwrap(),
+            RumbleParameters {
+                strong: 10,
+                weak: 20,
+                delay: Duration::from_millis(40),
+                length: Duration::from_millis(30),
+            }
+        );
+        let unsupported = ff::Effect::from(ff::Constant::new(100));
+        let error = effect_parameters(&unsupported).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(is_effect_rejection(&error));
+        assert!(!is_effect_rejection(&io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "uinput ioctl failed",
+        )));
     }
 }

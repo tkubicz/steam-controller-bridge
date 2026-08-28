@@ -16,6 +16,9 @@ pub(crate) trait Backend: Send {
 #[expect(dead_code)]
 mod linux;
 #[cfg(any(target_os = "linux", test))]
+#[path = "backend/linux/feedback.rs"]
+mod linux_feedback;
+#[cfg(any(target_os = "linux", test))]
 #[path = "backend/linux/mapping.rs"]
 mod linux_mapping;
 #[cfg(target_os = "macos")]
