@@ -16,7 +16,6 @@ pub(crate) trait Backend: Send {
 }
 
 #[cfg(target_os = "linux")]
-#[expect(dead_code)]
 mod linux;
 #[cfg(any(target_os = "linux", test))]
 #[path = "backend/linux/feedback.rs"]
