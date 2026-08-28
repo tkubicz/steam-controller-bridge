@@ -4,6 +4,7 @@ use crate::{
 };
 
 const DEVICE_RULE_NAME: &str = "60-steam-controller-bridge.rules";
+const UINPUT_MODULES_LOAD_NAME: &str = "steam-controller-bridge.conf";
 const UINPUT_PATH: &str = "/dev/uinput";
 const DEVICE_ACCESS_DOCUMENTATION: &str = concat!(
     env!("CARGO_PKG_REPOSITORY"),
@@ -84,7 +85,7 @@ impl PlatformCapabilities for LinuxCapabilities {
                 "For an active desktop session with the official XIAO bridge, install the narrowly matched raw-USB and serial-fallback rules from {DEVICE_RULE_NAME} under /etc/udev/rules.d, or use the copy installed by your package under /usr/lib/udev/rules.d. Follow {DEVICE_ACCESS_DOCUMENTATION}. For a third-party bridge using serial, add an equally narrow rule for its USB identity or use the distribution's serial-access group. For a headless service, use the documented dedicated-group fallback with an exact device match. Reload udev rules and reconnect the bridge, or start a new login or restart the service after changing groups"
             ),
             CapabilityId::VirtualGamepadAccess => format!(
-                "For development, run `sudo modprobe uinput`, then grant the current user temporary read/write access with `sudo setfacl -m u:$USER:rw {UINPUT_PATH}`. This access lasts only until the device is recreated or the machine reboots. Do not run Steam Controller Bridge as root. Persistent active-user and headless policies will be provided with Linux packaging"
+                "For an active desktop session, install the {UINPUT_PATH} rule from {DEVICE_RULE_NAME} and the modules-load policy from {UINPUT_MODULES_LOAD_NAME}. Follow {DEVICE_ACCESS_DOCUMENTATION}, then reboot or load `uinput` and reload and trigger the udev rule. For a headless service, use the documented dedicated-group fallback. Access permits creating arbitrary virtual input devices; do not run Steam Controller Bridge as root"
             ),
             CapabilityId::DesktopInputAccess
             | CapabilityId::InputMonitoring
@@ -527,9 +528,11 @@ mod tests {
             panic!("virtual-gamepad access must provide instructions");
         };
         assert!(text.contains("/dev/uinput"));
-        assert!(text.contains("sudo modprobe uinput"));
-        assert!(text.contains("sudo setfacl"));
-        assert!(text.contains("temporary"));
+        assert!(text.contains(DEVICE_RULE_NAME));
+        assert!(text.contains(UINPUT_MODULES_LOAD_NAME));
+        assert!(text.contains(DEVICE_ACCESS_DOCUMENTATION));
+        assert!(text.contains("dedicated-group"));
+        assert!(text.contains("arbitrary virtual input devices"));
         assert!(command.is_none());
     }
 
