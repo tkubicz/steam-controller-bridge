@@ -502,6 +502,17 @@ fn output_capabilities_come_from_the_selection_not_from_a_bridge_endpoint() {
             firmware: false,
         }
     );
+    let virtual_gamepad = OutputCapabilities::for_selection(
+        &OutputSelection::VirtualGamepad(VirtualGamepadConfig::default()),
+    );
+    assert_eq!(virtual_gamepad, virtual_hid);
+    assert_eq!(
+        OutputStatus::configured(&OutputSelection::VirtualGamepad(
+            VirtualGamepadConfig::default(),
+        ))
+        .backend,
+        OutputBackend::VirtualGamepad
+    );
     // Every passive backend is indistinguishable from the default.
     for passive in [
         OutputSelection::Mock,
@@ -555,6 +566,94 @@ impl GamepadOutput for ConfigurationFailureOutput {
     }
 }
 
+struct FeedbackOutput {
+    feedback: VecDeque<OutputFeedback>,
+}
+
+impl GamepadOutput for FeedbackOutput {
+    fn send_state(
+        &mut self,
+        _state: &gamepad_state::GamepadState,
+    ) -> Result<(), OutputError> {
+        Ok(())
+    }
+
+    fn take_feedback(&mut self) -> Option<OutputFeedback> {
+        self.feedback.pop_front()
+    }
+}
+
+#[test]
+fn active_output_feedback_is_renewed_until_zero_arrives() {
+    let mut output = FeedbackOutput {
+        feedback: VecDeque::from([OutputFeedback::Rumble {
+            low_frequency: 20,
+            high_frequency: 30,
+        }]),
+    };
+    let mut relay = OutputFeedbackRelay::new(OutputFeedbackSemantics::Stateful);
+    relay.drain(&mut output);
+
+    let active = RumbleCommand {
+        low_frequency: 20,
+        high_frequency: 30,
+    };
+    assert_eq!(relay.command_due(Duration::ZERO), Some(active));
+    assert_eq!(relay.command_due(Duration::from_millis(24)), None);
+    assert_eq!(relay.command_due(Duration::from_millis(25)), Some(active));
+    assert_eq!(relay.command_due(Duration::from_millis(125)), Some(active));
+    relay.activate();
+    assert_eq!(relay.command_due(Duration::ZERO), Some(active));
+
+    output.feedback.push_back(OutputFeedback::Rumble {
+        low_frequency: 0,
+        high_frequency: 0,
+    });
+    relay.drain(&mut output);
+    assert_eq!(
+        relay.command_due(Duration::from_millis(126)),
+        Some(RumbleCommand::default())
+    );
+    assert_eq!(relay.command_due(Duration::from_secs(1)), None);
+}
+
+#[test]
+fn bridge_feedback_remains_a_one_shot_lease() {
+    let mut output = FeedbackOutput {
+        feedback: VecDeque::from([OutputFeedback::Rumble {
+            low_frequency: 20,
+            high_frequency: 30,
+        }]),
+    };
+    let mut relay = OutputFeedbackRelay::new(OutputFeedbackSemantics::Leased);
+    relay.drain(&mut output);
+
+    assert_eq!(
+        relay.command_due(Duration::ZERO),
+        Some(RumbleCommand {
+            low_frequency: 20,
+            high_frequency: 30,
+        })
+    );
+    assert_eq!(relay.command_due(Duration::from_secs(1)), None);
+
+    output.feedback.push_back(OutputFeedback::Rumble {
+        low_frequency: 40,
+        high_frequency: 50,
+    });
+    relay.drain(&mut output);
+    relay.activate();
+    assert_eq!(relay.command_due(Duration::from_secs(2)), None);
+
+    output.feedback.push_back(OutputFeedback::Rumble {
+        low_frequency: 60,
+        high_frequency: 70,
+    });
+    relay.drain(&mut output);
+    relay.wait_without_consumer();
+    assert_eq!(relay.command_due(Duration::from_secs(3)), None);
+}
+
 #[test]
 fn waiting_output_service_preserves_permanent_failure_classification() {
     let mut output = OutputSession {
@@ -562,6 +661,7 @@ fn waiting_output_service_preserves_permanent_failure_classification() {
         bridge_endpoint: None,
         capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
         first_observed_receipt: FirstObservedReceiptState::Idle,
+        feedback: OutputFeedbackRelay::default(),
     };
     assert!(matches!(
         service_waiting_output(Some(&mut output)),

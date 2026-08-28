@@ -10,6 +10,7 @@ impl Supervisor {
             self.output_discovery_warnings.clear();
             return match make_non_bridge_output(&self.config.output) {
                 Ok(opened) => {
+                    let feedback = OutputFeedbackRelay::new(opened.output.feedback_semantics());
                     self.update_status(|status| {
                         status.output = OutputStatus {
                             ready: true,
@@ -22,6 +23,7 @@ impl Supervisor {
                         bridge_endpoint: None,
                         capabilities: OutputCapabilities::for_selection(&self.config.output),
                         first_observed_receipt: FirstObservedReceiptState::Idle,
+                        feedback,
                     })
                 }
                 Err(OutputOpenError::Transient { detail, error }) => {
@@ -99,11 +101,13 @@ impl Supervisor {
             endpoint.display_label(),
             masked_serial(endpoint.stable_id())
         );
+        let feedback = OutputFeedbackRelay::new(output.feedback_semantics());
         OutputDiscovery::Ready(OutputSession {
             output: Box::new(output),
             bridge_endpoint: Some(endpoint),
             capabilities: OutputCapabilities::for_selection(&self.config.output),
             first_observed_receipt: FirstObservedReceiptState::Idle,
+            feedback,
         })
     }
 

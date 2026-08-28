@@ -108,6 +108,80 @@ pub(crate) struct OutputSession {
     pub(crate) bridge_endpoint: Option<BridgeEndpoint>,
     pub(crate) capabilities: OutputCapabilities,
     pub(crate) first_observed_receipt: FirstObservedReceiptState,
+    pub(crate) feedback: OutputFeedbackRelay,
+}
+
+const OUTPUT_FEEDBACK_RENEW_INTERVAL: Duration = Duration::from_millis(25);
+// Stateful feedback must renew before the controller haptics lease expires.
+const _: () =
+    assert!(OUTPUT_FEEDBACK_RENEW_INTERVAL.as_millis() < RUMBLE_LEASE_TIMEOUT.as_millis());
+
+#[derive(Default)]
+pub(crate) struct OutputFeedbackRelay {
+    semantics: OutputFeedbackSemantics,
+    rumble: Option<RumbleCommand>,
+    changed: bool,
+    next_renewal: Duration,
+}
+
+impl OutputFeedbackRelay {
+    pub(crate) fn new(semantics: OutputFeedbackSemantics) -> Self {
+        Self {
+            semantics,
+            ..Self::default()
+        }
+    }
+
+    fn observe(&mut self, feedback: OutputFeedback) {
+        match feedback {
+            OutputFeedback::Rumble {
+                low_frequency,
+                high_frequency,
+            } => {
+                self.rumble = Some(RumbleCommand {
+                    low_frequency,
+                    high_frequency,
+                });
+                self.changed = true;
+            }
+        }
+    }
+
+    pub(crate) fn drain(&mut self, output: &mut dyn GamepadOutput) {
+        while let Some(feedback) = output.take_feedback() {
+            self.observe(feedback);
+        }
+    }
+
+    pub(crate) fn wait_without_consumer(&mut self) {
+        if self.semantics == OutputFeedbackSemantics::Leased {
+            self.rumble = None;
+            self.changed = false;
+        }
+    }
+
+    pub(crate) fn activate(&mut self) {
+        self.next_renewal = Duration::ZERO;
+        if self.semantics == OutputFeedbackSemantics::Stateful {
+            self.changed = self.rumble.is_some();
+        } else {
+            self.rumble = None;
+            self.changed = false;
+        }
+    }
+
+    pub(crate) fn command_due(&mut self, now: Duration) -> Option<RumbleCommand> {
+        let rumble = self.rumble?;
+        if !self.changed && (!rumble.is_active() || now < self.next_renewal) {
+            return None;
+        }
+        self.changed = false;
+        self.next_renewal = now + OUTPUT_FEEDBACK_RENEW_INTERVAL;
+        if self.semantics == OutputFeedbackSemantics::Leased {
+            self.rumble = None;
+        }
+        Some(rumble)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -157,7 +231,8 @@ pub(crate) fn service_waiting_output(
         return Ok(());
     };
     output.output.service()?;
-    while output.output.take_feedback().is_some() {}
+    output.feedback.drain(&mut *output.output);
+    output.feedback.wait_without_consumer();
     Ok(())
 }
 
@@ -231,24 +306,12 @@ pub(crate) fn make_non_bridge_output(
         OutputSelection::BridgeDevice => Err(OutputOpenError::Permanent(
             "bridge-device output requires endpoint discovery".to_owned(),
         )),
+        OutputSelection::VirtualGamepad(config) => VirtualGamepad::open(config.clone())
+            .map(opened_virtual_gamepad)
+            .map_err(|error| classify_virtual_gamepad_open_error(&error)),
         OutputSelection::VirtualHid(config) => VirtualGamepad::open_macos_helper(config)
-            .map(|output| {
-                let virtual_hid = output.macos_helper_metadata();
-                OpenedNonBridgeOutput {
-                    output: Box::new(output),
-                    virtual_hid,
-                }
-            })
-            .map_err(|error| {
-                if error.is_permanent_configuration_failure() {
-                    OutputOpenError::Permanent(error.to_string())
-                } else {
-                    OutputOpenError::Transient {
-                        detail: "Waiting to restart the virtual HID helper".to_owned(),
-                        error: error.to_string(),
-                    }
-                }
-            }),
+            .map(opened_virtual_gamepad)
+            .map_err(|error| classify_virtual_gamepad_open_error(&error)),
         OutputSelection::Dump(format) => Ok(OpenedNonBridgeOutput {
             output: Box::new(DumpOutput::new(io::stdout(), *format)),
             virtual_hid: None,
@@ -263,6 +326,27 @@ pub(crate) fn make_non_bridge_output(
             output: Box::new(MockOutput::default()),
             virtual_hid: None,
         }),
+    }
+}
+
+fn opened_virtual_gamepad(output: VirtualGamepad) -> OpenedNonBridgeOutput {
+    let virtual_hid = output.macos_helper_metadata();
+    OpenedNonBridgeOutput {
+        output: Box::new(output),
+        virtual_hid,
+    }
+}
+
+fn classify_virtual_gamepad_open_error(
+    error: &virtual_gamepad::VirtualGamepadError,
+) -> OutputOpenError {
+    if error.is_permanent_configuration_failure() {
+        OutputOpenError::Permanent(error.to_string())
+    } else {
+        OutputOpenError::Transient {
+            detail: "Waiting to restart virtual gamepad output".to_owned(),
+            error: error.to_string(),
+        }
     }
 }
 

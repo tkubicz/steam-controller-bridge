@@ -62,7 +62,7 @@ use bridge_core::{BridgeEngine, ProcessOutcome};
 use bridge_output::{
     available_serial_endpoints, discover_bridge_endpoints, BridgeEndpoint, BridgeEndpointDiscovery,
     BridgeOutput, BridgeTransportError, DumpOutput, FileOutput, GamepadOutput, MockOutput,
-    OutputError, OutputFeedback,
+    OutputError, OutputFeedback, OutputFeedbackSemantics,
 };
 use desktop_bindings::{
     bindable_mask, BindingEngine, BindingProfile, DesktopInputSink, DesktopInputSnapshot,
@@ -124,7 +124,10 @@ const OUTPUT_RETRY_STABILITY: Duration = Duration::from_secs(30);
 /// Retry policy belongs to the supervisor, not to the public description of a
 /// backend's user-facing capabilities.
 const fn output_reopens_with_backoff(selection: &OutputSelection) -> bool {
-    matches!(selection, OutputSelection::VirtualHid(_))
+    matches!(
+        selection,
+        OutputSelection::VirtualGamepad(_) | OutputSelection::VirtualHid(_)
+    )
 }
 
 #[derive(Debug)]

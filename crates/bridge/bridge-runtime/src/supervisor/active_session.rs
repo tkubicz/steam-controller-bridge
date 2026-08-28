@@ -34,10 +34,10 @@ impl Supervisor {
                 "bridge-device service failed before input activation: {error}"
             ));
         }
-        while output.output.take_feedback().is_some() {
-            // Feedback received before the input worker exists is not a valid
-            // post-reconnect lease. A continuing effect will be refreshed by
-            // the bridge device within 25 ms.
+        output.feedback.drain(&mut *output.output);
+        output.feedback.activate();
+        if let Some(command) = output.feedback.command_due(started.elapsed()) {
+            worker.set_rumble(command.low_frequency, command.high_frequency);
         }
         let mut last_controller_state = Instant::now();
         let mut controller_state_seen = initial_controller_seen;
@@ -295,13 +295,9 @@ impl Supervisor {
                 };
             }
             iteration_timer.enter("output_feedback");
-            while let Some(feedback) = output.output.take_feedback() {
-                match feedback {
-                    OutputFeedback::Rumble {
-                        low_frequency,
-                        high_frequency,
-                    } => worker.set_rumble(low_frequency, high_frequency),
-                }
+            output.feedback.drain(&mut *output.output);
+            if let Some(command) = output.feedback.command_due(started.elapsed()) {
+                worker.set_rumble(command.low_frequency, command.high_frequency);
             }
             iteration_timer.enter("automatic_shutdown");
             let now = Instant::now();

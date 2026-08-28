@@ -526,6 +526,7 @@ fn pending_manual_firmware_gets_one_first_observed_receipt() {
         bridge_endpoint: Some(bridge_endpoint("serial:test", "TESTSERIAL")),
         capabilities: OutputCapabilities::for_selection(&OutputSelection::BridgeDevice),
         first_observed_receipt: FirstObservedReceiptState::Idle,
+        feedback: OutputFeedbackRelay::default(),
     };
 
     supervisor.refresh_output_firmware(&mut output);
@@ -607,6 +608,7 @@ fn a_lost_receipt_ack_retries_the_same_receipt_after_backoff() {
         bridge_endpoint: Some(bridge_endpoint("serial:test", "TESTSERIAL")),
         capabilities: OutputCapabilities::for_selection(&OutputSelection::BridgeDevice),
         first_observed_receipt: FirstObservedReceiptState::Idle,
+        feedback: OutputFeedbackRelay::default(),
     };
 
     supervisor.refresh_output_firmware(&mut output);
@@ -639,6 +641,7 @@ fn hardware_release_finishes_before_command_acknowledgement() {
         bridge_endpoint: None,
         capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
         first_observed_receipt: FirstObservedReceiptState::Idle,
+        feedback: OutputFeedbackRelay::default(),
     };
     let release_order = Arc::clone(&order);
     let ack_order = Arc::clone(&order);
@@ -668,6 +671,7 @@ fn ordinary_stop_disconnects_virtual_hid_before_acknowledgement() {
             VirtualHidConfig::new(std::path::PathBuf::from("helper")),
         )),
         first_observed_receipt: FirstObservedReceiptState::Idle,
+        feedback: OutputFeedbackRelay::default(),
     };
     let release_order = Arc::clone(&order);
     let ack_order = Arc::clone(&order);
@@ -700,6 +704,7 @@ fn a_slow_desktop_operation_is_preceded_by_neutral_on_the_wire() {
         bridge_endpoint: None,
         capabilities: OutputCapabilities::for_selection(&OutputSelection::Mock),
         first_observed_receipt: FirstObservedReceiptState::Idle,
+        feedback: OutputFeedbackRelay::default(),
     };
     let mut engine = BridgeEngine::new(BridgeConfig::default(), MapperConfig::default()).unwrap();
     engine.connected();
