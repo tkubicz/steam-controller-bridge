@@ -6,8 +6,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bridge_output::{
-    BridgeOutput, BridgeTransportConfig, DumpFormat, DumpOutput, FeedbackObserverOutput,
-    FileOutput, GamepadOutput, MockOutput,
+    service_if_due, BridgeOutput, BridgeTransportConfig, DumpFormat, DumpOutput,
+    FeedbackObserverOutput, FileOutput, GamepadOutput, MockOutput, OUTPUT_SERVICE_INTERVAL,
 };
 use clap::{Parser, ValueEnum};
 use gamepad_simulator::{apply_keyboard_command, automated_sequence};
@@ -129,7 +129,8 @@ fn run() -> Result<(), String> {
                     if interval_ms > 0 {
                         service_delay(&mut *output, Duration::from_millis(interval_ms))?;
                     } else {
-                        service_if_due(&mut *output, &mut last_service, Instant::now())?;
+                        service_if_due(&mut *output, &mut last_service, Instant::now())
+                            .map_err(|error| error.to_string())?;
                     }
                 }
             }
@@ -175,7 +176,7 @@ fn keyboard_mode(output: &mut dyn GamepadOutput) -> Result<(), String> {
     });
     let mut last_service = Instant::now();
     loop {
-        let line = match receiver.recv_timeout(Duration::from_millis(25)) {
+        let line = match receiver.recv_timeout(OUTPUT_SERVICE_INTERVAL) {
             Ok(line) => line.map_err(|error| error.to_string())?,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 output.service().map_err(|error| error.to_string())?;
@@ -191,23 +192,10 @@ fn keyboard_mode(output: &mut dyn GamepadOutput) -> Result<(), String> {
             Ok(false) => break,
             Err(error) => eprintln!("{error}"),
         }
-        service_if_due(output, &mut last_service, Instant::now())?;
+        service_if_due(output, &mut last_service, Instant::now())
+            .map_err(|error| error.to_string())?;
     }
     output.send_neutral().map_err(|error| error.to_string())
-}
-
-const TOOL_SERVICE_INTERVAL: Duration = Duration::from_millis(25);
-
-fn service_if_due(
-    output: &mut dyn GamepadOutput,
-    last_service: &mut Instant,
-    now: Instant,
-) -> Result<(), String> {
-    if now.saturating_duration_since(*last_service) >= TOOL_SERVICE_INTERVAL {
-        output.service().map_err(|error| error.to_string())?;
-        *last_service = now;
-    }
-    Ok(())
 }
 
 fn service_delay(output: &mut dyn GamepadOutput, duration: Duration) -> Result<(), String> {
@@ -219,7 +207,7 @@ fn service_delay(output: &mut dyn GamepadOutput, duration: Duration) -> Result<(
         if remaining.is_zero() {
             return Ok(());
         }
-        next_service += TOOL_SERVICE_INTERVAL;
+        next_service += OUTPUT_SERVICE_INTERVAL;
         let until_service = next_service.saturating_duration_since(Instant::now());
         thread::sleep(remaining.min(until_service));
     }
@@ -351,41 +339,5 @@ mod tests {
         assert!(automated_states(true)
             .iter()
             .any(|state| state.buttons.contains(Button::Guide)));
-    }
-
-    #[test]
-    fn no_delay_mode_services_on_the_fixed_cadence() {
-        struct ServiceCounter(usize);
-
-        impl GamepadOutput for ServiceCounter {
-            fn send_state(
-                &mut self,
-                _state: &GamepadState,
-            ) -> Result<(), bridge_output::OutputError> {
-                Ok(())
-            }
-
-            fn service(&mut self) -> Result<(), bridge_output::OutputError> {
-                self.0 += 1;
-                Ok(())
-            }
-        }
-
-        let mut output = ServiceCounter(0);
-        let start = Instant::now();
-        let mut last_service = start;
-        service_if_due(
-            &mut output,
-            &mut last_service,
-            start + TOOL_SERVICE_INTERVAL,
-        )
-        .unwrap();
-        service_if_due(
-            &mut output,
-            &mut last_service,
-            start + TOOL_SERVICE_INTERVAL,
-        )
-        .unwrap();
-        assert_eq!(output.0, 1);
     }
 }

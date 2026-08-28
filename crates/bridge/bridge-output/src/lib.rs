@@ -3,6 +3,7 @@
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use bridge_protocol::{Frame, Message, WireGamepadState};
 use gamepad_state::GamepadState;
@@ -29,6 +30,7 @@ pub use endpoint_discovery::{
 /// and the classification cannot drift apart.
 pub const CONFIGURATION_FAILURE_PREFIX: &str = "output configuration failed";
 pub const BRIDGE_BUSY_ERROR_MARKER: &str = "bridge device or resource busy";
+pub const OUTPUT_SERVICE_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug)]
 pub enum OutputError {
@@ -151,6 +153,23 @@ pub trait GamepadOutput {
     ) -> Option<Result<FirmwareInstallReceipt, OutputError>> {
         None
     }
+}
+
+/// Services an output once when the shared tool cadence has elapsed.
+///
+/// # Errors
+///
+/// Returns [`OutputError`] when backend servicing fails.
+pub fn service_if_due<O: GamepadOutput + ?Sized>(
+    output: &mut O,
+    last_service: &mut Instant,
+    now: Instant,
+) -> Result<(), OutputError> {
+    if now.saturating_duration_since(*last_service) >= OUTPUT_SERVICE_INTERVAL {
+        output.service()?;
+        *last_service = now;
+    }
+    Ok(())
 }
 
 /// Lifetime contract for feedback consumed by the runtime.
@@ -521,6 +540,39 @@ mod tests {
             ChangedOnly::new(StatefulOutput).feedback_semantics(),
             OutputFeedbackSemantics::Stateful
         );
+    }
+
+    #[test]
+    fn output_service_cadence_is_time_bounded() {
+        struct ServiceCounter(usize);
+
+        impl GamepadOutput for ServiceCounter {
+            fn send_state(&mut self, _state: &GamepadState) -> Result<(), OutputError> {
+                Ok(())
+            }
+
+            fn service(&mut self) -> Result<(), OutputError> {
+                self.0 += 1;
+                Ok(())
+            }
+        }
+
+        let mut output = ServiceCounter(0);
+        let start = Instant::now();
+        let mut last_service = start;
+        service_if_due(
+            &mut output,
+            &mut last_service,
+            start + OUTPUT_SERVICE_INTERVAL,
+        )
+        .unwrap();
+        service_if_due(
+            &mut output,
+            &mut last_service,
+            start + OUTPUT_SERVICE_INTERVAL,
+        )
+        .unwrap();
+        assert_eq!(output.0, 1);
     }
 
     #[test]

@@ -3,11 +3,10 @@ use std::io::{self, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 
 use bridge_output::{
     BridgeOutput, BridgeTransportConfig, DumpFormat, DumpOutput, FeedbackObserverOutput,
-    FileOutput, GamepadOutput, MockOutput,
+    FileOutput, GamepadOutput, MockOutput, OUTPUT_SERVICE_INTERVAL,
 };
 use clap::{Parser, ValueEnum};
 use recording::{ReplayOptions, ReplaySession, ReplayTiming, KIND_MAPPED_GAMEPAD_STATE};
@@ -204,7 +203,7 @@ fn read_line_with_service(output: &mut dyn GamepadOutput) -> Result<String, Stri
         let _ = sender.send(result);
     });
     loop {
-        match receiver.recv_timeout(Duration::from_millis(25)) {
+        match receiver.recv_timeout(OUTPUT_SERVICE_INTERVAL) {
             Ok(result) => return result.map_err(|error| error.to_string()),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 output.service().map_err(|error| error.to_string())?;

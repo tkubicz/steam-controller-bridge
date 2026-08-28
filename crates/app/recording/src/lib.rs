@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use bridge_output::{GamepadOutput, OutputError};
+use bridge_output::{service_if_due, GamepadOutput, OutputError, OUTPUT_SERVICE_INTERVAL};
 use gamepad_state::{GamepadButtons, GamepadState, HatState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -600,20 +600,6 @@ impl ReplaySession {
     }
 }
 
-const REPLAY_SERVICE_INTERVAL: Duration = Duration::from_millis(25);
-
-fn service_if_due<O: GamepadOutput + ?Sized>(
-    output: &mut O,
-    last_service: &mut Instant,
-    now: Instant,
-) -> Result<(), RecordingError> {
-    if now.saturating_duration_since(*last_service) >= REPLAY_SERVICE_INTERVAL {
-        output.service()?;
-        *last_service = now;
-    }
-    Ok(())
-}
-
 fn service_sleep<O: GamepadOutput + ?Sized>(
     output: &mut O,
     duration: Duration,
@@ -625,7 +611,7 @@ fn service_sleep<O: GamepadOutput + ?Sized>(
         if remaining.is_zero() {
             return Ok(());
         }
-        thread::sleep(remaining.min(REPLAY_SERVICE_INTERVAL));
+        thread::sleep(remaining.min(OUTPUT_SERVICE_INTERVAL));
     }
 }
 
@@ -864,39 +850,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(output.states, vec![changed]);
-    }
-
-    #[test]
-    fn replay_service_cadence_is_time_bounded() {
-        struct ServiceCounter(usize);
-
-        impl GamepadOutput for ServiceCounter {
-            fn send_state(&mut self, _state: &GamepadState) -> Result<(), OutputError> {
-                Ok(())
-            }
-
-            fn service(&mut self) -> Result<(), OutputError> {
-                self.0 += 1;
-                Ok(())
-            }
-        }
-
-        let mut output = ServiceCounter(0);
-        let start = Instant::now();
-        let mut last_service = start;
-        service_if_due(
-            &mut output,
-            &mut last_service,
-            start + REPLAY_SERVICE_INTERVAL,
-        )
-        .unwrap();
-        service_if_due(
-            &mut output,
-            &mut last_service,
-            start + REPLAY_SERVICE_INTERVAL,
-        )
-        .unwrap();
-        assert_eq!(output.0, 1);
     }
 
     #[test]
