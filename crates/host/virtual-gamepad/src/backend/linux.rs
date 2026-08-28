@@ -15,11 +15,19 @@ use super::linux_feedback::{RumbleEffects, RumbleParameters, MAX_EFFECTS};
 use super::linux_mapping::{self, LinuxGamepadState};
 use super::Backend;
 use crate::contract::{DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID};
-use crate::{VirtualGamepadError, VirtualGamepadErrorClass, VIRTUAL_GAMEPAD_NAME};
+use crate::{
+    VirtualGamepadError, VirtualGamepadErrorClass, LINUX_VIRTUAL_GAMEPAD_VERSION,
+    VIRTUAL_GAMEPAD_NAME,
+};
 
 const UINPUT_PATH: &str = "/dev/uinput";
 const MAX_SERVICE_EVENTS: usize = 64;
-const DEVICE_ID: InputId = InputId::new(Bus::USB, DEFAULT_VENDOR_ID, DEFAULT_PRODUCT_ID, 0x0114);
+const DEVICE_ID: InputId = InputId::new(
+    Bus::USB,
+    DEFAULT_VENDOR_ID,
+    DEFAULT_PRODUCT_ID,
+    LINUX_VIRTUAL_GAMEPAD_VERSION,
+);
 const BUTTON_KEYS: [(Button, Key); 11] = [
     (Button::South, Key::BTN_SOUTH),
     (Button::East, Key::BTN_EAST),
