@@ -21,7 +21,7 @@ use virtual_gamepad::{parse_usb_id, VirtualHidOptions};
 #[derive(Debug, Clone, Parser)]
 #[command(name = "sc-bridge", version, about, long_about = None)]
 pub(crate) struct Cli {
-    /// Expose the entitlement-gated experimental virtual-HID backend.
+    /// Expose the entitlement-gated experimental virtual-HID backend on macOS.
     #[arg(long)]
     pub(crate) enable_virtual_hid: bool,
 
@@ -74,11 +74,11 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "PATH")]
     pub(crate) output_file: Option<PathBuf>,
 
-    /// Rust `IOHIDUserDevice` helper executable; required by virtual-gamepad output.
+    /// Rust `IOHIDUserDevice` helper executable; required by virtual-gamepad output on macOS.
     #[arg(long, value_name = "PATH")]
     pub(crate) virtual_hid_helper: Option<PathBuf>,
 
-    /// Override the virtual controller vendor ID (decimal or 0x-prefixed hex).
+    /// Override the macOS virtual controller vendor ID (decimal or 0x-prefixed hex).
     #[arg(
         long,
         value_name = "VID",
@@ -87,7 +87,7 @@ pub(crate) struct Cli {
     )]
     pub(crate) virtual_hid_vendor_id: Option<u16>,
 
-    /// Override the virtual controller product ID (decimal or 0x-prefixed hex).
+    /// Override the macOS virtual controller product ID (decimal or 0x-prefixed hex).
     #[arg(
         long,
         value_name = "PID",
@@ -162,7 +162,7 @@ pub(crate) enum PuckDockArg {
 pub(crate) enum OutputArg {
     Serial,
     #[value(name = "virtual-gamepad", alias = "virtual-hid")]
-    VirtualHid,
+    VirtualGamepad,
     /// `compact` has always been accepted as a synonym and stays accepted, but
     /// it is hidden so the help text keeps offering one name per behaviour.
     #[value(alias = "compact")]
@@ -212,7 +212,10 @@ impl Cli {
     /// long-standing wart: `--input replay --output file` used to create and
     /// truncate the output file before noticing that `--file` was missing.
     pub(crate) fn validate(&self, virtual_hid_enabled: bool) -> Result<(), String> {
-        if self.output() == OutputArg::VirtualHid && !virtual_hid_enabled {
+        if cfg!(target_os = "macos")
+            && self.output() == OutputArg::VirtualGamepad
+            && !virtual_hid_enabled
+        {
             return Err(format!(
                 "virtual HID output is experimental; pass --enable-virtual-hid or set {}=1",
                 virtual_gamepad::ENABLE_VIRTUAL_HID_ENV
@@ -225,11 +228,11 @@ impl Cli {
     }
 
     fn validate_live(&self) -> Result<(), String> {
-        if !matches!(self.output(), OutputArg::Serial | OutputArg::VirtualHid)
+        if !matches!(self.output(), OutputArg::Serial | OutputArg::VirtualGamepad)
             && (self.idle_shutdown.is_some() || self.puck_dock_action.is_some())
         {
             return Err(
-                "automatic controller shutdown requires live serial or virtual HID output"
+                "automatic controller shutdown requires live serial or virtual gamepad output"
                     .to_owned(),
             );
         }
@@ -263,7 +266,7 @@ impl Cli {
             return Err("file output requires --output-file PATH".to_owned());
         }
         self.virtual_hid()
-            .validate(self.output() == OutputArg::VirtualHid)
+            .validate_platform(self.output() == OutputArg::VirtualGamepad)
     }
 
     pub(crate) fn virtual_hid(&self) -> VirtualHidOptions {
@@ -345,8 +348,8 @@ mod tests {
     fn every_output_backend_still_parses() {
         for (value, expected) in [
             ("serial", OutputArg::Serial),
-            ("virtual-gamepad", OutputArg::VirtualHid),
-            ("virtual-hid", OutputArg::VirtualHid),
+            ("virtual-gamepad", OutputArg::VirtualGamepad),
+            ("virtual-hid", OutputArg::VirtualGamepad),
             ("dump", OutputArg::Dump),
             ("pretty", OutputArg::Pretty),
             ("json", OutputArg::Json),
@@ -359,7 +362,8 @@ mod tests {
     }
 
     #[test]
-    fn identity_override_is_paired_and_requires_virtual_hid_output() {
+    #[cfg(target_os = "macos")]
+    fn identity_override_is_paired_and_requires_virtual_gamepad_output() {
         let message = reject(&[
             "--virtual-hid-vendor-id",
             "0xcafe",
@@ -406,31 +410,32 @@ mod tests {
     fn shutdown_options_require_a_live_output() {
         let message = reject(&["--output", "dump", "--idle-shutdown", "5"]);
         assert!(
-            message.contains("requires live serial or virtual HID output"),
+            message.contains("requires live serial or virtual gamepad output"),
             "{message}"
         );
         let message = reject(&["--output", "mock", "--puck-dock-action", "power-off"]);
         assert!(
-            message.contains("requires live serial or virtual HID output"),
+            message.contains("requires live serial or virtual gamepad output"),
             "{message}"
         );
         // Both live backends support controller shutdown.
         parse(&["--idle-shutdown", "5"])
             .validate(false)
             .expect("serial is the live default");
-        parse(&[
-            "--enable-virtual-hid",
-            "--output",
-            "virtual-hid",
-            "--virtual-hid-helper",
-            "/tmp/sc-virtual-hid-helper",
-            "--idle-shutdown",
-            "5",
-        ])
-        .validate(true)
-        .expect("virtual HID is also a live output");
+        let mut arguments = vec!["--output", "virtual-hid", "--idle-shutdown", "5"];
+        if cfg!(target_os = "macos") {
+            arguments.extend([
+                "--enable-virtual-hid",
+                "--virtual-hid-helper",
+                "/tmp/helper",
+            ]);
+        }
+        parse(&arguments)
+            .validate(true)
+            .expect("virtual gamepad is also a live output");
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn virtual_hid_output_requires_the_explicit_runtime_opt_in() {
         let arguments = [
@@ -450,6 +455,21 @@ mod tests {
         enabled.extend(arguments);
         let cli = parse(&enabled);
         cli.validate(cli.enable_virtual_hid).unwrap();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn virtual_gamepad_requires_no_macos_opt_in_or_helper() {
+        let cli = parse(&["--output", "virtual-gamepad"]);
+        cli.validate(false).unwrap();
+
+        let message = reject(&[
+            "--output",
+            "virtual-gamepad",
+            "--virtual-hid-helper",
+            "/tmp/helper",
+        ]);
+        assert!(message.contains("only valid on macOS"), "{message}");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use bridge_output::{GamepadOutput, OutputError};
+use bridge_output::{service_if_due, GamepadOutput, OutputError, OUTPUT_SERVICE_INTERVAL};
 use gamepad_state::{GamepadButtons, GamepadState, HatState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -572,6 +572,7 @@ impl ReplaySession {
         let events = &self.events[self.seek_index(options.seek_timestamp_us)..];
         let mut stats = ReplayStats::default();
         let mut previous_timestamp = events.first().map(|event| event.timestamp_us);
+        let mut last_service = Instant::now();
         for event in events {
             if options.timing == ReplayTiming::RealTime {
                 let delta_us = event
@@ -582,6 +583,7 @@ impl ReplaySession {
                 );
                 if !scaled.is_zero() {
                     service_sleep(output, scaled)?;
+                    last_service = Instant::now();
                 }
             }
             previous_timestamp = Some(event.timestamp_us);
@@ -592,6 +594,7 @@ impl ReplaySession {
             } else {
                 stats.events_ignored += 1;
             }
+            service_if_due(output, &mut last_service, Instant::now())?;
         }
         Ok(stats)
     }
@@ -601,7 +604,6 @@ fn service_sleep<O: GamepadOutput + ?Sized>(
     output: &mut O,
     duration: Duration,
 ) -> Result<(), RecordingError> {
-    const SERVICE_INTERVAL: Duration = Duration::from_millis(25);
     let deadline = Instant::now() + duration;
     loop {
         output.service()?;
@@ -609,7 +611,7 @@ fn service_sleep<O: GamepadOutput + ?Sized>(
         if remaining.is_zero() {
             return Ok(());
         }
-        thread::sleep(remaining.min(SERVICE_INTERVAL));
+        thread::sleep(remaining.min(OUTPUT_SERVICE_INTERVAL));
     }
 }
 

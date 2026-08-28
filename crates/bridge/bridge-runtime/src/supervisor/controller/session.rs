@@ -306,7 +306,7 @@ pub(crate) fn make_non_bridge_output(
         OutputSelection::BridgeDevice => Err(OutputOpenError::Permanent(
             "bridge-device output requires endpoint discovery".to_owned(),
         )),
-        OutputSelection::VirtualGamepad(config) => VirtualGamepad::open(config.clone())
+        OutputSelection::VirtualGamepad(config) => VirtualGamepad::open(config)
             .map(opened_virtual_gamepad)
             .map_err(|error| classify_virtual_gamepad_open_error(&error)),
         OutputSelection::VirtualHid(config) => VirtualGamepad::open_macos_helper(config)

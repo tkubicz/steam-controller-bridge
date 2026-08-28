@@ -125,10 +125,8 @@ impl VirtualHidConfig {
     }
 }
 
-/// The virtual-HID knobs the development command-line tools expose. The rules
-/// binding them together are identical in every tool, so they live next to the
-/// backend instead of being restated in each argument parser. Tools still
-/// declare their own flags; only the meaning is shared.
+/// The legacy macOS virtual-HID knobs shared by the development command-line
+/// tools and their platform virtual-gamepad selection.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VirtualHidOptions {
     pub helper_path: Option<PathBuf>,
@@ -169,6 +167,34 @@ impl VirtualHidOptions {
         Ok(())
     }
 
+    /// Validates the legacy macOS options for the current platform's virtual
+    /// gamepad backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when required macOS configuration is missing, macOS
+    /// options are supplied on another platform, or options are supplied while
+    /// virtual output is not selected.
+    pub fn validate_platform(&self, selected: bool) -> Result<(), String> {
+        if !selected {
+            return self.validate(false);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.validate(true)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if self.helper_path.is_some() {
+                return Err("--virtual-hid-helper is only valid on macOS".to_owned());
+            }
+            if self.vendor_id.is_some() || self.product_id.is_some() {
+                return Err("virtual HID identity overrides are only valid on macOS".to_owned());
+            }
+            Ok(())
+        }
+    }
+
     /// Builds the backend configuration, applying an identity override only
     /// when both halves are present.
     ///
@@ -185,6 +211,46 @@ impl VirtualHidOptions {
         })
     }
 
+    /// Builds the current platform's canonical virtual-gamepad configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when platform-specific options are incomplete or
+    /// unsupported on the current host.
+    pub fn virtual_gamepad_config(&self) -> Result<VirtualGamepadConfig, String> {
+        self.validate_platform(true)?;
+        #[cfg(target_os = "macos")]
+        {
+            let mut config = VirtualGamepadConfig {
+                macos_helper_path: self.helper_path.clone(),
+                ..VirtualGamepadConfig::default()
+            };
+            if let (Some(vendor_id), Some(product_id)) = (self.vendor_id, self.product_id) {
+                config = config.with_macos_identity(vendor_id, product_id);
+            }
+            Ok(config)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(VirtualGamepadConfig::default())
+        }
+    }
+
+    /// Opens the current platform's canonical virtual-gamepad backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when configuration validation or backend startup
+    /// fails.
+    pub fn open_virtual_gamepad(&self) -> Result<VirtualGamepad, String> {
+        let config = self.virtual_gamepad_config()?;
+        let output = VirtualGamepad::open(&config).map_err(|error| error.to_string())?;
+        if let Some(metadata) = output.macos_helper_metadata() {
+            log_virtual_hid_ready(&metadata);
+        }
+        Ok(output)
+    }
+
     /// Opens the configured helper and reports the negotiated identity, which
     /// is the first thing to check when a virtual gamepad does not appear.
     ///
@@ -195,12 +261,16 @@ impl VirtualHidOptions {
     pub fn open(&self) -> Result<VirtualHidOutput, String> {
         let output = VirtualHidOutput::open(self.config()?).map_err(|error| error.to_string())?;
         let metadata = output.helper_metadata();
-        eprintln!(
-            "level=info event=virtual_hid_ready vendor_id={:04x} product_id={:04x} protocol={} dry_run={}",
-            metadata.vendor_id, metadata.product_id, metadata.protocol_version, metadata.dry_run
-        );
+        log_virtual_hid_ready(&metadata);
         Ok(output)
     }
+}
+
+fn log_virtual_hid_ready(metadata: &VirtualHidHelperMetadata) {
+    eprintln!(
+        "level=info event=virtual_hid_ready vendor_id={:04x} product_id={:04x} protocol={} dry_run={}",
+        metadata.vendor_id, metadata.product_id, metadata.protocol_version, metadata.dry_run
+    );
 }
 
 const MISSING_HELPER_PATH: &str = "--output virtual-hid requires --virtual-hid-helper PATH";
@@ -406,6 +476,35 @@ mod tests {
         };
         let config = both.config().unwrap();
         assert_eq!((config.vendor_id, config.product_id), (0xcafe, 0x4001));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn platform_config_preserves_macos_helper_and_identity() {
+        let options = VirtualHidOptions {
+            helper_path: Some(PathBuf::from("helper")),
+            vendor_id: Some(0xcafe),
+            product_id: Some(0x4001),
+        };
+        let config = options.virtual_gamepad_config().unwrap();
+        assert_eq!(config.backend, VirtualGamepadBackendKind::Automatic);
+        assert_eq!(config.macos_helper_path, Some(PathBuf::from("helper")));
+        assert_eq!(config.macos_identity, Some((0xcafe, 0x4001)));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn platform_config_uses_automatic_backend_without_macos_options() {
+        let config = VirtualHidOptions::default()
+            .virtual_gamepad_config()
+            .unwrap();
+        assert_eq!(config, VirtualGamepadConfig::default());
+
+        let options = VirtualHidOptions {
+            helper_path: Some(PathBuf::from("helper")),
+            ..VirtualHidOptions::default()
+        };
+        assert!(options.virtual_gamepad_config().is_err());
     }
 
     #[test]
