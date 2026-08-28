@@ -3,6 +3,7 @@ use std::io::{self, BufRead, Read};
 use gamepad_state::{Button, GamepadState, HatState};
 use serde::{Deserialize, Serialize};
 
+use crate::state_encoding;
 use crate::{VirtualHidError, VirtualHidErrorClass};
 
 pub const HELPER_PROTOCOL_VERSION: u16 = 4;
@@ -138,7 +139,7 @@ impl HelperResponse {
 pub fn encode_input_report(
     state: &GamepadState,
 ) -> Result<[u8; INPUT_REPORT_LEN], VirtualHidError> {
-    validate_state(state)?;
+    state_encoding::validate(state)?;
 
     let mut buttons = match state.hat {
         HatState::North => 0x0001,
@@ -171,47 +172,17 @@ pub fn encode_input_report(
 
     let mut report = NEUTRAL_INPUT_REPORT;
     report[2..4].copy_from_slice(&u16::to_le_bytes(buttons));
-    report[4] = encode_trigger(state.left_trigger);
-    report[5] = encode_trigger(state.right_trigger);
+    report[4] = state_encoding::trigger(state.left_trigger);
+    report[5] = state_encoding::trigger(state.right_trigger);
     for (offset, value) in [
         (6, state.left_x),
         (8, state.left_y),
         (10, state.right_x),
         (12, state.right_y),
     ] {
-        report[offset..offset + 2].copy_from_slice(&encode_axis(value).to_le_bytes());
+        report[offset..offset + 2].copy_from_slice(&state_encoding::stick(value).to_le_bytes());
     }
     Ok(report)
-}
-
-fn validate_state(state: &GamepadState) -> Result<(), VirtualHidError> {
-    state.validate().map_err(|error| {
-        VirtualHidError::new(
-            VirtualHidErrorClass::InvalidConfiguration,
-            error.to_string(),
-        )
-    })?;
-    if state.buttons.0 & !0xffff != 0 {
-        return Err(VirtualHidError::new(
-            VirtualHidErrorClass::InvalidConfiguration,
-            "virtual HID input accepts only the bridge's 16 defined buttons",
-        ));
-    }
-    Ok(())
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn encode_axis(value: f32) -> i16 {
-    // GamepadState::validate guarantees a finite value in -1.0..=1.0, so the
-    // rounded product is exactly representable by i16.
-    (value * 32_767.0).round() as i16
-}
-
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn encode_trigger(value: f32) -> u8 {
-    // GamepadState::validate guarantees a finite value in 0.0..=1.0, so the
-    // rounded product is exactly representable by u8.
-    (value * 255.0).round() as u8
 }
 
 /// Checks the length and fixed bytes of an input report.

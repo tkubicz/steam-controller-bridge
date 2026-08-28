@@ -12,6 +12,12 @@ pub(crate) trait Backend: Send {
     fn shutdown(&mut self) -> Result<(), VirtualGamepadError>;
 }
 
+#[cfg(target_os = "linux")]
+#[expect(dead_code)]
+mod linux;
+#[cfg(any(target_os = "linux", test))]
+#[path = "backend/linux/mapping.rs"]
+mod linux_mapping;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(not(target_os = "macos"))]
