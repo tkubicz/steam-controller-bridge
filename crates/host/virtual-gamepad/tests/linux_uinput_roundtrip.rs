@@ -277,12 +277,7 @@ fn read_report(device: &Evdev) -> io::Result<Vec<EventSignature>> {
         match device.read_events(&mut buffer) {
             Ok(count) => {
                 for event in buffer[..count].iter().copied() {
-                    let complete = matches!(
-                        event.kind(),
-                        EventKind::Syn(event) if event.syn() == Syn::REPORT
-                    );
-                    report.push(EventSignature::from(event));
-                    if complete {
+                    if append_state_report_event(&mut report, event) {
                         return Ok(report);
                     }
                 }
@@ -298,6 +293,44 @@ fn read_report(device: &Evdev) -> io::Result<Vec<EventSignature>> {
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn append_state_report_event(report: &mut Vec<EventSignature>, event: InputEvent) -> bool {
+    if event.event_type() == EventType::FF {
+        return false;
+    }
+    let complete = matches!(
+        event.kind(),
+        EventKind::Syn(event) if event.syn() == Syn::REPORT
+    );
+    if complete && report.is_empty() {
+        return false;
+    }
+    report.push(EventSignature::from(event));
+    complete
+}
+
+#[test]
+fn state_report_reader_excludes_force_feedback_controls() {
+    let mut report = Vec::new();
+    assert!(!append_state_report_event(
+        &mut report,
+        InputEvent::new(EventType::FF, 0, 1),
+    ));
+    assert!(!append_state_report_event(
+        &mut report,
+        InputEvent::from(Syn::REPORT),
+    ));
+    assert!(report.is_empty());
+
+    let key = InputEvent::from(KeyEvent::new(Key::BTN_SOUTH, KeyState::PRESSED));
+    assert!(!append_state_report_event(&mut report, key));
+    let syn = InputEvent::from(Syn::REPORT);
+    assert!(append_state_report_event(&mut report, syn));
+    assert_eq!(
+        report,
+        vec![EventSignature::from(key), EventSignature::from(syn)]
+    );
 }
 
 fn service_blocking_request<T, F>(output: &mut VirtualGamepad, request: F) -> TestResult<T>
