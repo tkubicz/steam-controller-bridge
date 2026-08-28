@@ -7,9 +7,9 @@ use evdevil::uinput::{AbsSetup, UinputDevice};
 use evdevil::{AbsInfo, Bus, InputId};
 use gamepad_state::{Button, GamepadState};
 
+use super::linux_mapping::{self, LinuxGamepadState};
 use super::Backend;
 use crate::contract::{DEFAULT_PRODUCT_ID, DEFAULT_VENDOR_ID};
-use crate::linux_mapping::{self, LinuxGamepadState};
 use crate::{VirtualGamepadError, VirtualGamepadErrorClass, VIRTUAL_GAMEPAD_NAME};
 
 const UINPUT_PATH: &str = "/dev/uinput";

@@ -14,6 +14,9 @@ pub(crate) trait Backend: Send {
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(any(target_os = "linux", test))]
+#[path = "backend/linux/mapping.rs"]
+mod linux_mapping;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(not(target_os = "macos"))]

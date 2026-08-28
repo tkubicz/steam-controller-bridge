@@ -5,9 +5,6 @@ mod client;
 pub mod contract;
 mod facade;
 pub mod helper;
-#[cfg(any(target_os = "linux", test))]
-#[path = "backend/linux/mapping.rs"]
-mod linux_mapping;
 mod state_encoding;
 
 use std::path::PathBuf;
