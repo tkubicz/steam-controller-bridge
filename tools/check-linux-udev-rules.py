@@ -12,6 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RULE_DIRECTORY = ROOT / "packaging/linux"
 RULE_FILENAME = "60-steam-controller-bridge.rules"
+MODULES_LOAD_DIRECTORY = RULE_DIRECTORY / "modules-load.d"
+MODULES_LOAD_FILENAME = "steam-controller-bridge.conf"
 README_PATH = ROOT / "packaging/linux/README.md"
 IDENTITY_PATH = ROOT / "crates/controller/steam-controller-device/src/lib.rs"
 FIRMWARE_TARGETS_PATH = ROOT / "crates/app/release-updater/firmware-targets.json"
@@ -30,6 +32,7 @@ REQUIRED_IDENTITIES = (
     "STEAM_CONTROLLER_BLUETOOTH_PRODUCT_ID",
 )
 BRIDGE_TARGET_ID = "seeed-xiao-nrf52840"
+UINPUT_RULE_PREFIX = 'SUBSYSTEM=="misc", KERNEL=="uinput", '
 
 
 def controller_identities(source: str) -> tuple[tuple[str, int, int], ...]:
@@ -125,6 +128,10 @@ def bridge_rules(source: str, assignment: str) -> tuple[str, str]:
     return raw_usb, serial
 
 
+def uinput_rule(assignment: str) -> str:
+    return f"{UINPUT_RULE_PREFIX}{assignment}"
+
+
 def expected_rules(
     identity_source: str,
     firmware_targets: str,
@@ -133,6 +140,7 @@ def expected_rules(
     return (
         *controller_rules(identity_source, assignment),
         *bridge_rules(firmware_targets, assignment),
+        uinput_rule(assignment),
     )
 
 
@@ -215,6 +223,25 @@ def documentation_errors(
     return exact_rule_errors(documented, expected, "headless fallback")
 
 
+def modules_load_errors(text: str) -> list[str]:
+    modules = active_rules(text)
+    if modules == ["uinput"]:
+        return []
+    return ["Linux modules-load policy must contain exactly one uinput entry"]
+
+
+def modules_load_set_errors(files: dict[str, str]) -> list[str]:
+    errors: list[str] = []
+    actual_names = set(files)
+    if MODULES_LOAD_FILENAME not in actual_names:
+        errors.append(f"missing Linux modules-load file: {MODULES_LOAD_FILENAME}")
+    for name in sorted(actual_names - {MODULES_LOAD_FILENAME}):
+        errors.append(f"unexpected Linux modules-load file: {name}")
+    if MODULES_LOAD_FILENAME in files:
+        errors.extend(modules_load_errors(files[MODULES_LOAD_FILENAME]))
+    return errors
+
+
 def self_test() -> None:
     identities = "\n".join(
         (
@@ -263,8 +290,23 @@ def self_test() -> None:
     )
     assert duplicate == [f"duplicate device access rule: {expected[0]}"]
 
-    missing = policy_errors("\n".join(expected[:3]), identities, firmware_targets)
+    missing = policy_errors(
+        "\n".join((*expected[:3], *expected[4:])), identities, firmware_targets
+    )
     assert missing == [f"missing device access rule: {expected[3]}"]
+
+    missing_uinput = policy_errors(
+        "\n".join(expected[:-1]), identities, firmware_targets
+    )
+    assert missing_uinput == [f"missing device access rule: {expected[-1]}"]
+
+    broad_uinput = expected[-1].replace(', KERNEL=="uinput"', "")
+    assert policy_errors(
+        "\n".join((*expected[:-1], broad_uinput)), identities, firmware_targets
+    ) == [
+        f"missing device access rule: {expected[-1]}",
+        f"unexpected device access rule: {broad_uinput}",
+    ]
 
     broad = policy_errors(
         "\n".join(
@@ -303,7 +345,9 @@ def self_test() -> None:
         "",
     )
     assert policy_errors(
-        "\n".join((*expected[:2], broad_bridge, expected[3])), identities, firmware_targets
+        "\n".join((*expected[:2], broad_bridge, *expected[3:])),
+        identities,
+        firmware_targets,
     )
     assert policy_errors(
         exact.replace(', ENV{ID_MM_DEVICE_IGNORE}="1"', ""),
@@ -323,6 +367,18 @@ def self_test() -> None:
         identities,
         firmware_targets,
     ) == ["unexpected Linux device access rule file: 99-open.rules"]
+
+    assert modules_load_errors("uinput\n") == []
+    assert modules_load_errors("# virtual gamepad\nuinput\n") == []
+    assert modules_load_errors("")
+    assert modules_load_errors("uinput\ntun\n")
+    assert modules_load_set_errors({MODULES_LOAD_FILENAME: "uinput\n"}) == []
+    assert modules_load_set_errors({}) == [
+        f"missing Linux modules-load file: {MODULES_LOAD_FILENAME}"
+    ]
+    assert modules_load_set_errors(
+        {MODULES_LOAD_FILENAME: "uinput\n", "unrelated.conf": "tun\n"}
+    ) == ["unexpected Linux modules-load file: unrelated.conf"]
 
     headless = "\n".join(
         expected_rules(
@@ -370,6 +426,11 @@ def main() -> int:
             BRIDGE_BACKEND_PATH.read_text(encoding="utf-8"), firmware_targets
         )
     )
+    modules_load_files = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in MODULES_LOAD_DIRECTORY.glob("*.conf")
+    }
+    errors.extend(modules_load_set_errors(modules_load_files))
     if errors:
         for error in errors:
             print(error)

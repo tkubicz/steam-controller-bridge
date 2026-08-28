@@ -7,3 +7,6 @@ SUBSYSTEM=="hidraw", KERNELS=="0005:28DE:1303.*", TAG+="uaccess"
 # Official XIAO bridge firmware raw USB device and CDC serial fallback.
 SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="045e", ATTR{idProduct}=="028e", ATTR{manufacturer}=="Lynxware", ATTR{product}=="Steam Controller Bridge", TAG+="uaccess"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="045e", ATTRS{idProduct}=="028e", ATTRS{manufacturer}=="Lynxware", ATTRS{product}=="Steam Controller Bridge", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# Linux virtual gamepad creation.
+SUBSYSTEM=="misc", KERNEL=="uinput", TAG+="uaccess"
