@@ -5,6 +5,17 @@ Published history may be corrected directly when this file and the matching
 GitHub Release are updated together. Versions follow [Semantic
 Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.10.0...v1.11.0) (2026-08-28)
+
+
+### Features
+
+* **packaging:** configure Linux uinput access ([#86](https://github.com/tkubicz/steam-controller-bridge/issues/86)) ([13492a0](https://github.com/tkubicz/steam-controller-bridge/commit/13492a00bc6ee7dbfc92b7fbc190e883d9dde16b))
+* **runtime:** integrate Linux virtual gamepad output ([#84](https://github.com/tkubicz/steam-controller-bridge/issues/84)) ([28cde27](https://github.com/tkubicz/steam-controller-bridge/commit/28cde273ccefd7fbba56bb17f26e162111ec4e72))
+* **tools:** use the platform virtual gamepad backend ([#85](https://github.com/tkubicz/steam-controller-bridge/issues/85)) ([85209e2](https://github.com/tkubicz/steam-controller-bridge/commit/85209e29d551def121f421904670fdee8743fc59))
+* **vgamepad:** add Linux uinput gamepad output ([#82](https://github.com/tkubicz/steam-controller-bridge/issues/82)) ([25f29f7](https://github.com/tkubicz/steam-controller-bridge/commit/25f29f7b41dbcf72879f3945a7cc7130808607a8))
+* **vgamepad:** route Linux force feedback into rumble output ([#83](https://github.com/tkubicz/steam-controller-bridge/issues/83)) ([45a615e](https://github.com/tkubicz/steam-controller-bridge/commit/45a615edf0e5cff6e232aa2da1d8c0cb7e15519c))
+
 ## [1.10.0](https://github.com/tkubicz/steam-controller-bridge/compare/v1.9.0...v1.10.0) (2026-08-27)
 
 
