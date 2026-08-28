@@ -35,7 +35,6 @@ impl Supervisor {
             ));
         }
         output.feedback.drain(&mut *output.output);
-        output.feedback.wait_without_consumer();
         output.feedback.activate();
         if let Some(command) = output.feedback.command_due(started.elapsed()) {
             worker.set_rumble(command.low_frequency, command.high_frequency);

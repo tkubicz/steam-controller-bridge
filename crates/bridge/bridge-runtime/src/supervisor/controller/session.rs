@@ -112,6 +112,9 @@ pub(crate) struct OutputSession {
 }
 
 const OUTPUT_FEEDBACK_RENEW_INTERVAL: Duration = Duration::from_millis(25);
+// Stateful feedback must renew before the controller haptics lease expires.
+const _: () =
+    assert!(OUTPUT_FEEDBACK_RENEW_INTERVAL.as_millis() < RUMBLE_LEASE_TIMEOUT.as_millis());
 
 #[derive(Default)]
 pub(crate) struct OutputFeedbackRelay {
