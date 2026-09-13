@@ -2,6 +2,8 @@ version: 2
 updates:
   - package-ecosystem: cargo
     directory: /
+    # Raise Cargo.toml minimum versions even when Cargo.lock updates are compatible.
+    versioning-strategy: increase
     schedule:
       interval: weekly
     groups:
