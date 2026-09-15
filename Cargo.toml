@@ -59,7 +59,7 @@ thiserror = "2.0.19"
 hidapi = { version = "2.6.6", default-features = false }
 rfd = "0.17.2"
 eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "glow"] }
-tray-icon = "0.24.2"
+tray-icon = "0.25.0"
 tiny-skia = { version = "0.12.0", default-features = false, features = ["simd", "std"] }
 winit = "0.30.13"
 serialport = { version = "4.9.0", default-features = false }
