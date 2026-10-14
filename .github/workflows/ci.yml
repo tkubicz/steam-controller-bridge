@@ -139,7 +139,7 @@ jobs:
         run: make -C firmware/xiao-nrf52840 setup
       - name: Build and validate firmware artifacts
         run: make -C firmware/xiao-nrf52840 artifacts
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: xiao-nrf52840-firmware
           path: firmware/xiao-nrf52840/build/artifacts/
@@ -153,7 +153,7 @@ jobs:
         run: ./tools/build-macos-app.py
       - name: Archive application bundle
         run: ditto -c -k --sequesterRsrc --keepParent "dist/Steam Controller Bridge.app" steam-controller-bridge-macos.zip
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: steam-controller-bridge-macos
           path: steam-controller-bridge-macos.zip
